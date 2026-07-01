@@ -1,6 +1,6 @@
-product_group_id,product_id,product_name,category,color,size,stock,image_path
-G001,P001,오버핏 반팔 티셔츠,TOP,BLACK,M,5,data/dev/images/p001_black.jpg
-G001,P002,오버핏 반팔 티셔츠,TOP,NAVY,L,3,data/dev/images/p002_navy.jpg
-G002,P003,와이드 카고 팬츠,BOTTOM,KHAKI,M,7,data/dev/images/p003_khaki.jpg
-G003,P004,스트라이프 셔츠,TOP,,L,4,data/dev/images/p004_stripe.jpg
-G004,P003,후드 집업,OUTER,GRAY,M,2,data/dev/images/p005_gray.jpg
+product_group_id,product_id,product_name,category,color,size,stock,price,image_path
+G001,P001,오버핏 반팔 티셔츠,TOP,BLACK,M,5,19000,data/dev/images/p001_black.jpg
+G001,P002,오버핏 반팔 티셔츠,TOP,NAVY,L,3,19000,data/dev/images/p002_navy.jpg
+G002,P003,와이드 카고 팬츠,BOTTOM,KHAKI,M,7,-5000,data/dev/images/p003_khaki.jpg
+G003,P004,스트라이프 셔츠,TOP,,L,4,,data/dev/images/p004_stripe.jpg
+G004,P003,후드 집업,OUTER,GRAY,M,2,0,data/dev/images/p005_gray.jpg

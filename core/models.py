@@ -10,6 +10,7 @@ class Product:
     color: str
     size: str
     stock: int
+    price: int
     image_path: str
 
 

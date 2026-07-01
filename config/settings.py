@@ -14,6 +14,7 @@ REQUIRED_COLUMNS = [
     "color",
     "size",
     "stock",
+    "price",
     "image_path",
 ]
 

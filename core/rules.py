@@ -94,11 +94,48 @@ def check_stock(products: list[Product]) -> list[ValidationIssue]:
     return issues
 
 
+def check_price(products: list[Product]) -> list[ValidationIssue]:
+    issues = []
+    for product in products:
+        if product.price is None:
+            issues.append(
+                ValidationIssue(
+                    rule="invalid_price",
+                    severity="error",
+                    product_id=product.product_id,
+                    product_group_id=product.product_group_id,
+                    message="price is missing or not a number",
+                )
+            )
+        elif product.price < 0:
+            issues.append(
+                ValidationIssue(
+                    rule="invalid_price",
+                    severity="error",
+                    product_id=product.product_id,
+                    product_group_id=product.product_group_id,
+                    message=f"price {product.price} is negative",
+                )
+            )
+        elif product.price == 0:
+            issues.append(
+                ValidationIssue(
+                    rule="zero_price",
+                    severity="warning",
+                    product_id=product.product_id,
+                    product_group_id=product.product_group_id,
+                    message="price is 0",
+                )
+            )
+    return issues
+
+
 RULES = [
     check_duplicate_product_id,
     check_missing_required_fields,
     check_invalid_category,
     check_stock,
+    check_price,
 ]
 
 

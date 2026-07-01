@@ -3,6 +3,7 @@ from core.rules import (
     check_duplicate_product_id,
     check_invalid_category,
     check_missing_required_fields,
+    check_price,
     check_stock,
     run_all_rules,
 )
@@ -17,6 +18,7 @@ def make_product(**overrides) -> Product:
         color="BLACK",
         size="M",
         stock=5,
+        price=19000,
         image_path="data/dev/images/p001.jpg",
     )
     defaults.update(overrides)
@@ -57,6 +59,24 @@ def test_check_missing_required_fields_detects_blank_color():
     assert "color" in issues[0].message
 
 
+def test_check_missing_required_fields_detects_blank_product_name():
+    products = [make_product(product_name="")]
+
+    issues = check_missing_required_fields(products)
+
+    assert len(issues) == 1
+    assert issues[0].rule == "missing_required_field"
+    assert "product_name" in issues[0].message
+
+
+def test_check_missing_required_fields_allows_full_product():
+    products = [make_product()]
+
+    issues = check_missing_required_fields(products)
+
+    assert issues == []
+
+
 def test_check_invalid_category_rejects_unknown_category():
     products = [make_product(category="SHOES")]
 
@@ -87,6 +107,30 @@ def test_check_stock_flags_non_numeric_stock():
 
     assert len(issues) == 1
     assert issues[0].message == "stock is missing or not a number"
+
+
+def test_check_price_flags_negative_as_error_and_zero_as_warning():
+    products = [
+        make_product(product_id="P020", price=-1000),
+        make_product(product_id="P021", price=0),
+        make_product(product_id="P022", price=5000),
+    ]
+
+    issues = check_price(products)
+
+    assert len(issues) == 2
+    assert issues[0].severity == "error"
+    assert issues[1].severity == "warning"
+
+
+def test_check_price_flags_non_numeric_price():
+    products = [make_product(price=None)]
+
+    issues = check_price(products)
+
+    assert len(issues) == 1
+    assert issues[0].rule == "invalid_price"
+    assert issues[0].message == "price is missing or not a number"
 
 
 def test_run_all_rules_aggregates_every_rule():

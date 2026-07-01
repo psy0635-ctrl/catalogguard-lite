@@ -15,6 +15,8 @@ def load_products(csv_path) -> list[Product]:
     for row in df.to_dict(orient="records"):
         stock_raw = row["stock"].strip()
         stock = int(stock_raw) if stock_raw.lstrip("-").isdigit() else None
+        price_raw = row["price"].strip()
+        price = int(price_raw) if price_raw.lstrip("-").isdigit() else None
         products.append(
             Product(
                 product_group_id=row["product_group_id"].strip(),
@@ -24,6 +26,7 @@ def load_products(csv_path) -> list[Product]:
                 color=row["color"].strip(),
                 size=row["size"].strip(),
                 stock=stock,
+                price=price,
                 image_path=row["image_path"].strip(),
             )
         )
