@@ -13,6 +13,8 @@ CSV 파일을 읽어서 상품 데이터에 빠진 값, 잘못된 카테고리, 
 - **invalid_price** / **zero_price**: `price`가 숫자가 아니거나 음수(error), 0(warning)인 경우
 
 헤더만 있고 상품 행이 없는 CSV는 처리하지 않습니다.
+잘못된 재고와 가격 문자열은 앱을 중단시키지 않고 형식 오류로 처리합니다.
+상품 ID 또는 상품 그룹 ID가 비어 있으면 중복 검사가 아니라 필수 값 누락으로 처리합니다.
 
 ## 검수 결과 표시
 
@@ -99,14 +101,14 @@ issues = run_all_rules(products)
 
 ## 테스트
 
-현재 테스트는 총 47개입니다.
+현재 테스트는 총 61개입니다.
 
-- `tests/test_loader.py`: 5개
-- `tests/test_rules.py`: 14개
+- `tests/test_loader.py`: 17개
+- `tests/test_rules.py`: 16개
 - `tests/test_presentation.py`: 28개
 
 마지막 확인 결과:
 
 ```text
-47 passed
+61 passed
 ```

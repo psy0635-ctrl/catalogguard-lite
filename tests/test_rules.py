@@ -49,6 +49,36 @@ def test_check_duplicate_product_id_allows_same_group_reuse():
     assert issues == []
 
 
+def test_check_duplicate_product_id_ignores_blank_product_ids_across_groups():
+    products = [
+        make_product(product_group_id="G001", product_id=""),
+        make_product(product_group_id="G002", product_id=""),
+    ]
+
+    duplicate_issues = check_duplicate_product_id(products)
+    missing_issues = check_missing_required_fields(products)
+
+    assert duplicate_issues == []
+    assert len(missing_issues) == 2
+    assert all(issue.rule == "missing_required_field" for issue in missing_issues)
+    assert all("product_id" in issue.message for issue in missing_issues)
+
+
+def test_check_duplicate_product_id_ignores_blank_product_group_id():
+    products = [
+        make_product(product_group_id="", product_id="P777"),
+        make_product(product_group_id="G002", product_id="P777"),
+    ]
+
+    duplicate_issues = check_duplicate_product_id(products)
+    missing_issues = check_missing_required_fields(products)
+
+    assert duplicate_issues == []
+    assert len(missing_issues) == 1
+    assert missing_issues[0].rule == "missing_required_field"
+    assert "product_group_id" in missing_issues[0].message
+
+
 def test_check_missing_required_fields_detects_blank_color():
     products = [make_product(color="")]
 

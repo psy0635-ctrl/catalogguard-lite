@@ -4,6 +4,19 @@ from config.settings import REQUIRED_COLUMNS
 from core.models import Product
 
 
+def parse_optional_int(value: str) -> int | None:
+    """문자열을 정수로 변환하고, 변환할 수 없으면 None을 반환합니다."""
+    cleaned_value = value.strip()
+
+    if not cleaned_value:
+        return None
+
+    try:
+        return int(cleaned_value)
+    except ValueError:
+        return None
+
+
 def load_products(csv_path) -> list[Product]:
     df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
 
@@ -19,10 +32,8 @@ def load_products(csv_path) -> list[Product]:
 
     products = []
     for row in df.to_dict(orient="records"):
-        stock_raw = row["stock"].strip()
-        stock = int(stock_raw) if stock_raw.lstrip("-").isdigit() else None
-        price_raw = row["price"].strip()
-        price = int(price_raw) if price_raw.lstrip("-").isdigit() else None
+        stock = parse_optional_int(row["stock"])
+        price = parse_optional_int(row["price"])
         products.append(
             Product(
                 product_group_id=row["product_group_id"].strip(),

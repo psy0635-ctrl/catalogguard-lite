@@ -1,7 +1,8 @@
 import pytest
 
-from core.loader import load_products
 from config.settings import DEV_DATA_PATH
+from core.loader import load_products, parse_optional_int
+from core.rules import run_all_rules
 
 
 def test_load_products_returns_expected_count():
@@ -51,3 +52,43 @@ def test_load_products_raises_on_header_only_csv(tmp_path):
 
     with pytest.raises(ValueError, match="상품 데이터가 없습니다"):
         load_products(empty_csv)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("5", 5),
+        ("-5", -5),
+        ("0", 0),
+        (" 10 ", 10),
+        ("+5", 5),
+    ],
+)
+def test_parse_optional_int_parses_valid_integer_strings(value, expected):
+    assert parse_optional_int(value) == expected
+
+
+@pytest.mark.parametrize("value", ["", "abc", "--5", "---10", "5.5", "1,000"])
+def test_parse_optional_int_returns_none_for_invalid_integer_strings(value):
+    assert parse_optional_int(value) is None
+
+
+def test_load_products_keeps_invalid_numeric_strings_as_none(tmp_path):
+    bad_number_csv = tmp_path / "bad_number.csv"
+    bad_number_csv.write_text(
+        (
+            "product_group_id,product_id,product_name,category,color,size,"
+            "stock,price,image_path\n"
+            "G001,P001,상품A,TOP,BLACK,M,--5,--1000,a.jpg\n"
+        ),
+        encoding="utf-8",
+    )
+
+    products = load_products(bad_number_csv)
+    issues = run_all_rules(products)
+    issue_rules = {issue.rule for issue in issues}
+
+    assert products[0].stock is None
+    assert products[0].price is None
+    assert "invalid_stock" in issue_rules
+    assert "invalid_price" in issue_rules

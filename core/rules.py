@@ -6,6 +6,9 @@ def check_duplicate_product_id(products: list[Product]) -> list[ValidationIssue]
     seen: dict[str, str] = {}
     issues = []
     for product in products:
+        if not product.product_id or not product.product_group_id:
+            continue
+
         prior_group = seen.get(product.product_id)
         if prior_group is None:
             seen[product.product_id] = product.product_group_id
