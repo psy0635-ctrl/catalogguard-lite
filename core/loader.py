@@ -11,6 +11,12 @@ def load_products(csv_path) -> list[Product]:
     if missing_columns:
         raise ValueError(f"Missing required columns: {missing_columns}")
 
+    if df.empty:
+        raise ValueError(
+            "CSV 파일에 상품 데이터가 없습니다. "
+            "헤더 아래에 상품 정보를 한 줄 이상 입력해 주세요."
+        )
+
     products = []
     for row in df.to_dict(orient="records"):
         stock_raw = row["stock"].strip()

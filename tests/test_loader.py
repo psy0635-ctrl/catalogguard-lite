@@ -1,3 +1,5 @@
+import pytest
+
 from core.loader import load_products
 from config.settings import DEV_DATA_PATH
 
@@ -35,3 +37,17 @@ def test_load_products_raises_on_missing_column(tmp_path):
         assert False, "ValueError expected"
     except ValueError as exc:
         assert "product_name" in str(exc)
+
+
+def test_load_products_raises_on_header_only_csv(tmp_path):
+    empty_csv = tmp_path / "empty.csv"
+    empty_csv.write_text(
+        (
+            "product_group_id,product_id,product_name,category,color,size,"
+            "stock,price,image_path\n"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="상품 데이터가 없습니다"):
+        load_products(empty_csv)

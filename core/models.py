@@ -9,8 +9,8 @@ class Product:
     category: str
     color: str
     size: str
-    stock: int
-    price: int
+    stock: int | None
+    price: int | None
     image_path: str
 
 

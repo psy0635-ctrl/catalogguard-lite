@@ -19,6 +19,8 @@ REQUIRED_COLUMNS = [
 ]
 
 REQUIRED_FIELDS = [
+    "product_group_id",
+    "product_id",
     "product_name",
     "category",
     "color",

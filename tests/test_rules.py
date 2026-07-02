@@ -69,6 +69,37 @@ def test_check_missing_required_fields_detects_blank_product_name():
     assert "product_name" in issues[0].message
 
 
+def test_check_missing_required_fields_detects_blank_product_group_id():
+    products = [make_product(product_group_id="")]
+
+    issues = check_missing_required_fields(products)
+
+    assert len(issues) == 1
+    assert issues[0].rule == "missing_required_field"
+    assert "product_group_id" in issues[0].message
+
+
+def test_check_missing_required_fields_detects_blank_product_id():
+    products = [make_product(product_id="")]
+
+    issues = check_missing_required_fields(products)
+
+    assert len(issues) == 1
+    assert issues[0].rule == "missing_required_field"
+    assert "product_id" in issues[0].message
+
+
+def test_check_missing_required_fields_messages_name_missing_id_fields():
+    products = [make_product(product_group_id="", product_id="")]
+
+    issues = check_missing_required_fields(products)
+    messages = [issue.message for issue in issues]
+
+    assert len(issues) == 2
+    assert any("product_group_id" in message for message in messages)
+    assert any("product_id" in message for message in messages)
+
+
 def test_check_missing_required_fields_allows_full_product():
     products = [make_product()]
 

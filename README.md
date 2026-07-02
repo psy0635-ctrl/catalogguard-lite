@@ -7,10 +7,21 @@ CSV 파일을 읽어서 상품 데이터에 빠진 값, 잘못된 카테고리, 
 ## 검증 규칙
 
 - **duplicate_product_id**: `product_id`가 서로 다른 `product_group_id`에서 재사용되는 경우
-- **missing_required_field**: `product_name`, `category`, `color`, `size`, `image_path` 중 값이 비어 있는 경우
+- **missing_required_field**: `product_group_id`, `product_id`, `product_name`, `category`, `color`, `size`, `image_path` 중 값이 비어 있는 경우
 - **invalid_category**: `category`가 허용 목록(`TOP`, `BOTTOM`, `OUTER`)에 없는 경우
 - **invalid_stock** / **out_of_stock**: `stock`이 숫자가 아니거나 음수(error), 0(warning)인 경우
 - **invalid_price** / **zero_price**: `price`가 숫자가 아니거나 음수(error), 0(warning)인 경우
+
+헤더만 있고 상품 행이 없는 CSV는 처리하지 않습니다.
+
+## 검수 결과 표시
+
+- 오류 이유는 사용자가 읽기 쉬운 한글 문장으로 표시됩니다.
+- 결과 CSV 다운로드 파일에도 한글 오류 이유가 포함됩니다.
+- 전체 상태는 오류, 주의, 정상으로 구분되어 표시됩니다.
+- 검수 상태와 오류 항목으로 결과를 필터링할 수 있습니다.
+- 상품 ID 일부 문자를 검색할 수 있습니다.
+- CSV 다운로드는 현재 필터 결과만 포함합니다.
 
 ## 프로젝트 구조
 
@@ -32,10 +43,50 @@ product_group_id, product_id, product_name, category, color, size, stock, price,
 
 ## 실행
 
-```bash
-pip install -r requirements.txt
-pytest
+Windows PowerShell 또는 VS Code 터미널에서 프로젝트 루트로 이동한 뒤 실행합니다.
+
+### 설치 명령어
+
+```powershell
+python -m pip install -r requirements.txt
 ```
+
+### 테스트 실행
+
+```powershell
+python -m pytest -q
+```
+
+### Streamlit 실행
+
+```powershell
+python -m streamlit run app.py
+```
+
+### 정상 실행 결과
+
+브라우저가 열리고 다음 화면이 보여야 합니다.
+
+- CatalogGuard Lite 제목
+- CSV 업로드 버튼
+- 상품 데이터 미리보기
+- 검수 요약
+- 검수 결과 표
+- 검수 상태, 오류 항목, 상품 ID 검색 필터
+- 현재 필터 결과 다운로드 버튼
+
+### 샘플 CSV 결과
+
+`data/dev/products_dev.csv`를 업로드했을 때 예상 결과는 다음과 같습니다.
+
+```text
+전체 상품 수: 5
+전체 문제 수: 5
+오류 수: 4
+주의 수: 1
+```
+
+## Python 예시
 
 ```python
 from core.loader import load_products
@@ -48,13 +99,14 @@ issues = run_all_rules(products)
 
 ## 테스트
 
-현재 테스트는 총 15개입니다.
+현재 테스트는 총 47개입니다.
 
-- `tests/test_loader.py`: 4개
-- `tests/test_rules.py`: 11개
+- `tests/test_loader.py`: 5개
+- `tests/test_rules.py`: 14개
+- `tests/test_presentation.py`: 28개
 
 마지막 확인 결과:
 
 ```text
-15 passed
+47 passed
 ```
