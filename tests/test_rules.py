@@ -14,7 +14,9 @@ from core.rules import (
 )
 
 
+# 각 검수 규칙이 어떤 상황에서 문제를 만들거나 무시하는지 확인하는 테스트입니다.
 def make_product(**overrides) -> Product:
+    # 테스트마다 필요한 값만 바꿀 수 있도록 기본 상품을 만들어 주는 helper입니다.
     defaults = dict(
         product_group_id="G001",
         product_id="P001",

@@ -1,3 +1,4 @@
+# 검수 결과를 사람이 보기 쉽게 바꾸는 파일
 import re
 
 import pandas as pd
@@ -5,6 +6,7 @@ import pandas as pd
 from core.models import ValidationIssue
 
 
+# 내부 규칙 이름을 사용자가 볼 한국어 이름으로 바꾸는 표입니다.
 RULE_LABELS = {
     "duplicate_product_id": "상품 ID 중복",
     "missing_required_field": "필수 값 누락",
@@ -22,6 +24,7 @@ RULE_LABELS = {
     "suspected_bank_account": "계좌번호 의심",
 }
 
+# 각 규칙별로 화면에 보여 줄 수정 가이드입니다.
 RECOMMENDATIONS = {
     "duplicate_product_id": "상품 그룹마다 중복되지 않는 상품 ID를 사용하세요.",
     "missing_required_field": "누락된 필수 값을 입력하세요.",
@@ -50,12 +53,14 @@ RECOMMENDATIONS = {
     ),
 }
 
+# 내부 필드명을 화면용 한국어 필드명으로 바꿉니다.
 FIELD_LABELS = {
     "product_name": "상품명",
     "description": "상품 설명",
     "seller": "판매자 정보",
 }
 
+# severity는 내부 값이고, 화면에는 한국어 상태로 보여줍니다.
 SEVERITY_LABELS = {
     "error": "오류",
     "warning": "주의",
@@ -80,6 +85,7 @@ def translate_issue_message(issue: ValidationIssue) -> str:
     """검수 결과의 영문 메시지를 사용자용 한글 문장으로 변환합니다."""
     message = issue.message
 
+    # 개인정보 관련 메시지는 이미 마스킹된 값만 들어오므로 그대로 화면 문장에 사용합니다.
     content_message_patterns = {
         "prohibited_term": (
             r"field '([^']*)' contains prohibited term '([^']*)'",
@@ -109,6 +115,7 @@ def translate_issue_message(issue: ValidationIssue) -> str:
         pattern, formatter = content_pattern
         match = re.fullmatch(pattern, message)
         if match:
+            # 예: product_name -> 상품명
             field_name, value = match.groups()
             field_label = FIELD_LABELS.get(field_name, field_name)
             return formatter(field_label, value)
@@ -195,6 +202,7 @@ def translate_issue_message(issue: ValidationIssue) -> str:
 
 def build_result_dataframe(issues: list[ValidationIssue]) -> pd.DataFrame:
     """검수 결과를 Streamlit 표시 및 CSV 다운로드용 표로 변환합니다."""
+    # 오류를 주의보다 먼저 보여주고, 같은 심각도 안에서는 원래 발견 순서를 유지합니다.
     sorted_issues = sorted(
         enumerate(issues),
         key=lambda item: (SEVERITY_ORDER.get(item[1].severity, 99), item[0]),
@@ -225,6 +233,7 @@ def filter_result_dataframe(
     product_id_query: str = "",
 ) -> pd.DataFrame:
     """선택한 조건에 따라 검수 결과 DataFrame을 필터링합니다."""
+    # 원본 DataFrame을 직접 바꾸지 않기 위해 복사본에서 필터링합니다.
     filtered_df = result_df.copy()
 
     if status_filter != "전체":
@@ -235,6 +244,7 @@ def filter_result_dataframe(
 
     query = product_id_query.strip()
     if query:
+        # 상품 ID 검색은 일부 글자만 입력해도 찾을 수 있게 contains로 처리합니다.
         filtered_df = filtered_df[
             filtered_df["상품 ID"]
             .fillna("")
@@ -252,6 +262,7 @@ def calculate_dataframe_height(
     max_height: int = 420,
 ) -> int:
     """행 개수에 맞는 표 높이를 계산합니다."""
+    # 표가 너무 작거나 너무 커지지 않도록 최소/최대 높이를 함께 적용합니다.
     header_height = 38
     row_height = 35
     calculated_height = header_height + row_count * row_height

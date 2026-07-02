@@ -5,6 +5,7 @@ from core.loader import load_products, parse_optional_int
 from core.rules import run_all_rules
 
 
+# CSV 파일을 Product 목록으로 읽는 로더 동작을 검증합니다.
 def test_load_products_returns_expected_count():
     products = load_products(DEV_DATA_PATH)
 

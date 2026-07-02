@@ -13,6 +13,7 @@ from core.presentation import (
 
 
 def make_issue(**overrides) -> ValidationIssue:
+    # 표시 계층 테스트에서 공통으로 쓰는 기본 문제 데이터입니다.
     defaults = dict(
         rule="missing_required_field",
         severity="error",
@@ -25,6 +26,7 @@ def make_issue(**overrides) -> ValidationIssue:
 
 
 def make_result_dataframe() -> pd.DataFrame:
+    # 필터 테스트용으로 여러 상태와 상품 ID가 섞인 결과 표를 만듭니다.
     return pd.DataFrame(
         [
             {
