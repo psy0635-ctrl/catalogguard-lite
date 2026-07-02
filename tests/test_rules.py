@@ -1,5 +1,8 @@
+import pytest
+
 from core.models import Product
 from core.rules import (
+    check_duplicate_product_content,
     check_duplicate_product_id,
     check_invalid_category,
     check_missing_required_fields,
@@ -78,6 +81,202 @@ def test_check_duplicate_product_id_ignores_blank_product_group_id():
     assert len(missing_issues) == 1
     assert missing_issues[0].rule == "missing_required_field"
     assert "product_group_id" in missing_issues[0].message
+
+
+def test_check_duplicate_product_content_flags_same_group_duplicate():
+    products = [
+        make_product(product_group_id="G001", product_id="P001", price=15000),
+        make_product(product_group_id="G001", product_id="P002", price=15000),
+    ]
+
+    issues = check_duplicate_product_content(products)
+
+    assert len(issues) == 1
+    assert issues[0].rule == "duplicate_product_content"
+    assert issues[0].severity == "error"
+    assert issues[0].product_id == "P002"
+
+
+def test_check_duplicate_product_content_flags_different_group_duplicate():
+    products = [
+        make_product(product_group_id="G001", product_id="P001", price=15000),
+        make_product(product_group_id="G002", product_id="P002", price=15000),
+    ]
+
+    issues = check_duplicate_product_content(products)
+
+    assert len(issues) == 1
+    assert issues[0].rule == "duplicate_product_content"
+    assert issues[0].product_id == "P002"
+
+
+def test_check_duplicate_product_content_uses_first_product_as_base():
+    products = [
+        make_product(product_group_id="G001", product_id="P001", price=15000),
+        make_product(product_group_id="G002", product_id="P002", price=15000),
+        make_product(product_group_id="G003", product_id="P003", price=15000),
+    ]
+
+    issues = check_duplicate_product_content(products)
+
+    assert len(issues) == 2
+    assert [issue.product_id for issue in issues] == ["P002", "P003"]
+    assert all("product_id 'P001' in group 'G001'" in issue.message for issue in issues)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"product_name": "긴팔 티셔츠"},
+        {"category": "BOTTOM"},
+        {"color": "WHITE"},
+        {"size": "L"},
+        {"price": 16000},
+    ],
+)
+def test_check_duplicate_product_content_allows_different_core_fields(overrides):
+    second_product_values = {
+        "product_group_id": "G002",
+        "product_id": "P002",
+        "price": 15000,
+    }
+    second_product_values.update(overrides)
+    products = [
+        make_product(product_group_id="G001", product_id="P001", price=15000),
+        make_product(**second_product_values),
+    ]
+
+    issues = check_duplicate_product_content(products)
+
+    assert issues == []
+
+
+def test_check_duplicate_product_content_ignores_stock_difference():
+    products = [
+        make_product(product_group_id="G001", product_id="P001", stock=10, price=15000),
+        make_product(product_group_id="G002", product_id="P002", stock=3, price=15000),
+    ]
+
+    issues = check_duplicate_product_content(products)
+
+    assert len(issues) == 1
+    assert issues[0].product_id == "P002"
+
+
+def test_check_duplicate_product_content_ignores_image_path_difference():
+    products = [
+        make_product(
+            product_group_id="G001",
+            product_id="P001",
+            price=15000,
+            image_path="image1.jpg",
+        ),
+        make_product(
+            product_group_id="G002",
+            product_id="P002",
+            price=15000,
+            image_path="image2.jpg",
+        ),
+    ]
+
+    issues = check_duplicate_product_content(products)
+
+    assert len(issues) == 1
+    assert issues[0].product_id == "P002"
+
+
+def test_check_duplicate_product_content_normalizes_whitespace():
+    products = [
+        make_product(product_group_id="G001", product_id="P001", product_name="기본 티셔츠"),
+        make_product(product_group_id="G002", product_id="P002", product_name=" 기본  티셔츠 "),
+    ]
+
+    issues = check_duplicate_product_content(products)
+
+    assert len(issues) == 1
+    assert issues[0].product_id == "P002"
+
+
+def test_check_duplicate_product_content_normalizes_case():
+    products = [
+        make_product(product_group_id="G001", product_id="P001", color="BLACK"),
+        make_product(product_group_id="G002", product_id="P002", color="black"),
+    ]
+
+    issues = check_duplicate_product_content(products)
+
+    assert len(issues) == 1
+    assert issues[0].product_id == "P002"
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["product_group_id", "product_id", "product_name", "category", "color", "size"],
+)
+def test_check_duplicate_product_content_excludes_missing_required_fields(field_name):
+    products = [
+        make_product(product_group_id="G001", product_id="P001"),
+        make_product(product_group_id="G002", product_id="P002"),
+    ]
+    for product in products:
+        setattr(product, field_name, "")
+
+    duplicate_issues = check_duplicate_product_content(products)
+    missing_issues = check_missing_required_fields(products)
+
+    assert duplicate_issues == []
+    assert len(missing_issues) == 2
+    assert all(field_name in issue.message for issue in missing_issues)
+
+
+def test_check_duplicate_product_content_excludes_invalid_categories():
+    products = [
+        make_product(product_group_id="G001", product_id="P001", category="SHOES"),
+        make_product(product_group_id="G002", product_id="P002", category="SHOES"),
+    ]
+
+    duplicate_issues = check_duplicate_product_content(products)
+    category_issues = check_invalid_category(products)
+
+    assert duplicate_issues == []
+    assert len(category_issues) == 2
+    assert all(issue.rule == "invalid_category" for issue in category_issues)
+
+
+@pytest.mark.parametrize(
+    ("price", "expected_rule"),
+    [
+        (None, "invalid_price"),
+        (0, "zero_price"),
+        (-1000, "invalid_price"),
+    ],
+)
+def test_check_duplicate_product_content_excludes_invalid_prices(price, expected_rule):
+    products = [
+        make_product(product_group_id="G001", product_id="P001", price=price),
+        make_product(product_group_id="G002", product_id="P002", price=price),
+    ]
+
+    duplicate_issues = check_duplicate_product_content(products)
+    price_issues = check_price(products)
+
+    assert duplicate_issues == []
+    assert len(price_issues) == 2
+    assert all(issue.rule == expected_rule for issue in price_issues)
+
+
+def test_check_duplicate_product_content_keeps_duplicate_product_id_rule():
+    products = [
+        make_product(product_group_id="G001", product_id="P777", product_name="반팔 티셔츠"),
+        make_product(product_group_id="G002", product_id="P777", product_name="긴팔 티셔츠"),
+    ]
+
+    duplicate_id_issues = check_duplicate_product_id(products)
+    duplicate_content_issues = check_duplicate_product_content(products)
+
+    assert len(duplicate_id_issues) == 1
+    assert duplicate_id_issues[0].rule == "duplicate_product_id"
+    assert duplicate_content_issues == []
 
 
 def test_check_missing_required_fields_detects_blank_color():
@@ -349,6 +548,21 @@ def test_run_all_rules_includes_price_outlier_issues():
 
     assert len(price_outlier_issues) == 1
     assert price_outlier_issues[0].product_id == "P005"
+
+
+def test_run_all_rules_includes_duplicate_product_content_issues():
+    products = [
+        make_product(product_group_id="G001", product_id="P001", price=15000),
+        make_product(product_group_id="G002", product_id="P002", price=15000),
+    ]
+
+    issues = run_all_rules(products)
+    duplicate_content_issues = [
+        issue for issue in issues if issue.rule == "duplicate_product_content"
+    ]
+
+    assert len(duplicate_content_issues) == 1
+    assert duplicate_content_issues[0].product_id == "P002"
 
 
 def test_run_all_rules_aggregates_every_rule():

@@ -14,6 +14,7 @@ RULE_LABELS = {
     "invalid_price": "가격 오류",
     "zero_price": "가격 0원",
     "price_outlier": "가격 이상치",
+    "duplicate_product_content": "완전 중복 상품",
 }
 
 RECOMMENDATIONS = {
@@ -27,6 +28,9 @@ RECOMMENDATIONS = {
     "price_outlier": (
         "같은 카테고리 상품의 일반적인 가격 범위와 비교하여 "
         "입력 가격이 맞는지 확인하세요."
+    ),
+    "duplicate_product_content": (
+        "상품 ID와 상품 그룹을 확인하고 중복 등록된 상품을 삭제하거나 하나로 통합하세요."
     ),
 }
 
@@ -71,6 +75,21 @@ def translate_issue_message(issue: ValidationIssue) -> str:
         if match:
             field_name = match.group(1)
             return f"필수 항목 '{field_name}' 값이 누락되었습니다."
+
+    if issue.rule == "duplicate_product_content":
+        match = re.fullmatch(
+            r"product_id '([^']*)' in group '([^']*)' duplicates product_id "
+            r"'([^']*)' in group '([^']*)' with same product_name, category, "
+            r"color, size, and price",
+            message,
+        )
+        if match:
+            product_id, product_group_id, base_product_id, base_group_id = match.groups()
+            return (
+                f"상품 ID '{product_id}'(그룹 '{product_group_id}')는 상품 ID "
+                f"'{base_product_id}'(그룹 '{base_group_id}')와 상품명, "
+                "카테고리, 색상, 사이즈, 가격이 모두 같습니다."
+            )
 
     if issue.rule == "invalid_category":
         match = re.fullmatch(r"category '([^']*)' is not one of .+", message)

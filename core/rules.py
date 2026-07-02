@@ -9,6 +9,11 @@ from config.settings import (
 from core.models import Product, ValidationIssue
 
 
+def normalize_duplicate_text(value: str) -> str:
+    """중복 비교를 위해 공백과 영문 대소문자를 정리합니다."""
+    return " ".join(value.split()).casefold()
+
+
 def check_duplicate_product_id(products: list[Product]) -> list[ValidationIssue]:
     seen: dict[str, str] = {}
     issues = []
@@ -32,6 +37,54 @@ def check_duplicate_product_id(products: list[Product]) -> list[ValidationIssue]
                     ),
                 )
             )
+    return issues
+
+
+def check_duplicate_product_content(products: list[Product]) -> list[ValidationIssue]:
+    """상품 핵심 정보가 모두 같은 중복 상품을 찾습니다."""
+    seen: dict[tuple[str, str, str, str, int], Product] = {}
+    issues = []
+
+    for product in products:
+        if not product.product_group_id or not product.product_id:
+            continue
+        if not product.product_name or not product.category:
+            continue
+        if product.category not in VALID_CATEGORIES:
+            continue
+        if not product.color or not product.size:
+            continue
+        if product.price is None or product.price <= 0:
+            continue
+
+        duplicate_key = (
+            normalize_duplicate_text(product.product_name),
+            normalize_duplicate_text(product.category),
+            normalize_duplicate_text(product.color),
+            normalize_duplicate_text(product.size),
+            product.price,
+        )
+        first_product = seen.get(duplicate_key)
+        if first_product is None:
+            seen[duplicate_key] = product
+            continue
+
+        issues.append(
+            ValidationIssue(
+                rule="duplicate_product_content",
+                severity="error",
+                product_id=product.product_id,
+                product_group_id=product.product_group_id,
+                message=(
+                    f"product_id '{product.product_id}' in group "
+                    f"'{product.product_group_id}' duplicates product_id "
+                    f"'{first_product.product_id}' in group "
+                    f"'{first_product.product_group_id}' with same product_name, "
+                    "category, color, size, and price"
+                ),
+            )
+        )
+
     return issues
 
 
@@ -186,6 +239,7 @@ def check_price_outliers(products: list[Product]) -> list[ValidationIssue]:
 
 RULES = [
     check_duplicate_product_id,
+    check_duplicate_product_content,
     check_missing_required_fields,
     check_invalid_category,
     check_stock,

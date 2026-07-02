@@ -81,6 +81,35 @@ def test_translate_missing_required_field_message_to_korean():
     assert message == "필수 항목 'color' 값이 누락되었습니다."
 
 
+def test_translate_duplicate_product_content_message_to_korean():
+    issue = make_issue(
+        rule="duplicate_product_content",
+        message=(
+            "product_id 'P002' in group 'G002' duplicates product_id "
+            "'P001' in group 'G001' with same product_name, category, color, "
+            "size, and price"
+        ),
+    )
+
+    message = translate_issue_message(issue)
+
+    assert message == (
+        "상품 ID 'P002'(그룹 'G002')는 상품 ID 'P001'(그룹 'G001')와 "
+        "상품명, 카테고리, 색상, 사이즈, 가격이 모두 같습니다."
+    )
+
+
+def test_translate_unknown_duplicate_product_content_message_keeps_original_text():
+    issue = make_issue(
+        rule="duplicate_product_content",
+        message="unexpected duplicate product content message",
+    )
+
+    message = translate_issue_message(issue)
+
+    assert message == "unexpected duplicate product content message"
+
+
 def test_translate_invalid_category_message_to_korean():
     issue = make_issue(
         rule="invalid_category",
@@ -221,6 +250,30 @@ def test_build_result_dataframe_handles_empty_issue_list():
 
     assert list(df.columns) == RESULT_COLUMNS
     assert df.empty
+
+
+def test_build_result_dataframe_displays_duplicate_product_content_label_and_recommendation():
+    issue = make_issue(
+        rule="duplicate_product_content",
+        severity="error",
+        product_id="P002",
+        product_group_id="G002",
+        message=(
+            "product_id 'P002' in group 'G002' duplicates product_id "
+            "'P001' in group 'G001' with same product_name, category, color, "
+            "size, and price"
+        ),
+    )
+
+    df = build_result_dataframe([issue])
+
+    assert df.iloc[0]["검수 상태"] == "오류"
+    assert df.iloc[0]["오류 항목"] == "완전 중복 상품"
+    assert df.iloc[0]["오류 이유"] == (
+        "상품 ID 'P002'(그룹 'G002')는 상품 ID 'P001'(그룹 'G001')와 "
+        "상품명, 카테고리, 색상, 사이즈, 가격이 모두 같습니다."
+    )
+    assert "중복 등록된 상품을 삭제하거나 하나로 통합" in df.iloc[0]["수정 권장사항"]
 
 
 def test_build_result_dataframe_displays_price_outlier_label_and_recommendation():
