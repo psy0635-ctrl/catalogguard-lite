@@ -11,10 +11,13 @@ CSV 파일을 읽어서 상품 데이터에 빠진 값, 잘못된 카테고리, 
 - **invalid_category**: `category`가 허용 목록(`TOP`, `BOTTOM`, `OUTER`)에 없는 경우
 - **invalid_stock** / **out_of_stock**: `stock`이 숫자가 아니거나 음수(error), 0(warning)인 경우
 - **invalid_price** / **zero_price**: `price`가 숫자가 아니거나 음수(error), 0(warning)인 경우
+- **price_outlier**: 같은 카테고리의 유효 가격이 5개 이상일 때 IQR 방식으로 지나치게 높거나 낮은 가격을 warning으로 표시
 
 헤더만 있고 상품 행이 없는 CSV는 처리하지 않습니다.
 잘못된 재고와 가격 문자열은 앱을 중단시키지 않고 형식 오류로 처리합니다.
 상품 ID 또는 상품 그룹 ID가 비어 있으면 중복 검사가 아니라 필수 값 누락으로 처리합니다.
+0원, 음수, 숫자 오류 가격은 가격 이상치가 아니라 기존 가격 형식 규칙에서 처리합니다.
+가격 이상치 분석은 현재 상품 행 단위로 수행되며, 같은 상품 그룹의 여러 옵션이 가격 분포에 여러 번 포함될 수 있습니다.
 
 ## 검수 결과 표시
 
@@ -28,12 +31,15 @@ CSV 파일을 읽어서 상품 데이터에 빠진 값, 잘못된 카테고리, 
 ## 프로젝트 구조
 
 ```
+app.py                 # Streamlit CSV 업로드 및 결과 화면
 config/settings.py   # 경로, 필수 컬럼, 허용값 등 설정
 core/models.py        # Product, ValidationIssue 데이터 모델
 core/loader.py         # CSV -> Product 리스트 로딩
 core/rules.py           # 검증 규칙 및 run_all_rules()
+core/presentation.py    # 검수 결과 표시, 필터, 한글 메시지 변환
 tests/test_loader.py    # CSV 로딩 테스트
 tests/test_rules.py     # 검증 규칙 테스트
+tests/test_presentation.py # 표시 및 필터 테스트
 data/dev/                # 개발용 샘플 데이터
 ```
 
@@ -101,14 +107,14 @@ issues = run_all_rules(products)
 
 ## 테스트
 
-현재 테스트는 총 61개입니다.
+현재 테스트는 총 73개입니다.
 
 - `tests/test_loader.py`: 17개
-- `tests/test_rules.py`: 16개
-- `tests/test_presentation.py`: 28개
+- `tests/test_rules.py`: 25개
+- `tests/test_presentation.py`: 31개
 
 마지막 확인 결과:
 
 ```text
-61 passed
+73 passed
 ```

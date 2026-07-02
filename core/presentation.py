@@ -13,6 +13,7 @@ RULE_LABELS = {
     "out_of_stock": "품절 상품",
     "invalid_price": "가격 오류",
     "zero_price": "가격 0원",
+    "price_outlier": "가격 이상치",
 }
 
 RECOMMENDATIONS = {
@@ -23,6 +24,10 @@ RECOMMENDATIONS = {
     "out_of_stock": "판매 상태와 재입고 여부를 확인하세요.",
     "invalid_price": "가격을 0 이상의 정수로 입력하세요.",
     "zero_price": "무료 상품이 아니라면 정상 판매 가격을 입력하세요.",
+    "price_outlier": (
+        "같은 카테고리 상품의 일반적인 가격 범위와 비교하여 "
+        "입력 가격이 맞는지 확인하세요."
+    ),
 }
 
 SEVERITY_LABELS = {
@@ -96,6 +101,20 @@ def translate_issue_message(issue: ValidationIssue) -> str:
 
     if issue.rule == "zero_price" and message == "price is 0":
         return "가격이 0원으로 입력되었습니다."
+
+    if issue.rule == "price_outlier":
+        match = re.fullmatch(
+            r"price (-?\d+) is outside category '([^']*)' expected range "
+            r"(-?\d+) to (-?\d+)",
+            message,
+        )
+        if match:
+            price, category, lower_bound, upper_bound = match.groups()
+            return (
+                f"가격 {int(price):,}원은 {category} 카테고리의 일반적인 "
+                f"가격 범위인 {int(lower_bound):,}원~{int(upper_bound):,}원을 "
+                "벗어났습니다."
+            )
 
     return message
 

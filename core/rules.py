@@ -1,4 +1,11 @@
-from config.settings import REQUIRED_FIELDS, VALID_CATEGORIES
+from statistics import quantiles
+
+from config.settings import (
+    PRICE_OUTLIER_IQR_MULTIPLIER,
+    PRICE_OUTLIER_MIN_CATEGORY_SIZE,
+    REQUIRED_FIELDS,
+    VALID_CATEGORIES,
+)
 from core.models import Product, ValidationIssue
 
 
@@ -133,12 +140,57 @@ def check_price(products: list[Product]) -> list[ValidationIssue]:
     return issues
 
 
+def check_price_outliers(products: list[Product]) -> list[ValidationIssue]:
+    """카테고리별 가격 분포를 기준으로 지나치게 높거나 낮은 가격을 찾습니다."""
+    products_by_category: dict[str, list[Product]] = {}
+
+    for product in products:
+        if not product.category or product.category not in VALID_CATEGORIES:
+            continue
+        if product.price is None or product.price <= 0:
+            continue
+
+        products_by_category.setdefault(product.category, []).append(product)
+
+    issues = []
+    for category, category_products in products_by_category.items():
+        if len(category_products) < PRICE_OUTLIER_MIN_CATEGORY_SIZE:
+            continue
+
+        prices = sorted(product.price for product in category_products if product.price)
+        q1, _, q3 = quantiles(prices, n=4, method="inclusive")
+        iqr = q3 - q1
+        lower_bound = q1 - PRICE_OUTLIER_IQR_MULTIPLIER * iqr
+        upper_bound = q3 + PRICE_OUTLIER_IQR_MULTIPLIER * iqr
+        lower_display = round(lower_bound)
+        upper_display = round(upper_bound)
+
+        for product in category_products:
+            if product.price < lower_bound or product.price > upper_bound:
+                issues.append(
+                    ValidationIssue(
+                        rule="price_outlier",
+                        severity="warning",
+                        product_id=product.product_id,
+                        product_group_id=product.product_group_id,
+                        message=(
+                            f"price {product.price} is outside category "
+                            f"'{category}' expected range {lower_display} "
+                            f"to {upper_display}"
+                        ),
+                    )
+                )
+
+    return issues
+
+
 RULES = [
     check_duplicate_product_id,
     check_missing_required_fields,
     check_invalid_category,
     check_stock,
     check_price,
+    check_price_outliers,
 ]
 
 

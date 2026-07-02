@@ -154,6 +154,30 @@ def test_translate_zero_price_message_to_korean():
     assert message == "가격이 0원으로 입력되었습니다."
 
 
+def test_translate_price_outlier_message_to_korean():
+    issue = make_issue(
+        rule="price_outlier",
+        severity="warning",
+        message="price 100000 is outside category 'TOP' expected range 8000 to 16000",
+    )
+
+    message = translate_issue_message(issue)
+
+    assert message == "가격 100,000원은 TOP 카테고리의 일반적인 가격 범위인 8,000원~16,000원을 벗어났습니다."
+
+
+def test_translate_unknown_price_outlier_message_keeps_original_text():
+    issue = make_issue(
+        rule="price_outlier",
+        severity="warning",
+        message="unexpected price outlier message",
+    )
+
+    message = translate_issue_message(issue)
+
+    assert message == "unexpected price outlier message"
+
+
 def test_translate_unknown_message_keeps_original_text():
     issue = make_issue(rule="unknown_rule", message="unexpected validation message")
 
@@ -197,6 +221,26 @@ def test_build_result_dataframe_handles_empty_issue_list():
 
     assert list(df.columns) == RESULT_COLUMNS
     assert df.empty
+
+
+def test_build_result_dataframe_displays_price_outlier_label_and_recommendation():
+    issue = make_issue(
+        rule="price_outlier",
+        severity="warning",
+        product_id="P005",
+        product_group_id="G005",
+        message="price 100000 is outside category 'TOP' expected range 8000 to 16000",
+    )
+
+    df = build_result_dataframe([issue])
+
+    assert df.iloc[0]["검수 상태"] == "주의"
+    assert df.iloc[0]["오류 항목"] == "가격 이상치"
+    assert df.iloc[0]["오류 이유"] == "가격 100,000원은 TOP 카테고리의 일반적인 가격 범위인 8,000원~16,000원을 벗어났습니다."
+    assert df.iloc[0]["수정 권장사항"] == (
+        "같은 카테고리 상품의 일반적인 가격 범위와 비교하여 "
+        "입력 가격이 맞는지 확인하세요."
+    )
 
 
 def test_calculate_dataframe_height_uses_min_height_for_empty_rows():
