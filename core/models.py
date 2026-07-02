@@ -12,6 +12,8 @@ class Product:
     stock: int | None
     price: int | None
     image_path: str
+    description: str = ""
+    seller: str = ""
 
 
 @dataclass

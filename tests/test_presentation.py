@@ -1,7 +1,9 @@
 import pandas as pd
+import pytest
 
 from core.models import ValidationIssue
 from core.presentation import (
+    FIELD_LABELS,
     RESULT_COLUMNS,
     build_result_dataframe,
     calculate_dataframe_height,
@@ -213,6 +215,169 @@ def test_translate_unknown_message_keeps_original_text():
     message = translate_issue_message(issue)
 
     assert message == "unexpected validation message"
+
+
+@pytest.mark.parametrize(
+    ("rule", "message", "expected"),
+    [
+        (
+            "prohibited_term",
+            "field 'product_name' contains prohibited term '카톡'",
+            "상품명에 금지어 '카톡'이 포함되어 있습니다.",
+        ),
+        (
+            "email_address",
+            "field 'description' contains email address 'te***@example.com'",
+            "상품 설명에 이메일 주소 'te***@example.com'이 포함되어 있습니다.",
+        ),
+        (
+            "phone_number",
+            "field 'seller' contains phone number '010-****-5678'",
+            "판매자 정보에 전화번호 '010-****-5678'이 포함되어 있습니다.",
+        ),
+        (
+            "resident_registration_number",
+            (
+                "field 'description' contains resident registration number "
+                "'990101-1******'"
+            ),
+            "상품 설명에 주민등록번호 형식 '990101-1******'이 포함되어 있습니다.",
+        ),
+        (
+            "suspected_bank_account",
+            "field 'description' contains suspected bank account '123-***-***012'",
+            (
+                "상품 설명에 계좌번호로 의심되는 값 '123-***-***012'이 "
+                "포함되어 있습니다."
+            ),
+        ),
+    ],
+)
+def test_translate_content_safety_messages_to_korean(rule, message, expected):
+    issue = make_issue(rule=rule, message=message)
+
+    translated_message = translate_issue_message(issue)
+
+    assert translated_message == expected
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "prohibited_term",
+        "email_address",
+        "phone_number",
+        "resident_registration_number",
+        "suspected_bank_account",
+    ],
+)
+def test_translate_unknown_content_safety_message_keeps_original_text(rule):
+    issue = make_issue(rule=rule, message="unexpected content safety message")
+
+    message = translate_issue_message(issue)
+
+    assert message == "unexpected content safety message"
+
+
+def test_field_labels_include_content_scan_fields():
+    assert FIELD_LABELS == {
+        "product_name": "상품명",
+        "description": "상품 설명",
+        "seller": "판매자 정보",
+    }
+
+
+@pytest.mark.parametrize(
+    ("rule", "message", "expected_label", "recommendation_fragment"),
+    [
+        (
+            "prohibited_term",
+            "field 'product_name' contains prohibited term '카톡'",
+            "금지어 포함",
+            "금지어를 제거",
+        ),
+        (
+            "email_address",
+            "field 'description' contains email address 'te***@example.com'",
+            "이메일 주소 포함",
+            "이메일 주소를 제거",
+        ),
+        (
+            "phone_number",
+            "field 'seller' contains phone number '010-****-5678'",
+            "전화번호 포함",
+            "전화번호를 제거",
+        ),
+        (
+            "resident_registration_number",
+            (
+                "field 'description' contains resident registration number "
+                "'990101-1******'"
+            ),
+            "주민등록번호 형식 포함",
+            "즉시 제거",
+        ),
+        (
+            "suspected_bank_account",
+            "field 'description' contains suspected bank account '123-***-***012'",
+            "계좌번호 의심",
+            "개인 금융정보",
+        ),
+    ],
+)
+def test_build_result_dataframe_displays_content_safety_labels_and_recommendations(
+    rule,
+    message,
+    expected_label,
+    recommendation_fragment,
+):
+    issue = make_issue(
+        rule=rule,
+        severity="warning" if rule == "suspected_bank_account" else "error",
+        message=message,
+    )
+
+    df = build_result_dataframe([issue])
+
+    assert df.iloc[0]["오류 항목"] == expected_label
+    assert recommendation_fragment in df.iloc[0]["수정 권장사항"]
+
+
+def test_build_result_dataframe_does_not_show_raw_personal_information():
+    issues = [
+        make_issue(
+            rule="email_address",
+            message="field 'description' contains email address 'te***@example.com'",
+        ),
+        make_issue(
+            rule="phone_number",
+            message="field 'seller' contains phone number '010-****-5678'",
+        ),
+        make_issue(
+            rule="resident_registration_number",
+            message=(
+                "field 'description' contains resident registration number "
+                "'990101-1******'"
+            ),
+        ),
+        make_issue(
+            rule="suspected_bank_account",
+            severity="warning",
+            message="field 'description' contains suspected bank account '123-***-***012'",
+        ),
+    ]
+
+    df = build_result_dataframe(issues)
+    reason_text = " ".join(df["오류 이유"].tolist())
+
+    assert "test@example.com" not in reason_text
+    assert "010-1234-5678" not in reason_text
+    assert "990101-1234567" not in reason_text
+    assert "123-456-789012" not in reason_text
+    assert "te***@example.com" in reason_text
+    assert "010-****-5678" in reason_text
+    assert "990101-1******" in reason_text
+    assert "123-***-***012" in reason_text
 
 
 def test_build_result_dataframe_uses_expected_columns_and_display_values():

@@ -32,3 +32,27 @@ VALID_CATEGORIES = {"TOP", "BOTTOM", "OUTER"}
 
 PRICE_OUTLIER_MIN_CATEGORY_SIZE = 5
 PRICE_OUTLIER_IQR_MULTIPLIER = 1.5
+
+CONTENT_SCAN_FIELDS = (
+    "product_name",
+    "description",
+    "seller",
+)
+
+PROHIBITED_TERMS = (
+    "카카오톡",
+    "카톡",
+    "텔레그램",
+    "외부결제",
+    "외부 결제",
+    "직거래",
+    "현금거래",
+)
+
+BANK_ACCOUNT_CONTEXT_TERMS = (
+    "계좌",
+    "입금",
+    "송금",
+    "은행",
+    "예금주",
+)

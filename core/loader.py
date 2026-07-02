@@ -17,6 +17,10 @@ def parse_optional_int(value: str) -> int | None:
         return None
 
 
+def clean_optional_text(row: dict[str, str], field_name: str) -> str:
+    return row.get(field_name, "").strip()
+
+
 def load_products(csv_path) -> list[Product]:
     df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
 
@@ -45,6 +49,8 @@ def load_products(csv_path) -> list[Product]:
                 stock=stock,
                 price=price,
                 image_path=row["image_path"].strip(),
+                description=clean_optional_text(row, "description"),
+                seller=clean_optional_text(row, "seller"),
             )
         )
     return products

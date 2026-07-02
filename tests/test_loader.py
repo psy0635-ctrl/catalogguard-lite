@@ -29,6 +29,48 @@ def test_load_products_treats_blank_field_as_empty_string():
     assert missing_color.color == ""
 
 
+def test_load_products_handles_missing_optional_content_columns():
+    products = load_products(DEV_DATA_PATH)
+
+    assert products[0].description == ""
+    assert products[0].seller == ""
+
+
+def test_load_products_reads_optional_content_columns(tmp_path):
+    extended_csv = tmp_path / "extended.csv"
+    extended_csv.write_text(
+        (
+            "product_group_id,product_id,product_name,category,color,size,"
+            "stock,price,image_path,description,seller\n"
+            "G001,P001,기본 상품,TOP,BLACK,M,5,10000,a.jpg,"
+            "안전한 상품 설명,공식 판매자\n"
+        ),
+        encoding="utf-8",
+    )
+
+    products = load_products(extended_csv)
+
+    assert products[0].description == "안전한 상품 설명"
+    assert products[0].seller == "공식 판매자"
+
+
+def test_load_products_strips_blank_optional_content_values(tmp_path):
+    extended_csv = tmp_path / "blank_optional.csv"
+    extended_csv.write_text(
+        (
+            "product_group_id,product_id,product_name,category,color,size,"
+            "stock,price,image_path,description,seller\n"
+            "G001,P001,기본 상품,TOP,BLACK,M,5,10000,a.jpg,   ,   \n"
+        ),
+        encoding="utf-8",
+    )
+
+    products = load_products(extended_csv)
+
+    assert products[0].description == ""
+    assert products[0].seller == ""
+
+
 def test_load_products_raises_on_missing_column(tmp_path):
     bad_csv = tmp_path / "bad.csv"
     bad_csv.write_text("product_group_id,product_id\nG001,P001\n", encoding="utf-8")

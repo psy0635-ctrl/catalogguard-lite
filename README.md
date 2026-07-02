@@ -13,6 +13,9 @@ CSV 파일을 읽어서 상품 데이터에 빠진 값, 잘못된 카테고리, 
 - **invalid_stock** / **out_of_stock**: `stock`이 숫자가 아니거나 음수(error), 0(warning)인 경우
 - **invalid_price** / **zero_price**: `price`가 숫자가 아니거나 음수(error), 0(warning)인 경우
 - **price_outlier**: 같은 카테고리의 유효 가격이 5개 이상일 때 IQR 방식으로 지나치게 높거나 낮은 가격을 warning으로 표시
+- **prohibited_term**: `product_name`, `description`, `seller`에서 설정된 금지어가 발견된 경우
+- **email_address** / **phone_number** / **resident_registration_number**: 상품 텍스트에 이메일 주소, 전화번호, 주민등록번호 형식이 포함된 경우
+- **suspected_bank_account**: 계좌, 입금, 송금, 은행, 예금주 같은 문맥어와 10~14자리 숫자 형식이 함께 있을 때 계좌번호 의심 항목을 warning으로 표시
 
 헤더만 있고 상품 행이 없는 CSV는 처리하지 않습니다.
 잘못된 재고와 가격 문자열은 앱을 중단시키지 않고 형식 오류로 처리합니다.
@@ -21,11 +24,15 @@ CSV 파일을 읽어서 상품 데이터에 빠진 값, 잘못된 카테고리, 
 가격 이상치 분석은 현재 상품 행 단위로 수행되며, 같은 상품 그룹의 여러 옵션이 가격 분포에 여러 번 포함될 수 있습니다.
 완전 중복 상품 검사는 공백과 영문 대소문자를 정리한 뒤 비교하며, 상품 ID, 상품 그룹 ID, 재고, 이미지 경로는 비교 기준에서 제외합니다.
 누락 값, 잘못된 카테고리, 0원·음수·숫자 오류 가격은 완전 중복 비교에서 제외합니다.
+금지어 목록은 MVP 예시이며 실제 서비스 운영 정책에 맞게 조정해야 합니다.
+개인정보와 계좌번호 의심 탐지는 정규식 기반이므로 오탐과 미탐 가능성이 있습니다.
+테스트 데이터에는 실제 개인정보를 사용하지 말고 가짜 값을 사용해야 합니다.
 
 ## 검수 결과 표시
 
 - 오류 이유는 사용자가 읽기 쉬운 한글 문장으로 표시됩니다.
 - 결과 CSV 다운로드 파일에도 한글 오류 이유가 포함됩니다.
+- 이메일 주소, 전화번호, 주민등록번호 형식, 계좌번호 의심 값은 화면과 CSV에서 마스킹되어 표시됩니다.
 - 전체 상태는 오류, 주의, 정상으로 구분되어 표시됩니다.
 - 검수 상태와 오류 항목으로 결과를 필터링할 수 있습니다.
 - 상품 ID 일부 문자를 검색할 수 있습니다.
@@ -51,6 +58,15 @@ data/dev/                # 개발용 샘플 데이터
 ```text
 product_group_id, product_id, product_name, category, color, size, stock, price, image_path
 ```
+
+## CSV 선택 컬럼
+
+```text
+description, seller
+```
+
+`description`과 `seller`는 상품 설명과 판매자 정보 검수에 사용됩니다.
+두 컬럼이 없는 기존 CSV도 그대로 로딩되며, 값이 비어 있으면 빈 문자열로 처리합니다.
 
 ## 실행
 
@@ -110,14 +126,14 @@ issues = run_all_rules(products)
 
 ## 테스트
 
-현재 테스트는 총 100개입니다.
+현재 테스트는 총 154개입니다.
 
-- `tests/test_loader.py`: 17개
-- `tests/test_rules.py`: 49개
-- `tests/test_presentation.py`: 34개
+- `tests/test_loader.py`: 20개
+- `tests/test_rules.py`: 83개
+- `tests/test_presentation.py`: 51개
 
 마지막 확인 결과:
 
 ```text
-100 passed
+154 passed
 ```

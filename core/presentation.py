@@ -15,6 +15,11 @@ RULE_LABELS = {
     "zero_price": "가격 0원",
     "price_outlier": "가격 이상치",
     "duplicate_product_content": "완전 중복 상품",
+    "prohibited_term": "금지어 포함",
+    "email_address": "이메일 주소 포함",
+    "phone_number": "전화번호 포함",
+    "resident_registration_number": "주민등록번호 형식 포함",
+    "suspected_bank_account": "계좌번호 의심",
 }
 
 RECOMMENDATIONS = {
@@ -32,6 +37,23 @@ RECOMMENDATIONS = {
     "duplicate_product_content": (
         "상품 ID와 상품 그룹을 확인하고 중복 등록된 상품을 삭제하거나 하나로 통합하세요."
     ),
+    "prohibited_term": (
+        "운영 정책상 허용되는 표현으로 수정하고 금지어를 제거하세요."
+    ),
+    "email_address": "상품 정보에서 이메일 주소를 제거하세요.",
+    "phone_number": "상품 정보에서 전화번호를 제거하세요.",
+    "resident_registration_number": (
+        "상품 정보에서 주민등록번호 형태의 개인정보를 즉시 제거하세요."
+    ),
+    "suspected_bank_account": (
+        "계좌번호가 맞는지 확인하고 개인 금융정보라면 제거하세요."
+    ),
+}
+
+FIELD_LABELS = {
+    "product_name": "상품명",
+    "description": "상품 설명",
+    "seller": "판매자 정보",
 }
 
 SEVERITY_LABELS = {
@@ -57,6 +79,39 @@ RESULT_COLUMNS = [
 def translate_issue_message(issue: ValidationIssue) -> str:
     """검수 결과의 영문 메시지를 사용자용 한글 문장으로 변환합니다."""
     message = issue.message
+
+    content_message_patterns = {
+        "prohibited_term": (
+            r"field '([^']*)' contains prohibited term '([^']*)'",
+            lambda field, value: f"{field}에 금지어 '{value}'이 포함되어 있습니다.",
+        ),
+        "email_address": (
+            r"field '([^']*)' contains email address '([^']*)'",
+            lambda field, value: f"{field}에 이메일 주소 '{value}'이 포함되어 있습니다.",
+        ),
+        "phone_number": (
+            r"field '([^']*)' contains phone number '([^']*)'",
+            lambda field, value: f"{field}에 전화번호 '{value}'이 포함되어 있습니다.",
+        ),
+        "resident_registration_number": (
+            r"field '([^']*)' contains resident registration number '([^']*)'",
+            lambda field, value: f"{field}에 주민등록번호 형식 '{value}'이 포함되어 있습니다.",
+        ),
+        "suspected_bank_account": (
+            r"field '([^']*)' contains suspected bank account '([^']*)'",
+            lambda field, value: (
+                f"{field}에 계좌번호로 의심되는 값 '{value}'이 포함되어 있습니다."
+            ),
+        ),
+    }
+    content_pattern = content_message_patterns.get(issue.rule)
+    if content_pattern:
+        pattern, formatter = content_pattern
+        match = re.fullmatch(pattern, message)
+        if match:
+            field_name, value = match.groups()
+            field_label = FIELD_LABELS.get(field_name, field_name)
+            return formatter(field_label, value)
 
     if issue.rule == "duplicate_product_id":
         match = re.fullmatch(

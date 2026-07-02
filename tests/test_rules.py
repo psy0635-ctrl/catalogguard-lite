@@ -8,6 +8,7 @@ from core.rules import (
     check_missing_required_fields,
     check_price,
     check_price_outliers,
+    check_prohibited_and_personal_information,
     check_stock,
     run_all_rules,
 )
@@ -532,6 +533,276 @@ def test_check_price_outliers_handles_zero_iqr():
     assert len(outlier_issues) == 1
     assert outlier_issues[0].product_id == "P005"
     assert normal_issues == []
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("product_name", "카톡 문의 상품"),
+        ("description", "텔레그램으로 문의하세요"),
+        ("seller", "직거래 가능 판매자"),
+    ],
+)
+def test_check_content_safety_flags_prohibited_terms_in_scanned_fields(
+    field_name,
+    value,
+):
+    products = [make_product(**{field_name: value})]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert len(issues) == 1
+    assert issues[0].rule == "prohibited_term"
+    assert issues[0].severity == "error"
+    assert f"field '{field_name}' contains prohibited term" in issues[0].message
+
+
+def test_check_content_safety_normalizes_whitespace_for_prohibited_terms():
+    products = [make_product(description="외부   결제로 구매 가능")]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert len(issues) == 1
+    assert issues[0].message == "field 'description' contains prohibited term '외부 결제'"
+
+
+def test_check_content_safety_does_not_repeat_same_prohibited_term_in_field():
+    products = [make_product(product_name="카톡 문의 후 카톡 연락")]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert [issue.rule for issue in issues] == ["prohibited_term"]
+
+
+def test_check_content_safety_flags_different_prohibited_terms_separately():
+    products = [make_product(product_name="카톡 또는 텔레그램 문의")]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert [issue.rule for issue in issues] == ["prohibited_term", "prohibited_term"]
+    assert "카톡" in issues[0].message
+    assert "텔레그램" in issues[1].message
+
+
+@pytest.mark.parametrize(
+    ("email_address", "masked_email"),
+    [
+        ("test@example.com", "te***@example.com"),
+        ("user.name+shop@example.co.kr", "us***@example.co.kr"),
+        ("a@example.com", "a***@example.com"),
+    ],
+    ids=["basic_email", "subdomain_email", "short_local_email"],
+)
+def test_check_content_safety_masks_email_addresses(email_address, masked_email):
+    products = [make_product(description=f"문의 {email_address}")]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert len(issues) == 1
+    assert issues[0].rule == "email_address"
+    assert issues[0].message == (
+        f"field 'description' contains email address '{masked_email}'"
+    )
+    assert email_address not in issues[0].message
+
+
+@pytest.mark.parametrize("text", ["example", "test@", "@example.com"])
+def test_check_content_safety_ignores_invalid_email_text(text):
+    products = [make_product(description=f"문의 {text}")]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert issues == []
+
+
+@pytest.mark.parametrize(
+    ("phone_number", "masked_phone"),
+    [
+        ("010-1234-5678", "010-****-5678"),
+        ("01012345678", "010****5678"),
+        ("010 1234 5678", "010-****-5678"),
+        ("02-123-4567", "02-****-4567"),
+        ("031-1234-5678", "031-****-5678"),
+    ],
+    ids=[
+        "mobile_hyphen",
+        "mobile_plain",
+        "mobile_spaces",
+        "seoul_landline",
+        "regional_landline",
+    ],
+)
+def test_check_content_safety_masks_phone_numbers(phone_number, masked_phone):
+    products = [make_product(seller=f"문의 {phone_number}")]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert len(issues) == 1
+    assert issues[0].rule == "phone_number"
+    assert issues[0].message == f"field 'seller' contains phone number '{masked_phone}'"
+    assert phone_number not in issues[0].message
+
+
+def test_check_content_safety_ignores_general_product_numbers_as_phone_numbers():
+    products = [make_product(description="상품 코드 12345678901")]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert issues == []
+
+
+def test_check_content_safety_masks_resident_registration_numbers():
+    rrn = "990101-1234567"
+    products = [make_product(description=f"테스트 값 {rrn}")]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert len(issues) == 1
+    assert issues[0].rule == "resident_registration_number"
+    assert issues[0].message == (
+        "field 'description' contains resident registration number '990101-1******'"
+    )
+    assert rrn not in issues[0].message
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["9901011234567", "바코드 8801234567890"],
+    ids=["plain_rrn_like_number", "barcode_number"],
+)
+def test_check_content_safety_ignores_non_hyphenated_rrn_like_numbers(text):
+    products = [make_product(description=text)]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert issues == []
+
+
+@pytest.mark.parametrize("context_term", ["계좌", "입금", "은행"])
+def test_check_content_safety_flags_suspected_bank_account_with_context(context_term):
+    products = [make_product(description=f"{context_term} 123-456-789012")]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert len(issues) == 1
+    assert issues[0].rule == "suspected_bank_account"
+    assert issues[0].severity == "warning"
+    assert issues[0].message == (
+        "field 'description' contains suspected bank account '123-***-***012'"
+    )
+    assert "123-456-789012" not in issues[0].message
+
+
+def test_check_content_safety_ignores_bank_account_like_number_without_context():
+    products = [make_product(description="상품 코드 123-456-789012")]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert issues == []
+
+
+def test_check_content_safety_does_not_duplicate_phone_as_bank_account():
+    products = [make_product(description="입금 문의 010-1234-5678")]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert [issue.rule for issue in issues] == ["phone_number"]
+
+
+def test_check_content_safety_uses_all_phone_spans_to_avoid_bank_duplicates():
+    products = [make_product(description="입금 문의 010-1234-5678 01012345678")]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert [issue.rule for issue in issues] == ["phone_number"]
+
+
+def test_check_content_safety_does_not_duplicate_rrn_as_bank_account():
+    products = [make_product(description="입금 확인 990101-1234567")]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert [issue.rule for issue in issues] == ["resident_registration_number"]
+
+
+def test_check_content_safety_uses_all_rrn_spans_to_avoid_bank_duplicates():
+    products = [make_product(description="입금 확인 990101-1234567 990101-1234567")]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert [issue.rule for issue in issues] == ["resident_registration_number"]
+
+
+def test_check_content_safety_deduplicates_repeated_personal_information_in_field():
+    products = [
+        make_product(
+            description=(
+                "문의 test@example.com test@example.com "
+                "010-1234-5678 01012345678"
+            )
+        )
+    ]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert [issue.rule for issue in issues] == ["email_address", "phone_number"]
+
+
+def test_check_content_safety_skips_blank_scanned_fields():
+    products = [make_product(product_name="", description="", seller="")]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert issues == []
+
+
+def test_check_content_safety_uses_deterministic_field_and_rule_order():
+    products = [
+        make_product(
+            product_name="카톡 문의 상품",
+            description="문의 test@example.com",
+            seller="010-1234-5678",
+        )
+    ]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert [issue.rule for issue in issues] == [
+        "prohibited_term",
+        "email_address",
+        "phone_number",
+    ]
+    assert "field 'product_name'" in issues[0].message
+    assert "field 'description'" in issues[1].message
+    assert "field 'seller'" in issues[2].message
+
+
+def test_check_content_safety_preserves_product_and_group_ids():
+    products = [
+        make_product(
+            product_group_id="G777",
+            product_id="P777",
+            description="문의 test@example.com",
+        )
+    ]
+
+    issues = check_prohibited_and_personal_information(products)
+
+    assert len(issues) == 1
+    assert issues[0].product_group_id == "G777"
+    assert issues[0].product_id == "P777"
+
+
+def test_run_all_rules_includes_content_safety_issues():
+    products = [make_product(description="문의 test@example.com")]
+
+    issues = run_all_rules(products)
+    content_issues = [issue for issue in issues if issue.rule == "email_address"]
+
+    assert len(content_issues) == 1
+    assert content_issues[0].message == (
+        "field 'description' contains email address 'te***@example.com'"
+    )
 
 
 def test_run_all_rules_includes_price_outlier_issues():
