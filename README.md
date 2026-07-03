@@ -57,6 +57,16 @@ CSV 파일을 읽어서 상품 데이터에 빠진 값, 잘못된 카테고리, 
 - 필수 컬럼 누락을 검사하며, `description`, `seller` 선택 컬럼 누락은 허용합니다.
 - 정상 검증된 DataFrame 하나를 미리보기와 상품 검수에 함께 사용합니다.
 
+## CSV 입력 템플릿
+
+앱 화면의 `CSV 입력 템플릿 다운로드` 버튼을 사용하면 현재 지원하는 컬럼이 포함된 CSV 파일을 내려받을 수 있습니다.
+
+템플릿에는 작성 방법을 보여 주기 위한 가짜 예시 상품 1개가 포함되어 있습니다.
+실제 사용 전 예시 행을 삭제하거나 실제 상품 정보로 교체해 주세요.
+
+필수 컬럼은 `product_group_id`, `product_id`, `product_name`, `category`, `color`, `size`, `stock`, `price`, `image_path`입니다.
+선택 컬럼은 `description`, `seller`입니다.
+
 ## 프로젝트 구조
 
 ```
@@ -65,11 +75,13 @@ config/settings.py   # 경로, 필수 컬럼, 허용값 등 설정
 core/models.py        # Product, ValidationIssue 데이터 모델
 core/loader.py         # CSV -> Product 리스트 로딩
 core/upload_validator.py # CSV 업로드 파일 사전 검증
+core/product_template.py # CSV 입력 템플릿 생성
 core/rules.py           # 검증 규칙 및 run_all_rules()
 core/presentation.py    # 검수 결과 표시, 필터, 한글 메시지 변환
 core/result_exporter.py # 검수 결과 CSV 다운로드 데이터 생성
 tests/test_loader.py    # CSV 로딩 테스트
 tests/test_upload_validator.py # CSV 업로드 검증 테스트
+tests/test_product_template.py # CSV 입력 템플릿 테스트
 tests/test_rules.py     # 검증 규칙 테스트
 tests/test_presentation.py # 표시 및 필터 테스트
 tests/test_result_exporter.py # 검수 결과 CSV 다운로드 테스트
@@ -118,6 +130,7 @@ python -m streamlit run app.py
 브라우저가 열리고 다음 화면이 보여야 합니다.
 
 - CatalogGuard Lite 제목
+- CSV 입력 템플릿 다운로드 버튼
 - CSV 업로드 버튼
 - 상품 데이터 미리보기
 - 검수 요약
@@ -131,9 +144,9 @@ python -m streamlit run app.py
 
 ```text
 전체 상품 수: 5
-전체 문제 수: 5
-오류 수: 4
-주의 수: 1
+전체 문제 수: 6
+오류 수: 6
+주의 수: 0
 ```
 
 ## Python 예시
@@ -153,6 +166,7 @@ issues = run_all_rules(products)
 
 - `tests/test_loader.py`: CSV 로딩 테스트
 - `tests/test_upload_validator.py`: CSV 업로드 검증 테스트
+- `tests/test_product_template.py`: CSV 입력 템플릿 테스트
 - `tests/test_rules.py`: 검증 규칙 테스트
 - `tests/test_presentation.py`: 표시 및 필터 테스트
 - `tests/test_result_exporter.py`: 검수 결과 CSV 다운로드 테스트

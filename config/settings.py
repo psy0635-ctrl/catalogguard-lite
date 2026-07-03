@@ -25,6 +25,13 @@ REQUIRED_COLUMNS = [
     "image_path",
 ]
 
+OPTIONAL_COLUMNS = [
+    "description",
+    "seller",
+]
+
+CSV_TEMPLATE_COLUMNS = [*REQUIRED_COLUMNS, *OPTIONAL_COLUMNS]
+
 # 값이 비어 있으면 오류로 볼 필드입니다. stock, price는 전용 숫자 규칙에서 따로 봅니다.
 REQUIRED_FIELDS = [
     "product_group_id",

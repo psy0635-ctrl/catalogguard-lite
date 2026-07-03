@@ -3,6 +3,7 @@ import ast
 
 import streamlit as st
 
+from config.settings import OPTIONAL_COLUMNS, REQUIRED_COLUMNS
 from core.loader import load_products_from_dataframe
 from core.presentation import (
     build_result_dataframe,
@@ -11,6 +12,10 @@ from core.presentation import (
     filter_result_dataframe,
 )
 from core.privacy import create_masked_preview
+from core.product_template import (
+    build_product_template_csv,
+    get_product_template_filename,
+)
 from core.result_exporter import build_result_filename, build_validation_result_csv
 from core.rules import run_all_rules
 from core.upload_validator import (
@@ -54,6 +59,21 @@ st.set_page_config(page_title="CatalogGuard Lite", layout="wide")
 
 st.title("CatalogGuard Lite")
 st.write("상품 카탈로그 CSV 파일의 누락 값과 데이터 오류를 검사합니다.")
+
+st.subheader("CSV 입력 템플릿")
+st.write("올바른 컬럼 구조가 필요한 경우 아래 템플릿을 내려받아 작성하세요.")
+st.caption(
+    "템플릿에는 가짜 예시 상품 1개가 포함되어 있습니다. "
+    "실제 사용 전 예시 행을 삭제하거나 상품 정보로 교체해 주세요."
+)
+st.caption(f"필수 컬럼: {', '.join(REQUIRED_COLUMNS)}")
+st.caption(f"선택 컬럼: {', '.join(OPTIONAL_COLUMNS)}")
+st.download_button(
+    "CSV 입력 템플릿 다운로드",
+    data=build_product_template_csv(),
+    file_name=get_product_template_filename(),
+    mime="text/csv",
+)
 
 uploaded_file = st.file_uploader("CSV 파일 업로드", type=["csv"])
 
