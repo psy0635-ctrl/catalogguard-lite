@@ -1,0 +1,3 @@
+﻿product_group_id,product_id,product_name,category,color,size,stock,price,image_path,description,seller
+G9001,P9001,오버핏 반팔 티셔츠,TOP,검정,L,10,19900,images/sample_top.jpg,문의 이메일: demo.user@example.com / 전화: 010-1234-5678,테스트판매자A
+G9002,P9002,데님 와이드 팬츠,BOTTOM,파랑,M,8,49900,images/sample_bottom.jpg,환불 문의는 고객센터를 이용해 주세요.,담당자 정보: 900101-1234567
