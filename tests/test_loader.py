@@ -1,7 +1,8 @@
+import pandas as pd
 import pytest
 
 from config.settings import DEV_DATA_PATH
-from core.loader import load_products, parse_optional_int
+from core.loader import load_products, load_products_from_dataframe, parse_optional_int
 from core.rules import run_all_rules
 
 
@@ -35,6 +36,75 @@ def test_load_products_handles_missing_optional_content_columns():
 
     assert products[0].description == ""
     assert products[0].seller == ""
+
+
+def test_load_products_from_dataframe_returns_expected_product():
+    dataframe = pd.read_csv(DEV_DATA_PATH, dtype=str, keep_default_na=False)
+
+    products = load_products_from_dataframe(dataframe)
+
+    first = products[0]
+    assert first.product_group_id == "G001"
+    assert first.product_id == "P001"
+    assert first.product_name == "오버핏 반팔 티셔츠"
+    assert first.stock == 5
+    assert first.price == 19000
+
+
+def test_load_products_from_dataframe_matches_load_products_result():
+    dataframe = pd.read_csv(DEV_DATA_PATH, dtype=str, keep_default_na=False)
+
+    dataframe_products = load_products_from_dataframe(dataframe)
+    file_products = load_products(DEV_DATA_PATH)
+
+    assert dataframe_products == file_products
+
+
+def test_load_products_from_dataframe_handles_missing_optional_content_columns():
+    dataframe = pd.DataFrame(
+        [
+            {
+                "product_group_id": "G001",
+                "product_id": "P001",
+                "product_name": "기본 상품",
+                "category": "TOP",
+                "color": "BLACK",
+                "size": "M",
+                "stock": "5",
+                "price": "10000",
+                "image_path": "a.jpg",
+            }
+        ]
+    )
+
+    products = load_products_from_dataframe(dataframe)
+
+    assert products[0].description == ""
+    assert products[0].seller == ""
+
+
+def test_load_products_from_dataframe_does_not_change_original_dataframe():
+    dataframe = pd.DataFrame(
+        [
+            {
+                "product_group_id": " G001 ",
+                "product_id": " P001 ",
+                "product_name": " 기본 상품 ",
+                "category": " TOP ",
+                "color": " BLACK ",
+                "size": " M ",
+                "stock": " 5 ",
+                "price": " 10000 ",
+                "image_path": " a.jpg ",
+            }
+        ]
+    )
+    original_dataframe = dataframe.copy(deep=True)
+
+    products = load_products_from_dataframe(dataframe)
+
+    assert products[0].product_group_id == "G001"
+    pd.testing.assert_frame_equal(dataframe, original_dataframe)
 
 
 def test_load_products_reads_optional_content_columns(tmp_path):

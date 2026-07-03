@@ -1,11 +1,9 @@
 # 사용자가 보는 웹 화면
 import ast
-import io
 
-import pandas as pd
 import streamlit as st
 
-from core.loader import load_products
+from core.loader import load_products_from_dataframe
 from core.presentation import (
     build_result_dataframe,
     calculate_dataframe_height,
@@ -14,9 +12,10 @@ from core.presentation import (
 from core.privacy import create_masked_preview
 from core.result_exporter import build_result_filename, build_validation_result_csv
 from core.rules import run_all_rules
-
-
-MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024
+from core.upload_validator import (
+    CsvUploadValidationError,
+    validate_and_read_uploaded_csv,
+)
 
 
 def format_value_error(error: ValueError) -> str:
@@ -64,27 +63,21 @@ if uploaded_file is None:
 
 file_bytes = uploaded_file.getvalue()
 
-# 브라우저에서 다루기 부담스러운 큰 파일은 먼저 차단합니다.
-if len(file_bytes) > MAX_FILE_SIZE_BYTES:
-    st.error("파일 크기가 5MB를 초과합니다. 더 작은 CSV 파일을 업로드해 주세요.")
-    st.stop()
-
 try:
-    # 미리보기용 DataFrame과 검사용 Product 목록은 같은 업로드 파일에서 만듭니다.
-    preview_df = pd.read_csv(io.BytesIO(file_bytes), dtype=str, keep_default_na=False)
-    masked_preview_df = create_masked_preview(preview_df)
-    products = load_products(io.BytesIO(file_bytes))
+    # 검증된 하나의 DataFrame을 미리보기와 검수에 함께 사용합니다.
+    validated_df = validate_and_read_uploaded_csv(uploaded_file.name, file_bytes)
+    masked_preview_df = create_masked_preview(validated_df)
+    products = load_products_from_dataframe(validated_df)
     issues = run_all_rules(products)
-except UnicodeDecodeError:
-    st.error("UTF-8로 읽을 수 없는 파일입니다. CSV 파일 인코딩을 UTF-8로 저장해 주세요.")
-except pd.errors.EmptyDataError:
-    st.error("CSV 파일이 비어 있습니다.")
-except pd.errors.ParserError:
-    st.error("CSV 형식이 올바르지 않습니다. 쉼표와 열 개수를 확인해 주세요.")
+except CsvUploadValidationError as error:
+    st.error(str(error))
+    st.stop()
 except ValueError as error:
     st.error(format_value_error(error))
+    st.stop()
 except Exception:
     st.error("파일 처리 중 오류가 발생했습니다. CSV 형식과 내용을 확인해 주세요.")
+    st.stop()
 else:
     # 화면에는 마스킹된 복사본의 상위 100행만 보여주고, 검수에는 원본 Product를 사용합니다.
     st.subheader("상품 데이터 미리보기")

@@ -44,6 +44,18 @@ CSV 파일을 읽어서 상품 데이터에 빠진 값, 잘못된 카테고리, 
 - CSV 다운로드용 데이터는 표시용 결과 DataFrame의 복사본을 사용하며, 원본 검수 결과를 직접 변경하지 않습니다.
 - 수식으로 해석될 수 있는 문자열은 CSV에서 안전하게 처리됩니다.
 
+## CSV 업로드 제한
+
+- CSV 파일만 업로드할 수 있습니다. 확장자는 대소문자를 구분하지 않습니다.
+- 최대 파일 크기는 5MB입니다.
+- 최대 데이터 행 수는 10,000행입니다.
+- 지원 인코딩은 UTF-8 BOM, UTF-8, CP949입니다.
+- NUL 바이트가 포함된 일반 텍스트가 아닌 파일은 거부합니다.
+- 빈 파일, 헤더만 있는 파일, 잘못된 CSV 형식은 검수를 시작하기 전에 차단합니다.
+- 빈 컬럼명과 중복 컬럼명을 검사합니다.
+- 필수 컬럼 누락을 검사하며, `description`, `seller` 선택 컬럼 누락은 허용합니다.
+- 정상 검증된 DataFrame 하나를 미리보기와 상품 검수에 함께 사용합니다.
+
 ## 프로젝트 구조
 
 ```
@@ -51,10 +63,12 @@ app.py                 # Streamlit CSV 업로드 및 결과 화면
 config/settings.py   # 경로, 필수 컬럼, 허용값 등 설정
 core/models.py        # Product, ValidationIssue 데이터 모델
 core/loader.py         # CSV -> Product 리스트 로딩
+core/upload_validator.py # CSV 업로드 파일 사전 검증
 core/rules.py           # 검증 규칙 및 run_all_rules()
 core/presentation.py    # 검수 결과 표시, 필터, 한글 메시지 변환
 core/result_exporter.py # 검수 결과 CSV 다운로드 데이터 생성
 tests/test_loader.py    # CSV 로딩 테스트
+tests/test_upload_validator.py # CSV 업로드 검증 테스트
 tests/test_rules.py     # 검증 규칙 테스트
 tests/test_presentation.py # 표시 및 필터 테스트
 tests/test_result_exporter.py # 검수 결과 CSV 다운로드 테스트
@@ -137,6 +151,7 @@ issues = run_all_rules(products)
 현재 테스트는 pytest로 실행합니다.
 
 - `tests/test_loader.py`: CSV 로딩 테스트
+- `tests/test_upload_validator.py`: CSV 업로드 검증 테스트
 - `tests/test_rules.py`: 검증 규칙 테스트
 - `tests/test_presentation.py`: 표시 및 필터 테스트
 - `tests/test_result_exporter.py`: 검수 결과 CSV 다운로드 테스트

@@ -8,6 +8,10 @@ DATA_DIR = BASE_DIR / "data"
 DEV_DATA_PATH = DATA_DIR / "dev" / "products_dev.csv"
 TEST_DATA_PATH = DATA_DIR / "test"
 
+MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024
+MAX_CSV_ROWS = 10_000
+SUPPORTED_CSV_ENCODINGS = ("utf-8-sig", "utf-8", "cp949")
+
 # CSV에 반드시 있어야 하는 컬럼 목록입니다.
 REQUIRED_COLUMNS = [
     "product_group_id",

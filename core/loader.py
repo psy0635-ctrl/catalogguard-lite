@@ -19,15 +19,28 @@ def parse_optional_int(value: str) -> int | None:
         return None
 
 
-def clean_optional_text(row: dict[str, str], field_name: str) -> str:
+def clean_text(value: object) -> str:
+    if value is None:
+        return ""
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def clean_optional_text(row: dict[str, object], field_name: str) -> str:
     # description, seller처럼 없어도 되는 컬럼은 없으면 빈 문자열로 채웁니다.
-    return row.get(field_name, "").strip()
+    return clean_text(row.get(field_name, ""))
 
 
 def load_products(csv_path) -> list[Product]:
     # 모든 값을 문자열로 읽어야 공백, 잘못된 숫자도 검수 규칙에서 직접 판단할 수 있습니다.
     df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+    return load_products_from_dataframe(df)
 
+
+def load_products_from_dataframe(dataframe: pd.DataFrame) -> list[Product]:
+    """검증된 DataFrame을 Product 목록으로 변환합니다."""
+    df = dataframe.copy(deep=True)
     missing_columns = [col for col in REQUIRED_COLUMNS if col not in df.columns]
     if missing_columns:
         raise ValueError(f"Missing required columns: {missing_columns}")
@@ -41,19 +54,19 @@ def load_products(csv_path) -> list[Product]:
     products = []
     for row in df.to_dict(orient="records"):
         # stock과 price는 비어 있거나 잘못된 숫자일 수 있으므로 안전하게 파싱합니다.
-        stock = parse_optional_int(row["stock"])
-        price = parse_optional_int(row["price"])
+        stock = parse_optional_int(clean_text(row["stock"]))
+        price = parse_optional_int(clean_text(row["price"]))
         products.append(
             Product(
-                product_group_id=row["product_group_id"].strip(),
-                product_id=row["product_id"].strip(),
-                product_name=row["product_name"].strip(),
-                category=row["category"].strip(),
-                color=row["color"].strip(),
-                size=row["size"].strip(),
+                product_group_id=clean_text(row["product_group_id"]),
+                product_id=clean_text(row["product_id"]),
+                product_name=clean_text(row["product_name"]),
+                category=clean_text(row["category"]),
+                color=clean_text(row["color"]),
+                size=clean_text(row["size"]),
                 stock=stock,
                 price=price,
-                image_path=row["image_path"].strip(),
+                image_path=clean_text(row["image_path"]),
                 description=clean_optional_text(row, "description"),
                 seller=clean_optional_text(row, "seller"),
             )
