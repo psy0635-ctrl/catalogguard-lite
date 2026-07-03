@@ -6,6 +6,7 @@ import streamlit as st
 from core.loader import load_products_from_dataframe
 from core.presentation import (
     build_result_dataframe,
+    build_validation_summary_message,
     calculate_dataframe_height,
     filter_result_dataframe,
 )
@@ -105,10 +106,15 @@ else:
     error_col.metric("오류 수", error_count)
     warning_col.metric("주의 수", warning_count)
 
+    summary_message = build_validation_summary_message(
+        issue_count,
+        error_count,
+        warning_count,
+    )
     if error_count > 0:
-        st.error(f"수정이 필요한 오류가 {error_count}건 발견되었습니다.")
+        st.error(summary_message)
     elif warning_count > 0:
-        st.warning(f"확인이 필요한 주의 항목이 {warning_count}건 발견되었습니다.")
+        st.warning(summary_message)
     else:
         st.success("검사가 완료되었습니다. 발견된 문제가 없습니다.")
 

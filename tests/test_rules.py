@@ -1,5 +1,7 @@
 import pytest
 
+from config.settings import DEV_DATA_PATH
+from core.loader import load_products
 from core.models import Product
 from core.rules import (
     check_duplicate_product_content,
@@ -864,3 +866,14 @@ def test_run_all_rules_aggregates_every_rule():
 
     assert "duplicate_product_id" in rules_triggered
     assert "missing_required_field" in rules_triggered
+
+
+def test_run_all_rules_products_dev_has_expected_issue_counts_after_option_filter():
+    products = load_products(DEV_DATA_PATH)
+
+    issues = run_all_rules(products)
+
+    assert len(issues) == 6
+    assert sum(issue.severity == "error" for issue in issues) == 6
+    assert sum(issue.severity == "warning" for issue in issues) == 0
+    assert "duplicate_product_name" not in {issue.rule for issue in issues}

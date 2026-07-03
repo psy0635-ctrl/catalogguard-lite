@@ -4,8 +4,10 @@ import pytest
 from core.models import ValidationIssue
 from core.presentation import (
     FIELD_LABELS,
+    PRICE_RECOMMENDATION,
     RESULT_COLUMNS,
     build_result_dataframe,
+    build_validation_summary_message,
     calculate_dataframe_height,
     filter_result_dataframe,
     translate_issue_message,
@@ -35,7 +37,7 @@ def make_result_dataframe() -> pd.DataFrame:
                 "상품 그룹 ID": "G001",
                 "상품 ID": "P001",
                 "오류 이유": "가격 -5000원은 음수이므로 사용할 수 없습니다.",
-                "수정 권장사항": "가격을 0 이상의 정수로 입력하세요.",
+                "수정 권장사항": PRICE_RECOMMENDATION,
             },
             {
                 "검수 상태": "오류",
@@ -59,7 +61,7 @@ def make_result_dataframe() -> pd.DataFrame:
                 "상품 그룹 ID": "G004",
                 "상품 ID": "P004",
                 "오류 이유": "가격이 누락되었거나 숫자 형식이 아닙니다.",
-                "수정 권장사항": "가격을 0 이상의 정수로 입력하세요.",
+                "수정 권장사항": PRICE_RECOMMENDATION,
             },
         ],
         columns=RESULT_COLUMNS,
@@ -462,10 +464,70 @@ def test_build_result_dataframe_uses_expected_columns_and_display_values():
     assert df.iloc[0]["상품 그룹 ID"] == "G020"
     assert df.iloc[0]["상품 ID"] == "P020"
     assert df.iloc[0]["오류 이유"] == "상품 가격이 0 이하입니다. 현재 가격: -5,000원."
-    assert df.iloc[0]["수정 권장사항"] == "0보다 큰 정상 판매 가격을 입력하십시오."
+    assert df.iloc[0]["수정 권장사항"] == PRICE_RECOMMENDATION
     assert df.iloc[0]["위험 수준"] == "높음"
     assert df.iloc[1]["검수 상태"] == "주의"
     assert df.iloc[1]["위험 수준"] == "중간"
+
+
+def test_build_result_dataframe_uses_positive_price_recommendation_for_invalid_price():
+    issue = make_issue(
+        rule="invalid_price",
+        message="price is missing or not a number",
+    )
+
+    df = build_result_dataframe([issue])
+
+    assert df.iloc[0]["수정 권장사항"] == PRICE_RECOMMENDATION
+    assert "가격을 0 이상의 정수로 입력하세요." not in df.iloc[0]["수정 권장사항"]
+
+
+def test_build_result_dataframe_uses_positive_price_recommendation_for_zero_price():
+    issue = make_issue(rule="zero_price", message="price is 0")
+
+    df = build_result_dataframe([issue])
+
+    assert df.iloc[0]["수정 권장사항"] == PRICE_RECOMMENDATION
+    assert "가격을 0 이상의 정수로 입력하세요." not in df.iloc[0]["수정 권장사항"]
+
+
+@pytest.mark.parametrize(
+    ("total_issue_count", "error_count", "warning_count", "expected"),
+    [
+        (
+            8,
+            6,
+            2,
+            "총 8건의 문제가 발견되었습니다. 오류 6건, 주의 2건입니다.",
+        ),
+        (
+            6,
+            6,
+            0,
+            "총 6건의 문제가 발견되었습니다. 오류 6건, 주의 0건입니다.",
+        ),
+        (
+            2,
+            0,
+            2,
+            "총 2건의 문제가 발견되었습니다. 오류 0건, 주의 2건입니다.",
+        ),
+    ],
+)
+def test_build_validation_summary_message_counts_errors_and_warnings(
+    total_issue_count,
+    error_count,
+    warning_count,
+    expected,
+):
+    assert (
+        build_validation_summary_message(
+            total_issue_count,
+            error_count,
+            warning_count,
+        )
+        == expected
+    )
 
 
 def test_build_result_dataframe_handles_empty_issue_list():

@@ -7,7 +7,7 @@ CSV 파일을 읽어서 상품 데이터에 빠진 값, 잘못된 카테고리, 
 ## 검증 규칙
 
 - **duplicate_product_id**: 같은 `product_id`가 여러 상품에 사용된 경우
-- **duplicate_product_name**: 정리한 `product_name`이 같은 상품명 중복 후보가 있는 경우
+- **duplicate_product_name**: 정리한 `product_name`이 같은 상품명 중복 후보가 있는 경우. 같은 상품 그룹에서 색상이나 사이즈가 명확하게 다른 옵션 상품은 제외합니다.
 - **duplicate_product_content**: `product_name`, `category`, `color`, `size`, `price`가 모두 같은 상품이 중복 등록된 경우
 - **missing_required_field**: `product_group_id`, `product_id`, `product_name`, `category`, `color`, `size`, `image_path` 중 값이 비어 있는 경우
 - **invalid_category**: `category`가 허용 목록(`TOP`, `BOTTOM`, `OUTER`)에 없는 경우
@@ -26,6 +26,7 @@ CSV 파일을 읽어서 상품 데이터에 빠진 값, 잘못된 카테고리, 
 가격 이상치 분석은 현재 상품 행 단위로 수행되며, 같은 상품 그룹의 여러 옵션이 가격 분포에 여러 번 포함될 수 있습니다.
 상품명·카테고리 불일치는 명확한 키워드가 하나의 카테고리만 가리킬 때만 warning으로 표시합니다.
 완전 중복 상품 검사는 공백과 영문 대소문자를 정리한 뒤 비교하며, 상품 ID, 상품 그룹 ID, 재고, 이미지 경로는 비교 기준에서 제외합니다.
+상품명 중복 검사는 다른 상품 그룹의 동일 상품명이나 같은 상품 그룹의 동일 옵션 조합을 중복 후보로 표시합니다.
 누락 값, 잘못된 카테고리, 0원·음수·숫자 오류 가격은 완전 중복 비교에서 제외합니다.
 금지어 목록은 MVP 예시이며 실제 서비스 운영 정책에 맞게 조정해야 합니다.
 개인정보와 계좌번호 의심 탐지는 정규식 기반이므로 오탐과 미탐 가능성이 있습니다.

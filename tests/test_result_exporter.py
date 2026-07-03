@@ -3,8 +3,14 @@ import io
 import pandas as pd
 import pytest
 
+from config.settings import DEV_DATA_PATH
+from core.loader import load_products
 from core.models import ValidationIssue
-from core.presentation import RESULT_COLUMNS, build_result_dataframe
+from core.presentation import (
+    PRICE_RECOMMENDATION,
+    RESULT_COLUMNS,
+    build_result_dataframe,
+)
 from core.result_exporter import (
     DEFAULT_RESULT_FILENAME,
     MAX_FILENAME_STEM_LENGTH,
@@ -13,6 +19,7 @@ from core.result_exporter import (
     prepare_export_dataframe,
     sanitize_csv_cell,
 )
+from core.rules import run_all_rules
 
 
 def read_exported_csv(csv_bytes: bytes) -> pd.DataFrame:
@@ -204,3 +211,20 @@ def test_csv_export_does_not_expose_raw_personal_information_when_results_are_ma
     assert "010-****-0000" in csv_text
     assert "se****@example.test" in csv_text
     assert "000000-*******" in csv_text
+
+
+def test_products_dev_export_matches_filtered_validation_results_after_option_filter():
+    products = load_products(DEV_DATA_PATH)
+    issues = run_all_rules(products)
+    result_df = build_result_dataframe(issues)
+
+    csv_bytes = build_validation_result_csv(result_df)
+    exported_df = read_exported_csv(csv_bytes)
+
+    assert csv_bytes.startswith(b"\xef\xbb\xbf")
+    assert len(exported_df) == 6
+    assert set(exported_df["검수 상태"]) == {"오류"}
+    assert "상품명 중복" not in set(exported_df["오류 항목"])
+    assert "P001" not in set(exported_df["상품 ID"])
+    assert "P002" not in set(exported_df["상품 ID"])
+    assert PRICE_RECOMMENDATION in set(exported_df["수정 권장사항"])

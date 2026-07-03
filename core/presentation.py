@@ -29,6 +29,8 @@ RULE_LABELS = {
 }
 
 # 각 규칙별로 화면에 보여 줄 수정 가이드입니다.
+PRICE_RECOMMENDATION = "0보다 큰 정상 판매 가격을 입력하십시오."
+
 RECOMMENDATIONS = {
     "duplicate_product_id": "각 상품에 고유한 상품 ID를 입력하십시오.",
     "duplicate_product_name": "모델명, 색상, 옵션, 용량 또는 상품 ID를 확인하십시오.",
@@ -36,9 +38,9 @@ RECOMMENDATIONS = {
     "invalid_category": "허용된 카테고리 값으로 수정하세요.",
     "invalid_stock": "재고를 0 이상의 정수로 입력하세요.",
     "out_of_stock": "판매 상태와 재입고 여부를 확인하세요.",
-    "invalid_price": "가격을 0 이상의 정수로 입력하세요.",
-    "invalid_non_positive_price": "0보다 큰 정상 판매 가격을 입력하십시오.",
-    "zero_price": "무료 상품이 아니라면 정상 판매 가격을 입력하세요.",
+    "invalid_price": PRICE_RECOMMENDATION,
+    "invalid_non_positive_price": PRICE_RECOMMENDATION,
+    "zero_price": PRICE_RECOMMENDATION,
     "price_outlier": (
         "같은 카테고리 상품의 일반적인 가격 범위와 비교하여 "
         "입력 가격이 맞는지 확인하세요."
@@ -317,6 +319,18 @@ def build_result_dataframe(issues: list[ValidationIssue]) -> pd.DataFrame:
         )
 
     return pd.DataFrame(rows, columns=RESULT_COLUMNS)
+
+
+def build_validation_summary_message(
+    total_issue_count: int,
+    error_count: int,
+    warning_count: int,
+) -> str:
+    """검수 요약 알림에 표시할 문제 개수 문장을 만듭니다."""
+    return (
+        f"총 {total_issue_count}건의 문제가 발견되었습니다. "
+        f"오류 {error_count}건, 주의 {warning_count}건입니다."
+    )
 
 
 def filter_result_dataframe(
