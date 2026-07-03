@@ -1,4 +1,4 @@
-# 검수 결과 DataFrame을 안전한 다운로드 CSV로 변환하는 유틸입니다.
+# 역할: 검수 결과 DataFrame을 엑셀에서 안전하게 열 수 있는 다운로드 CSV로 변환합니다.
 import re
 
 import pandas as pd

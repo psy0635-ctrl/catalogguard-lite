@@ -1,1 +1,1 @@
-# Database package for SQLAlchemy models and sessions.
+# 역할: db 폴더를 SQLAlchemy 모델과 세션 패키지로 인식하게 하는 초기화 파일입니다.

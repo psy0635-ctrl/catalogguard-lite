@@ -1,3 +1,4 @@
+# 역할: FastAPI CSV 검수 엔드포인트의 성공, 오류, 개인정보 마스킹 응답을 테스트합니다.
 from fastapi.testclient import TestClient
 
 from api.main import app

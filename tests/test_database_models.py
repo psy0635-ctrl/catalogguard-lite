@@ -1,3 +1,4 @@
+# 역할: SQLAlchemy ORM 모델의 컬럼, 제약조건, 관계 설정이 기대와 같은지 테스트합니다.
 import importlib
 import sys
 
@@ -7,6 +8,7 @@ from db.models import InspectionResult, InspectionRun
 
 
 def get_constraint_names(table) -> set[str]:
+    # SQLAlchemy Table 객체에서 CheckConstraint 이름만 뽑아 비교하기 쉽게 만듭니다.
     return {
         constraint.name
         for constraint in table.constraints
@@ -15,10 +17,12 @@ def get_constraint_names(table) -> set[str]:
 
 
 def get_index_names(table) -> set[str]:
+    # 모델에 선언된 인덱스 이름을 집합으로 모읍니다.
     return {index.name for index in table.indexes}
 
 
 def test_database_table_names_are_expected():
+    # Alembic 마이그레이션과 ORM 모델이 같은 테이블 이름을 쓰는지 확인합니다.
     assert InspectionRun.__tablename__ == "inspection_runs"
     assert InspectionResult.__tablename__ == "inspection_results"
 
@@ -95,6 +99,7 @@ def test_nullable_settings_allow_missing_product_identifiers():
 
 
 def test_foreign_key_points_to_inspection_runs_with_cascade_delete():
+    # 상세 결과는 반드시 하나의 검수 실행에 속하고, 부모 삭제 시 같이 삭제됩니다.
     foreign_keys = list(InspectionResult.__table__.c.inspection_run_id.foreign_keys)
 
     assert len(foreign_keys) == 1
@@ -137,6 +142,7 @@ def test_inspection_run_count_columns_have_non_negative_constraints():
 
 
 def test_existing_apps_and_database_models_import_without_database_url(monkeypatch):
+    # DB URL이 없어도 앱 import 단계에서는 실패하지 않아야 배포/테스트가 편합니다.
     monkeypatch.delenv("DATABASE_URL", raising=False)
     sys.modules.pop("app", None)
 

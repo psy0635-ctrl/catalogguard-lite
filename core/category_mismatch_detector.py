@@ -1,4 +1,4 @@
-# 상품명에서 추정되는 카테고리와 현재 카테고리의 명확한 불일치를 찾습니다.
+# 역할: 상품명에서 추정한 카테고리와 입력 카테고리의 명확한 불일치를 찾습니다.
 import re
 
 from config.settings import CATEGORY_ALIASES, CATEGORY_KEYWORDS

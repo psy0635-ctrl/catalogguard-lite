@@ -1,3 +1,4 @@
+# 역할: Streamlit 앱이 업로드 전 초기 화면에서 예외 없이 렌더링되는지 테스트합니다.
 from streamlit.testing.v1 import AppTest
 
 

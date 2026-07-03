@@ -1,3 +1,4 @@
+# 역할: 핵심 검수 규칙들이 상품 데이터 오류를 정확히 찾아내는지 테스트합니다.
 import pytest
 
 from config.settings import DEV_DATA_PATH

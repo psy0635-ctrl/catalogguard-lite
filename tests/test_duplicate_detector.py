@@ -1,3 +1,4 @@
+# 역할: 상품 ID와 상품명 중복 탐지 유틸의 다양한 비교 조건을 테스트합니다.
 from dataclasses import asdict
 
 from core.duplicate_detector import (

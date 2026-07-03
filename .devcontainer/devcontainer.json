@@ -1,3 +1,4 @@
+// 역할: Codespaces/Dev Container에서 Streamlit 개발 환경을 자동으로 준비하는 설정 파일입니다.
 {
   "name": "Python 3",
   // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile

@@ -1,3 +1,4 @@
+# 역할: 상품 입력 CSV 템플릿 생성 결과가 업로드와 검수를 통과하는지 테스트합니다.
 import io
 from dataclasses import asdict
 

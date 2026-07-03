@@ -1,3 +1,4 @@
+# 역할: CSV와 DataFrame을 Product 객체로 변환하는 로더 동작을 테스트합니다.
 import pandas as pd
 import pytest
 

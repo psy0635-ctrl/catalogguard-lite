@@ -1,3 +1,4 @@
+# 역할: 검수 결과 저장 Service와 Repository가 PostgreSQL에 안전하게 저장하는지 테스트합니다.
 import importlib
 import sys
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from db.persistence_service import (
 from db.session import create_database_engine, create_session_factory
 
 
+# 테스트에서 반복해서 사용할 정상 상품 한 줄입니다.
 BASE_ROW = {
     "product_group_id": "G001",
     "product_id": "P001",
@@ -51,14 +53,17 @@ CSV_COLUMNS = [
 
 
 def make_dataframe(rows: list[dict[str, str]] | None = None) -> pd.DataFrame:
+    # rows를 넘기지 않으면 기본 정상 상품 1건으로 DataFrame을 만듭니다.
     return pd.DataFrame(rows or [BASE_ROW], columns=CSV_COLUMNS)
 
 
 def make_report(rows: list[dict[str, str]] | None = None):
+    # 실제 검수 흐름을 사용해 테스트용 InspectionReport를 만듭니다.
     return inspect_dataframe(make_dataframe(rows))
 
 
 def make_invalid_required_field_report():
+    # 저장 필수값이 비어 있을 때 Service가 막는지 확인하기 위한 가짜 Report입니다.
     return SimpleNamespace(
         summary=InspectionSummary(
             total_products=1,
@@ -84,6 +89,7 @@ def make_invalid_required_field_report():
 
 @pytest.fixture()
 def database_session():
+    # 실제 PostgreSQL URL이 없으면 통합 테스트만 건너뛰고 단위 테스트는 계속 실행합니다.
     test_database_url = get_optional_database_url()
     if test_database_url is None:
         pytest.skip("TEST_DATABASE_URL이 설정되지 않아 PostgreSQL 저장 통합 테스트를 건너뜁니다.")
@@ -100,6 +106,7 @@ def database_session():
         session.close()
 
         if created_source_filenames:
+            # 테스트가 만든 실행 기록만 파일명으로 찾아 정리합니다.
             with session_factory() as cleanup_session:
                 cleanup_session.execute(
                     delete(InspectionRun).where(
@@ -112,6 +119,7 @@ def database_session():
 
 
 def unique_filename(prefix: str = "products") -> str:
+    # 여러 테스트가 같은 DB를 써도 파일명이 충돌하지 않도록 UUID를 붙입니다.
     return f"{prefix}_{uuid4().hex}.csv"
 
 
@@ -313,6 +321,7 @@ def test_save_inspection_report_rolls_back_when_result_insert_fails(
     database_session,
     monkeypatch,
 ):
+    # 상세 결과 저장 중 실패하면 부모 run도 남지 않아야 합니다.
     session, created_source_filenames = database_session
     source_filename = unique_filename("rollback")
     created_source_filenames.append(source_filename)

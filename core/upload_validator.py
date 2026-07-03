@@ -1,4 +1,4 @@
-# 업로드된 CSV 파일이 검수 가능한 형태인지 먼저 확인하는 공통 유틸입니다.
+# 역할: 업로드된 CSV 파일의 확장자, 크기, 인코딩, 헤더, 행 수를 검증합니다.
 import csv
 import io
 from collections.abc import Iterable

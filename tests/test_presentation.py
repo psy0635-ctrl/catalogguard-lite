@@ -1,3 +1,4 @@
+# 역할: 내부 검수 문제를 화면용 한글 결과표로 바꾸는 표시 계층을 테스트합니다.
 import pandas as pd
 import pytest
 

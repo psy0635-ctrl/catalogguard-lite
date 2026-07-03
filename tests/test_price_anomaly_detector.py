@@ -1,3 +1,4 @@
+# 역할: 카테고리별 가격 이상치 탐지 로직이 경계값과 예외를 올바르게 처리하는지 테스트합니다.
 from dataclasses import asdict
 
 from core.duplicate_detector import find_duplicate_product_ids

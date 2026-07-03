@@ -1,4 +1,4 @@
-# 사용자가 보는 웹 화면
+# 역할: 사용자가 CSV를 업로드하고 검수 결과를 확인하는 Streamlit 웹 화면입니다.
 import ast
 
 import streamlit as st

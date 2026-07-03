@@ -1,3 +1,4 @@
+# 역할: 검수 결과 CSV 내보내기가 한글, BOM, 수식 주입 방지를 지키는지 테스트합니다.
 import io
 
 import pandas as pd

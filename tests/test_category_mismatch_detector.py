@@ -1,3 +1,4 @@
+# 역할: 상품명 기반 카테고리 불일치 탐지 로직과 기존 규칙 연동을 테스트합니다.
 from dataclasses import asdict
 
 import pandas as pd

@@ -1,3 +1,4 @@
+# 역할: CSV 업로드 검증기가 파일 형식, 인코딩, 헤더, 행 수를 올바르게 검사하는지 테스트합니다.
 import pytest
 
 from config.settings import MAX_CSV_ROWS, MAX_UPLOAD_SIZE_BYTES, REQUIRED_COLUMNS

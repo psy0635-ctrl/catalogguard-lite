@@ -1,3 +1,4 @@
+# 역할: FastAPI health check 엔드포인트가 정상 상태를 반환하는지 테스트합니다.
 from fastapi.testclient import TestClient
 
 from api.main import app

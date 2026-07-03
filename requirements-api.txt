@@ -1,3 +1,4 @@
+# 역할: FastAPI와 PostgreSQL 저장 계층 실행에 필요한 Python 패키지 목록입니다.
 fastapi==0.139.0
 uvicorn==0.49.0
 httpx2==2.5.0

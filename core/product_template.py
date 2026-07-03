@@ -1,4 +1,4 @@
-# 상품 입력 CSV 템플릿을 메모리에서 생성하는 유틸입니다.
+# 역할: 사용자가 내려받을 수 있는 상품 입력 CSV 템플릿을 생성합니다.
 import pandas as pd
 
 from config.settings import CSV_TEMPLATE_COLUMNS

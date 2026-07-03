@@ -1,4 +1,4 @@
-# 실제 오류를 찾는 핵심 파일
+# 역할: 상품 목록에 적용할 핵심 검수 규칙들을 실행하고 문제 목록을 만듭니다.
 import re
 
 from config.settings import (

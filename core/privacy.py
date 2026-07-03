@@ -1,4 +1,4 @@
-# 개인정보 탐지와 마스킹을 한곳에서 재사용하기 위한 공통 유틸입니다.
+# 역할: 이메일, 전화번호, 주민등록번호 형태의 개인정보를 탐지하고 마스킹합니다.
 import re
 from collections.abc import Callable
 

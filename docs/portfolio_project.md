@@ -1,3 +1,5 @@
+<!-- 역할: CatalogGuard Lite를 포트폴리오용으로 소개하는 프로젝트 설명 문서입니다. -->
+
 # CatalogGuard Lite 포트폴리오 소개
 
 ## 6.1 프로젝트 한 줄 소개

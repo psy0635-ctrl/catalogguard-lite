@@ -1,3 +1,4 @@
+# 역할: 개인정보 탐지와 마스킹 함수가 원본 노출을 막는지 테스트합니다.
 import pandas as pd
 
 from core.privacy import (

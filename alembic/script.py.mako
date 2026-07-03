@@ -1,3 +1,4 @@
+## 역할: 새 Alembic 마이그레이션 파일을 만들 때 사용하는 기본 템플릿입니다.
 """${message}
 
 Revision ID: ${up_revision}

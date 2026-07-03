@@ -1,3 +1,4 @@
+# 역할: CSV 업로드 검수 API 엔드포인트와 응답 변환 로직을 제공합니다.
 from fastapi import APIRouter, File, HTTPException, UploadFile
 import pandas as pd
 
@@ -13,6 +14,7 @@ from core.upload_validator import CsvUploadValidationError
 router = APIRouter()
 
 
+# core/presentation.py의 한글 표시 컬럼명을 API 응답 필드명으로 바꿉니다.
 RESULT_FIELD_MAP = {
     "검수 상태": "status",
     "상품 그룹 ID": "product_group_id",
@@ -25,6 +27,7 @@ RESULT_FIELD_MAP = {
 
 
 def _clean_text_value(value: object) -> str:
+    # pandas의 빈 값(None/NaN)은 JSON에서 다루기 쉬운 빈 문자열로 통일합니다.
     if value is None:
         return ""
     if pd.isna(value):
@@ -33,6 +36,7 @@ def _clean_text_value(value: object) -> str:
 
 
 def build_inspection_response(report: InspectionReport) -> InspectionResponse:
+    # 공통 검수 서비스가 만든 InspectionReport를 FastAPI 응답 모델로 변환합니다.
     result_items = []
 
     for row in report.result_dataframe.to_dict(orient="records"):
@@ -58,6 +62,7 @@ def build_inspection_response(report: InspectionReport) -> InspectionResponse:
     response_model=InspectionResponse,
 )
 async def create_inspection(file: UploadFile = File(...)) -> InspectionResponse:
+    # 이번 MVP에서는 업로드 파일을 메모리에서 바로 검수하고, DB에는 저장하지 않습니다.
     file_bytes = await file.read()
 
     try:

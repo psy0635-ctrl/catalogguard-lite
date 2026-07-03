@@ -1,3 +1,4 @@
+# 역할: Alembic이 SQLAlchemy 모델 정보를 읽어 마이그레이션을 실행하도록 설정합니다.
 from logging.config import fileConfig
 
 from alembic import context
@@ -17,6 +18,7 @@ target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
+    # 오프라인 모드는 DB에 접속하지 않고 SQL 스크립트 생성용으로 설정합니다.
     context.configure(
         url=get_database_url(),
         target_metadata=target_metadata,
@@ -29,6 +31,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    # 일반적인 마이그레이션 실행은 실제 DB에 연결한 뒤 트랜잭션 안에서 진행합니다.
     configuration = config.get_section(config.config_ini_section, {})
     configuration["sqlalchemy.url"] = get_database_url()
 

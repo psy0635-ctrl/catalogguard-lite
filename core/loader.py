@@ -1,4 +1,4 @@
-# CSV를 읽어서 상품 객체로 바꾸는 파일
+# 역할: CSV 또는 DataFrame의 행 데이터를 Product 객체 목록으로 변환합니다.
 import pandas as pd
 
 from config.settings import REQUIRED_COLUMNS

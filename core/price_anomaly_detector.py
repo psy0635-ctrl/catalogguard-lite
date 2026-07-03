@@ -1,4 +1,4 @@
-# 상품 목록 전체의 가격 분포를 비교하는 가격 이상치 탐지 유틸입니다.
+# 역할: 카테고리별 가격 분포를 기준으로 지나치게 낮거나 높은 가격을 찾습니다.
 from statistics import median
 
 from core.models import Product, ValidationIssue

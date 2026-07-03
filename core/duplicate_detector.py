@@ -1,4 +1,4 @@
-# 상품 목록 전체를 비교하는 중복 탐지 유틸입니다.
+# 역할: 상품 ID와 상품명 기준으로 중복 상품 후보를 탐지합니다.
 import re
 
 from core.models import Product, ValidationIssue

@@ -1,4 +1,4 @@
-# Streamlit 화면과 FastAPI가 같은 검수 흐름을 쓰도록 모은 공통 서비스입니다.
+# 역할: Streamlit과 FastAPI가 함께 쓰는 CSV 검수 전체 흐름을 제공합니다.
 from dataclasses import dataclass
 
 import pandas as pd

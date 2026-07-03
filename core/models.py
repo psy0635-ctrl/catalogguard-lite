@@ -1,4 +1,4 @@
-# 데이터 모양을 정하는 파일
+# 역할: 검수 로직에서 사용하는 상품과 검수 문제의 데이터 모양을 정의합니다.
 from dataclasses import dataclass
 
 
