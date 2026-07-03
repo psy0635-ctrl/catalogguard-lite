@@ -12,6 +12,7 @@ from core.presentation import (
     filter_result_dataframe,
 )
 from core.privacy import create_masked_preview
+from core.result_exporter import build_result_filename, build_validation_result_csv
 from core.rules import run_all_rules
 
 
@@ -159,11 +160,10 @@ else:
                 hide_index=True,
             )
 
-            # utf-8-sig는 Excel에서 한글 CSV를 깨지지 않게 열기 위한 인코딩입니다.
-            csv_bytes = filtered_result_df.to_csv(index=False).encode("utf-8-sig")
+            csv_bytes = build_validation_result_csv(filtered_result_df)
             st.download_button(
                 "현재 필터 결과 CSV 다운로드",
                 data=csv_bytes,
-                file_name="catalog_validation_results.csv",
+                file_name=build_result_filename(uploaded_file.name),
                 mime="text/csv",
             )
