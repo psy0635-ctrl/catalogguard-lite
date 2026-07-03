@@ -19,6 +19,7 @@ RULE_LABELS = {
     "zero_price": "가격 0원",
     "price_outlier": "가격 이상치",
     "category_price_anomaly": "가격 이상치",
+    "product_category_mismatch": "상품명·카테고리 불일치",
     "duplicate_product_content": "완전 중복 상품",
     "prohibited_term": "금지어 포함",
     "email_address": "이메일 주소 포함",
@@ -44,6 +45,9 @@ RECOMMENDATIONS = {
     ),
     "category_price_anomaly": (
         "가격 단위, 숫자 입력 오류, 할인 가격 입력 여부를 확인하십시오."
+    ),
+    "product_category_mismatch": (
+        "상품명과 카테고리를 확인하고 올바른 카테고리로 수정하십시오."
     ),
     "duplicate_product_content": (
         "상품 ID와 상품 그룹을 확인하고 중복 등록된 상품을 삭제하거나 하나로 통합하세요."
@@ -74,6 +78,7 @@ RISK_LEVELS = {
     "zero_price": "중간",
     "price_outlier": "중간",
     "category_price_anomaly": "중간",
+    "product_category_mismatch": "중간",
     "prohibited_term": "높음",
     "email_address": "높음",
     "phone_number": "높음",
@@ -255,6 +260,19 @@ def translate_issue_message(issue: ValidationIssue) -> str:
                 "같은 카테고리의 일반적인 가격 범위와 큰 차이가 있습니다. "
                 f"현재 가격 {int(price):,}원은 {category} 카테고리 중앙값 "
                 f"{float(median_price):,.0f}원의 {float(ratio):g}배입니다."
+            )
+
+    if issue.rule == "product_category_mismatch":
+        match = re.fullmatch(
+            r"product_name keyword '([^']*)' implies category '([^']*)' "
+            r"but current category is '([^']*)'",
+            message,
+        )
+        if match:
+            keyword, inferred_category, current_category = match.groups()
+            return (
+                f"상품명에서 '{keyword}'가 확인되어 {inferred_category} 상품으로 "
+                f"추정되지만 현재 카테고리는 '{current_category}'입니다."
             )
 
     if issue.rule == "price_outlier":

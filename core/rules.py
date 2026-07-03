@@ -8,6 +8,7 @@ from config.settings import (
     REQUIRED_FIELDS,
     VALID_CATEGORIES,
 )
+from core.category_mismatch_detector import find_category_mismatches
 from core.duplicate_detector import (
     find_duplicate_product_ids,
     find_duplicate_product_names,
@@ -289,6 +290,10 @@ def check_price_outliers(products: list[Product]) -> list[ValidationIssue]:
     return find_category_price_anomalies(products)
 
 
+def check_product_category_mismatch(products: list[Product]) -> list[ValidationIssue]:
+    return find_category_mismatches(products)
+
+
 def check_prohibited_and_personal_information(
     products: list[Product],
 ) -> list[ValidationIssue]:
@@ -407,6 +412,7 @@ RULES = [
     check_stock,
     check_price,
     check_price_outliers,
+    check_product_category_mismatch,
     check_prohibited_and_personal_information,
 ]
 

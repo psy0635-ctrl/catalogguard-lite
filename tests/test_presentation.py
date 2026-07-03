@@ -235,6 +235,24 @@ def test_translate_category_price_anomaly_message_to_korean():
     )
 
 
+def test_translate_product_category_mismatch_message_to_korean():
+    issue = make_issue(
+        rule="product_category_mismatch",
+        severity="warning",
+        message=(
+            "product_name keyword '부츠' implies category '신발' "
+            "but current category is '상의'"
+        ),
+    )
+
+    message = translate_issue_message(issue)
+
+    assert message == (
+        "상품명에서 '부츠'가 확인되어 신발 상품으로 추정되지만 "
+        "현재 카테고리는 '상의'입니다."
+    )
+
+
 def test_translate_unknown_category_price_anomaly_message_keeps_original_text():
     issue = make_issue(
         rule="category_price_anomaly",
@@ -524,6 +542,32 @@ def test_build_result_dataframe_displays_price_outlier_label_and_recommendation(
     )
     assert df.iloc[0]["수정 권장사항"] == (
         "가격 단위, 숫자 입력 오류, 할인 가격 입력 여부를 확인하십시오."
+    )
+    assert df.iloc[0]["위험 수준"] == "중간"
+
+
+def test_build_result_dataframe_displays_product_category_mismatch_warning():
+    issue = make_issue(
+        rule="product_category_mismatch",
+        severity="warning",
+        product_id="P002",
+        product_group_id="G001",
+        message=(
+            "product_name keyword '부츠' implies category '신발' "
+            "but current category is '상의'"
+        ),
+    )
+
+    df = build_result_dataframe([issue])
+
+    assert df.iloc[0]["검수 상태"] == "주의"
+    assert df.iloc[0]["오류 항목"] == "상품명·카테고리 불일치"
+    assert df.iloc[0]["오류 이유"] == (
+        "상품명에서 '부츠'가 확인되어 신발 상품으로 추정되지만 "
+        "현재 카테고리는 '상의'입니다."
+    )
+    assert df.iloc[0]["수정 권장사항"] == (
+        "상품명과 카테고리를 확인하고 올바른 카테고리로 수정하십시오."
     )
     assert df.iloc[0]["위험 수준"] == "중간"
 
