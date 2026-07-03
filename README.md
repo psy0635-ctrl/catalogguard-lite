@@ -115,6 +115,12 @@ python -m pip install -r requirements.txt
 
 ### 테스트 실행
 
+테스트 실행에는 `pytest`가 필요합니다. 현재 검증한 테스트 도구 버전은 `pytest==9.1.1`입니다.
+
+```powershell
+python -m pip install pytest==9.1.1
+```
+
 ```powershell
 python -m pytest -q
 ```
@@ -137,6 +143,73 @@ python -m streamlit run app.py
 - 검수 결과 표
 - 검수 상태, 오류 항목, 상품 ID 검색 필터
 - 현재 필터 결과 CSV 다운로드 버튼
+
+## Streamlit Community Cloud 배포
+
+### 배포 정보
+
+- Repository: `psy0635-ctrl/catalogguard-lite`
+- Branch: `main`
+- Main file path: `app.py`
+- 권장 Python: `3.11`
+
+### 배포 절차
+
+1. GitHub 저장소의 `main` 브랜치가 최신인지 확인합니다.
+2. Streamlit Community Cloud에 GitHub 계정으로 로그인합니다.
+3. 새 앱 생성을 선택합니다.
+4. 저장소로 `psy0635-ctrl/catalogguard-lite`를 선택합니다.
+5. Branch는 `main`을 선택합니다.
+6. Main file path에는 `app.py`를 입력합니다.
+7. Advanced settings에서 Python `3.11`을 선택합니다.
+8. 현재 프로젝트는 별도 비밀정보가 없으므로 Secrets는 비워 둡니다.
+9. Deploy를 실행합니다.
+10. 배포 로그에서 의존성 설치와 앱 시작 여부를 확인합니다.
+
+Python `3.11`을 선택할 수 없다면 지원되는 Python 버전을 선택한 뒤 의존성 설치와 전체 기능을 다시 확인해야 합니다.
+
+### 배포 후 기능 확인
+
+- 초기 화면 정상 표시
+- CSV 입력 템플릿 다운로드
+- 템플릿 재업로드 성공
+- `data/dev/products_dev.csv` 업로드 성공
+- 개인정보 마스킹 미리보기
+- 검수 결과 6건 표시
+- 오류 6건 / 주의 0건 표시
+- 상태 및 상품 ID 필터
+- 결과 CSV 다운로드
+- 다운로드 CSV 한글 정상 표시
+
+### 배포 오류 해결
+
+| 오류 | 확인할 부분 |
+|---|---|
+| `ModuleNotFoundError` | `requirements.txt` 패키지 이름과 설치 로그 |
+| `FileNotFoundError` | 상대 경로, 파일명 대소문자, 개발 파일 강제 의존 여부 |
+| 앱 화면 중단 | Community Cloud 로그와 파일 업로드 전 변수 접근 |
+| 한글 CSV 오류 | UTF-8 BOM, UTF-8, CP949 인코딩 처리 |
+| 변경사항 미반영 | GitHub `main` 브랜치 최신 커밋, 앱 재부팅 또는 재배포 |
+| 비밀정보 오류 | Community Cloud Secrets 설정과 `.streamlit/secrets.toml` 제외 여부 |
+
+### 배포 체크리스트
+
+```text
+[ ] git status가 clean인지 확인
+[ ] 전체 테스트 통과 확인
+[ ] requirements.txt 확인
+[ ] GitHub main 브랜치 push 확인
+[ ] Community Cloud 로그인
+[ ] Repository 선택
+[ ] Branch main 선택
+[ ] Main file path app.py 입력
+[ ] Advanced settings에서 Python 3.11 선택
+[ ] Deploy 실행
+[ ] 배포 로그 확인
+[ ] 템플릿 다운로드 확인
+[ ] CSV 업로드 확인
+[ ] 결과 다운로드 확인
+```
 
 ### 샘플 CSV 결과
 
@@ -170,6 +243,7 @@ issues = run_all_rules(products)
 - `tests/test_rules.py`: 검증 규칙 테스트
 - `tests/test_presentation.py`: 표시 및 필터 테스트
 - `tests/test_result_exporter.py`: 검수 결과 CSV 다운로드 테스트
+- `tests/test_app_smoke.py`: Streamlit 초기 화면 스모크 테스트
 
 실행 예시:
 
