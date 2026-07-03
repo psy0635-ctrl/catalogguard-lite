@@ -1,0 +1,8 @@
+product_group_id,product_id,product_name,category,color,size,stock,price,image_path,description,seller
+G001,P001,오버핏 반팔 티셔츠,TOP,흰색,L,10,19900,,,판매자A
+G001,P002,데님 청바지,BOTTOM,파랑,M,10,49900,,,판매자A
+G002,P003,남성 울 코트,OUTER,검정,L,5,129000,,,판매자B
+G002,P004,여성 앵클 부츠,TOP,검정,240,5,89000,,,판매자B
+G003,P005,데님 청바지,TOP,파랑,M,10,49900,,,판매자C
+G003,P006,오버핏 티셔츠,BOTTOM,흰색,L,10,19900,,,판매자C
+G004,P007,운동화 티셔츠 세트,OTHER,혼합,,3,99000,,,판매자D
