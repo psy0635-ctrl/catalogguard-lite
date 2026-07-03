@@ -5,7 +5,7 @@
 - 배포 URL: https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
 - 실행 방식: Streamlit 웹 앱
 - 주요 기술: Python 3.11, Streamlit, pandas, pytest
-- 현재 테스트 기준: 327개 자동 테스트 통과, 경고 1건
+- 현재 테스트 기준: 350개 자동 테스트 통과, 경고 1건
 
 ## 프로젝트 소개
 
@@ -210,11 +210,17 @@ Streamlit Community Cloud 기준 설정은 다음과 같습니다.
 
 ```text
 app.py
+api/
+  main.py
+  schemas.py
+  routes/
+    inspections.py
 config/
   settings.py
 core/
   category_mismatch_detector.py
   duplicate_detector.py
+  inspection_service.py
   loader.py
   models.py
   presentation.py
@@ -230,6 +236,8 @@ data/
     price_anomaly_test.csv
     products_dev.csv
 tests/
+  test_api_health.py
+  test_api_inspections.py
   test_app_smoke.py
   test_category_mismatch_detector.py
   test_duplicate_detector.py
@@ -248,7 +256,11 @@ tests/
 | 파일 | 역할 |
 |---|---|
 | `app.py` | Streamlit 화면, CSV 업로드, 미리보기, 검수 요약, 결과 필터, 다운로드 연결 |
+| `api/main.py` | FastAPI 앱 생성, 라우터 등록, 헬스 체크 엔드포인트 |
+| `api/routes/inspections.py` | CSV 업로드 검수 API |
+| `api/schemas.py` | API 응답 스키마 |
 | `config/settings.py` | 컬럼, 카테고리, 업로드 제한, 금지어, 스캔 대상 필드 설정 |
+| `core/inspection_service.py` | DataFrame 검수, 요약, 표시용 결과 생성 공통 흐름 |
 | `core/upload_validator.py` | 업로드 CSV 사전 검증 |
 | `core/loader.py` | DataFrame 또는 CSV 파일을 Product 객체 목록으로 변환 |
 | `core/rules.py` | 전체 검수 규칙 실행 |
@@ -289,14 +301,51 @@ python -m uvicorn api.main:app --reload
 
 - Health check: http://127.0.0.1:8000/health
 - API docs: http://127.0.0.1:8000/docs
+- CSV inspection API: `POST http://127.0.0.1:8000/api/v1/inspections`
+
+CSV 검수 API는 `multipart/form-data` 요청을 사용하며 파일 필드명은 `file`입니다.
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8000/api/v1/inspections" `
+  -H "accept: application/json" `
+  -F "file=@data/dev/products_dev.csv;type=text/csv"
+```
+
+정상 응답은 검수 요약과 문제 목록을 JSON으로 반환합니다.
+
+```json
+{
+  "summary": {
+    "total_products": 5,
+    "total_issues": 6,
+    "error_count": 6,
+    "warning_count": 0
+  },
+  "results": [
+    {
+      "status": "오류",
+      "product_group_id": "G002",
+      "product_id": "P003",
+      "error_field": "가격 오류",
+      "reason": "상품 가격이 0 이하입니다. 현재 가격: -5,000원.",
+      "recommendation": "0보다 큰 정상 판매 가격을 입력하십시오.",
+      "risk_level": "높음"
+    }
+  ]
+}
+```
+
+잘못된 CSV는 HTTP 400과 오류 메시지를 반환합니다. 파일을 보내지 않으면 FastAPI 기본 검증에 따라 HTTP 422가 반환됩니다.
 
 API 테스트만 실행하려면 다음 명령을 사용합니다.
 
 ```powershell
 python -m pytest tests/test_api_health.py -q
+python -m pytest tests/test_api_inspections.py -q
+python -m pytest tests/test_api_health.py tests/test_api_inspections.py -q
 ```
 
-서버는 실행 중인 터미널에서 `Ctrl+C`로 종료합니다.
+Swagger UI의 `/api/v1/inspections`에서도 CSV 파일을 업로드해 테스트할 수 있습니다. 서버는 실행 중인 터미널에서 `Ctrl+C`로 종료합니다.
 
 ## 테스트 실행
 
@@ -313,7 +362,7 @@ python -m pytest -q
 현재 확인 결과는 다음과 같습니다.
 
 ```text
-전체 테스트: 327개 통과
+전체 테스트: 350개 통과
 경고: 1건
 ```
 

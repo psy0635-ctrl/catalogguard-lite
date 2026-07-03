@@ -4,20 +4,17 @@ import ast
 import streamlit as st
 
 from config.settings import OPTIONAL_COLUMNS, REQUIRED_COLUMNS
-from core.loader import load_products_from_dataframe
+from core.inspection_service import inspect_dataframe
 from core.presentation import (
-    build_result_dataframe,
     build_validation_summary_message,
     calculate_dataframe_height,
     filter_result_dataframe,
 )
-from core.privacy import create_masked_preview
 from core.product_template import (
     build_product_template_csv,
     get_product_template_filename,
 )
 from core.result_exporter import build_result_filename, build_validation_result_csv
-from core.rules import run_all_rules
 from core.upload_validator import (
     CsvUploadValidationError,
     validate_and_read_uploaded_csv,
@@ -87,9 +84,7 @@ file_bytes = uploaded_file.getvalue()
 try:
     # 검증된 하나의 DataFrame을 미리보기와 검수에 함께 사용합니다.
     validated_df = validate_and_read_uploaded_csv(uploaded_file.name, file_bytes)
-    masked_preview_df = create_masked_preview(validated_df)
-    products = load_products_from_dataframe(validated_df)
-    issues = run_all_rules(products)
+    inspection_report = inspect_dataframe(validated_df)
 except CsvUploadValidationError as error:
     st.error(str(error))
     st.stop()
@@ -101,6 +96,11 @@ except Exception:
     st.stop()
 else:
     # 화면에는 마스킹된 복사본의 상위 100행만 보여주고, 검수에는 원본 Product를 사용합니다.
+    masked_preview_df = inspection_report.masked_preview_dataframe
+    products = inspection_report.products
+    issues = inspection_report.issues
+    summary = inspection_report.summary
+
     st.subheader("상품 데이터 미리보기")
     preview_rows = masked_preview_df.head(100)
     st.dataframe(
@@ -112,9 +112,9 @@ else:
     if len(masked_preview_df) > len(preview_rows):
         st.caption(f"전체 {len(masked_preview_df)}행 중 앞 100행만 표시합니다.")
 
-    error_count = sum(issue.severity == "error" for issue in issues)
-    warning_count = sum(issue.severity == "warning" for issue in issues)
-    issue_count = len(issues)
+    error_count = summary.error_count
+    warning_count = summary.warning_count
+    issue_count = summary.total_issues
     overall_status = get_overall_status(error_count, warning_count)
 
     # 사용자가 현재 CSV 상태를 빠르게 판단할 수 있는 요약 숫자입니다.
@@ -140,7 +140,7 @@ else:
 
     if issue_count > 0:
         # 내부 검수 결과를 화면 표시와 CSV 다운로드에 쓰는 표 형태로 바꿉니다.
-        result_df = build_result_dataframe(issues)
+        result_df = inspection_report.result_dataframe
         rule_options = [
             "전체",
             *sorted(
