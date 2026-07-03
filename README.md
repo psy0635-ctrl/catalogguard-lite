@@ -5,7 +5,7 @@
 - 배포 URL: https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
 - 실행 방식: Streamlit 웹 앱
 - 주요 기술: Python 3.11, Streamlit, pandas, pytest
-- 현재 테스트 기준: 326개 자동 테스트 통과, 경고 1건
+- 현재 테스트 기준: 327개 자동 테스트 통과, 경고 1건
 
 ## 프로젝트 소개
 
@@ -274,13 +274,38 @@ python -m streamlit run app.py
 
 브라우저가 자동으로 열리지 않으면 터미널에 표시되는 Streamlit 주소를 열면 됩니다.
 
-## 테스트 실행
+## FastAPI 개발 서버
 
-테스트 실행에는 pytest가 필요합니다. 현재 확인한 테스트 도구 버전은 `pytest==9.1.1`입니다.
+API 서버 실행과 테스트에는 별도 의존성 파일을 사용합니다.
 
 ```powershell
 cd <프로젝트_폴더>
 .\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-api.txt
+python -m uvicorn api.main:app --reload
+```
+
+브라우저에서 아래 주소를 확인합니다.
+
+- Health check: http://127.0.0.1:8000/health
+- API docs: http://127.0.0.1:8000/docs
+
+API 테스트만 실행하려면 다음 명령을 사용합니다.
+
+```powershell
+python -m pytest tests/test_api_health.py -q
+```
+
+서버는 실행 중인 터미널에서 `Ctrl+C`로 종료합니다.
+
+## 테스트 실행
+
+테스트 실행에는 pytest와 API 테스트 의존성이 필요합니다. 현재 확인한 테스트 도구 버전은 `pytest==9.1.1`입니다.
+
+```powershell
+cd <프로젝트_폴더>
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-api.txt
 python -m pip install pytest==9.1.1
 python -m pytest -q
 ```
@@ -288,7 +313,7 @@ python -m pytest -q
 현재 확인 결과는 다음과 같습니다.
 
 ```text
-전체 테스트: 326개 통과
+전체 테스트: 327개 통과
 경고: 1건
 ```
 
