@@ -12,13 +12,17 @@ from config.settings import (
     VALID_CATEGORIES,
 )
 from core.models import Product, ValidationIssue
+from core.privacy import (
+    EMAIL_PATTERN,
+    extract_digits,
+    find_phone_number_matches,
+    find_resident_registration_number_matches,
+    mask_email,
+    mask_phone_number,
+    mask_resident_registration_number,
+)
 
 
-# 자주 쓰는 정규식은 매번 새로 만들지 않도록 파일이 로드될 때 한 번만 준비합니다.
-EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-MOBILE_PHONE_PATTERN = re.compile(r"(?<!\d)01[016789][-\s]?\d{3,4}[-\s]?\d{4}(?!\d)")
-LANDLINE_PHONE_PATTERN = re.compile(r"(?<!\d)0(?:2|[3-6]\d)[-\s]?\d{3,4}[-\s]?\d{4}(?!\d)")
-RESIDENT_REGISTRATION_NUMBER_PATTERN = re.compile(r"(?<!\d)\d{6}-[1-4]\d{6}(?!\d)")
 BANK_ACCOUNT_PATTERN = re.compile(r"(?<![\d-])(?:\d[-\s]?){9,13}\d(?![-\s]?\d)")
 
 
@@ -30,11 +34,6 @@ def normalize_duplicate_text(value: str) -> str:
 def normalize_content_text(value: str) -> str:
     """내용 검색을 위해 공백과 영문 대소문자를 정리합니다."""
     return " ".join(value.split()).casefold()
-
-
-def extract_digits(value: str) -> str:
-    # 전화번호나 계좌번호처럼 구분자가 섞인 값에서 숫자만 비교할 때 사용합니다.
-    return re.sub(r"\D", "", value)
 
 
 def iter_scannable_fields(product: Product):
@@ -71,15 +70,6 @@ def find_unique_pattern_values(pattern: re.Pattern[str], text: str) -> list[str]
     return values
 
 
-def find_phone_number_matches(text: str) -> list[re.Match[str]]:
-    matches = [
-        *MOBILE_PHONE_PATTERN.finditer(text),
-        *LANDLINE_PHONE_PATTERN.finditer(text),
-    ]
-    matches.sort(key=lambda match: (match.start(), match.end()))
-    return matches
-
-
 def find_unique_matches_by_key(matches: list[re.Match[str]], key_func) -> list[re.Match[str]]:
     # 같은 값을 다른 표기로 쓴 경우도 같은 문제로 보려고 비교용 key를 따로 받습니다.
     unique_matches = []
@@ -92,10 +82,6 @@ def find_unique_matches_by_key(matches: list[re.Match[str]], key_func) -> list[r
         unique_matches.append(match)
 
     return unique_matches
-
-
-def find_resident_registration_number_matches(text: str) -> list[re.Match[str]]:
-    return list(RESIDENT_REGISTRATION_NUMBER_PATTERN.finditer(text))
 
 
 def spans_overlap(first: tuple[int, int], second: tuple[int, int]) -> bool:
@@ -136,28 +122,6 @@ def find_suspected_bank_account_matches(
         matches.append(match)
 
     return matches
-
-
-def mask_email(value: str) -> str:
-    # 결과 메시지에는 개인정보 원문을 남기지 않고 일부만 보여줍니다.
-    local_part, domain = value.split("@", 1)
-    visible_local_part = local_part[:2] if len(local_part) >= 2 else local_part[:1]
-    return f"{visible_local_part}***@{domain}"
-
-
-def mask_phone_number(value: str) -> str:
-    digits = extract_digits(value)
-    separated_parts = [part for part in re.split(r"[-\s]+", value.strip()) if part]
-
-    if len(separated_parts) >= 3:
-        return f"{separated_parts[0]}-****-{separated_parts[-1]}"
-
-    prefix_length = 2 if digits.startswith("02") else 3
-    return f"{digits[:prefix_length]}****{digits[-4:]}"
-
-
-def mask_resident_registration_number(value: str) -> str:
-    return f"{value[:8]}******"
 
 
 def mask_account_number(value: str) -> str:

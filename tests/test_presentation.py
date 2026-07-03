@@ -229,8 +229,8 @@ def test_translate_unknown_message_keeps_original_text():
         ),
         (
             "email_address",
-            "field 'description' contains email address 'te***@example.com'",
-            "상품 설명에 이메일 주소 'te***@example.com'이 포함되어 있습니다.",
+            "field 'description' contains email address 'te**@example.com'",
+            "상품 설명에 이메일 주소 'te**@example.com'이 포함되어 있습니다.",
         ),
         (
             "phone_number",
@@ -241,9 +241,9 @@ def test_translate_unknown_message_keeps_original_text():
             "resident_registration_number",
             (
                 "field 'description' contains resident registration number "
-                "'990101-1******'"
+                "'000000-*******'"
             ),
-            "상품 설명에 주민등록번호 형식 '990101-1******'이 포함되어 있습니다.",
+            "상품 설명에 주민등록번호 형식 '000000-*******'이 포함되어 있습니다.",
         ),
         (
             "suspected_bank_account",
@@ -300,7 +300,7 @@ def test_field_labels_include_content_scan_fields():
         ),
         (
             "email_address",
-            "field 'description' contains email address 'te***@example.com'",
+            "field 'description' contains email address 'te**@example.com'",
             "이메일 주소 포함",
             "이메일 주소를 제거",
         ),
@@ -314,7 +314,7 @@ def test_field_labels_include_content_scan_fields():
             "resident_registration_number",
             (
                 "field 'description' contains resident registration number "
-                "'990101-1******'"
+                "'000000-*******'"
             ),
             "주민등록번호 형식 포함",
             "즉시 제거",
@@ -349,7 +349,7 @@ def test_build_result_dataframe_does_not_show_raw_personal_information():
     issues = [
         make_issue(
             rule="email_address",
-            message="field 'description' contains email address 'te***@example.com'",
+            message="field 'description' contains email address 'te**@example.com'",
         ),
         make_issue(
             rule="phone_number",
@@ -359,7 +359,7 @@ def test_build_result_dataframe_does_not_show_raw_personal_information():
             rule="resident_registration_number",
             message=(
                 "field 'description' contains resident registration number "
-                "'990101-1******'"
+                "'000000-*******'"
             ),
         ),
         make_issue(
@@ -374,11 +374,11 @@ def test_build_result_dataframe_does_not_show_raw_personal_information():
 
     assert "test@example.com" not in reason_text
     assert "010-1234-5678" not in reason_text
-    assert "990101-1234567" not in reason_text
+    assert "000000-1234567" not in reason_text
     assert "123-456-789012" not in reason_text
-    assert "te***@example.com" in reason_text
+    assert "te**@example.com" in reason_text
     assert "010-****-5678" in reason_text
-    assert "990101-1******" in reason_text
+    assert "000000-*******" in reason_text
     assert "123-***-***012" in reason_text
 
 

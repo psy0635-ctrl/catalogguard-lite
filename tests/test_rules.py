@@ -589,9 +589,9 @@ def test_check_content_safety_flags_different_prohibited_terms_separately():
 @pytest.mark.parametrize(
     ("email_address", "masked_email"),
     [
-        ("test@example.com", "te***@example.com"),
-        ("user.name+shop@example.co.kr", "us***@example.co.kr"),
-        ("a@example.com", "a***@example.com"),
+        ("test@example.com", "te**@example.com"),
+        ("user.name+shop@example.co.kr", "us************@example.co.kr"),
+        ("a@example.com", "a*@example.com"),
     ],
     ids=["basic_email", "subdomain_email", "short_local_email"],
 )
@@ -654,7 +654,7 @@ def test_check_content_safety_ignores_general_product_numbers_as_phone_numbers()
 
 
 def test_check_content_safety_masks_resident_registration_numbers():
-    rrn = "990101-1234567"
+    rrn = "000000-1234567"
     products = [make_product(description=f"테스트 값 {rrn}")]
 
     issues = check_prohibited_and_personal_information(products)
@@ -662,14 +662,14 @@ def test_check_content_safety_masks_resident_registration_numbers():
     assert len(issues) == 1
     assert issues[0].rule == "resident_registration_number"
     assert issues[0].message == (
-        "field 'description' contains resident registration number '990101-1******'"
+        "field 'description' contains resident registration number '000000-*******'"
     )
     assert rrn not in issues[0].message
 
 
 @pytest.mark.parametrize(
     "text",
-    ["9901011234567", "바코드 8801234567890"],
+    ["0000001234567", "바코드 8801234567890"],
     ids=["plain_rrn_like_number", "barcode_number"],
 )
 def test_check_content_safety_ignores_non_hyphenated_rrn_like_numbers(text):
@@ -720,7 +720,7 @@ def test_check_content_safety_uses_all_phone_spans_to_avoid_bank_duplicates():
 
 
 def test_check_content_safety_does_not_duplicate_rrn_as_bank_account():
-    products = [make_product(description="입금 확인 990101-1234567")]
+    products = [make_product(description="입금 확인 000000-1234567")]
 
     issues = check_prohibited_and_personal_information(products)
 
@@ -728,7 +728,7 @@ def test_check_content_safety_does_not_duplicate_rrn_as_bank_account():
 
 
 def test_check_content_safety_uses_all_rrn_spans_to_avoid_bank_duplicates():
-    products = [make_product(description="입금 확인 990101-1234567 990101-1234567")]
+    products = [make_product(description="입금 확인 000000-1234567 000000-1234567")]
 
     issues = check_prohibited_and_personal_information(products)
 
@@ -803,7 +803,7 @@ def test_run_all_rules_includes_content_safety_issues():
 
     assert len(content_issues) == 1
     assert content_issues[0].message == (
-        "field 'description' contains email address 'te***@example.com'"
+        "field 'description' contains email address 'te**@example.com'"
     )
 
 

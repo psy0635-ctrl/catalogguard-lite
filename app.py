@@ -11,6 +11,7 @@ from core.presentation import (
     calculate_dataframe_height,
     filter_result_dataframe,
 )
+from core.privacy import create_masked_preview
 from core.rules import run_all_rules
 
 
@@ -70,6 +71,7 @@ if len(file_bytes) > MAX_FILE_SIZE_BYTES:
 try:
     # 미리보기용 DataFrame과 검사용 Product 목록은 같은 업로드 파일에서 만듭니다.
     preview_df = pd.read_csv(io.BytesIO(file_bytes), dtype=str, keep_default_na=False)
+    masked_preview_df = create_masked_preview(preview_df)
     products = load_products(io.BytesIO(file_bytes))
     issues = run_all_rules(products)
 except UnicodeDecodeError:
@@ -83,17 +85,17 @@ except ValueError as error:
 except Exception:
     st.error("파일 처리 중 오류가 발생했습니다. CSV 형식과 내용을 확인해 주세요.")
 else:
-    # 원본 CSV를 먼저 확인할 수 있게 상위 100행만 화면에 보여줍니다.
+    # 화면에는 마스킹된 복사본의 상위 100행만 보여주고, 검수에는 원본 Product를 사용합니다.
     st.subheader("상품 데이터 미리보기")
-    preview_rows = preview_df.head(100)
+    preview_rows = masked_preview_df.head(100)
     st.dataframe(
         preview_rows,
         height=calculate_dataframe_height(len(preview_rows)),
         use_container_width=True,
         hide_index=True,
     )
-    if len(preview_df) > len(preview_rows):
-        st.caption(f"전체 {len(preview_df)}행 중 앞 100행만 표시합니다.")
+    if len(masked_preview_df) > len(preview_rows):
+        st.caption(f"전체 {len(masked_preview_df)}행 중 앞 100행만 표시합니다.")
 
     error_count = sum(issue.severity == "error" for issue in issues)
     warning_count = sum(issue.severity == "warning" for issue in issues)
