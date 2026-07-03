@@ -31,3 +31,4 @@ Thumbs.db
 # 환경변수
 .env
 .env.*
+!.env.example

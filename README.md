@@ -5,7 +5,7 @@
 - 배포 URL: https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
 - 실행 방식: Streamlit 웹 앱
 - 주요 기술: Python 3.11, Streamlit, pandas, pytest
-- 현재 테스트 기준: 350개 자동 테스트 통과, 경고 1건
+- 현재 테스트 기준: 365개 자동 테스트 통과, skipped 1건, 경고 1건
 
 ## 프로젝트 소개
 
@@ -210,12 +210,17 @@ Streamlit Community Cloud 기준 설정은 다음과 같습니다.
 
 ```text
 app.py
+alembic/
+  env.py
+  versions/
+    20260703_0001_create_inspection_tables.py
 api/
   main.py
   schemas.py
   routes/
     inspections.py
 config/
+  database.py
   settings.py
 core/
   category_mismatch_detector.py
@@ -235,11 +240,17 @@ data/
     category_mismatch_test.csv
     price_anomaly_test.csv
     products_dev.csv
+db/
+  base.py
+  models.py
+  session.py
 tests/
   test_api_health.py
   test_api_inspections.py
   test_app_smoke.py
   test_category_mismatch_detector.py
+  test_database_connection.py
+  test_database_models.py
   test_duplicate_detector.py
   test_loader.py
   test_presentation.py
@@ -259,6 +270,7 @@ tests/
 | `api/main.py` | FastAPI 앱 생성, 라우터 등록, 헬스 체크 엔드포인트 |
 | `api/routes/inspections.py` | CSV 업로드 검수 API |
 | `api/schemas.py` | API 응답 스키마 |
+| `config/database.py` | 환경변수 기반 데이터베이스 연결 설정 |
 | `config/settings.py` | 컬럼, 카테고리, 업로드 제한, 금지어, 스캔 대상 필드 설정 |
 | `core/inspection_service.py` | DataFrame 검수, 요약, 표시용 결과 생성 공통 흐름 |
 | `core/upload_validator.py` | 업로드 CSV 사전 검증 |
@@ -271,6 +283,10 @@ tests/
 | `core/duplicate_detector.py` | 상품 ID와 상품명 중복 탐지 |
 | `core/price_anomaly_detector.py` | 카테고리별 가격 이상치 탐지 |
 | `core/category_mismatch_detector.py` | 상품명 키워드 기반 카테고리 불일치 탐지 |
+| `db/base.py` | SQLAlchemy Declarative Base |
+| `db/models.py` | 검수 실행 및 검수 결과 테이블 모델 |
+| `db/session.py` | SQLAlchemy 엔진, 세션 팩토리, 세션 제공 함수 |
+| `alembic/env.py` | Alembic 마이그레이션 환경 설정 |
 
 ## 설치 및 실행
 
@@ -347,6 +363,65 @@ python -m pytest tests/test_api_health.py tests/test_api_inspections.py -q
 
 Swagger UI의 `/api/v1/inspections`에서도 CSV 파일을 업로드해 테스트할 수 있습니다. 서버는 실행 중인 터미널에서 `Ctrl+C`로 종료합니다.
 
+## PostgreSQL 데이터베이스 기반
+
+현재 단계에서는 테이블과 DB 연결 기반만 구성되어 있습니다. 검수 결과를 실제 DB에 저장하거나 조회하는 기능은 아직 구현되지 않았습니다.
+
+PostgreSQL은 향후 검수 실행 이력과 검수 결과만 저장하기 위한 기반입니다. 원본 CSV 파일, CSV 원본 행 전체, 상품 설명 원문, 판매자 정보 원문, 이메일 원문, 전화번호 원문, 주민등록번호 형태 원문, 이미지 파일과 업로드 파일 바이너리는 저장하지 않습니다.
+
+DB 관련 패키지는 API 의존성 파일에 포함되어 있습니다.
+
+```powershell
+python -m pip install -r requirements-api.txt
+```
+
+환경변수 예시는 `.env.example`에 있습니다.
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+연결 문자열 형식은 다음과 같습니다. 실제 비밀번호는 저장소에 커밋하지 마세요.
+
+```text
+postgresql+psycopg://catalogguard_user:CHANGE_ME@localhost:5432/catalogguard_lite
+```
+
+PowerShell에서 현재 터미널에만 환경변수를 설정하려면 다음처럼 입력합니다.
+
+```powershell
+$env:DATABASE_URL="postgresql+psycopg://catalogguard_user:CHANGE_ME@localhost:5432/catalogguard_lite"
+$env:TEST_DATABASE_URL="postgresql+psycopg://catalogguard_test_user:CHANGE_ME@localhost:5432/catalogguard_lite_test"
+```
+
+PostgreSQL이 설치되어 있다면 테스트용 사용자와 데이터베이스를 만든 뒤 Alembic을 실행합니다.
+
+```sql
+CREATE USER catalogguard_user WITH PASSWORD 'CHANGE_ME';
+CREATE DATABASE catalogguard_lite OWNER catalogguard_user;
+CREATE USER catalogguard_test_user WITH PASSWORD 'CHANGE_ME';
+CREATE DATABASE catalogguard_lite_test OWNER catalogguard_test_user;
+```
+
+마이그레이션 명령은 저장소 루트에서 실행합니다.
+
+```powershell
+python -m alembic current
+python -m alembic upgrade head
+python -m alembic history
+```
+
+테이블은 `psql`에서 다음처럼 확인할 수 있습니다.
+
+```powershell
+psql "$env:DATABASE_URL" -c "\dt"
+psql "$env:DATABASE_URL" -c "\d inspection_runs"
+psql "$env:DATABASE_URL" -c "\d inspection_results"
+```
+
+실제 PostgreSQL 연결 테스트는 `TEST_DATABASE_URL`이 설정된 경우에만 실행됩니다. 설정하지 않으면 해당 테스트만 skipped 처리됩니다.
+
 ## 테스트 실행
 
 테스트 실행에는 pytest와 API 테스트 의존성이 필요합니다. 현재 확인한 테스트 도구 버전은 `pytest==9.1.1`입니다.
@@ -356,13 +431,16 @@ cd <프로젝트_폴더>
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements-api.txt
 python -m pip install pytest==9.1.1
+python -m pytest tests/test_database_models.py -q
+python -m pytest tests/test_database_connection.py -q
 python -m pytest -q
 ```
 
 현재 확인 결과는 다음과 같습니다.
 
 ```text
-전체 테스트: 350개 통과
+전체 테스트: 365개 통과
+skipped: 1건
 경고: 1건
 ```
 
@@ -373,4 +451,4 @@ python -m pytest -q
 - 결과 CSV 생성도 표시용 결과 DataFrame의 복사본을 사용합니다.
 - 개인정보 탐지는 정규식 기반이므로 실제 운영에서는 정책과 샘플 데이터를 기준으로 지속 조정이 필요합니다.
 - 금지어 목록은 MVP 예시이며 운영 정책에 맞게 바꾸는 것을 전제로 합니다.
-- 현재 프로젝트는 인증, 데이터베이스 저장, 외부 API 연동을 포함하지 않습니다.
+- 현재 프로젝트는 인증, 검수 결과 DB 저장 API, 검수 기록 조회 API, 외부 API 연동을 포함하지 않습니다.
