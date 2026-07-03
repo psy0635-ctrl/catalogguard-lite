@@ -15,8 +15,10 @@ RULE_LABELS = {
     "invalid_stock": "재고 형식 오류",
     "out_of_stock": "품절 상품",
     "invalid_price": "가격 오류",
+    "invalid_non_positive_price": "가격 오류",
     "zero_price": "가격 0원",
     "price_outlier": "가격 이상치",
+    "category_price_anomaly": "가격 이상치",
     "duplicate_product_content": "완전 중복 상품",
     "prohibited_term": "금지어 포함",
     "email_address": "이메일 주소 포함",
@@ -34,10 +36,14 @@ RECOMMENDATIONS = {
     "invalid_stock": "재고를 0 이상의 정수로 입력하세요.",
     "out_of_stock": "판매 상태와 재입고 여부를 확인하세요.",
     "invalid_price": "가격을 0 이상의 정수로 입력하세요.",
+    "invalid_non_positive_price": "0보다 큰 정상 판매 가격을 입력하십시오.",
     "zero_price": "무료 상품이 아니라면 정상 판매 가격을 입력하세요.",
     "price_outlier": (
         "같은 카테고리 상품의 일반적인 가격 범위와 비교하여 "
         "입력 가격이 맞는지 확인하세요."
+    ),
+    "category_price_anomaly": (
+        "가격 단위, 숫자 입력 오류, 할인 가격 입력 여부를 확인하십시오."
     ),
     "duplicate_product_content": (
         "상품 ID와 상품 그룹을 확인하고 중복 등록된 상품을 삭제하거나 하나로 통합하세요."
@@ -64,8 +70,10 @@ RISK_LEVELS = {
     "invalid_stock": "중간",
     "out_of_stock": "낮음",
     "invalid_price": "높음",
+    "invalid_non_positive_price": "높음",
     "zero_price": "중간",
     "price_outlier": "중간",
+    "category_price_anomaly": "중간",
     "prohibited_term": "높음",
     "email_address": "높음",
     "phone_number": "높음",
@@ -226,8 +234,28 @@ def translate_issue_message(issue: ValidationIssue) -> str:
             price = match.group(1)
             return f"가격 {price}원은 음수이므로 사용할 수 없습니다."
 
+    if issue.rule == "invalid_non_positive_price":
+        match = re.fullmatch(r"price (-?\d+) is not positive", message)
+        if match:
+            price = int(match.group(1))
+            return f"상품 가격이 0 이하입니다. 현재 가격: {price:,}원."
+
     if issue.rule == "zero_price" and message == "price is 0":
         return "가격이 0원으로 입력되었습니다."
+
+    if issue.rule == "category_price_anomaly":
+        match = re.fullmatch(
+            r"price ([0-9]+) in category '([^']*)' has median ([0-9.]+) "
+            r"and ratio ([0-9.]+)",
+            message,
+        )
+        if match:
+            price, category, median_price, ratio = match.groups()
+            return (
+                "같은 카테고리의 일반적인 가격 범위와 큰 차이가 있습니다. "
+                f"현재 가격 {int(price):,}원은 {category} 카테고리 중앙값 "
+                f"{float(median_price):,.0f}원의 {float(ratio):g}배입니다."
+            )
 
     if issue.rule == "price_outlier":
         match = re.fullmatch(

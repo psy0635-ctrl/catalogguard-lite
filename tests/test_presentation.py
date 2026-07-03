@@ -198,48 +198,53 @@ def test_translate_non_numeric_price_message_to_korean():
     assert message == "가격이 누락되었거나 숫자 형식이 아닙니다."
 
 
-def test_translate_negative_price_message_to_korean():
-    issue = make_issue(rule="invalid_price", message="price -5000 is negative")
-
-    message = translate_issue_message(issue)
-
-    assert message == "가격 -5000원은 음수이므로 사용할 수 없습니다."
-
-
-def test_translate_zero_price_message_to_korean():
+def test_translate_non_positive_price_message_to_korean():
     issue = make_issue(
-        rule="zero_price",
-        severity="warning",
-        message="price is 0",
+        rule="invalid_non_positive_price",
+        message="price -5000 is not positive",
     )
 
     message = translate_issue_message(issue)
 
-    assert message == "가격이 0원으로 입력되었습니다."
+    assert message == "상품 가격이 0 이하입니다. 현재 가격: -5,000원."
 
 
-def test_translate_price_outlier_message_to_korean():
+def test_translate_zero_price_as_non_positive_message_to_korean():
     issue = make_issue(
-        rule="price_outlier",
-        severity="warning",
-        message="price 100000 is outside category 'TOP' expected range 8000 to 16000",
+        rule="invalid_non_positive_price",
+        message="price 0 is not positive",
     )
 
     message = translate_issue_message(issue)
 
-    assert message == "가격 100,000원은 TOP 카테고리의 일반적인 가격 범위인 8,000원~16,000원을 벗어났습니다."
+    assert message == "상품 가격이 0 이하입니다. 현재 가격: 0원."
 
 
-def test_translate_unknown_price_outlier_message_keeps_original_text():
+def test_translate_category_price_anomaly_message_to_korean():
     issue = make_issue(
-        rule="price_outlier",
+        rule="category_price_anomaly",
         severity="warning",
-        message="unexpected price outlier message",
+        message="price 100000 in category 'TOP' has median 20000 and ratio 5",
     )
 
     message = translate_issue_message(issue)
 
-    assert message == "unexpected price outlier message"
+    assert message == (
+        "같은 카테고리의 일반적인 가격 범위와 큰 차이가 있습니다. "
+        "현재 가격 100,000원은 TOP 카테고리 중앙값 20,000원의 5배입니다."
+    )
+
+
+def test_translate_unknown_category_price_anomaly_message_keeps_original_text():
+    issue = make_issue(
+        rule="category_price_anomaly",
+        severity="warning",
+        message="unexpected category price anomaly message",
+    )
+
+    message = translate_issue_message(issue)
+
+    assert message == "unexpected category price anomaly message"
 
 
 def test_translate_unknown_message_keeps_original_text():
@@ -416,18 +421,18 @@ def test_build_result_dataframe_does_not_show_raw_personal_information():
 def test_build_result_dataframe_uses_expected_columns_and_display_values():
     issues = [
         make_issue(
-            rule="zero_price",
+            rule="category_price_anomaly",
             severity="warning",
             product_id="P010",
             product_group_id="G010",
-            message="price is 0",
+            message="price 100000 in category 'TOP' has median 20000 and ratio 5",
         ),
         make_issue(
-            rule="invalid_price",
+            rule="invalid_non_positive_price",
             severity="error",
             product_id="P020",
             product_group_id="G020",
-            message="price -5000 is negative",
+            message="price -5000 is not positive",
         ),
     ]
 
@@ -438,8 +443,8 @@ def test_build_result_dataframe_uses_expected_columns_and_display_values():
     assert df.iloc[0]["오류 항목"] == "가격 오류"
     assert df.iloc[0]["상품 그룹 ID"] == "G020"
     assert df.iloc[0]["상품 ID"] == "P020"
-    assert df.iloc[0]["오류 이유"] == "가격 -5000원은 음수이므로 사용할 수 없습니다."
-    assert df.iloc[0]["수정 권장사항"] == "가격을 0 이상의 정수로 입력하세요."
+    assert df.iloc[0]["오류 이유"] == "상품 가격이 0 이하입니다. 현재 가격: -5,000원."
+    assert df.iloc[0]["수정 권장사항"] == "0보다 큰 정상 판매 가격을 입력하십시오."
     assert df.iloc[0]["위험 수준"] == "높음"
     assert df.iloc[1]["검수 상태"] == "주의"
     assert df.iloc[1]["위험 수준"] == "중간"
@@ -502,22 +507,25 @@ def test_build_result_dataframe_displays_duplicate_product_name_warning():
 
 def test_build_result_dataframe_displays_price_outlier_label_and_recommendation():
     issue = make_issue(
-        rule="price_outlier",
+        rule="category_price_anomaly",
         severity="warning",
         product_id="P005",
         product_group_id="G005",
-        message="price 100000 is outside category 'TOP' expected range 8000 to 16000",
+        message="price 100000 in category 'TOP' has median 20000 and ratio 5",
     )
 
     df = build_result_dataframe([issue])
 
     assert df.iloc[0]["검수 상태"] == "주의"
     assert df.iloc[0]["오류 항목"] == "가격 이상치"
-    assert df.iloc[0]["오류 이유"] == "가격 100,000원은 TOP 카테고리의 일반적인 가격 범위인 8,000원~16,000원을 벗어났습니다."
-    assert df.iloc[0]["수정 권장사항"] == (
-        "같은 카테고리 상품의 일반적인 가격 범위와 비교하여 "
-        "입력 가격이 맞는지 확인하세요."
+    assert df.iloc[0]["오류 이유"] == (
+        "같은 카테고리의 일반적인 가격 범위와 큰 차이가 있습니다. "
+        "현재 가격 100,000원은 TOP 카테고리 중앙값 20,000원의 5배입니다."
     )
+    assert df.iloc[0]["수정 권장사항"] == (
+        "가격 단위, 숫자 입력 오류, 할인 가격 입력 여부를 확인하십시오."
+    )
+    assert df.iloc[0]["위험 수준"] == "중간"
 
 
 def test_calculate_dataframe_height_uses_min_height_for_empty_rows():

@@ -34,10 +34,6 @@ REQUIRED_FIELDS = [
 
 VALID_CATEGORIES = {"TOP", "BOTTOM", "OUTER"}
 
-# 가격 이상치는 같은 카테고리에 최소 5개 가격이 있을 때만 계산합니다.
-PRICE_OUTLIER_MIN_CATEGORY_SIZE = 5
-PRICE_OUTLIER_IQR_MULTIPLIER = 1.5
-
 # 금지어와 개인정보 형태를 검사할 텍스트 필드입니다.
 CONTENT_SCAN_FIELDS = (
     "product_name",

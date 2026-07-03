@@ -253,8 +253,8 @@ def test_check_duplicate_product_content_excludes_invalid_categories():
     ("price", "expected_rule"),
     [
         (None, "invalid_price"),
-        (0, "zero_price"),
-        (-1000, "invalid_price"),
+        (0, "invalid_non_positive_price"),
+        (-1000, "invalid_non_positive_price"),
     ],
 )
 def test_check_duplicate_product_content_excludes_invalid_prices(price, expected_rule):
@@ -376,7 +376,7 @@ def test_check_stock_flags_non_numeric_stock():
     assert issues[0].message == "stock is missing or not a number"
 
 
-def test_check_price_flags_negative_as_error_and_zero_as_warning():
+def test_check_price_flags_non_positive_prices_as_errors():
     products = [
         make_product(product_id="P020", price=-1000),
         make_product(product_id="P021", price=0),
@@ -387,7 +387,11 @@ def test_check_price_flags_negative_as_error_and_zero_as_warning():
 
     assert len(issues) == 2
     assert issues[0].severity == "error"
-    assert issues[1].severity == "warning"
+    assert issues[1].severity == "error"
+    assert [issue.rule for issue in issues] == [
+        "invalid_non_positive_price",
+        "invalid_non_positive_price",
+    ]
 
 
 def test_check_price_flags_non_numeric_price():
@@ -412,7 +416,7 @@ def test_check_price_outliers_flags_high_price_by_category():
     issues = check_price_outliers(products)
 
     assert len(issues) == 1
-    assert issues[0].rule == "price_outlier"
+    assert issues[0].rule == "category_price_anomaly"
     assert issues[0].severity == "warning"
     assert issues[0].product_id == "P005"
 
@@ -429,7 +433,7 @@ def test_check_price_outliers_flags_low_price_by_category():
     issues = check_price_outliers(products)
 
     assert len(issues) == 1
-    assert issues[0].rule == "price_outlier"
+    assert issues[0].rule == "category_price_anomaly"
     assert issues[0].severity == "warning"
     assert issues[0].product_id == "P001"
 
@@ -494,8 +498,14 @@ def test_check_price_outliers_excludes_invalid_prices():
     ]
 
     issues = run_all_rules(products)
-    price_outlier_issues = [issue for issue in issues if issue.rule == "price_outlier"]
-    price_issues = [issue for issue in issues if issue.rule in {"invalid_price", "zero_price"}]
+    price_outlier_issues = [
+        issue for issue in issues if issue.rule == "category_price_anomaly"
+    ]
+    price_issues = [
+        issue
+        for issue in issues
+        if issue.rule in {"invalid_price", "invalid_non_positive_price"}
+    ]
 
     assert price_outlier_issues == []
     assert len(price_issues) == 3
@@ -516,7 +526,7 @@ def test_check_price_outliers_excludes_invalid_categories():
     assert issues == []
 
 
-def test_check_price_outliers_handles_zero_iqr():
+def test_check_price_outliers_handles_equal_baseline_prices():
     products_with_outlier = [
         make_product(product_id="P001", price=10000),
         make_product(product_id="P002", price=10000),
@@ -820,7 +830,9 @@ def test_run_all_rules_includes_price_outlier_issues():
     ]
 
     issues = run_all_rules(products)
-    price_outlier_issues = [issue for issue in issues if issue.rule == "price_outlier"]
+    price_outlier_issues = [
+        issue for issue in issues if issue.rule == "category_price_anomaly"
+    ]
 
     assert len(price_outlier_issues) == 1
     assert price_outlier_issues[0].product_id == "P005"
