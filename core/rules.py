@@ -11,6 +11,10 @@ from config.settings import (
     REQUIRED_FIELDS,
     VALID_CATEGORIES,
 )
+from core.duplicate_detector import (
+    find_duplicate_product_ids,
+    find_duplicate_product_names,
+)
 from core.models import Product, ValidationIssue
 from core.privacy import (
     EMAIL_PATTERN,
@@ -130,30 +134,11 @@ def mask_account_number(value: str) -> str:
 
 
 def check_duplicate_product_id(products: list[Product]) -> list[ValidationIssue]:
-    seen: dict[str, str] = {}
-    issues = []
-    for product in products:
-        # ID가 비어 있으면 중복 검사가 아니라 필수값 누락 규칙에서 처리합니다.
-        if not product.product_id or not product.product_group_id:
-            continue
+    return find_duplicate_product_ids(products)
 
-        prior_group = seen.get(product.product_id)
-        if prior_group is None:
-            seen[product.product_id] = product.product_group_id
-        elif prior_group != product.product_group_id:
-            issues.append(
-                ValidationIssue(
-                    rule="duplicate_product_id",
-                    severity="error",
-                    product_id=product.product_id,
-                    product_group_id=product.product_group_id,
-                    message=(
-                        f"product_id '{product.product_id}' is reused across "
-                        f"groups '{prior_group}' and '{product.product_group_id}'"
-                    ),
-                )
-            )
-    return issues
+
+def check_duplicate_product_name(products: list[Product]) -> list[ValidationIssue]:
+    return find_duplicate_product_names(products)
 
 
 def check_duplicate_product_content(products: list[Product]) -> list[ValidationIssue]:
@@ -469,6 +454,7 @@ def check_prohibited_and_personal_information(
 RULES = [
     # 이 순서대로 실행되므로, 새 규칙을 추가할 때 결과 순서도 함께 고려해야 합니다.
     check_duplicate_product_id,
+    check_duplicate_product_name,
     check_duplicate_product_content,
     check_missing_required_fields,
     check_invalid_category,

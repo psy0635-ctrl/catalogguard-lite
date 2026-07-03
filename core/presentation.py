@@ -9,6 +9,7 @@ from core.models import ValidationIssue
 # 내부 규칙 이름을 사용자가 볼 한국어 이름으로 바꾸는 표입니다.
 RULE_LABELS = {
     "duplicate_product_id": "상품 ID 중복",
+    "duplicate_product_name": "상품명 중복",
     "missing_required_field": "필수 값 누락",
     "invalid_category": "카테고리 오류",
     "invalid_stock": "재고 형식 오류",
@@ -26,7 +27,8 @@ RULE_LABELS = {
 
 # 각 규칙별로 화면에 보여 줄 수정 가이드입니다.
 RECOMMENDATIONS = {
-    "duplicate_product_id": "상품 그룹마다 중복되지 않는 상품 ID를 사용하세요.",
+    "duplicate_product_id": "각 상품에 고유한 상품 ID를 입력하십시오.",
+    "duplicate_product_name": "모델명, 색상, 옵션, 용량 또는 상품 ID를 확인하십시오.",
     "missing_required_field": "누락된 필수 값을 입력하세요.",
     "invalid_category": "허용된 카테고리 값으로 수정하세요.",
     "invalid_stock": "재고를 0 이상의 정수로 입력하세요.",
@@ -51,6 +53,24 @@ RECOMMENDATIONS = {
     "suspected_bank_account": (
         "계좌번호가 맞는지 확인하고 개인 금융정보라면 제거하세요."
     ),
+}
+
+RISK_LEVELS = {
+    "duplicate_product_id": "높음",
+    "duplicate_product_name": "중간",
+    "duplicate_product_content": "높음",
+    "missing_required_field": "높음",
+    "invalid_category": "중간",
+    "invalid_stock": "중간",
+    "out_of_stock": "낮음",
+    "invalid_price": "높음",
+    "zero_price": "중간",
+    "price_outlier": "중간",
+    "prohibited_term": "높음",
+    "email_address": "높음",
+    "phone_number": "높음",
+    "resident_registration_number": "높음",
+    "suspected_bank_account": "중간",
 }
 
 # 내부 필드명을 화면용 한국어 필드명으로 바꿉니다.
@@ -78,6 +98,7 @@ RESULT_COLUMNS = [
     "상품 ID",
     "오류 이유",
     "수정 권장사항",
+    "위험 수준",
 ]
 
 
@@ -122,6 +143,17 @@ def translate_issue_message(issue: ValidationIssue) -> str:
 
     if issue.rule == "duplicate_product_id":
         match = re.fullmatch(
+            r"product_id '([^']*)' is duplicated in rows ([0-9, ]+)",
+            message,
+        )
+        if match:
+            product_id, rows = match.groups()
+            return (
+                f"동일한 상품 ID '{product_id}'가 여러 상품에 사용되었습니다. "
+                f"중복 행: {rows}."
+            )
+
+        match = re.fullmatch(
             r"product_id '([^']*)' is reused across groups '([^']*)' and '([^']*)'",
             message,
         )
@@ -130,6 +162,20 @@ def translate_issue_message(issue: ValidationIssue) -> str:
             return (
                 f"상품 ID '{product_id}'이 상품 그룹 '{first_group}'와 "
                 f"'{second_group}'에서 중복 사용되었습니다."
+            )
+
+    if issue.rule == "duplicate_product_name":
+        match = re.fullmatch(
+            r"product_name '([^']*)' normalized to '([^']*)' duplicates rows "
+            r"([0-9, ]+) with product_ids '([^']*)'",
+            message,
+        )
+        if match:
+            product_name, _, rows, product_ids = match.groups()
+            return (
+                f"상품명 '{product_name}'이 다른 상품과 동일하거나 정리 후 "
+                f"같은 값으로 확인되었습니다. 중복 후보 상품 ID: {product_ids}. "
+                f"중복 행: {rows}."
             )
 
     if issue.rule == "missing_required_field":
@@ -220,6 +266,7 @@ def build_result_dataframe(issues: list[ValidationIssue]) -> pd.DataFrame:
                 "수정 권장사항": RECOMMENDATIONS.get(
                     issue.rule, "CSV 내용을 확인하세요."
                 ),
+                "위험 수준": RISK_LEVELS.get(issue.rule, ""),
             }
         )
 

@@ -77,6 +77,37 @@ def test_translate_duplicate_product_id_message_to_korean():
     assert message == "상품 ID 'P003'이 상품 그룹 'G002'와 'G004'에서 중복 사용되었습니다."
 
 
+def test_translate_duplicate_product_id_rows_message_to_korean():
+    issue = make_issue(
+        rule="duplicate_product_id",
+        message="product_id 'P003' is duplicated in rows 2, 4, 7",
+    )
+
+    message = translate_issue_message(issue)
+
+    assert message == (
+        "동일한 상품 ID 'P003'가 여러 상품에 사용되었습니다. 중복 행: 2, 4, 7."
+    )
+
+
+def test_translate_duplicate_product_name_message_to_korean():
+    issue = make_issue(
+        rule="duplicate_product_name",
+        severity="warning",
+        message=(
+            "product_name '가짜 테스트 1' normalized to '가짜테스트1' "
+            "duplicates rows 2, 3 with product_ids 'P001, P002'"
+        ),
+    )
+
+    message = translate_issue_message(issue)
+
+    assert message == (
+        "상품명 '가짜 테스트 1'이 다른 상품과 동일하거나 정리 후 같은 값으로 "
+        "확인되었습니다. 중복 후보 상품 ID: P001, P002. 중복 행: 2, 3."
+    )
+
+
 def test_translate_missing_required_field_message_to_korean():
     issue = make_issue(rule="missing_required_field", message="'color' is missing")
 
@@ -409,7 +440,9 @@ def test_build_result_dataframe_uses_expected_columns_and_display_values():
     assert df.iloc[0]["상품 ID"] == "P020"
     assert df.iloc[0]["오류 이유"] == "가격 -5000원은 음수이므로 사용할 수 없습니다."
     assert df.iloc[0]["수정 권장사항"] == "가격을 0 이상의 정수로 입력하세요."
+    assert df.iloc[0]["위험 수준"] == "높음"
     assert df.iloc[1]["검수 상태"] == "주의"
+    assert df.iloc[1]["위험 수준"] == "중간"
 
 
 def test_build_result_dataframe_handles_empty_issue_list():
@@ -441,6 +474,30 @@ def test_build_result_dataframe_displays_duplicate_product_content_label_and_rec
         "상품명, 카테고리, 색상, 사이즈, 가격이 모두 같습니다."
     )
     assert "중복 등록된 상품을 삭제하거나 하나로 통합" in df.iloc[0]["수정 권장사항"]
+    assert df.iloc[0]["위험 수준"] == "높음"
+
+
+def test_build_result_dataframe_displays_duplicate_product_name_warning():
+    issue = make_issue(
+        rule="duplicate_product_name",
+        severity="warning",
+        product_id="P002",
+        product_group_id="G002",
+        message=(
+            "product_name '가짜 테스트 1' normalized to '가짜테스트1' "
+            "duplicates rows 2, 3 with product_ids 'P001, P002'"
+        ),
+    )
+
+    df = build_result_dataframe([issue])
+
+    assert df.iloc[0]["검수 상태"] == "주의"
+    assert df.iloc[0]["오류 항목"] == "상품명 중복"
+    assert "정리 후 같은 값" in df.iloc[0]["오류 이유"]
+    assert df.iloc[0]["수정 권장사항"] == (
+        "모델명, 색상, 옵션, 용량 또는 상품 ID를 확인하십시오."
+    )
+    assert df.iloc[0]["위험 수준"] == "중간"
 
 
 def test_build_result_dataframe_displays_price_outlier_label_and_recommendation():

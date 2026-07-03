@@ -40,12 +40,13 @@ def test_check_duplicate_product_id_flags_reuse_across_groups():
 
     issues = check_duplicate_product_id(products)
 
-    assert len(issues) == 1
-    assert issues[0].rule == "duplicate_product_id"
-    assert issues[0].product_id == "P003"
+    assert len(issues) == 2
+    assert all(issue.rule == "duplicate_product_id" for issue in issues)
+    assert all(issue.product_id == "P003" for issue in issues)
+    assert all("rows 2, 3" in issue.message for issue in issues)
 
 
-def test_check_duplicate_product_id_allows_same_group_reuse():
+def test_check_duplicate_product_id_flags_same_group_reuse():
     products = [
         make_product(product_group_id="G001", product_id="P001", size="M"),
         make_product(product_group_id="G001", product_id="P001", size="L"),
@@ -53,7 +54,8 @@ def test_check_duplicate_product_id_allows_same_group_reuse():
 
     issues = check_duplicate_product_id(products)
 
-    assert issues == []
+    assert len(issues) == 2
+    assert all(issue.rule == "duplicate_product_id" for issue in issues)
 
 
 def test_check_duplicate_product_id_ignores_blank_product_ids_across_groups():
@@ -71,7 +73,7 @@ def test_check_duplicate_product_id_ignores_blank_product_ids_across_groups():
     assert all("product_id" in issue.message for issue in missing_issues)
 
 
-def test_check_duplicate_product_id_ignores_blank_product_group_id():
+def test_check_duplicate_product_id_does_not_require_product_group_id():
     products = [
         make_product(product_group_id="", product_id="P777"),
         make_product(product_group_id="G002", product_id="P777"),
@@ -80,7 +82,8 @@ def test_check_duplicate_product_id_ignores_blank_product_group_id():
     duplicate_issues = check_duplicate_product_id(products)
     missing_issues = check_missing_required_fields(products)
 
-    assert duplicate_issues == []
+    assert len(duplicate_issues) == 2
+    assert all(issue.rule == "duplicate_product_id" for issue in duplicate_issues)
     assert len(missing_issues) == 1
     assert missing_issues[0].rule == "missing_required_field"
     assert "product_group_id" in missing_issues[0].message
@@ -277,8 +280,8 @@ def test_check_duplicate_product_content_keeps_duplicate_product_id_rule():
     duplicate_id_issues = check_duplicate_product_id(products)
     duplicate_content_issues = check_duplicate_product_content(products)
 
-    assert len(duplicate_id_issues) == 1
-    assert duplicate_id_issues[0].rule == "duplicate_product_id"
+    assert len(duplicate_id_issues) == 2
+    assert all(issue.rule == "duplicate_product_id" for issue in duplicate_id_issues)
     assert duplicate_content_issues == []
 
 
