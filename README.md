@@ -1,219 +1,179 @@
 # CatalogGuard Lite
 
-상품 카탈로그 CSV 데이터의 품질을 검증하고 검수 결과를 CSV로 내려받을 수 있는 경량 도구입니다.
+상품 카탈로그 CSV를 업로드하면 필수 값 누락, 잘못된 카테고리, 재고/가격 오류, 중복 상품, 개인정보 포함 여부를 검사하는 Streamlit 기반 검수 도구입니다.
 
-CSV 파일을 읽어서 상품 데이터에 빠진 값, 잘못된 카테고리, 이상한 재고, 이상한 가격, 중복 상품 ID가 있는지 확인합니다.
+- 배포 URL: https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
+- 실행 방식: Streamlit 웹 앱
+- 주요 기술: Python 3.11, Streamlit, pandas, pytest
+- 현재 테스트 기준: 326개 자동 테스트 통과, 경고 1건
 
-## 검증 규칙
+## 프로젝트 소개
 
-- **duplicate_product_id**: 같은 `product_id`가 여러 상품에 사용된 경우
-- **duplicate_product_name**: 정리한 `product_name`이 같은 상품명 중복 후보가 있는 경우. 같은 상품 그룹에서 색상이나 사이즈가 명확하게 다른 옵션 상품은 제외합니다.
-- **duplicate_product_content**: `product_name`, `category`, `color`, `size`, `price`가 모두 같은 상품이 중복 등록된 경우
-- **missing_required_field**: `product_group_id`, `product_id`, `product_name`, `category`, `color`, `size`, `image_path` 중 값이 비어 있는 경우
-- **invalid_category**: `category`가 허용 목록(`TOP`, `BOTTOM`, `OUTER`)에 없는 경우
-- **invalid_stock** / **out_of_stock**: `stock`이 숫자가 아니거나 음수(error), 0(warning)인 경우
-- **invalid_price** / **invalid_non_positive_price**: `price`가 숫자가 아니거나 0 이하인 경우
-- **category_price_anomaly**: 같은 카테고리의 유효 가격이 5개 이상일 때 중앙값 기준으로 지나치게 높거나 낮은 가격을 warning으로 표시
-- **product_category_mismatch**: 상품명에서 추정되는 카테고리와 현재 `category`가 명확하게 다른 경우
-- **prohibited_term**: `product_name`, `description`, `seller`에서 설정된 금지어가 발견된 경우
-- **email_address** / **phone_number** / **resident_registration_number**: 상품 텍스트에 이메일 주소, 전화번호, 주민등록번호 형식이 포함된 경우
-- **suspected_bank_account**: 계좌, 입금, 송금, 은행, 예금주 같은 문맥어와 10~14자리 숫자 형식이 함께 있을 때 계좌번호 의심 항목을 warning으로 표시
+CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 업로드한 뒤, 검수 결과를 화면과 CSV 다운로드 파일로 확인할 수 있도록 만든 경량 품질 검사 도구입니다.
 
-헤더만 있고 상품 행이 없는 CSV는 처리하지 않습니다.
-잘못된 재고와 가격 문자열은 앱을 중단시키지 않고 형식 오류로 처리합니다.
-상품 ID가 비어 있으면 중복 검사가 아니라 필수 값 누락으로 처리합니다.
-0원, 음수, 숫자 오류 가격은 가격 이상치가 아니라 가격 오류 규칙에서 처리합니다.
-가격 이상치 분석은 현재 상품 행 단위로 수행되며, 같은 상품 그룹의 여러 옵션이 가격 분포에 여러 번 포함될 수 있습니다.
-상품명·카테고리 불일치는 명확한 키워드가 하나의 카테고리만 가리킬 때만 warning으로 표시합니다.
-완전 중복 상품 검사는 공백과 영문 대소문자를 정리한 뒤 비교하며, 상품 ID, 상품 그룹 ID, 재고, 이미지 경로는 비교 기준에서 제외합니다.
-상품명 중복 검사는 다른 상품 그룹의 동일 상품명이나 같은 상품 그룹의 동일 옵션 조합을 중복 후보로 표시합니다.
-누락 값, 잘못된 카테고리, 0원·음수·숫자 오류 가격은 완전 중복 비교에서 제외합니다.
-금지어 목록은 MVP 예시이며 실제 서비스 운영 정책에 맞게 조정해야 합니다.
-개인정보와 계좌번호 의심 탐지는 정규식 기반이므로 오탐과 미탐 가능성이 있습니다.
-테스트 데이터에는 실제 개인정보를 사용하지 말고 가짜 값을 사용해야 합니다.
+이 프로젝트는 실제 상품 데이터를 저장하거나 외부 서버로 전송하지 않습니다. 업로드된 CSV는 앱 실행 중 메모리에서 검수되며, 개인정보로 보이는 값은 미리보기와 검수 결과 표시 단계에서 마스킹됩니다.
 
-## 검수 결과 표시
+## 핵심 기능
 
-- 오류 이유는 사용자가 읽기 쉬운 한글 문장으로 표시됩니다.
-- 결과 CSV 다운로드 파일에도 한글 오류 이유가 포함됩니다.
-- 이메일 주소, 전화번호, 주민등록번호 형식, 계좌번호 의심 값은 화면과 CSV에서 마스킹되어 표시됩니다.
-- 전체 상태는 오류, 주의, 정상으로 구분되어 표시됩니다.
-- 검수 상태와 오류 항목으로 결과를 필터링할 수 있습니다.
-- 상품 ID 일부 문자를 검색할 수 있습니다.
-- CSV 다운로드는 현재 필터 결과만 포함합니다.
-- CSV 다운로드 파일은 Windows Excel에서 한글이 깨지지 않도록 UTF-8 BOM 인코딩으로 생성됩니다.
-- CSV 다운로드용 데이터는 표시용 결과 DataFrame의 복사본을 사용하며, 원본 검수 결과를 직접 변경하지 않습니다.
-- 수식으로 해석될 수 있는 문자열은 CSV에서 안전하게 처리됩니다.
-
-## CSV 업로드 제한
-
-- CSV 파일만 업로드할 수 있습니다. 확장자는 대소문자를 구분하지 않습니다.
-- 최대 파일 크기는 5MB입니다.
-- 최대 데이터 행 수는 10,000행입니다.
-- 지원 인코딩은 UTF-8 BOM, UTF-8, CP949입니다.
-- NUL 바이트가 포함된 일반 텍스트가 아닌 파일은 거부합니다.
-- 빈 파일, 헤더만 있는 파일, 잘못된 CSV 형식은 검수를 시작하기 전에 차단합니다.
-- 빈 컬럼명과 중복 컬럼명을 검사합니다.
-- 필수 컬럼 누락을 검사하며, `description`, `seller` 선택 컬럼 누락은 허용합니다.
-- 정상 검증된 DataFrame 하나를 미리보기와 상품 검수에 함께 사용합니다.
-
-## CSV 입력 템플릿
-
-앱 화면의 `CSV 입력 템플릿 다운로드` 버튼을 사용하면 현재 지원하는 컬럼이 포함된 CSV 파일을 내려받을 수 있습니다.
-
-템플릿에는 작성 방법을 보여 주기 위한 가짜 예시 상품 1개가 포함되어 있습니다.
-실제 사용 전 예시 행을 삭제하거나 실제 상품 정보로 교체해 주세요.
-
-필수 컬럼은 `product_group_id`, `product_id`, `product_name`, `category`, `color`, `size`, `stock`, `price`, `image_path`입니다.
-선택 컬럼은 `description`, `seller`입니다.
-
-## 프로젝트 구조
-
-```
-app.py                 # Streamlit CSV 업로드 및 결과 화면
-config/settings.py   # 경로, 필수 컬럼, 허용값 등 설정
-core/models.py        # Product, ValidationIssue 데이터 모델
-core/loader.py         # CSV -> Product 리스트 로딩
-core/upload_validator.py # CSV 업로드 파일 사전 검증
-core/product_template.py # CSV 입력 템플릿 생성
-core/rules.py           # 검증 규칙 및 run_all_rules()
-core/presentation.py    # 검수 결과 표시, 필터, 한글 메시지 변환
-core/result_exporter.py # 검수 결과 CSV 다운로드 데이터 생성
-tests/test_loader.py    # CSV 로딩 테스트
-tests/test_upload_validator.py # CSV 업로드 검증 테스트
-tests/test_product_template.py # CSV 입력 템플릿 테스트
-tests/test_rules.py     # 검증 규칙 테스트
-tests/test_presentation.py # 표시 및 필터 테스트
-tests/test_result_exporter.py # 검수 결과 CSV 다운로드 테스트
-data/dev/                # 개발용 샘플 데이터
-```
-
-## CSV 필수 컬럼
-
-```text
-product_group_id, product_id, product_name, category, color, size, stock, price, image_path
-```
-
-## CSV 선택 컬럼
-
-```text
-description, seller
-```
-
-`description`과 `seller`는 상품 설명과 판매자 정보 검수에 사용됩니다.
-두 컬럼이 없는 기존 CSV도 그대로 로딩되며, 값이 비어 있으면 빈 문자열로 처리합니다.
-
-## 실행
-
-Windows PowerShell 또는 VS Code 터미널에서 프로젝트 루트로 이동한 뒤 실행합니다.
-
-### 설치 명령어
-
-```powershell
-python -m pip install -r requirements.txt
-```
-
-### 테스트 실행
-
-테스트 실행에는 `pytest`가 필요합니다. 현재 검증한 테스트 도구 버전은 `pytest==9.1.1`입니다.
-
-```powershell
-python -m pip install pytest==9.1.1
-```
-
-```powershell
-python -m pytest -q
-```
-
-### Streamlit 실행
-
-```powershell
-python -m streamlit run app.py
-```
-
-### 정상 실행 결과
-
-브라우저가 열리고 다음 화면이 보여야 합니다.
-
-- CatalogGuard Lite 제목
-- CSV 입력 템플릿 다운로드 버튼
-- CSV 업로드 버튼
-- 상품 데이터 미리보기
-- 검수 요약
-- 검수 결과 표
-- 검수 상태, 오류 항목, 상품 ID 검색 필터
-- 현재 필터 결과 CSV 다운로드 버튼
-
-## Streamlit Community Cloud 배포
-
-### 배포 정보
-
-- Repository: `psy0635-ctrl/catalogguard-lite`
-- Branch: `main`
-- Main file path: `app.py`
-- 권장 Python: `3.11`
-
-### 배포 절차
-
-1. GitHub 저장소의 `main` 브랜치가 최신인지 확인합니다.
-2. Streamlit Community Cloud에 GitHub 계정으로 로그인합니다.
-3. 새 앱 생성을 선택합니다.
-4. 저장소로 `psy0635-ctrl/catalogguard-lite`를 선택합니다.
-5. Branch는 `main`을 선택합니다.
-6. Main file path에는 `app.py`를 입력합니다.
-7. Advanced settings에서 Python `3.11`을 선택합니다.
-8. 현재 프로젝트는 별도 비밀정보가 없으므로 Secrets는 비워 둡니다.
-9. Deploy를 실행합니다.
-10. 배포 로그에서 의존성 설치와 앱 시작 여부를 확인합니다.
-
-Python `3.11`을 선택할 수 없다면 지원되는 Python 버전을 선택한 뒤 의존성 설치와 전체 기능을 다시 확인해야 합니다.
-
-### 배포 후 기능 확인
-
-- 초기 화면 정상 표시
+- CSV 업로드 전 파일 검증
 - CSV 입력 템플릿 다운로드
-- 템플릿 재업로드 성공
-- `data/dev/products_dev.csv` 업로드 성공
-- 개인정보 마스킹 미리보기
-- 검수 결과 6건 표시
-- 오류 6건 / 주의 0건 표시
-- 상태 및 상품 ID 필터
-- 결과 CSV 다운로드
-- 다운로드 CSV 한글 정상 표시
+- 업로드 상품 데이터 미리보기
+- 미리보기 개인정보 마스킹
+- 상품 필수 값 누락 검사
+- 허용 카테고리 검사
+- 재고 오류 및 품절 상품 검사
+- 가격 오류 및 카테고리별 가격 이상치 검사
+- 상품 ID, 상품명, 완전 중복 상품 탐지
+- 상품명과 카테고리 불일치 탐지
+- 금지어 및 개인정보 형태 탐지
+- 검수 결과 필터링
+- 현재 필터 결과 CSV 다운로드
 
-### 배포 오류 해결
-
-| 오류 | 확인할 부분 |
-|---|---|
-| `ModuleNotFoundError` | `requirements.txt` 패키지 이름과 설치 로그 |
-| `FileNotFoundError` | 상대 경로, 파일명 대소문자, 개발 파일 강제 의존 여부 |
-| 앱 화면 중단 | Community Cloud 로그와 파일 업로드 전 변수 접근 |
-| 한글 CSV 오류 | UTF-8 BOM, UTF-8, CP949 인코딩 처리 |
-| 변경사항 미반영 | GitHub `main` 브랜치 최신 커밋, 앱 재부팅 또는 재배포 |
-| 비밀정보 오류 | Community Cloud Secrets 설정과 `.streamlit/secrets.toml` 제외 여부 |
-
-### 배포 체크리스트
+## 서비스 흐름
 
 ```text
-[ ] git status가 clean인지 확인
-[ ] 전체 테스트 통과 확인
-[ ] requirements.txt 확인
-[ ] GitHub main 브랜치 push 확인
-[ ] Community Cloud 로그인
-[ ] Repository 선택
-[ ] Branch main 선택
-[ ] Main file path app.py 입력
-[ ] Advanced settings에서 Python 3.11 선택
-[ ] Deploy 실행
-[ ] 배포 로그 확인
-[ ] 템플릿 다운로드 확인
-[ ] CSV 업로드 확인
-[ ] 결과 다운로드 확인
+CSV 업로드
+-> 파일명, 크기, 인코딩, 헤더, 행 개수 검증
+-> 원본 DataFrame 생성
+-> 마스킹된 미리보기 복사본 생성
+-> 원본 DataFrame을 Product 객체로 변환
+-> 검수 규칙 실행
+-> 검수 결과 화면 표시
+-> 필터링된 결과 CSV 다운로드
 ```
 
-### 샘플 CSV 결과
+중요한 분리 원칙은 다음과 같습니다.
 
-`data/dev/products_dev.csv`를 업로드했을 때 예상 결과는 다음과 같습니다.
+```text
+원본 DataFrame
+-> Product 객체 변환
+-> 실제 상품 검수에 사용
+
+마스킹된 DataFrame 복사본
+-> 화면 미리보기에만 사용
+```
+
+## 배포 앱
+
+현재 배포된 앱은 아래 주소에서 확인할 수 있습니다.
+
+https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
+
+Streamlit Community Cloud 기준 설정은 다음과 같습니다.
+
+| 항목 | 값 |
+|---|---|
+| Repository | `psy0635-ctrl/catalogguard-lite` |
+| Branch | `main` |
+| Main file path | `app.py` |
+| Python | `3.11` 권장 |
+| Secrets | 사용하지 않음 |
+
+## CSV 입력 형식
+
+필수 컬럼은 9개입니다.
+
+| 컬럼 | 설명 |
+|---|---|
+| `product_group_id` | 옵션 상품을 묶는 상품 그룹 ID |
+| `product_id` | 개별 상품 ID |
+| `product_name` | 상품명 |
+| `category` | 상품 카테고리 |
+| `color` | 색상 |
+| `size` | 사이즈 |
+| `stock` | 재고 수량 |
+| `price` | 판매 가격 |
+| `image_path` | 상품 이미지 경로 |
+
+선택 컬럼은 2개입니다.
+
+| 컬럼 | 설명 |
+|---|---|
+| `description` | 상품 설명 |
+| `seller` | 판매자 정보 |
+
+허용 카테고리는 `TOP`, `BOTTOM`, `OUTER`입니다.
+
+## CSV 업로드 검증
+
+업로드된 파일은 검수 규칙 실행 전에 먼저 검증됩니다.
+
+- `.csv` 확장자만 허용
+- 최대 파일 크기 5MB
+- 최대 데이터 행 수 10,000행
+- UTF-8 BOM, UTF-8, CP949 인코딩 지원
+- NUL 바이트 포함 파일 차단
+- 빈 파일과 헤더만 있는 파일 차단
+- 빈 컬럼명 차단
+- 중복 컬럼명 차단
+- 필수 컬럼 누락 차단
+- CSV 행의 열 개수 불일치 차단
+
+## 검수 규칙
+
+현재 `core/rules.py`의 `RULES`에는 10개 규칙 함수가 등록되어 있습니다.
+
+| 규칙 | 주요 내용 | 심각도 |
+|---|---|---|
+| `check_duplicate_product_id` | 같은 상품 ID가 여러 행에 사용되었는지 검사 | 오류 |
+| `check_duplicate_product_name` | 정규화된 상품명이 중복 후보인지 검사 | 주의 |
+| `check_duplicate_product_content` | 상품명, 카테고리, 색상, 사이즈, 가격이 모두 같은 상품 검사 | 오류 |
+| `check_missing_required_fields` | 필수 값 누락 검사 | 오류 |
+| `check_invalid_category` | 허용되지 않은 카테고리 검사 | 오류 |
+| `check_stock` | 재고 누락, 숫자 오류, 음수, 0개 검사 | 오류 또는 주의 |
+| `check_price` | 가격 누락, 숫자 오류, 0 이하 가격 검사 | 오류 |
+| `check_price_outliers` | 카테고리 중앙값 기준 가격 이상치 검사 | 주의 |
+| `check_product_category_mismatch` | 상품명 키워드와 카테고리 불일치 검사 | 주의 |
+| `check_prohibited_and_personal_information` | 금지어, 이메일, 전화번호, 주민등록번호 형태, 계좌번호 의심 검사 | 오류 또는 주의 |
+
+가격 이상치는 같은 카테고리의 유효 가격이 5개 이상일 때 계산합니다. 카테고리 중앙값의 0.25배보다 낮거나 4배보다 높은 가격을 주의 항목으로 표시합니다.
+
+상품명 중복 검사는 같은 상품 그룹 안에서 색상 또는 사이즈가 명확히 다른 정상 옵션 상품을 중복 후보에서 제외합니다.
+
+## 개인정보 처리
+
+개인정보 관련 정규식과 미리보기 마스킹 함수는 `core/privacy.py`에 모여 있습니다.
+
+미리보기에서 마스킹하는 항목은 다음과 같습니다.
+
+| 항목 | 예시 |
+|---|---|
+| 전화번호 | `010-****-5678` |
+| 이메일 | `sa****@test.com` |
+| 주민등록번호 형태 | `900101-*******` |
+
+마스킹은 셀 전체뿐 아니라 문장 안에 포함된 값에도 적용됩니다.
+
+```text
+문의 전화는 010-1234-5678입니다.
+-> 문의 전화는 010-****-5678입니다.
+```
+
+숫자형 컬럼으로 쓰이는 `product_group_id`, `product_id`, `stock`, `price`는 미리보기 마스킹 대상에서 제외합니다. 또한 문자열이 아닌 값은 그대로 반환해 가격, 재고, 결측값 처리와 충돌하지 않도록 했습니다.
+
+계좌번호 의심 값은 숫자만으로 판단하지 않고 `계좌`, `입금`, `송금`, `은행`, `예금주` 같은 문맥어가 함께 있을 때 검수 결과에 표시합니다.
+
+## 검수 결과 화면
+
+검수 결과는 다음 컬럼으로 표시됩니다.
+
+```text
+검수 상태, 오류 항목, 상품 그룹 ID, 상품 ID, 오류 이유, 수정 권장사항, 위험 수준
+```
+
+화면에서는 다음 기능을 사용할 수 있습니다.
+
+- 전체 상태, 전체 상품 수, 전체 문제 수, 오류 수, 주의 수 요약
+- 검수 상태 필터
+- 오류 항목 필터
+- 상품 ID 검색
+- 현재 필터 결과 CSV 다운로드
+
+결과 CSV는 Windows Excel에서 한글이 깨지지 않도록 UTF-8 BOM으로 생성합니다. CSV 수식 삽입을 막기 위해 `=`, `+`, `-`, `@`로 시작하는 문자열은 다운로드용 복사본에서 안전하게 처리합니다.
+
+## 샘플 데이터 기준 결과
+
+`data/dev/products_dev.csv`를 현재 코드로 검수하면 다음 결과가 나옵니다.
 
 ```text
 전체 상품 수: 5
@@ -222,31 +182,97 @@ Python `3.11`을 선택할 수 없다면 지원되는 Python 버전을 선택한
 주의 수: 0
 ```
 
-## Python 예시
-
-```python
-from core.loader import load_products
-from core.rules import run_all_rules
-from config.settings import DEV_DATA_PATH
-
-products = load_products(DEV_DATA_PATH)
-issues = run_all_rules(products)
-```
-
-## 테스트
-
-현재 테스트는 pytest로 실행합니다.
-
-- `tests/test_loader.py`: CSV 로딩 테스트
-- `tests/test_upload_validator.py`: CSV 업로드 검증 테스트
-- `tests/test_product_template.py`: CSV 입력 템플릿 테스트
-- `tests/test_rules.py`: 검증 규칙 테스트
-- `tests/test_presentation.py`: 표시 및 필터 테스트
-- `tests/test_result_exporter.py`: 검수 결과 CSV 다운로드 테스트
-- `tests/test_app_smoke.py`: Streamlit 초기 화면 스모크 테스트
-
-실행 예시:
+## 프로젝트 구조
 
 ```text
-pytest
+app.py
+config/
+  settings.py
+core/
+  category_mismatch_detector.py
+  duplicate_detector.py
+  loader.py
+  models.py
+  presentation.py
+  price_anomaly_detector.py
+  privacy.py
+  product_template.py
+  result_exporter.py
+  rules.py
+  upload_validator.py
+data/
+  dev/
+    category_mismatch_test.csv
+    price_anomaly_test.csv
+    products_dev.csv
+tests/
+  test_app_smoke.py
+  test_category_mismatch_detector.py
+  test_duplicate_detector.py
+  test_loader.py
+  test_presentation.py
+  test_price_anomaly_detector.py
+  test_privacy.py
+  test_product_template.py
+  test_result_exporter.py
+  test_rules.py
+  test_upload_validator.py
 ```
+
+## 주요 파일 역할
+
+| 파일 | 역할 |
+|---|---|
+| `app.py` | Streamlit 화면, CSV 업로드, 미리보기, 검수 요약, 결과 필터, 다운로드 연결 |
+| `config/settings.py` | 컬럼, 카테고리, 업로드 제한, 금지어, 스캔 대상 필드 설정 |
+| `core/upload_validator.py` | 업로드 CSV 사전 검증 |
+| `core/loader.py` | DataFrame 또는 CSV 파일을 Product 객체 목록으로 변환 |
+| `core/rules.py` | 전체 검수 규칙 실행 |
+| `core/privacy.py` | 개인정보 정규식, 마스킹, 미리보기 복사본 생성 |
+| `core/presentation.py` | 검수 결과를 화면용 DataFrame과 한글 메시지로 변환 |
+| `core/result_exporter.py` | 검수 결과 CSV 다운로드 데이터 생성 |
+| `core/product_template.py` | CSV 입력 템플릿 생성 |
+| `core/duplicate_detector.py` | 상품 ID와 상품명 중복 탐지 |
+| `core/price_anomaly_detector.py` | 카테고리별 가격 이상치 탐지 |
+| `core/category_mismatch_detector.py` | 상품명 키워드 기반 카테고리 불일치 탐지 |
+
+## 설치 및 실행
+
+Windows PowerShell 또는 VS Code 터미널에서 실행합니다.
+
+```powershell
+cd <프로젝트_폴더>
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
+```
+
+브라우저가 자동으로 열리지 않으면 터미널에 표시되는 Streamlit 주소를 열면 됩니다.
+
+## 테스트 실행
+
+테스트 실행에는 pytest가 필요합니다. 현재 확인한 테스트 도구 버전은 `pytest==9.1.1`입니다.
+
+```powershell
+cd <프로젝트_폴더>
+.\.venv\Scripts\Activate.ps1
+python -m pip install pytest==9.1.1
+python -m pytest -q
+```
+
+현재 확인 결과는 다음과 같습니다.
+
+```text
+전체 테스트: 326개 통과
+경고: 1건
+```
+
+## 개발 메모
+
+- 원본 DataFrame은 검수 로직에 그대로 사용합니다.
+- 미리보기 마스킹은 복사본 DataFrame에만 적용합니다.
+- 결과 CSV 생성도 표시용 결과 DataFrame의 복사본을 사용합니다.
+- 개인정보 탐지는 정규식 기반이므로 실제 운영에서는 정책과 샘플 데이터를 기준으로 지속 조정이 필요합니다.
+- 금지어 목록은 MVP 예시이며 운영 정책에 맞게 바꾸는 것을 전제로 합니다.
+- 현재 프로젝트는 인증, 데이터베이스 저장, 외부 API 연동을 포함하지 않습니다.
