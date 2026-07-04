@@ -19,3 +19,6 @@ def test_app_initial_render_without_upload(monkeypatch):
     assert "검수 이력 API 주소가 설정되지 않았습니다." in [
         warning.value for warning in app.warning
     ]
+    assert app.session_state["history_view_mode"] == "list"
+    assert app.session_state["selected_inspection_run_id"] is None
+    assert app.session_state["history_offset"] == 0

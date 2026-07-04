@@ -42,6 +42,15 @@ HISTORY_DISPLAY_COLUMNS = [
     "오류",
     "주의",
 ]
+HISTORY_DETAIL_DISPLAY_COLUMNS = [
+    "검수 상태",
+    "오류 항목",
+    "상품 그룹 ID",
+    "상품 ID",
+    "오류 이유",
+    "수정 권장사항",
+    "위험 수준",
+]
 
 
 def format_value_error(error: ValueError) -> str:
@@ -124,11 +133,39 @@ def build_history_dataframe(items: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=HISTORY_DISPLAY_COLUMNS)
 
 
+def format_history_option_label(item: dict) -> str:
+    return (
+        f"{item.get('inspection_run_id')} · "
+        f"{item.get('source_filename')} · "
+        f"{format_history_datetime(item.get('created_at'))}"
+    )
+
+
+def build_history_detail_dataframe(results: list[dict]) -> pd.DataFrame:
+    rows = [
+        {
+            "검수 상태": result.get("status"),
+            "오류 항목": result.get("error_field"),
+            "상품 그룹 ID": result.get("product_group_id"),
+            "상품 ID": result.get("product_id"),
+            "오류 이유": result.get("reason"),
+            "수정 권장사항": result.get("recommendation"),
+            "위험 수준": result.get("risk_level"),
+        }
+        for result in results
+    ]
+    return pd.DataFrame(rows, columns=HISTORY_DETAIL_DISPLAY_COLUMNS)
+
+
 def initialize_history_state() -> None:
     if "history_limit" not in st.session_state:
         st.session_state.history_limit = HISTORY_LIMIT_DEFAULT
     if "history_offset" not in st.session_state:
         st.session_state.history_offset = 0
+    if "history_view_mode" not in st.session_state:
+        st.session_state.history_view_mode = "list"
+    if "selected_inspection_run_id" not in st.session_state:
+        st.session_state.selected_inspection_run_id = None
 
 
 def render_csv_inspection_tab() -> None:
@@ -271,8 +308,6 @@ def render_inspection_history_tab() -> None:
     st.write("저장된 검수 실행 기록을 최근 순서대로 확인합니다.")
 
     initialize_history_state()
-    limit = st.session_state.history_limit
-    offset = st.session_state.history_offset
 
     try:
         api_client = create_catalogguard_api_client()
@@ -280,6 +315,17 @@ def render_inspection_history_tab() -> None:
         st.warning("검수 이력 API 주소가 설정되지 않았습니다.")
         st.caption("로컬 실행 시 CATALOGGUARD_API_BASE_URL 환경변수를 설정해 주세요.")
         return
+
+    if st.session_state.history_view_mode == "detail":
+        render_inspection_history_detail(api_client)
+        return
+
+    render_inspection_history_list(api_client)
+
+
+def render_inspection_history_list(api_client) -> None:
+    limit = st.session_state.history_limit
+    offset = st.session_state.history_offset
 
     try:
         history_response = api_client.list_inspections(limit=limit, offset=offset)
@@ -310,6 +356,27 @@ def render_inspection_history_tab() -> None:
             use_container_width=True,
             hide_index=True,
         )
+        run_options = [
+            item["inspection_run_id"]
+            for item in history_response["items"]
+            if item.get("inspection_run_id") is not None
+        ]
+        option_labels = {
+            item["inspection_run_id"]: format_history_option_label(item)
+            for item in history_response["items"]
+            if item.get("inspection_run_id") is not None
+        }
+        if run_options:
+            selected_run_id = st.selectbox(
+                "검수 실행 선택",
+                options=run_options,
+                format_func=lambda run_id: option_labels.get(run_id, str(run_id)),
+                key="history_run_selector",
+            )
+            if st.button("상세 보기", key="history_show_detail"):
+                st.session_state.selected_inspection_run_id = int(selected_run_id)
+                st.session_state.history_view_mode = "detail"
+                st.rerun()
 
     current_page, total_pages, has_previous, has_next = calculate_history_pagination(
         total=total,
@@ -327,6 +394,61 @@ def render_inspection_history_tab() -> None:
         if st.button("다음", disabled=not has_next, key="history_next"):
             st.session_state.history_offset = offset + limit
             st.rerun()
+
+
+def return_to_history_list() -> None:
+    st.session_state.history_view_mode = "list"
+    st.session_state.selected_inspection_run_id = None
+    st.rerun()
+
+
+def render_inspection_history_detail(api_client) -> None:
+    st.subheader("검수 상세 결과")
+    if st.button("목록으로 돌아가기", key="history_back_to_list"):
+        return_to_history_list()
+
+    inspection_run_id = st.session_state.selected_inspection_run_id
+    if inspection_run_id is None:
+        st.warning("선택한 검수 실행이 없습니다.")
+        return
+
+    try:
+        detail_response = api_client.get_inspection_detail(inspection_run_id)
+    except InspectionNotFoundError:
+        st.error("선택한 검수 실행 결과를 찾을 수 없습니다.")
+        return
+    except CatalogGuardApiConnectionError:
+        st.error("검수 이력 서버에 연결할 수 없습니다.")
+        return
+    except CatalogGuardApiTimeoutError:
+        st.error("검수 이력 서버 응답 시간이 초과되었습니다.")
+        return
+    except CatalogGuardApiResponseError:
+        st.error("검수 상세 결과를 불러오는 중 오류가 발생했습니다.")
+        return
+
+    st.write(f"파일명: {detail_response.get('source_filename', '')}")
+    st.write(f"검수 시간: {format_history_datetime(detail_response.get('created_at'))}")
+    st.write(f"실행 ID: {detail_response.get('inspection_run_id', '')}")
+
+    summary = detail_response.get("summary") or {}
+    product_col, issue_col, error_col, warning_col = st.columns(4)
+    product_col.metric("전체 상품", summary.get("total_products", 0))
+    issue_col.metric("전체 문제", summary.get("total_issues", 0))
+    error_col.metric("오류", summary.get("error_count", 0))
+    warning_col.metric("주의", summary.get("warning_count", 0))
+
+    detail_dataframe = build_history_detail_dataframe(detail_response.get("results", []))
+    if detail_dataframe.empty:
+        st.info("이 검수 실행에서 발견된 문제가 없습니다.")
+        return
+
+    st.dataframe(
+        detail_dataframe,
+        height=calculate_dataframe_height(len(detail_dataframe)),
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 def main() -> None:
