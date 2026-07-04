@@ -36,6 +36,17 @@ DETAIL_RESPONSE = {
     "results": [],
 }
 
+CREATE_RESPONSE = {
+    "inspection_run_id": 12,
+    "summary": {
+        "total_products": 5,
+        "total_issues": 6,
+        "error_count": 6,
+        "warning_count": 0,
+    },
+    "results": [],
+}
+
 
 class FakeResponse:
     def __init__(self, *, payload=None, status_code=200, json_error=None, text=""):
@@ -65,6 +76,18 @@ class FakeSession:
             {
                 "url": url,
                 "params": params,
+                "timeout": timeout,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+    def post(self, url, *, files=None, timeout=None):
+        self.calls.append(
+            {
+                "url": url,
+                "files": files,
                 "timeout": timeout,
             }
         )
@@ -158,6 +181,34 @@ def test_get_inspection_detail_calls_expected_endpoint_with_timeout():
     ]
 
 
+def test_create_inspection_posts_multipart_file_with_timeout():
+    client, session = make_client(
+        response=FakeResponse(payload=CREATE_RESPONSE),
+        timeout_seconds=8.5,
+    )
+
+    data = client.create_inspection(
+        source_filename="products_dev.csv",
+        file_content=b"product_id,price\nP001,1000\n",
+        content_type="text/csv",
+    )
+
+    assert data == CREATE_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/inspections",
+            "files": {
+                "file": (
+                    "products_dev.csv",
+                    b"product_id,price\nP001,1000\n",
+                    "text/csv",
+                )
+            },
+            "timeout": 8.5,
+        }
+    ]
+
+
 def test_list_inspections_converts_connection_error_without_leaking_url():
     client_module = import_client_module()
     client, _ = make_client(
@@ -178,6 +229,36 @@ def test_list_inspections_converts_timeout_error():
 
     with pytest.raises(client_module.CatalogGuardApiTimeoutError) as error:
         client.list_inspections()
+
+    assert "검수 이력 서버 응답 시간이 초과되었습니다." in str(error.value)
+
+
+def test_create_inspection_converts_connection_error_without_leaking_url():
+    client_module = import_client_module()
+    client, _ = make_client(
+        error=requests.ConnectionError("failed to reach http://internal.example")
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiConnectionError) as error:
+        client.create_inspection(
+            source_filename="products_dev.csv",
+            file_content=b"product_id,price\nP001,1000\n",
+        )
+
+    message = str(error.value)
+    assert "검수 이력 서버에 연결할 수 없습니다." in message
+    assert "http://internal.example" not in message
+
+
+def test_create_inspection_converts_timeout_error():
+    client_module = import_client_module()
+    client, _ = make_client(error=requests.Timeout("too slow"))
+
+    with pytest.raises(client_module.CatalogGuardApiTimeoutError) as error:
+        client.create_inspection(
+            source_filename="products_dev.csv",
+            file_content=b"product_id,price\nP001,1000\n",
+        )
 
     assert "검수 이력 서버 응답 시간이 초과되었습니다." in str(error.value)
 
@@ -207,6 +288,24 @@ def test_list_inspections_converts_server_error_without_leaking_body():
     assert "secret" not in message
 
 
+def test_create_inspection_converts_server_error_without_leaking_body():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(status_code=500, text="Traceback: secret stack trace")
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.create_inspection(
+            source_filename="products_dev.csv",
+            file_content=b"product_id,price\nP001,1000\n",
+        )
+
+    message = str(error.value)
+    assert "검수 이력 서버에서 오류가 발생했습니다." in message
+    assert "Traceback" not in message
+    assert "secret" not in message
+
+
 def test_list_inspections_converts_invalid_json():
     client_module = import_client_module()
     client, _ = make_client(
@@ -221,12 +320,42 @@ def test_list_inspections_converts_invalid_json():
     assert "검수 이력 서버의 응답 형식이 올바르지 않습니다." in str(error.value)
 
 
+def test_create_inspection_converts_invalid_json():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            json_error=requests.JSONDecodeError("bad json", "", 0),
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.create_inspection(
+            source_filename="products_dev.csv",
+            file_content=b"product_id,price\nP001,1000\n",
+        )
+
+    assert "검수 이력 서버의 응답 형식이 올바르지 않습니다." in str(error.value)
+
+
 def test_list_inspections_rejects_missing_required_keys():
     client_module = import_client_module()
     client, _ = make_client(response=FakeResponse(payload={"items": []}))
 
     with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
         client.list_inspections()
+
+    assert "검수 이력 서버의 응답 형식이 올바르지 않습니다." in str(error.value)
+
+
+def test_create_inspection_rejects_missing_required_keys():
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload={"inspection_run_id": 12}))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.create_inspection(
+            source_filename="products_dev.csv",
+            file_content=b"product_id,price\nP001,1000\n",
+        )
 
     assert "검수 이력 서버의 응답 형식이 올바르지 않습니다." in str(error.value)
 
@@ -263,5 +392,29 @@ def test_get_inspection_detail_rejects_invalid_id_without_request():
 
     with pytest.raises(ValueError):
         client.get_inspection_detail(0)
+
+    assert session.calls == []
+
+
+def test_create_inspection_rejects_empty_filename_without_request():
+    client, session = make_client(response=FakeResponse(payload=CREATE_RESPONSE))
+
+    with pytest.raises(ValueError):
+        client.create_inspection(
+            source_filename="",
+            file_content=b"product_id,price\nP001,1000\n",
+        )
+
+    assert session.calls == []
+
+
+def test_create_inspection_rejects_empty_file_content_without_request():
+    client, session = make_client(response=FakeResponse(payload=CREATE_RESPONSE))
+
+    with pytest.raises(ValueError):
+        client.create_inspection(
+            source_filename="products_dev.csv",
+            file_content=b"",
+        )
 
     assert session.calls == []

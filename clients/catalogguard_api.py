@@ -17,6 +17,7 @@ SERVER_ERROR_MESSAGE = "검수 이력 서버에서 오류가 발생했습니다.
 INVALID_RESPONSE_MESSAGE = "검수 이력 서버의 응답 형식이 올바르지 않습니다."
 
 LIST_RESPONSE_KEYS = ("items", "total", "limit", "offset")
+CREATE_RESPONSE_KEYS = ("inspection_run_id", "summary", "results")
 DETAIL_RESPONSE_KEYS = (
     "inspection_run_id",
     "source_filename",
@@ -86,6 +87,32 @@ class CatalogGuardApiClient:
         self._validate_response_keys(data, LIST_RESPONSE_KEYS)
         return data
 
+    def create_inspection(
+        self,
+        *,
+        source_filename: str,
+        file_content: bytes,
+        content_type: str = "text/csv",
+    ) -> dict[str, Any]:
+        normalized_filename = str(source_filename).strip()
+        if not normalized_filename:
+            raise ValueError("source_filename must not be empty")
+        if not file_content:
+            raise ValueError("file_content must not be empty")
+
+        data = self._post_json(
+            "/api/v1/inspections",
+            files={
+                "file": (
+                    normalized_filename,
+                    file_content,
+                    content_type or "text/csv",
+                )
+            },
+        )
+        self._validate_response_keys(data, CREATE_RESPONSE_KEYS)
+        return data
+
     def get_inspection_detail(self, inspection_run_id: int) -> dict[str, Any]:
         if inspection_run_id <= 0:
             raise ValueError("inspection_run_id must be positive")
@@ -105,6 +132,23 @@ class CatalogGuardApiClient:
         not_found_error: InspectionNotFoundError | None = None,
     ) -> dict[str, Any]:
         response = self._get_response(path, params=params, not_found_error=not_found_error)
+
+        try:
+            data = response.json()
+        except ValueError as error:
+            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE) from error
+
+        if not isinstance(data, dict):
+            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+        return data
+
+    def _post_json(
+        self,
+        path: str,
+        *,
+        files: dict[str, tuple[str, bytes, str]],
+    ) -> dict[str, Any]:
+        response = self._post_response(path, files=files)
 
         try:
             data = response.json()
@@ -139,6 +183,32 @@ class CatalogGuardApiClient:
             status_code = getattr(getattr(error, "response", None), "status_code", None)
             if status_code == 404 and not_found_error is not None:
                 raise not_found_error from error
+            raise CatalogGuardApiResponseError(SERVER_ERROR_MESSAGE) from error
+        except requests.RequestException as error:
+            raise CatalogGuardApiResponseError(SERVER_ERROR_MESSAGE) from error
+
+        return response
+
+    def _post_response(
+        self,
+        path: str,
+        *,
+        files: dict[str, tuple[str, bytes, str]],
+    ):
+        url = f"{self._base_url}{path}"
+
+        try:
+            response = self._session.post(
+                url,
+                files=files,
+                timeout=self._timeout_seconds,
+            )
+            response.raise_for_status()
+        except requests.Timeout as error:
+            raise CatalogGuardApiTimeoutError(TIMEOUT_ERROR_MESSAGE) from error
+        except requests.ConnectionError as error:
+            raise CatalogGuardApiConnectionError(CONNECTION_ERROR_MESSAGE) from error
+        except requests.HTTPError as error:
             raise CatalogGuardApiResponseError(SERVER_ERROR_MESSAGE) from error
         except requests.RequestException as error:
             raise CatalogGuardApiResponseError(SERVER_ERROR_MESSAGE) from error

@@ -1,5 +1,6 @@
 # 역할: 사용자가 CSV를 업로드하고 검수 결과를 확인하는 Streamlit 웹 화면입니다.
 import ast
+import hashlib
 from datetime import datetime
 from math import ceil
 
@@ -82,6 +83,26 @@ def get_overall_status(error_count: int, warning_count: int) -> str:
     if warning_count > 0:
         return "주의"
     return "정상"
+
+
+def build_file_hash(file_bytes: bytes) -> str:
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
+def get_saved_inspection_run_id(session_state, file_hash: str) -> int | None:
+    if session_state.get("saved_file_hash") != file_hash:
+        return None
+    return session_state.get("saved_inspection_run_id")
+
+
+def mark_inspection_saved(
+    session_state,
+    *,
+    file_hash: str,
+    inspection_run_id: int,
+) -> None:
+    session_state["saved_file_hash"] = file_hash
+    session_state["saved_inspection_run_id"] = inspection_run_id
 
 
 def calculate_history_pagination(
@@ -168,6 +189,73 @@ def initialize_history_state() -> None:
         st.session_state.selected_inspection_run_id = None
 
 
+def render_inspection_save_failure(detail_message: str) -> None:
+    st.error("검수 결과는 확인할 수 있지만 이력 저장에 실패했습니다.")
+    st.caption(detail_message)
+
+
+def render_inspection_save_button(
+    *,
+    source_filename: str,
+    file_bytes: bytes,
+    content_type: str,
+) -> None:
+    file_hash = build_file_hash(file_bytes)
+    saved_inspection_run_id = get_saved_inspection_run_id(
+        st.session_state,
+        file_hash,
+    )
+
+    if st.button("검수 이력에 저장", key="save_inspection_history"):
+        if saved_inspection_run_id is not None:
+            st.info(
+                "이미 검수 이력에 저장된 파일입니다. "
+                f"실행 ID: {saved_inspection_run_id}"
+            )
+            return
+
+        try:
+            api_client = create_catalogguard_api_client()
+            response = api_client.create_inspection(
+                source_filename=source_filename,
+                file_content=file_bytes,
+                content_type=content_type,
+            )
+            inspection_run_id = int(response["inspection_run_id"])
+        except CatalogGuardApiConfigurationError:
+            render_inspection_save_failure(
+                "검수 이력 API 주소가 설정되지 않았습니다."
+            )
+            return
+        except CatalogGuardApiConnectionError:
+            render_inspection_save_failure("검수 이력 서버에 연결할 수 없습니다.")
+            return
+        except CatalogGuardApiTimeoutError:
+            render_inspection_save_failure(
+                "검수 이력 서버 응답 시간이 초과되었습니다."
+            )
+            return
+        except (CatalogGuardApiResponseError, KeyError, TypeError, ValueError):
+            render_inspection_save_failure(
+                "검수 이력 서버에서 오류가 발생했습니다."
+            )
+            return
+
+        mark_inspection_saved(
+            st.session_state,
+            file_hash=file_hash,
+            inspection_run_id=inspection_run_id,
+        )
+        st.success(f"검수 이력에 저장되었습니다. 실행 ID: {inspection_run_id}")
+        return
+
+    if saved_inspection_run_id is not None:
+        st.info(
+            "이미 검수 이력에 저장된 파일입니다. "
+            f"실행 ID: {saved_inspection_run_id}"
+        )
+
+
 def render_csv_inspection_tab() -> None:
     st.subheader("CSV 입력 템플릿")
     st.write("올바른 컬럼 구조가 필요한 경우 아래 템플릿을 내려받아 작성하세요.")
@@ -249,6 +337,12 @@ def render_csv_inspection_tab() -> None:
         st.warning(summary_message)
     else:
         st.success("검사가 완료되었습니다. 발견된 문제가 없습니다.")
+
+    render_inspection_save_button(
+        source_filename=uploaded_file.name,
+        file_bytes=file_bytes,
+        content_type=getattr(uploaded_file, "type", None) or "text/csv",
+    )
 
     if issue_count <= 0:
         return
