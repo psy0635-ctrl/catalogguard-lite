@@ -1,8 +1,13 @@
 # 역할: CSV 컬럼, 허용 카테고리, 금칙어처럼 검수 전반에서 쓰는 설정값을 모읍니다.
+import os
 from pathlib import Path
 
 # 프로젝트 기준 경로입니다. 다른 파일에서 샘플 CSV 위치를 만들 때 사용합니다.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+CATALOGGUARD_API_BASE_URL_ENV_VAR = "CATALOGGUARD_API_BASE_URL"
+CATALOGGUARD_API_TIMEOUT_SECONDS_ENV_VAR = "CATALOGGUARD_API_TIMEOUT_SECONDS"
+CATALOGGUARD_API_DEFAULT_TIMEOUT_SECONDS = 5.0
 
 DATA_DIR = BASE_DIR / "data"
 DEV_DATA_PATH = DATA_DIR / "dev" / "products_dev.csv"
@@ -138,3 +143,27 @@ BANK_ACCOUNT_CONTEXT_TERMS = (
     "은행",
     "예금주",
 )
+
+
+def get_catalogguard_api_base_url() -> str | None:
+    api_base_url = os.environ.get(CATALOGGUARD_API_BASE_URL_ENV_VAR, "").strip()
+    if not api_base_url:
+        return None
+
+    normalized_url = api_base_url.rstrip("/")
+    return normalized_url or None
+
+
+def get_catalogguard_api_timeout_seconds() -> float:
+    timeout_text = os.environ.get(CATALOGGUARD_API_TIMEOUT_SECONDS_ENV_VAR, "").strip()
+    if not timeout_text:
+        return CATALOGGUARD_API_DEFAULT_TIMEOUT_SECONDS
+
+    try:
+        timeout_seconds = float(timeout_text)
+    except ValueError:
+        return CATALOGGUARD_API_DEFAULT_TIMEOUT_SECONDS
+
+    if timeout_seconds <= 0:
+        return CATALOGGUARD_API_DEFAULT_TIMEOUT_SECONDS
+    return timeout_seconds

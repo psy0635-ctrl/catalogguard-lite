@@ -1,3 +1,4 @@
 # 역할: Streamlit MVP 실행에 필요한 기본 Python 패키지 목록입니다.
 pandas==3.0.3
+requests==2.34.2
 streamlit==1.58.0
