@@ -64,6 +64,50 @@ def fake_inspection_persistence(monkeypatch):
             risk_level="낮음",
         ),
     ]
+    list_calls = []
+    list_state = SimpleNamespace(mode="default")
+    list_created_at = datetime(2026, 7, 4, 4, 30, tzinfo=timezone.utc)
+    default_list = SimpleNamespace(
+        items=[
+            SimpleNamespace(
+                inspection_run_id=12,
+                source_filename="template.csv",
+                created_at=list_created_at,
+                total_products=1,
+                total_issues=0,
+                error_count=0,
+                warning_count=0,
+            ),
+            SimpleNamespace(
+                inspection_run_id=11,
+                source_filename="products_dev.csv",
+                created_at=list_created_at,
+                total_products=5,
+                total_issues=2,
+                error_count=1,
+                warning_count=1,
+            ),
+        ],
+        total=2,
+        limit=20,
+        offset=0,
+    )
+    paged_list = SimpleNamespace(
+        items=[
+            SimpleNamespace(
+                inspection_run_id=3,
+                source_filename="old_products.csv",
+                created_at=list_created_at,
+                total_products=8,
+                total_issues=4,
+                error_count=3,
+                warning_count=1,
+            )
+        ],
+        total=37,
+        limit=10,
+        offset=20,
+    )
     fake_details = {
         11: SimpleNamespace(
             inspection_run_id=11,
@@ -109,6 +153,20 @@ def fake_inspection_persistence(monkeypatch):
         )
         return fake_details.get(inspection_run_id)
 
+    def fake_list_inspections(session, *, limit, offset):
+        list_calls.append(
+            {
+                "session": session,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
+        if list_state.mode == "empty":
+            return SimpleNamespace(items=[], total=0, limit=limit, offset=offset)
+        if limit == 10 and offset == 20:
+            return paged_list
+        return default_list
+
     app.dependency_overrides[get_session] = override_session
     monkeypatch.setattr(
         inspections_route,
@@ -122,8 +180,20 @@ def fake_inspection_persistence(monkeypatch):
         fake_get_inspection_detail,
         raising=False,
     )
+    monkeypatch.setattr(
+        inspections_route,
+        "list_inspections",
+        fake_list_inspections,
+        raising=False,
+    )
 
-    yield SimpleNamespace(session=fake_session, calls=calls, detail_calls=detail_calls)
+    yield SimpleNamespace(
+        session=fake_session,
+        calls=calls,
+        detail_calls=detail_calls,
+        list_calls=list_calls,
+        list_state=list_state,
+    )
 
     app.dependency_overrides.clear()
 
@@ -155,6 +225,78 @@ def post_csv(
         ENDPOINT,
         files={"file": (filename, file_bytes, content_type)},
     )
+
+
+def test_list_inspections_api_returns_default_page(fake_inspection_persistence):
+    response = client.get(ENDPOINT)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 2
+    assert data["limit"] == 20
+    assert data["offset"] == 0
+    assert [item["inspection_run_id"] for item in data["items"]] == [12, 11]
+    assert data["items"][0] == {
+        "inspection_run_id": 12,
+        "source_filename": "template.csv",
+        "created_at": data["items"][0]["created_at"],
+        "total_products": 1,
+        "total_issues": 0,
+        "error_count": 0,
+        "warning_count": 0,
+    }
+    assert data["items"][0]["created_at"].startswith("2026-07-04T04:30:00")
+    assert fake_inspection_persistence.list_calls == [
+        {
+            "session": fake_inspection_persistence.session,
+            "limit": 20,
+            "offset": 0,
+        }
+    ]
+
+
+def test_list_inspections_api_passes_limit_and_offset(fake_inspection_persistence):
+    response = client.get(f"{ENDPOINT}?limit=10&offset=20")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 37
+    assert data["limit"] == 10
+    assert data["offset"] == 20
+    assert len(data["items"]) == 1
+    assert data["items"][0]["inspection_run_id"] == 3
+    assert fake_inspection_persistence.list_calls == [
+        {
+            "session": fake_inspection_persistence.session,
+            "limit": 10,
+            "offset": 20,
+        }
+    ]
+
+
+def test_list_inspections_api_returns_empty_list(fake_inspection_persistence):
+    fake_inspection_persistence.list_state.mode = "empty"
+
+    response = client.get(ENDPOINT)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [],
+        "total": 0,
+        "limit": 20,
+        "offset": 0,
+    }
+
+
+@pytest.mark.parametrize("query", ["limit=0", "limit=101", "offset=-1"])
+def test_list_inspections_api_rejects_invalid_query_without_service_call(
+    fake_inspection_persistence,
+    query,
+):
+    response = client.get(f"{ENDPOINT}?{query}")
+
+    assert response.status_code == 422
+    assert fake_inspection_persistence.list_calls == []
 
 
 def test_get_inspection_api_returns_saved_inspection_detail(

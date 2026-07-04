@@ -35,3 +35,20 @@ class InspectionDetailResponse(InspectionResponse):
     # 저장된 검수 실행을 조회할 때는 파일명과 저장 시각도 함께 반환합니다.
     source_filename: str
     created_at: datetime
+
+
+class InspectionListItemResponse(BaseModel):
+    inspection_run_id: int
+    source_filename: str
+    created_at: datetime
+    total_products: int
+    total_issues: int
+    error_count: int
+    warning_count: int
+
+
+class InspectionListResponse(BaseModel):
+    items: list[InspectionListItemResponse]
+    total: int
+    limit: int
+    offset: int

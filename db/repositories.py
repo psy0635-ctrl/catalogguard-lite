@@ -2,7 +2,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from db.models import InspectionResult, InspectionRun
@@ -89,3 +89,23 @@ def get_inspection_results_by_run_id(
         .order_by(InspectionResult.id.asc())
     )
     return list(session.scalars(statement).all())
+
+
+def list_inspection_runs(
+    session: Session,
+    *,
+    limit: int,
+    offset: int,
+) -> list[InspectionRun]:
+    statement = (
+        select(InspectionRun)
+        .order_by(InspectionRun.created_at.desc(), InspectionRun.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return list(session.scalars(statement).all())
+
+
+def count_inspection_runs(session: Session) -> int:
+    statement = select(func.count()).select_from(InspectionRun)
+    return int(session.scalar(statement) or 0)

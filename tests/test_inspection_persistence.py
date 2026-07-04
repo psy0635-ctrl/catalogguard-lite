@@ -500,6 +500,162 @@ def test_get_inspection_detail_handles_zero_result_run(monkeypatch):
     assert detail.results == []
 
 
+def test_list_inspections_maps_repository_rows_and_total(monkeypatch):
+    session = object()
+    created_at = pd.Timestamp("2026-07-04T12:30:00+09:00").to_pydatetime()
+    runs = [
+        SimpleNamespace(
+            id=12,
+            source_filename="template.csv",
+            total_products=1,
+            total_issues=0,
+            error_count=0,
+            warning_count=0,
+            created_at=created_at,
+        ),
+        SimpleNamespace(
+            id=11,
+            source_filename="products_dev.csv",
+            total_products=5,
+            total_issues=2,
+            error_count=1,
+            warning_count=1,
+            created_at=created_at,
+        ),
+    ]
+    calls = []
+
+    def fake_list_inspection_runs(session_arg, *, limit, offset):
+        calls.append(("list", session_arg, limit, offset))
+        return runs
+
+    def fake_count_inspection_runs(session_arg):
+        calls.append(("count", session_arg))
+        return 37
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "list_inspection_runs",
+        fake_list_inspection_runs,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "count_inspection_runs",
+        fake_count_inspection_runs,
+        raising=False,
+    )
+
+    listing = persistence_service.list_inspections(session, limit=10, offset=20)
+
+    assert listing.total == 37
+    assert listing.limit == 10
+    assert listing.offset == 20
+    assert [item.inspection_run_id for item in listing.items] == [12, 11]
+    assert listing.items[0].source_filename == "template.csv"
+    assert listing.items[1].error_count == 1
+    assert listing.items[1].warning_count == 1
+    assert calls == [
+        ("list", session, 10, 20),
+        ("count", session),
+    ]
+
+
+def test_list_inspections_handles_empty_repository_result(monkeypatch):
+    session = object()
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "list_inspection_runs",
+        lambda session, *, limit, offset: [],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "count_inspection_runs",
+        lambda session: 0,
+        raising=False,
+    )
+
+    listing = persistence_service.list_inspections(session, limit=20, offset=0)
+
+    assert listing.items == []
+    assert listing.total == 0
+    assert listing.limit == 20
+    assert listing.offset == 0
+
+
+def test_repository_list_inspection_runs_returns_recent_runs_with_limit(
+    database_session,
+):
+    session, created_source_filenames = database_session
+    first_source_filename = unique_filename("list_first")
+    second_source_filename = unique_filename("list_second")
+    created_source_filenames.extend([first_source_filename, second_source_filename])
+    report = make_report([{**BASE_ROW, "price": "0"}])
+    first_run_id = save_inspection_report(
+        session,
+        source_filename=first_source_filename,
+        report=report,
+    )
+    second_run_id = save_inspection_report(
+        session,
+        source_filename=second_source_filename,
+        report=report,
+    )
+
+    runs = repositories.list_inspection_runs(session, limit=2, offset=0)
+
+    assert [run.id for run in runs] == [second_run_id, first_run_id]
+
+
+def test_repository_list_inspection_runs_applies_offset(database_session):
+    session, created_source_filenames = database_session
+    first_source_filename = unique_filename("list_offset_first")
+    second_source_filename = unique_filename("list_offset_second")
+    created_source_filenames.extend([first_source_filename, second_source_filename])
+    report = make_report([{**BASE_ROW, "price": "0"}])
+    first_run_id = save_inspection_report(
+        session,
+        source_filename=first_source_filename,
+        report=report,
+    )
+    second_run_id = save_inspection_report(
+        session,
+        source_filename=second_source_filename,
+        report=report,
+    )
+
+    first_page = repositories.list_inspection_runs(session, limit=1, offset=0)
+    second_page = repositories.list_inspection_runs(session, limit=1, offset=1)
+
+    assert [run.id for run in first_page] == [second_run_id]
+    assert [run.id for run in second_page] == [first_run_id]
+
+
+def test_repository_count_inspection_runs_counts_created_runs(database_session):
+    session, created_source_filenames = database_session
+    before_count = repositories.count_inspection_runs(session)
+    session.rollback()
+    first_source_filename = unique_filename("count_first")
+    second_source_filename = unique_filename("count_second")
+    created_source_filenames.extend([first_source_filename, second_source_filename])
+    report = make_report([{**BASE_ROW, "price": "0"}])
+
+    save_inspection_report(
+        session,
+        source_filename=first_source_filename,
+        report=report,
+    )
+    save_inspection_report(
+        session,
+        source_filename=second_source_filename,
+        report=report,
+    )
+
+    assert repositories.count_inspection_runs(session) == before_count + 2
+
+
 def test_repository_get_inspection_run_by_id_returns_saved_run(database_session):
     session, created_source_filenames = database_session
     source_filename = unique_filename("lookup")

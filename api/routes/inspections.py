@@ -1,10 +1,12 @@
 # 역할: CSV 업로드 검수 API 엔드포인트와 응답 변환 로직을 제공합니다.
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 import pandas as pd
 from sqlalchemy.orm import Session
 
 from api.schemas import (
     InspectionDetailResponse,
+    InspectionListItemResponse,
+    InspectionListResponse,
     InspectionResponse,
     InspectionResultItem,
     InspectionSummary,
@@ -13,7 +15,9 @@ from core.inspection_service import InspectionReport, inspect_uploaded_csv
 from core.upload_validator import CsvUploadValidationError
 from db.persistence_service import (
     InspectionDetail,
+    InspectionList,
     get_inspection_detail,
+    list_inspections,
     save_inspection_report,
 )
 from db.session import get_session
@@ -98,6 +102,46 @@ def build_inspection_detail_response(
         ),
         results=result_items,
     )
+
+
+def build_inspection_list_response(
+    inspection_list: InspectionList,
+) -> InspectionListResponse:
+    return InspectionListResponse(
+        items=[
+            InspectionListItemResponse(
+                inspection_run_id=item.inspection_run_id,
+                source_filename=item.source_filename,
+                created_at=item.created_at,
+                total_products=item.total_products,
+                total_issues=item.total_issues,
+                error_count=item.error_count,
+                warning_count=item.warning_count,
+            )
+            for item in inspection_list.items
+        ],
+        total=inspection_list.total,
+        limit=inspection_list.limit,
+        offset=inspection_list.offset,
+    )
+
+
+@router.get(
+    "/api/v1/inspections",
+    response_model=InspectionListResponse,
+)
+def list_inspection_runs(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: Session = Depends(get_session),
+) -> InspectionListResponse:
+    inspection_list = list_inspections(
+        session,
+        limit=limit,
+        offset=offset,
+    )
+
+    return build_inspection_list_response(inspection_list)
 
 
 @router.post(

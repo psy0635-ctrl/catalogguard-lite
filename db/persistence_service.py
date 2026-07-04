@@ -45,6 +45,25 @@ class InspectionDetail:
     results: list[InspectionResultCreate]
 
 
+@dataclass(frozen=True)
+class InspectionListItem:
+    inspection_run_id: int
+    source_filename: str
+    created_at: datetime
+    total_products: int
+    total_issues: int
+    error_count: int
+    warning_count: int
+
+
+@dataclass(frozen=True)
+class InspectionList:
+    items: list[InspectionListItem]
+    total: int
+    limit: int
+    offset: int
+
+
 def normalize_source_filename(source_filename: str | None) -> str:
     # 경로 전체가 들어와도 DB에는 파일명만 저장합니다.
     cleaned_filename = "" if source_filename is None else str(source_filename)
@@ -196,4 +215,37 @@ def get_inspection_detail(
         error_count=inspection_run.error_count,
         warning_count=inspection_run.warning_count,
         results=result_items,
+    )
+
+
+def list_inspections(
+    session: Session,
+    *,
+    limit: int,
+    offset: int,
+) -> InspectionList:
+    inspection_runs = repositories.list_inspection_runs(
+        session,
+        limit=limit,
+        offset=offset,
+    )
+    total = repositories.count_inspection_runs(session)
+    items = [
+        InspectionListItem(
+            inspection_run_id=inspection_run.id,
+            source_filename=inspection_run.source_filename,
+            created_at=inspection_run.created_at,
+            total_products=inspection_run.total_products,
+            total_issues=inspection_run.total_issues,
+            error_count=inspection_run.error_count,
+            warning_count=inspection_run.warning_count,
+        )
+        for inspection_run in inspection_runs
+    ]
+
+    return InspectionList(
+        items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
     )
