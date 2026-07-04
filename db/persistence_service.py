@@ -225,6 +225,7 @@ def list_inspections(
     offset: int,
     filename: str | None = None,
 ) -> InspectionList:
+    # 목록과 total은 같은 filename 조건을 써야 화면의 페이지 수가 정확합니다.
     inspection_runs = repositories.list_inspection_runs(
         session,
         limit=limit,

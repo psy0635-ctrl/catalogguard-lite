@@ -94,11 +94,13 @@ def get_inspection_results_by_run_id(
 
 
 def normalize_filename_filter(filename: str | None) -> str | None:
+    # Repository에서도 한 번 더 정리해 빈 문자열 검색이 전체 목록이 되게 합니다.
     cleaned_filename = "" if filename is None else str(filename).strip()
     return cleaned_filename or None
 
 
 def escape_like_pattern(value: str) -> str:
+    # %, _, \는 SQL LIKE에서 특별한 뜻이 있으므로 일반 글자로 검색되게 표시합니다.
     return (
         value.replace(LIKE_ESCAPE_CHARACTER, LIKE_ESCAPE_CHARACTER * 2)
         .replace("%", f"{LIKE_ESCAPE_CHARACTER}%")
@@ -111,6 +113,7 @@ def apply_filename_filter(statement, filename: str | None):
     if filename_filter is None:
         return statement
 
+    # 앞뒤에 %를 붙여 파일명 앞/중간/뒤 어디에 검색어가 있어도 찾습니다.
     pattern = f"%{escape_like_pattern(filename_filter)}%"
     return statement.where(
         InspectionRun.source_filename.ilike(
@@ -129,6 +132,7 @@ def list_inspection_runs(
 ) -> list[InspectionRun]:
     statement = (
         apply_filename_filter(select(InspectionRun), filename)
+        # 최신 검수 이력이 먼저 보이도록 기존 정렬 순서를 그대로 유지합니다.
         .order_by(InspectionRun.created_at.desc(), InspectionRun.id.desc())
         .limit(limit)
         .offset(offset)
@@ -141,6 +145,7 @@ def count_inspection_runs(
     *,
     filename: str | None = None,
 ) -> int:
+    # total도 목록과 같은 filename 조건으로 세야 pagination이 맞습니다.
     statement = apply_filename_filter(
         select(func.count()).select_from(InspectionRun),
         filename,

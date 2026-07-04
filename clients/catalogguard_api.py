@@ -81,6 +81,7 @@ class CatalogGuardApiClient:
         if offset < 0:
             raise ValueError("offset must be greater than or equal to 0")
 
+        # filename은 비어 있으면 보내지 않아 기존 전체 목록 API와 똑같이 동작합니다.
         params: dict[str, int | str] = {"limit": limit, "offset": offset}
         normalized_filename = "" if filename is None else str(filename).strip()
         if len(normalized_filename) > 100:

@@ -211,6 +211,7 @@ def should_show_history_detail_download(dataframe: pd.DataFrame) -> bool:
 
 
 def normalize_history_filename_query(value: object) -> str:
+    # 검색어 앞뒤 공백을 없애서 " products "와 "products"를 같은 검색어로 봅니다.
     return str(value or "").strip()
 
 
@@ -221,15 +222,18 @@ def get_history_filename_query(session_state) -> str:
 
 
 def apply_history_filename_search(session_state) -> None:
+    # 검색 버튼을 누른 순간의 입력값만 실제 검색어로 확정합니다.
     filename_query = normalize_history_filename_query(
         session_state.get("history_filename_input", "")
     )
     session_state["history_filename_input"] = filename_query
     session_state["history_filename_query"] = filename_query
+    # 새 검색은 항상 첫 페이지부터 보여줘야 하므로 offset을 0으로 돌립니다.
     session_state["history_offset"] = 0
 
 
 def reset_history_filename_search(session_state) -> None:
+    # 초기화는 입력창과 실제 검색어를 모두 비워 전체 목록을 다시 보게 합니다.
     session_state["history_filename_input"] = ""
     session_state["history_filename_query"] = ""
     session_state["history_offset"] = 0
@@ -241,6 +245,7 @@ def build_history_list_request_params(
     limit: int,
     offset: int,
 ) -> dict[str, int | str]:
+    # API에는 기본 페이지 정보(limit/offset)를 항상 보내고, 검색어는 있을 때만 보냅니다.
     params: dict[str, int | str] = {"limit": limit, "offset": offset}
     filename_query = get_history_filename_query(session_state)
     if filename_query:
@@ -255,6 +260,7 @@ def get_empty_history_message(filename_query: str) -> str:
 
 
 def return_history_list_state(session_state) -> None:
+    # 상세 화면에서 목록으로 돌아와도 검색어와 현재 페이지는 유지합니다.
     session_state["history_view_mode"] = "list"
     session_state["selected_inspection_run_id"] = None
 
@@ -503,6 +509,7 @@ def render_inspection_history_tab() -> None:
 
 
 def render_history_filename_search_controls() -> None:
+    # 입력만으로는 검색하지 않고, 사용자가 검색 버튼을 누를 때만 목록을 다시 조회합니다.
     input_col, search_col, reset_col = st.columns([4, 1, 1])
     with input_col:
         st.text_input(
@@ -531,6 +538,7 @@ def render_inspection_history_list(api_client) -> None:
     render_history_filename_search_controls()
     limit = st.session_state.history_limit
     offset = st.session_state.history_offset
+    # 현재 페이지와 실제 적용 중인 파일명 검색어를 API Client에 넘길 형태로 만듭니다.
     request_params = build_history_list_request_params(
         st.session_state,
         limit=limit,

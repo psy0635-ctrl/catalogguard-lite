@@ -127,6 +127,7 @@ def build_inspection_list_response(
 
 
 def normalize_filename_query(filename: str | None) -> str | None:
+    # 공백뿐인 filename은 검색 조건이 아니라 "전체 목록" 요청으로 처리합니다.
     cleaned_filename = "" if filename is None else filename.strip()
     return cleaned_filename or None
 
@@ -138,6 +139,7 @@ def normalize_filename_query(filename: str | None) -> str | None:
 def list_inspection_runs(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    # filename은 선택 검색어입니다. 없으면 기존 목록 API와 같은 결과를 반환합니다.
     filename: str | None = Query(default=None, max_length=100),
     session: Session = Depends(get_session),
 ) -> InspectionListResponse:
