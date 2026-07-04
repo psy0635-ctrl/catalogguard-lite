@@ -210,6 +210,55 @@ def should_show_history_detail_download(dataframe: pd.DataFrame) -> bool:
     return not dataframe.empty
 
 
+def normalize_history_filename_query(value: object) -> str:
+    return str(value or "").strip()
+
+
+def get_history_filename_query(session_state) -> str:
+    return normalize_history_filename_query(
+        session_state.get("history_filename_query", "")
+    )
+
+
+def apply_history_filename_search(session_state) -> None:
+    filename_query = normalize_history_filename_query(
+        session_state.get("history_filename_input", "")
+    )
+    session_state["history_filename_input"] = filename_query
+    session_state["history_filename_query"] = filename_query
+    session_state["history_offset"] = 0
+
+
+def reset_history_filename_search(session_state) -> None:
+    session_state["history_filename_input"] = ""
+    session_state["history_filename_query"] = ""
+    session_state["history_offset"] = 0
+
+
+def build_history_list_request_params(
+    session_state,
+    *,
+    limit: int,
+    offset: int,
+) -> dict[str, int | str]:
+    params: dict[str, int | str] = {"limit": limit, "offset": offset}
+    filename_query = get_history_filename_query(session_state)
+    if filename_query:
+        params["filename"] = filename_query
+    return params
+
+
+def get_empty_history_message(filename_query: str) -> str:
+    if normalize_history_filename_query(filename_query):
+        return "입력한 파일명과 일치하는 검수 이력이 없습니다."
+    return "저장된 검수 이력이 없습니다."
+
+
+def return_history_list_state(session_state) -> None:
+    session_state["history_view_mode"] = "list"
+    session_state["selected_inspection_run_id"] = None
+
+
 def initialize_history_state() -> None:
     if "history_limit" not in st.session_state:
         st.session_state.history_limit = HISTORY_LIMIT_DEFAULT
@@ -219,6 +268,10 @@ def initialize_history_state() -> None:
         st.session_state.history_view_mode = "list"
     if "selected_inspection_run_id" not in st.session_state:
         st.session_state.selected_inspection_run_id = None
+    if "history_filename_input" not in st.session_state:
+        st.session_state.history_filename_input = ""
+    if "history_filename_query" not in st.session_state:
+        st.session_state.history_filename_query = ""
 
 
 def render_inspection_save_failure(detail_message: str) -> None:
@@ -449,12 +502,43 @@ def render_inspection_history_tab() -> None:
     render_inspection_history_list(api_client)
 
 
+def render_history_filename_search_controls() -> None:
+    input_col, search_col, reset_col = st.columns([4, 1, 1])
+    with input_col:
+        st.text_input(
+            "파일명 검색",
+            placeholder="예: products_dev.csv",
+            key="history_filename_input",
+            max_chars=100,
+        )
+    with search_col:
+        st.button(
+            "검색",
+            key="history_filename_search",
+            on_click=apply_history_filename_search,
+            args=(st.session_state,),
+        )
+    with reset_col:
+        st.button(
+            "초기화",
+            key="history_filename_reset",
+            on_click=reset_history_filename_search,
+            args=(st.session_state,),
+        )
+
+
 def render_inspection_history_list(api_client) -> None:
+    render_history_filename_search_controls()
     limit = st.session_state.history_limit
     offset = st.session_state.history_offset
+    request_params = build_history_list_request_params(
+        st.session_state,
+        limit=limit,
+        offset=offset,
+    )
 
     try:
-        history_response = api_client.list_inspections(limit=limit, offset=offset)
+        history_response = api_client.list_inspections(**request_params)
     except CatalogGuardApiConnectionError:
         st.error("검수 이력 서버에 연결할 수 없습니다.")
         return
@@ -467,6 +551,9 @@ def render_inspection_history_list(api_client) -> None:
     except CatalogGuardApiResponseError:
         st.error("검수 이력을 불러오는 중 오류가 발생했습니다.")
         return
+    except ValueError:
+        st.error("파일명 검색어는 최대 100자까지 입력할 수 있습니다.")
+        return
 
     total = max(0, int(history_response["total"]))
     if total > 0 and offset >= total:
@@ -474,8 +561,9 @@ def render_inspection_history_list(api_client) -> None:
         st.rerun()
 
     history_dataframe = build_history_dataframe(history_response["items"])
+    filename_query = get_history_filename_query(st.session_state)
     if history_dataframe.empty:
-        st.info("저장된 검수 이력이 없습니다.")
+        st.info(get_empty_history_message(filename_query))
     else:
         st.dataframe(
             history_dataframe,
@@ -523,8 +611,7 @@ def render_inspection_history_list(api_client) -> None:
 
 
 def return_to_history_list() -> None:
-    st.session_state.history_view_mode = "list"
-    st.session_state.selected_inspection_run_id = None
+    return_history_list_state(st.session_state)
     st.rerun()
 
 

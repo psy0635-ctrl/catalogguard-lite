@@ -126,6 +126,11 @@ def build_inspection_list_response(
     )
 
 
+def normalize_filename_query(filename: str | None) -> str | None:
+    cleaned_filename = "" if filename is None else filename.strip()
+    return cleaned_filename or None
+
+
 @router.get(
     "/api/v1/inspections",
     response_model=InspectionListResponse,
@@ -133,12 +138,14 @@ def build_inspection_list_response(
 def list_inspection_runs(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    filename: str | None = Query(default=None, max_length=100),
     session: Session = Depends(get_session),
 ) -> InspectionListResponse:
     inspection_list = list_inspections(
         session,
         limit=limit,
         offset=offset,
+        filename=normalize_filename_query(filename),
     )
 
     return build_inspection_list_response(inspection_list)

@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 
 from db.models import InspectionResult, InspectionRun
 
+LIKE_ESCAPE_CHARACTER = "\\"
+
 
 @dataclass(frozen=True)
 class InspectionResultCreate:
@@ -91,14 +93,42 @@ def get_inspection_results_by_run_id(
     return list(session.scalars(statement).all())
 
 
+def normalize_filename_filter(filename: str | None) -> str | None:
+    cleaned_filename = "" if filename is None else str(filename).strip()
+    return cleaned_filename or None
+
+
+def escape_like_pattern(value: str) -> str:
+    return (
+        value.replace(LIKE_ESCAPE_CHARACTER, LIKE_ESCAPE_CHARACTER * 2)
+        .replace("%", f"{LIKE_ESCAPE_CHARACTER}%")
+        .replace("_", f"{LIKE_ESCAPE_CHARACTER}_")
+    )
+
+
+def apply_filename_filter(statement, filename: str | None):
+    filename_filter = normalize_filename_filter(filename)
+    if filename_filter is None:
+        return statement
+
+    pattern = f"%{escape_like_pattern(filename_filter)}%"
+    return statement.where(
+        InspectionRun.source_filename.ilike(
+            pattern,
+            escape=LIKE_ESCAPE_CHARACTER,
+        )
+    )
+
+
 def list_inspection_runs(
     session: Session,
     *,
     limit: int,
     offset: int,
+    filename: str | None = None,
 ) -> list[InspectionRun]:
     statement = (
-        select(InspectionRun)
+        apply_filename_filter(select(InspectionRun), filename)
         .order_by(InspectionRun.created_at.desc(), InspectionRun.id.desc())
         .limit(limit)
         .offset(offset)
@@ -106,6 +136,13 @@ def list_inspection_runs(
     return list(session.scalars(statement).all())
 
 
-def count_inspection_runs(session: Session) -> int:
-    statement = select(func.count()).select_from(InspectionRun)
+def count_inspection_runs(
+    session: Session,
+    *,
+    filename: str | None = None,
+) -> int:
+    statement = apply_filename_filter(
+        select(func.count()).select_from(InspectionRun),
+        filename,
+    )
     return int(session.scalar(statement) or 0)

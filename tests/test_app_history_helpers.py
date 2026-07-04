@@ -94,6 +94,95 @@ def test_build_history_dataframe_returns_empty_dataframe_with_display_columns(
     assert list(dataframe.columns) == app_module.HISTORY_DISPLAY_COLUMNS
 
 
+def test_apply_history_filename_search_trims_query_and_resets_offset(app_module):
+    session_state = {
+        "history_filename_input": "  products  ",
+        "history_filename_query": "",
+        "history_offset": 20,
+    }
+
+    app_module.apply_history_filename_search(session_state)
+
+    assert session_state["history_filename_input"] == "products"
+    assert session_state["history_filename_query"] == "products"
+    assert session_state["history_offset"] == 0
+
+
+def test_build_history_list_request_params_includes_filename_query(app_module):
+    session_state = {"history_filename_query": "products"}
+
+    params = app_module.build_history_list_request_params(
+        session_state,
+        limit=10,
+        offset=20,
+    )
+
+    assert params == {"limit": 10, "offset": 20, "filename": "products"}
+
+
+def test_build_history_list_request_params_omits_blank_filename_query(app_module):
+    session_state = {"history_filename_query": "   "}
+
+    params = app_module.build_history_list_request_params(
+        session_state,
+        limit=10,
+        offset=0,
+    )
+
+    assert params == {"limit": 10, "offset": 0}
+
+
+def test_history_filename_query_is_kept_for_pagination_offsets(app_module):
+    session_state = {"history_filename_query": "products"}
+
+    params = app_module.build_history_list_request_params(
+        session_state,
+        limit=10,
+        offset=10,
+    )
+
+    assert params["filename"] == "products"
+    assert params["offset"] == 10
+
+
+def test_return_history_list_state_keeps_search_query_and_offset(app_module):
+    session_state = {
+        "history_view_mode": "detail",
+        "selected_inspection_run_id": 11,
+        "history_filename_query": "products",
+        "history_offset": 10,
+    }
+
+    app_module.return_history_list_state(session_state)
+
+    assert session_state["history_view_mode"] == "list"
+    assert session_state["selected_inspection_run_id"] is None
+    assert session_state["history_filename_query"] == "products"
+    assert session_state["history_offset"] == 10
+
+
+def test_reset_history_filename_search_clears_query_and_offset(app_module):
+    session_state = {
+        "history_filename_input": "products",
+        "history_filename_query": "products",
+        "history_offset": 20,
+    }
+
+    app_module.reset_history_filename_search(session_state)
+
+    assert session_state["history_filename_input"] == ""
+    assert session_state["history_filename_query"] == ""
+    assert session_state["history_offset"] == 0
+
+
+def test_get_empty_history_message_distinguishes_search_result(app_module):
+    assert (
+        app_module.get_empty_history_message("products")
+        == "입력한 파일명과 일치하는 검수 이력이 없습니다."
+    )
+    assert app_module.get_empty_history_message("") == "저장된 검수 이력이 없습니다."
+
+
 def test_format_history_option_label_uses_run_id_filename_and_time(app_module):
     label = app_module.format_history_option_label(
         {

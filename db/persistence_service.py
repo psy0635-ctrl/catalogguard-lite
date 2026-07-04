@@ -223,13 +223,15 @@ def list_inspections(
     *,
     limit: int,
     offset: int,
+    filename: str | None = None,
 ) -> InspectionList:
     inspection_runs = repositories.list_inspection_runs(
         session,
         limit=limit,
         offset=offset,
+        filename=filename,
     )
-    total = repositories.count_inspection_runs(session)
+    total = repositories.count_inspection_runs(session, filename=filename)
     items = [
         InspectionListItem(
             inspection_run_id=inspection_run.id,

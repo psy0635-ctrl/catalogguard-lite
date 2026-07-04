@@ -153,14 +153,15 @@ def fake_inspection_persistence(monkeypatch):
         )
         return fake_details.get(inspection_run_id)
 
-    def fake_list_inspections(session, *, limit, offset):
-        list_calls.append(
-            {
-                "session": session,
-                "limit": limit,
-                "offset": offset,
-            }
-        )
+    def fake_list_inspections(session, *, limit, offset, filename=None):
+        list_call = {
+            "session": session,
+            "limit": limit,
+            "offset": offset,
+        }
+        if filename is not None:
+            list_call["filename"] = filename
+        list_calls.append(list_call)
         if list_state.mode == "empty":
             return SimpleNamespace(items=[], total=0, limit=limit, offset=offset)
         if limit == 10 and offset == 20:
@@ -272,6 +273,67 @@ def test_list_inspections_api_passes_limit_and_offset(fake_inspection_persistenc
             "offset": 20,
         }
     ]
+
+
+def test_list_inspections_api_passes_trimmed_filename(
+    fake_inspection_persistence,
+):
+    response = client.get(
+        ENDPOINT,
+        params={"limit": 10, "offset": 0, "filename": "  products  "},
+    )
+
+    assert response.status_code == 200
+    assert fake_inspection_persistence.list_calls == [
+        {
+            "session": fake_inspection_persistence.session,
+            "limit": 10,
+            "offset": 0,
+            "filename": "products",
+        }
+    ]
+
+
+def test_list_inspections_api_treats_blank_filename_as_no_filter(
+    fake_inspection_persistence,
+):
+    response = client.get(ENDPOINT, params={"filename": "   "})
+
+    assert response.status_code == 200
+    assert fake_inspection_persistence.list_calls == [
+        {
+            "session": fake_inspection_persistence.session,
+            "limit": 20,
+            "offset": 0,
+        }
+    ]
+
+
+def test_list_inspections_api_accepts_100_character_filename(
+    fake_inspection_persistence,
+):
+    filename = "a" * 100
+
+    response = client.get(ENDPOINT, params={"filename": filename})
+
+    assert response.status_code == 200
+    assert fake_inspection_persistence.list_calls == [
+        {
+            "session": fake_inspection_persistence.session,
+            "limit": 20,
+            "offset": 0,
+            "filename": filename,
+        }
+    ]
+
+
+def test_list_inspections_api_rejects_too_long_filename_without_service_call(
+    fake_inspection_persistence,
+):
+    response = client.get(ENDPOINT, params={"filename": "a" * 101})
+
+    assert response.status_code == 422
+    assert fake_inspection_persistence.list_calls == []
 
 
 def test_list_inspections_api_returns_empty_list(fake_inspection_persistence):

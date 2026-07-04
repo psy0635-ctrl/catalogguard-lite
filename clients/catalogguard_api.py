@@ -74,15 +74,23 @@ class CatalogGuardApiClient:
         *,
         limit: int = 20,
         offset: int = 0,
+        filename: str | None = None,
     ) -> dict[str, Any]:
         if not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
         if offset < 0:
             raise ValueError("offset must be greater than or equal to 0")
 
+        params: dict[str, int | str] = {"limit": limit, "offset": offset}
+        normalized_filename = "" if filename is None else str(filename).strip()
+        if len(normalized_filename) > 100:
+            raise ValueError("filename must be 100 characters or fewer")
+        if normalized_filename:
+            params["filename"] = normalized_filename
+
         data = self._get_json(
             "/api/v1/inspections",
-            params={"limit": limit, "offset": offset},
+            params=params,
         )
         self._validate_response_keys(data, LIST_RESPONSE_KEYS)
         return data
@@ -128,7 +136,7 @@ class CatalogGuardApiClient:
         self,
         path: str,
         *,
-        params: dict[str, int] | None = None,
+        params: dict[str, int | str] | None = None,
         not_found_error: InspectionNotFoundError | None = None,
     ) -> dict[str, Any]:
         response = self._get_response(path, params=params, not_found_error=not_found_error)
@@ -163,7 +171,7 @@ class CatalogGuardApiClient:
         self,
         path: str,
         *,
-        params: dict[str, int] | None,
+        params: dict[str, int | str] | None,
         not_found_error: InspectionNotFoundError | None,
     ):
         url = f"{self._base_url}{path}"

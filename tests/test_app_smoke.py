@@ -22,3 +22,5 @@ def test_app_initial_render_without_upload(monkeypatch):
     assert app.session_state["history_view_mode"] == "list"
     assert app.session_state["selected_inspection_run_id"] is None
     assert app.session_state["history_offset"] == 0
+    assert app.session_state["history_filename_input"] == ""
+    assert app.session_state["history_filename_query"] == ""

@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pandas as pd
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, event, select
 
 from config.database import get_optional_database_url
 from core.inspection_service import InspectionSummary, inspect_dataframe
@@ -525,12 +525,18 @@ def test_list_inspections_maps_repository_rows_and_total(monkeypatch):
     ]
     calls = []
 
-    def fake_list_inspection_runs(session_arg, *, limit, offset):
-        calls.append(("list", session_arg, limit, offset))
+    def fake_list_inspection_runs(session_arg, *, limit, offset, filename=None):
+        if filename is None:
+            calls.append(("list", session_arg, limit, offset))
+        else:
+            calls.append(("list", session_arg, limit, offset, filename))
         return runs
 
-    def fake_count_inspection_runs(session_arg):
-        calls.append(("count", session_arg))
+    def fake_count_inspection_runs(session_arg, *, filename=None):
+        if filename is None:
+            calls.append(("count", session_arg))
+        else:
+            calls.append(("count", session_arg, filename))
         return 37
 
     monkeypatch.setattr(
@@ -561,19 +567,71 @@ def test_list_inspections_maps_repository_rows_and_total(monkeypatch):
     ]
 
 
+def test_list_inspections_passes_filename_to_repository(monkeypatch):
+    session = object()
+    created_at = pd.Timestamp("2026-07-04T12:30:00+09:00").to_pydatetime()
+    runs = [
+        SimpleNamespace(
+            id=11,
+            source_filename="products_dev.csv",
+            total_products=5,
+            total_issues=2,
+            error_count=1,
+            warning_count=1,
+            created_at=created_at,
+        ),
+    ]
+    calls = []
+
+    def fake_list_inspection_runs(session_arg, *, limit, offset, filename=None):
+        calls.append(("list", session_arg, limit, offset, filename))
+        return runs
+
+    def fake_count_inspection_runs(session_arg, *, filename=None):
+        calls.append(("count", session_arg, filename))
+        return 1
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "list_inspection_runs",
+        fake_list_inspection_runs,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "count_inspection_runs",
+        fake_count_inspection_runs,
+        raising=False,
+    )
+
+    listing = persistence_service.list_inspections(
+        session,
+        limit=10,
+        offset=0,
+        filename="products",
+    )
+
+    assert listing.total == 1
+    assert [item.source_filename for item in listing.items] == ["products_dev.csv"]
+    assert calls == [
+        ("list", session, 10, 0, "products"),
+        ("count", session, "products"),
+    ]
+
+
 def test_list_inspections_handles_empty_repository_result(monkeypatch):
     session = object()
 
     monkeypatch.setattr(
         persistence_service.repositories,
         "list_inspection_runs",
-        lambda session, *, limit, offset: [],
+        lambda session, *, limit, offset, filename=None: [],
         raising=False,
     )
     monkeypatch.setattr(
         persistence_service.repositories,
         "count_inspection_runs",
-        lambda session: 0,
+        lambda session, *, filename=None: 0,
         raising=False,
     )
 
@@ -631,6 +689,133 @@ def test_repository_list_inspection_runs_applies_offset(database_session):
 
     assert [run.id for run in first_page] == [second_run_id]
     assert [run.id for run in second_page] == [first_run_id]
+
+
+def test_repository_list_and_count_filter_by_filename_with_pagination(
+    database_session,
+):
+    session, created_source_filenames = database_session
+    token = f"search_{uuid4().hex}"
+    first_source_filename = f"{token}_products_first.csv"
+    second_source_filename = f"{token}_products_second.csv"
+    third_source_filename = f"{token}_template.csv"
+    created_source_filenames.extend(
+        [first_source_filename, second_source_filename, third_source_filename]
+    )
+    report = make_report([{**BASE_ROW, "price": "0"}])
+    first_run_id = save_inspection_report(
+        session,
+        source_filename=first_source_filename,
+        report=report,
+    )
+    second_run_id = save_inspection_report(
+        session,
+        source_filename=second_source_filename,
+        report=report,
+    )
+    save_inspection_report(
+        session,
+        source_filename=third_source_filename,
+        report=report,
+    )
+    filename_query = f"{token.upper()}_PRODUCTS"
+
+    first_page = repositories.list_inspection_runs(
+        session,
+        limit=1,
+        offset=0,
+        filename=filename_query,
+    )
+    second_page = repositories.list_inspection_runs(
+        session,
+        limit=1,
+        offset=1,
+        filename=filename_query,
+    )
+
+    assert repositories.count_inspection_runs(session, filename=filename_query) == 2
+    assert [run.id for run in first_page] == [second_run_id]
+    assert [run.id for run in second_page] == [first_run_id]
+
+
+def test_repository_filename_filter_returns_empty_when_no_match(database_session):
+    session, _ = database_session
+    token = f"missing_{uuid4().hex}"
+
+    runs = repositories.list_inspection_runs(
+        session,
+        limit=10,
+        offset=0,
+        filename=token,
+    )
+
+    assert runs == []
+    assert repositories.count_inspection_runs(session, filename=token) == 0
+
+
+def test_repository_filename_filter_treats_like_wildcards_as_literals(
+    database_session,
+):
+    session, created_source_filenames = database_session
+    token = f"literal_{uuid4().hex}"
+    percent_source_filename = f"{token}_literal_%_file.csv"
+    other_source_filename = f"{token}_literal_X_file.csv"
+    created_source_filenames.extend([percent_source_filename, other_source_filename])
+    report = make_report([{**BASE_ROW, "price": "0"}])
+    percent_run_id = save_inspection_report(
+        session,
+        source_filename=percent_source_filename,
+        report=report,
+    )
+    save_inspection_report(
+        session,
+        source_filename=other_source_filename,
+        report=report,
+    )
+
+    runs = repositories.list_inspection_runs(
+        session,
+        limit=10,
+        offset=0,
+        filename=f"{token}_literal_%",
+    )
+
+    assert [run.id for run in runs] == [percent_run_id]
+    assert repositories.count_inspection_runs(
+        session,
+        filename=f"{token}_literal_%",
+    ) == 1
+
+
+def test_repository_list_inspection_runs_does_not_query_results_table(
+    database_session,
+):
+    session, created_source_filenames = database_session
+    source_filename = unique_filename("no_results_join")
+    created_source_filenames.append(source_filename)
+    save_inspection_report(
+        session,
+        source_filename=source_filename,
+        report=make_report([{**BASE_ROW, "price": "0"}]),
+    )
+    statements: list[str] = []
+
+    def collect_statement(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.lower())
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", collect_statement)
+    try:
+        repositories.list_inspection_runs(
+            session,
+            limit=10,
+            offset=0,
+            filename=source_filename,
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", collect_statement)
+
+    assert not any("inspection_results" in statement for statement in statements)
 
 
 def test_repository_count_inspection_runs_counts_created_runs(database_session):

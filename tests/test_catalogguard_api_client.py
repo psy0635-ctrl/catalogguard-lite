@@ -163,6 +163,39 @@ def test_list_inspections_calls_expected_endpoint_with_pagination_and_timeout():
     ]
 
 
+def test_list_inspections_includes_trimmed_filename_when_provided():
+    client, session = make_client(response=FakeResponse(payload=LIST_RESPONSE))
+
+    data = client.list_inspections(
+        limit=10,
+        offset=0,
+        filename="  products  ",
+    )
+
+    assert data == LIST_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/inspections",
+            "params": {"limit": 10, "offset": 0, "filename": "products"},
+            "timeout": 5.0,
+        }
+    ]
+
+
+def test_list_inspections_omits_blank_filename():
+    client, session = make_client(response=FakeResponse(payload=LIST_RESPONSE))
+
+    client.list_inspections(filename="   ")
+
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/inspections",
+            "params": {"limit": 20, "offset": 0},
+            "timeout": 5.0,
+        }
+    ]
+
+
 def test_get_inspection_detail_calls_expected_endpoint_with_timeout():
     client, session = make_client(
         response=FakeResponse(payload=DETAIL_RESPONSE),
@@ -383,6 +416,15 @@ def test_list_inspections_rejects_invalid_pagination_without_request(limit, offs
 
     with pytest.raises(ValueError):
         client.list_inspections(limit=limit, offset=offset)
+
+    assert session.calls == []
+
+
+def test_list_inspections_rejects_too_long_filename_without_request():
+    client, session = make_client(response=FakeResponse(payload=LIST_RESPONSE))
+
+    with pytest.raises(ValueError):
+        client.list_inspections(filename="a" * 101)
 
     assert session.calls == []
 
