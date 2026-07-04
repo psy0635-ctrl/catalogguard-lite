@@ -1,4 +1,6 @@
 # 역할: InspectionReport를 하나의 트랜잭션으로 PostgreSQL에 저장합니다.
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import PurePath
 
 import pandas as pd
@@ -29,6 +31,18 @@ REQUIRED_RESULT_FIELDS = (
     "recommendation",
     "risk_level",
 )
+
+
+@dataclass(frozen=True)
+class InspectionDetail:
+    inspection_run_id: int
+    source_filename: str
+    created_at: datetime
+    total_products: int
+    total_issues: int
+    error_count: int
+    warning_count: int
+    results: list[InspectionResultCreate]
 
 
 def normalize_source_filename(source_filename: str | None) -> str:
@@ -142,3 +156,44 @@ def save_inspection_report(
         )
 
     return inspection_run.id
+
+
+def get_inspection_detail(
+    session: Session,
+    *,
+    inspection_run_id: int,
+) -> InspectionDetail | None:
+    inspection_run = repositories.get_inspection_run_by_id(
+        session,
+        inspection_run_id=inspection_run_id,
+    )
+    if inspection_run is None:
+        return None
+
+    inspection_results = repositories.get_inspection_results_by_run_id(
+        session,
+        inspection_run_id=inspection_run_id,
+    )
+    result_items = [
+        InspectionResultCreate(
+            product_group_id=result.product_group_id,
+            product_id=result.product_id,
+            status=result.status,
+            error_field=result.error_field,
+            reason=result.reason,
+            recommendation=result.recommendation,
+            risk_level=result.risk_level,
+        )
+        for result in inspection_results
+    ]
+
+    return InspectionDetail(
+        inspection_run_id=inspection_run.id,
+        source_filename=inspection_run.source_filename,
+        created_at=inspection_run.created_at,
+        total_products=inspection_run.total_products,
+        total_issues=inspection_run.total_issues,
+        error_count=inspection_run.error_count,
+        warning_count=inspection_run.warning_count,
+        results=result_items,
+    )

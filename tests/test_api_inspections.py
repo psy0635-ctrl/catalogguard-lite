@@ -1,4 +1,5 @@
 # 역할: FastAPI CSV 검수 엔드포인트의 성공, 오류, 개인정보 마스킹 응답을 테스트합니다.
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -41,6 +42,50 @@ ALL_COLUMNS = [*REQUIRED_COLUMNS, "description", "seller"]
 def fake_inspection_persistence(monkeypatch):
     fake_session = object()
     calls = []
+    detail_calls = []
+    detail_created_at = datetime(2026, 7, 4, 3, 30, tzinfo=timezone.utc)
+    detail_results = [
+        SimpleNamespace(
+            status="오류",
+            product_group_id="G002",
+            product_id="P003",
+            error_field="상품 ID 중복",
+            reason="동일한 상품 ID가 여러 상품에 사용되었습니다.",
+            recommendation="각 상품에 고유한 상품 ID를 입력하십시오.",
+            risk_level="높음",
+        ),
+        SimpleNamespace(
+            status="주의",
+            product_group_id="G003",
+            product_id="P004",
+            error_field="품절 상품",
+            reason="재고가 0개인 품절 상품입니다.",
+            recommendation="판매 상태와 재입고 여부를 확인하세요.",
+            risk_level="낮음",
+        ),
+    ]
+    fake_details = {
+        11: SimpleNamespace(
+            inspection_run_id=11,
+            source_filename="products_dev.csv",
+            created_at=detail_created_at,
+            total_products=5,
+            total_issues=2,
+            error_count=1,
+            warning_count=1,
+            results=detail_results,
+        ),
+        12: SimpleNamespace(
+            inspection_run_id=12,
+            source_filename="template.csv",
+            created_at=detail_created_at,
+            total_products=1,
+            total_issues=0,
+            error_count=0,
+            warning_count=0,
+            results=[],
+        ),
+    }
 
     def override_session():
         yield fake_session
@@ -55,6 +100,15 @@ def fake_inspection_persistence(monkeypatch):
         )
         return 123
 
+    def fake_get_inspection_detail(session, *, inspection_run_id):
+        detail_calls.append(
+            {
+                "session": session,
+                "inspection_run_id": inspection_run_id,
+            }
+        )
+        return fake_details.get(inspection_run_id)
+
     app.dependency_overrides[get_session] = override_session
     monkeypatch.setattr(
         inspections_route,
@@ -62,8 +116,14 @@ def fake_inspection_persistence(monkeypatch):
         fake_save_inspection_report,
         raising=False,
     )
+    monkeypatch.setattr(
+        inspections_route,
+        "get_inspection_detail",
+        fake_get_inspection_detail,
+        raising=False,
+    )
 
-    yield SimpleNamespace(session=fake_session, calls=calls)
+    yield SimpleNamespace(session=fake_session, calls=calls, detail_calls=detail_calls)
 
     app.dependency_overrides.clear()
 
@@ -95,6 +155,84 @@ def post_csv(
         ENDPOINT,
         files={"file": (filename, file_bytes, content_type)},
     )
+
+
+def test_get_inspection_api_returns_saved_inspection_detail(
+    fake_inspection_persistence,
+):
+    response = client.get(f"{ENDPOINT}/11")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["inspection_run_id"] == 11
+    assert data["source_filename"] == "products_dev.csv"
+    assert data["created_at"].startswith("2026-07-04T03:30:00")
+    assert data["summary"] == {
+        "total_products": 5,
+        "total_issues": 2,
+        "error_count": 1,
+        "warning_count": 1,
+    }
+    assert len(data["results"]) == 2
+    assert set(data["results"][0]) == {
+        "status",
+        "product_group_id",
+        "product_id",
+        "error_field",
+        "reason",
+        "recommendation",
+        "risk_level",
+    }
+    assert data["results"][0] == {
+        "status": "오류",
+        "product_group_id": "G002",
+        "product_id": "P003",
+        "error_field": "상품 ID 중복",
+        "reason": "동일한 상품 ID가 여러 상품에 사용되었습니다.",
+        "recommendation": "각 상품에 고유한 상품 ID를 입력하십시오.",
+        "risk_level": "높음",
+    }
+    assert len(fake_inspection_persistence.detail_calls) == 1
+    detail_call = fake_inspection_persistence.detail_calls[0]
+    assert detail_call["session"] is fake_inspection_persistence.session
+    assert detail_call["inspection_run_id"] == 11
+
+
+def test_get_inspection_api_returns_404_when_inspection_is_missing(
+    fake_inspection_persistence,
+):
+    response = client.get(f"{ENDPOINT}/999999")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "검수 실행 결과를 찾을 수 없습니다."}
+    assert len(fake_inspection_persistence.detail_calls) == 1
+    assert fake_inspection_persistence.detail_calls[0]["inspection_run_id"] == 999999
+
+
+def test_get_inspection_api_rejects_invalid_id_without_service_call(
+    fake_inspection_persistence,
+):
+    response = client.get(f"{ENDPOINT}/abc")
+
+    assert response.status_code == 422
+    assert fake_inspection_persistence.detail_calls == []
+
+
+def test_get_inspection_api_returns_empty_results(
+    fake_inspection_persistence,
+):
+    response = client.get(f"{ENDPOINT}/12")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["inspection_run_id"] == 12
+    assert data["summary"] == {
+        "total_products": 1,
+        "total_issues": 0,
+        "error_count": 0,
+        "warning_count": 0,
+    }
+    assert data["results"] == []
 
 
 def test_inspection_api_accepts_template_csv_with_no_issues():

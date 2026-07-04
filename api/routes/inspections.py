@@ -1,16 +1,21 @@
 # 역할: CSV 업로드 검수 API 엔드포인트와 응답 변환 로직을 제공합니다.
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 import pandas as pd
 from sqlalchemy.orm import Session
 
 from api.schemas import (
+    InspectionDetailResponse,
     InspectionResponse,
     InspectionResultItem,
     InspectionSummary,
 )
 from core.inspection_service import InspectionReport, inspect_uploaded_csv
 from core.upload_validator import CsvUploadValidationError
-from db.persistence_service import save_inspection_report
+from db.persistence_service import (
+    InspectionDetail,
+    get_inspection_detail,
+    save_inspection_report,
+)
 from db.session import get_session
 
 
@@ -65,6 +70,36 @@ def build_inspection_response(
     )
 
 
+def build_inspection_detail_response(
+    detail: InspectionDetail,
+) -> InspectionDetailResponse:
+    result_items = [
+        InspectionResultItem(
+            status=_clean_text_value(result.status),
+            product_group_id=_clean_text_value(result.product_group_id),
+            product_id=_clean_text_value(result.product_id),
+            error_field=_clean_text_value(result.error_field),
+            reason=_clean_text_value(result.reason),
+            recommendation=_clean_text_value(result.recommendation),
+            risk_level=_clean_text_value(result.risk_level),
+        )
+        for result in detail.results
+    ]
+
+    return InspectionDetailResponse(
+        inspection_run_id=detail.inspection_run_id,
+        source_filename=detail.source_filename,
+        created_at=detail.created_at,
+        summary=InspectionSummary(
+            total_products=detail.total_products,
+            total_issues=detail.total_issues,
+            error_count=detail.error_count,
+            warning_count=detail.warning_count,
+        ),
+        results=result_items,
+    )
+
+
 @router.post(
     "/api/v1/inspections",
     response_model=InspectionResponse,
@@ -90,3 +125,24 @@ async def create_inspection(
         report,
         inspection_run_id=inspection_run_id,
     )
+
+
+@router.get(
+    "/api/v1/inspections/{inspection_run_id}",
+    response_model=InspectionDetailResponse,
+)
+def get_inspection(
+    inspection_run_id: int,
+    session: Session = Depends(get_session),
+) -> InspectionDetailResponse:
+    detail = get_inspection_detail(
+        session,
+        inspection_run_id=inspection_run_id,
+    )
+    if detail is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="검수 실행 결과를 찾을 수 없습니다.",
+        )
+
+    return build_inspection_detail_response(detail)

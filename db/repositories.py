@@ -2,6 +2,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db.models import InspectionResult, InspectionRun
@@ -67,3 +68,24 @@ def create_inspection_results(
     # 여기서도 commit하지 않아야 상위 트랜잭션이 전체 성공/실패를 결정할 수 있습니다.
     session.flush()
     return inspection_results
+
+
+def get_inspection_run_by_id(
+    session: Session,
+    *,
+    inspection_run_id: int,
+) -> InspectionRun | None:
+    return session.get(InspectionRun, inspection_run_id)
+
+
+def get_inspection_results_by_run_id(
+    session: Session,
+    *,
+    inspection_run_id: int,
+) -> list[InspectionResult]:
+    statement = (
+        select(InspectionResult)
+        .where(InspectionResult.inspection_run_id == inspection_run_id)
+        .order_by(InspectionResult.id.asc())
+    )
+    return list(session.scalars(statement).all())

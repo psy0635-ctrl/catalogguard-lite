@@ -1,4 +1,6 @@
 # 역할: CSV 검수 API가 반환하는 JSON 응답 구조를 Pydantic 모델로 정의합니다.
+from datetime import datetime
+
 from pydantic import BaseModel
 
 
@@ -27,3 +29,9 @@ class InspectionResponse(BaseModel):
     inspection_run_id: int
     summary: InspectionSummary
     results: list[InspectionResultItem]
+
+
+class InspectionDetailResponse(InspectionResponse):
+    # 저장된 검수 실행을 조회할 때는 파일명과 저장 시각도 함께 반환합니다.
+    source_filename: str
+    created_at: datetime

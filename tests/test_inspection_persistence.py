@@ -12,7 +12,7 @@ from config.database import get_optional_database_url
 from core.inspection_service import InspectionSummary, inspect_dataframe
 from core.product_template import build_product_template_csv, get_product_template_filename
 from core.upload_validator import validate_and_read_uploaded_csv
-from db import persistence_service
+from db import persistence_service, repositories
 from db.models import InspectionResult, InspectionRun
 from db.persistence_service import (
     build_result_create_items,
@@ -363,6 +363,243 @@ def test_save_inspection_report_rolls_back_when_result_insert_fails(
             .limit(1)
         )
         assert persisted_run_count is None
+
+
+def test_get_inspection_detail_returns_none_when_run_is_missing(monkeypatch):
+    session = object()
+    calls = []
+
+    def fake_get_inspection_run_by_id(session_arg, *, inspection_run_id):
+        calls.append((session_arg, inspection_run_id))
+        return None
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "get_inspection_run_by_id",
+        fake_get_inspection_run_by_id,
+        raising=False,
+    )
+
+    detail = persistence_service.get_inspection_detail(
+        session,
+        inspection_run_id=999999,
+    )
+
+    assert detail is None
+    assert calls == [(session, 999999)]
+
+
+def test_get_inspection_detail_maps_repository_rows(monkeypatch):
+    session = object()
+    created_at = pd.Timestamp("2026-07-04T12:30:00+09:00").to_pydatetime()
+    run = SimpleNamespace(
+        id=11,
+        source_filename="products_dev.csv",
+        total_products=5,
+        total_issues=2,
+        error_count=1,
+        warning_count=1,
+        created_at=created_at,
+    )
+    result_rows = [
+        SimpleNamespace(
+            product_group_id="G002",
+            product_id="P003",
+            status="오류",
+            error_field="상품 ID 중복",
+            reason="동일한 상품 ID가 여러 상품에 사용되었습니다.",
+            recommendation="각 상품에 고유한 상품 ID를 입력하십시오.",
+            risk_level="높음",
+        ),
+        SimpleNamespace(
+            product_group_id="G003",
+            product_id="P004",
+            status="주의",
+            error_field="품절 상품",
+            reason="재고가 0개인 품절 상품입니다.",
+            recommendation="판매 상태와 재입고 여부를 확인하세요.",
+            risk_level="낮음",
+        ),
+    ]
+    calls = []
+
+    def fake_get_inspection_run_by_id(session_arg, *, inspection_run_id):
+        calls.append(("run", session_arg, inspection_run_id))
+        return run
+
+    def fake_get_inspection_results_by_run_id(session_arg, *, inspection_run_id):
+        calls.append(("results", session_arg, inspection_run_id))
+        return result_rows
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "get_inspection_run_by_id",
+        fake_get_inspection_run_by_id,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "get_inspection_results_by_run_id",
+        fake_get_inspection_results_by_run_id,
+        raising=False,
+    )
+
+    detail = persistence_service.get_inspection_detail(
+        session,
+        inspection_run_id=11,
+    )
+
+    assert detail.inspection_run_id == 11
+    assert detail.source_filename == "products_dev.csv"
+    assert detail.created_at == created_at
+    assert detail.total_products == 5
+    assert detail.total_issues == 2
+    assert detail.error_count == 1
+    assert detail.warning_count == 1
+    assert [item.status for item in detail.results] == ["오류", "주의"]
+    assert detail.results[0].error_field == "상품 ID 중복"
+    assert calls == [
+        ("run", session, 11),
+        ("results", session, 11),
+    ]
+
+
+def test_get_inspection_detail_handles_zero_result_run(monkeypatch):
+    session = object()
+    run = SimpleNamespace(
+        id=12,
+        source_filename="template.csv",
+        total_products=1,
+        total_issues=0,
+        error_count=0,
+        warning_count=0,
+        created_at=pd.Timestamp("2026-07-04T12:30:00+09:00").to_pydatetime(),
+    )
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "get_inspection_run_by_id",
+        lambda session, *, inspection_run_id: run,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "get_inspection_results_by_run_id",
+        lambda session, *, inspection_run_id: [],
+        raising=False,
+    )
+
+    detail = persistence_service.get_inspection_detail(
+        session,
+        inspection_run_id=12,
+    )
+
+    assert detail.total_issues == 0
+    assert detail.error_count == 0
+    assert detail.warning_count == 0
+    assert detail.results == []
+
+
+def test_repository_get_inspection_run_by_id_returns_saved_run(database_session):
+    session, created_source_filenames = database_session
+    source_filename = unique_filename("lookup")
+    created_source_filenames.append(source_filename)
+    report = make_report([{**BASE_ROW, "price": "0"}])
+    inspection_run_id = save_inspection_report(
+        session,
+        source_filename=source_filename,
+        report=report,
+    )
+
+    persisted_run = repositories.get_inspection_run_by_id(
+        session,
+        inspection_run_id=inspection_run_id,
+    )
+
+    assert persisted_run is not None
+    assert persisted_run.id == inspection_run_id
+    assert persisted_run.source_filename == source_filename
+
+
+def test_repository_get_inspection_run_by_id_returns_none_for_missing_run(
+    database_session,
+):
+    session, _ = database_session
+
+    assert (
+        repositories.get_inspection_run_by_id(
+            session,
+            inspection_run_id=-1,
+        )
+        is None
+    )
+
+
+def test_repository_get_inspection_results_by_run_id_filters_and_orders_results(
+    database_session,
+):
+    session, created_source_filenames = database_session
+    first_source_filename = unique_filename("lookup_results_first")
+    second_source_filename = unique_filename("lookup_results_second")
+    created_source_filenames.extend([first_source_filename, second_source_filename])
+    first_report = make_report(
+        [
+            BASE_ROW,
+            {
+                **BASE_ROW,
+                "product_group_id": "G002",
+                "product_id": "P001",
+                "product_name": "다른 상품",
+                "price": "0",
+            },
+        ]
+    )
+    second_report = make_report([{**BASE_ROW, "price": "0"}])
+    first_run_id = save_inspection_report(
+        session,
+        source_filename=first_source_filename,
+        report=first_report,
+    )
+    second_run_id = save_inspection_report(
+        session,
+        source_filename=second_source_filename,
+        report=second_report,
+    )
+
+    results = repositories.get_inspection_results_by_run_id(
+        session,
+        inspection_run_id=first_run_id,
+    )
+
+    assert results
+    assert [result.id for result in results] == sorted(result.id for result in results)
+    assert all(result.inspection_run_id == first_run_id for result in results)
+    assert all(result.inspection_run_id != second_run_id for result in results)
+
+
+def test_repository_get_inspection_results_by_run_id_returns_empty_list(
+    database_session,
+):
+    session, created_source_filenames = database_session
+    source_filename = unique_filename("lookup_empty")
+    created_source_filenames.append(source_filename)
+    dataframe = validate_and_read_uploaded_csv(
+        get_product_template_filename(),
+        build_product_template_csv(),
+    )
+    report = inspect_dataframe(dataframe)
+    inspection_run_id = save_inspection_report(
+        session,
+        source_filename=source_filename,
+        report=report,
+    )
+
+    results = repositories.get_inspection_results_by_run_id(
+        session,
+        inspection_run_id=inspection_run_id,
+    )
+
+    assert results == []
 
 
 def test_persistence_imports_without_database_url(monkeypatch):
