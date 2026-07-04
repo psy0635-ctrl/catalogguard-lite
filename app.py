@@ -1,6 +1,7 @@
 # 역할: 사용자가 CSV를 업로드하고 검수 결과를 확인하는 Streamlit 웹 화면입니다.
 import ast
 import hashlib
+import re
 from datetime import datetime
 from math import ceil
 
@@ -52,6 +53,7 @@ HISTORY_DETAIL_DISPLAY_COLUMNS = [
     "수정 권장사항",
     "위험 수준",
 ]
+WINDOWS_RESERVED_FILENAME_CHARS = re.compile(r'[\\/:\*\?"<>\|]+')
 
 
 def format_value_error(error: ValueError) -> str:
@@ -176,6 +178,36 @@ def build_history_detail_dataframe(results: list[dict]) -> pd.DataFrame:
         for result in results
     ]
     return pd.DataFrame(rows, columns=HISTORY_DETAIL_DISPLAY_COLUMNS)
+
+
+def build_history_detail_csv(dataframe: pd.DataFrame) -> bytes:
+    ordered_dataframe = dataframe.reindex(columns=HISTORY_DETAIL_DISPLAY_COLUMNS)
+    return ordered_dataframe.to_csv(index=False).encode("utf-8-sig")
+
+
+def build_history_download_filename(
+    inspection_run_id: int,
+    source_filename: str | None,
+) -> str:
+    run_id_text = WINDOWS_RESERVED_FILENAME_CHARS.sub(
+        "_",
+        str(inspection_run_id).strip() or "unknown",
+    ).strip(" ._")
+    raw_source_name = str(source_filename or "").strip()
+    if raw_source_name.lower().endswith(".csv"):
+        raw_source_name = raw_source_name[:-4]
+    safe_source_name = WINDOWS_RESERVED_FILENAME_CHARS.sub(
+        "_",
+        raw_source_name,
+    ).strip(" ._")
+    if not safe_source_name:
+        safe_source_name = "inspection"
+
+    return f"inspection_{run_id_text}_{safe_source_name}_results.csv"
+
+
+def should_show_history_detail_download(dataframe: pd.DataFrame) -> bool:
+    return not dataframe.empty
 
 
 def initialize_history_state() -> None:
@@ -533,7 +565,7 @@ def render_inspection_history_detail(api_client) -> None:
     warning_col.metric("주의", summary.get("warning_count", 0))
 
     detail_dataframe = build_history_detail_dataframe(detail_response.get("results", []))
-    if detail_dataframe.empty:
+    if not should_show_history_detail_download(detail_dataframe):
         st.info("이 검수 실행에서 발견된 문제가 없습니다.")
         return
 
@@ -542,6 +574,15 @@ def render_inspection_history_detail(api_client) -> None:
         height=calculate_dataframe_height(len(detail_dataframe)),
         use_container_width=True,
         hide_index=True,
+    )
+    st.download_button(
+        "상세 결과 CSV 다운로드",
+        data=build_history_detail_csv(detail_dataframe),
+        file_name=build_history_download_filename(
+            inspection_run_id,
+            detail_response.get("source_filename", ""),
+        ),
+        mime="text/csv",
     )
 
 
