@@ -1,14 +1,20 @@
 # 역할: FastAPI CSV 검수 엔드포인트의 성공, 오류, 개인정보 마스킹 응답을 테스트합니다.
+from types import SimpleNamespace
+
+import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from api.routes import inspections as inspections_route
 from config.settings import (
     DEV_DATA_PATH,
     MAX_CSV_ROWS,
     MAX_UPLOAD_SIZE_BYTES,
     REQUIRED_COLUMNS,
 )
+from core.inspection_service import InspectionReport
 from core.product_template import build_product_template_csv, get_product_template_filename
+from db.session import get_session
 
 
 client = TestClient(app)
@@ -29,6 +35,37 @@ BASE_ROW = {
 }
 
 ALL_COLUMNS = [*REQUIRED_COLUMNS, "description", "seller"]
+
+
+@pytest.fixture(autouse=True)
+def fake_inspection_persistence(monkeypatch):
+    fake_session = object()
+    calls = []
+
+    def override_session():
+        yield fake_session
+
+    def fake_save_inspection_report(session, *, source_filename, report):
+        calls.append(
+            {
+                "session": session,
+                "source_filename": source_filename,
+                "report": report,
+            }
+        )
+        return 123
+
+    app.dependency_overrides[get_session] = override_session
+    monkeypatch.setattr(
+        inspections_route,
+        "save_inspection_report",
+        fake_save_inspection_report,
+        raising=False,
+    )
+
+    yield SimpleNamespace(session=fake_session, calls=calls)
+
+    app.dependency_overrides.clear()
 
 
 def make_csv_text(
@@ -68,6 +105,7 @@ def test_inspection_api_accepts_template_csv_with_no_issues():
 
     assert response.status_code == 200
     assert response.json() == {
+        "inspection_run_id": 123,
         "summary": {
             "total_products": 1,
             "total_issues": 0,
@@ -76,6 +114,26 @@ def test_inspection_api_accepts_template_csv_with_no_issues():
         },
         "results": [],
     }
+
+
+def test_inspection_api_persists_report_and_returns_inspection_run_id(
+    fake_inspection_persistence,
+):
+    response = post_csv(DEV_DATA_PATH.read_bytes(), filename="products_dev.csv")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["inspection_run_id"] == 123
+    assert isinstance(data["inspection_run_id"], int)
+    assert len(fake_inspection_persistence.calls) == 1
+
+    call = fake_inspection_persistence.calls[0]
+    assert call["session"] is fake_inspection_persistence.session
+    assert call["source_filename"] == "products_dev.csv"
+    assert isinstance(call["report"], InspectionReport)
+    assert call["report"].summary.total_products == data["summary"]["total_products"]
+    assert call["report"].summary.total_issues == data["summary"]["total_issues"]
+    assert len(call["report"].result_dataframe) == data["summary"]["total_issues"]
 
 
 def test_inspection_api_returns_expected_products_dev_summary():
@@ -138,6 +196,15 @@ def test_inspection_api_rejects_empty_file():
 
     assert response.status_code == 400
     assert response.json()["detail"] == "업로드한 파일이 비어 있습니다."
+
+
+def test_inspection_api_does_not_persist_when_csv_validation_fails(
+    fake_inspection_persistence,
+):
+    response = post_csv(b"")
+
+    assert response.status_code == 400
+    assert fake_inspection_persistence.calls == []
 
 
 def test_inspection_api_rejects_bad_csv_quotes():
