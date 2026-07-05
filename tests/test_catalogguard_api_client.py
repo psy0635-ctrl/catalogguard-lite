@@ -38,6 +38,30 @@ DETAIL_RESPONSE = {
 
 CREATE_RESPONSE = {
     "inspection_run_id": 12,
+    "created": True,
+    "summary": {
+        "total_products": 5,
+        "total_issues": 6,
+        "error_count": 6,
+        "warning_count": 0,
+    },
+    "results": [],
+}
+
+CREATE_RESPONSE_WITHOUT_CREATED = {
+    "inspection_run_id": 12,
+    "summary": {
+        "total_products": 5,
+        "total_issues": 6,
+        "error_count": 6,
+        "warning_count": 0,
+    },
+    "results": [],
+}
+
+CREATE_DUPLICATE_RESPONSE = {
+    "inspection_run_id": 11,
+    "created": False,
     "summary": {
         "total_products": 5,
         "total_issues": 6,
@@ -240,6 +264,45 @@ def test_create_inspection_posts_multipart_file_with_timeout():
             "timeout": 8.5,
         }
     ]
+
+
+def test_create_inspection_defaults_missing_created_to_true():
+    client, _ = make_client(
+        response=FakeResponse(payload=CREATE_RESPONSE_WITHOUT_CREATED),
+    )
+
+    data = client.create_inspection(
+        source_filename="products_dev.csv",
+        file_content=b"product_id,price\nP001,1000\n",
+    )
+
+    assert data == {**CREATE_RESPONSE_WITHOUT_CREATED, "created": True}
+
+
+def test_create_inspection_preserves_created_false():
+    client, _ = make_client(response=FakeResponse(payload=CREATE_DUPLICATE_RESPONSE))
+
+    data = client.create_inspection(
+        source_filename="products_dev.csv",
+        file_content=b"product_id,price\nP001,1000\n",
+    )
+
+    assert data == CREATE_DUPLICATE_RESPONSE
+
+
+@pytest.mark.parametrize("created_value", ["false", 0, 1, None])
+def test_create_inspection_rejects_non_bool_created(created_value):
+    client_module = import_client_module()
+    payload = {**CREATE_RESPONSE, "created": created_value}
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.create_inspection(
+            source_filename="products_dev.csv",
+            file_content=b"product_id,price\nP001,1000\n",
+        )
+
+    assert "검수 이력 서버의 응답 형식이 올바르지 않습니다." in str(error.value)
 
 
 def test_list_inspections_converts_connection_error_without_leaking_url():

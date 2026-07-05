@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -40,7 +41,22 @@ class InspectionRun(Base):
             "warning_count >= 0",
             name="ck_inspection_runs_warning_count_non_negative",
         ),
+        CheckConstraint(
+            "file_sha256 IS NULL OR length(file_sha256) = 64",
+            name="ck_inspection_runs_file_sha256_length",
+        ),
+        CheckConstraint(
+            "length(trim(inspection_version)) > 0",
+            name="ck_inspection_runs_inspection_version_not_blank",
+        ),
         Index("ix_inspection_runs_created_at", "created_at"),
+        Index(
+            "ux_inspection_runs_file_sha256_inspection_version",
+            "file_sha256",
+            "inspection_version",
+            unique=True,
+            postgresql_where=text("file_sha256 IS NOT NULL"),
+        ),
     )
 
     # PostgreSQL에서 자동 증가하는 기본키입니다.
@@ -50,6 +66,11 @@ class InspectionRun(Base):
         autoincrement=True,
     )
     source_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    inspection_version: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+    )
     total_products: Mapped[int] = mapped_column(Integer, nullable=False)
     total_issues: Mapped[int] = mapped_column(Integer, nullable=False)
     error_count: Mapped[int] = mapped_column(Integer, nullable=False)

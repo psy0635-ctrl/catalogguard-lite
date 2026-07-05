@@ -1,4 +1,6 @@
 # 역할: CSV 업로드 검수 API 엔드포인트와 응답 변환 로직을 제공합니다.
+import hashlib
+
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -11,6 +13,7 @@ from api.schemas import (
     InspectionResultItem,
     InspectionSummary,
 )
+from config.settings import INSPECTION_VERSION
 from core.inspection_service import InspectionReport, inspect_uploaded_csv
 from core.upload_validator import CsvUploadValidationError
 from db.persistence_service import (
@@ -51,6 +54,7 @@ def build_inspection_response(
     report: InspectionReport,
     *,
     inspection_run_id: int,
+    created: bool = True,
 ) -> InspectionResponse:
     # 공통 검수 서비스가 만든 InspectionReport를 FastAPI 응답 모델로 변환합니다.
     result_items = []
@@ -64,6 +68,7 @@ def build_inspection_response(
 
     return InspectionResponse(
         inspection_run_id=inspection_run_id,
+        created=created,
         summary=InspectionSummary(
             total_products=report.summary.total_products,
             total_issues=report.summary.total_issues,
@@ -76,6 +81,8 @@ def build_inspection_response(
 
 def build_inspection_detail_response(
     detail: InspectionDetail,
+    *,
+    created: bool = True,
 ) -> InspectionDetailResponse:
     result_items = [
         InspectionResultItem(
@@ -92,6 +99,7 @@ def build_inspection_detail_response(
 
     return InspectionDetailResponse(
         inspection_run_id=detail.inspection_run_id,
+        created=created,
         source_filename=detail.source_filename,
         created_at=detail.created_at,
         summary=InspectionSummary(
@@ -162,21 +170,37 @@ async def create_inspection(
     session: Session = Depends(get_session),
 ) -> InspectionResponse:
     file_bytes = await file.read()
+    file_sha256 = hashlib.sha256(file_bytes).hexdigest()
 
     try:
         report = inspect_uploaded_csv(file.filename, file_bytes)
     except CsvUploadValidationError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
-    inspection_run_id = save_inspection_report(
+    save_outcome = save_inspection_report(
         session,
         source_filename=file.filename,
         report=report,
+        file_sha256=file_sha256,
+        inspection_version=INSPECTION_VERSION,
     )
+
+    if not save_outcome.created:
+        detail = get_inspection_detail(
+            session,
+            inspection_run_id=save_outcome.inspection_run_id,
+        )
+        if detail is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="중복 검수 이력 조회에 실패했습니다.",
+            )
+        return build_inspection_detail_response(detail, created=False)
 
     return build_inspection_response(
         report,
-        inspection_run_id=inspection_run_id,
+        inspection_run_id=save_outcome.inspection_run_id,
+        created=True,
     )
 
 

@@ -27,6 +27,7 @@ class InspectionResultItem(BaseModel):
 class InspectionResponse(BaseModel):
     # 최종 응답은 요약(summary)과 문제 목록(results)으로 구성됩니다.
     inspection_run_id: int
+    created: bool = True
     summary: InspectionSummary
     results: list[InspectionResultItem]
 

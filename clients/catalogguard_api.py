@@ -120,7 +120,7 @@ class CatalogGuardApiClient:
             },
         )
         self._validate_response_keys(data, CREATE_RESPONSE_KEYS)
-        return data
+        return self._normalize_create_response(data)
 
     def get_inspection_detail(self, inspection_run_id: int) -> dict[str, Any]:
         if inspection_run_id <= 0:
@@ -231,6 +231,16 @@ class CatalogGuardApiClient:
     ) -> None:
         if any(key not in data for key in required_keys):
             raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+
+    def _normalize_create_response(self, data: dict[str, Any]) -> dict[str, Any]:
+        normalized_data = dict(data)
+        if "created" not in normalized_data:
+            normalized_data["created"] = True
+            return normalized_data
+
+        if type(normalized_data["created"]) is not bool:
+            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+        return normalized_data
 
 
 def create_catalogguard_api_client() -> CatalogGuardApiClient:

@@ -1,4 +1,5 @@
 # 역할: FastAPI CSV 검수 엔드포인트의 성공, 오류, 개인정보 마스킹 응답을 테스트합니다.
+import hashlib
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ from api.main import app
 from api.routes import inspections as inspections_route
 from config.settings import (
     DEV_DATA_PATH,
+    INSPECTION_VERSION,
     MAX_CSV_ROWS,
     MAX_UPLOAD_SIZE_BYTES,
     REQUIRED_COLUMNS,
@@ -65,6 +67,7 @@ def fake_inspection_persistence(monkeypatch):
         ),
     ]
     list_calls = []
+    save_state = SimpleNamespace(mode="created")
     list_state = SimpleNamespace(mode="default")
     list_created_at = datetime(2026, 7, 4, 4, 30, tzinfo=timezone.utc)
     default_list = SimpleNamespace(
@@ -134,15 +137,26 @@ def fake_inspection_persistence(monkeypatch):
     def override_session():
         yield fake_session
 
-    def fake_save_inspection_report(session, *, source_filename, report):
+    def fake_save_inspection_report(
+        session,
+        *,
+        source_filename,
+        report,
+        file_sha256=None,
+        inspection_version=None,
+    ):
         calls.append(
             {
                 "session": session,
                 "source_filename": source_filename,
                 "report": report,
+                "file_sha256": file_sha256,
+                "inspection_version": inspection_version,
             }
         )
-        return 123
+        if save_state.mode == "duplicate":
+            return SimpleNamespace(inspection_run_id=11, created=False)
+        return SimpleNamespace(inspection_run_id=123, created=True)
 
     def fake_get_inspection_detail(session, *, inspection_run_id):
         detail_calls.append(
@@ -194,6 +208,7 @@ def fake_inspection_persistence(monkeypatch):
         detail_calls=detail_calls,
         list_calls=list_calls,
         list_state=list_state,
+        save_state=save_state,
     )
 
     app.dependency_overrides.clear()
@@ -448,6 +463,7 @@ def test_inspection_api_accepts_template_csv_with_no_issues():
     assert response.status_code == 200
     assert response.json() == {
         "inspection_run_id": 123,
+        "created": True,
         "summary": {
             "total_products": 1,
             "total_issues": 0,
@@ -467,15 +483,47 @@ def test_inspection_api_persists_report_and_returns_inspection_run_id(
     data = response.json()
     assert data["inspection_run_id"] == 123
     assert isinstance(data["inspection_run_id"], int)
+    assert data["created"] is True
     assert len(fake_inspection_persistence.calls) == 1
 
     call = fake_inspection_persistence.calls[0]
     assert call["session"] is fake_inspection_persistence.session
     assert call["source_filename"] == "products_dev.csv"
+    assert call["file_sha256"] == hashlib.sha256(DEV_DATA_PATH.read_bytes()).hexdigest()
+    assert call["inspection_version"] == INSPECTION_VERSION
     assert isinstance(call["report"], InspectionReport)
     assert call["report"].summary.total_products == data["summary"]["total_products"]
     assert call["report"].summary.total_issues == data["summary"]["total_issues"]
     assert len(call["report"].result_dataframe) == data["summary"]["total_issues"]
+
+
+def test_inspection_api_returns_existing_detail_when_duplicate(
+    fake_inspection_persistence,
+):
+    fake_inspection_persistence.save_state.mode = "duplicate"
+
+    response = post_csv(DEV_DATA_PATH.read_bytes(), filename="renamed.csv")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["inspection_run_id"] == 11
+    assert data["created"] is False
+    assert data["summary"] == {
+        "total_products": 5,
+        "total_issues": 2,
+        "error_count": 1,
+        "warning_count": 1,
+    }
+    assert [item["error_field"] for item in data["results"]] == [
+        "상품 ID 중복",
+        "품절 상품",
+    ]
+    assert fake_inspection_persistence.detail_calls == [
+        {
+            "session": fake_inspection_persistence.session,
+            "inspection_run_id": 11,
+        }
+    ]
 
 
 def test_inspection_api_returns_expected_products_dev_summary():

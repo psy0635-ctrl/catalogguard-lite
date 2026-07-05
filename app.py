@@ -107,6 +107,39 @@ def mark_inspection_saved(
     session_state["saved_inspection_run_id"] = inspection_run_id
 
 
+def build_inspection_save_message(
+    *,
+    inspection_run_id: int,
+    created: bool,
+) -> str:
+    if created:
+        return f"검수 이력에 저장되었습니다. 실행 ID: {inspection_run_id}"
+    return f"이미 검수 이력에 저장된 파일입니다. 실행 ID: {inspection_run_id}"
+
+
+def apply_inspection_save_response(
+    session_state,
+    *,
+    file_hash: str,
+    response: dict,
+) -> tuple[int, bool, str]:
+    inspection_run_id = int(response["inspection_run_id"])
+    created = bool(response.get("created", True))
+    mark_inspection_saved(
+        session_state,
+        file_hash=file_hash,
+        inspection_run_id=inspection_run_id,
+    )
+    return (
+        inspection_run_id,
+        created,
+        build_inspection_save_message(
+            inspection_run_id=inspection_run_id,
+            created=created,
+        ),
+    )
+
+
 def calculate_history_pagination(
     *,
     total: int,
@@ -312,7 +345,11 @@ def render_inspection_save_button(
                 file_content=file_bytes,
                 content_type=content_type,
             )
-            inspection_run_id = int(response["inspection_run_id"])
+            _, created, message = apply_inspection_save_response(
+                st.session_state,
+                file_hash=file_hash,
+                response=response,
+            )
         except CatalogGuardApiConfigurationError:
             render_inspection_save_failure(
                 "검수 이력 API 주소가 설정되지 않았습니다."
@@ -332,12 +369,10 @@ def render_inspection_save_button(
             )
             return
 
-        mark_inspection_saved(
-            st.session_state,
-            file_hash=file_hash,
-            inspection_run_id=inspection_run_id,
-        )
-        st.success(f"검수 이력에 저장되었습니다. 실행 ID: {inspection_run_id}")
+        if created:
+            st.success(message)
+        else:
+            st.info(message)
         return
 
     if saved_inspection_run_id is not None:

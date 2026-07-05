@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from config.settings import INSPECTION_VERSION
 from db.models import InspectionResult, InspectionRun
 
 LIKE_ESCAPE_CHARACTER = "\\"
@@ -30,10 +31,14 @@ def create_inspection_run(
     total_issues: int,
     error_count: int,
     warning_count: int,
+    file_sha256: str | None = None,
+    inspection_version: str = INSPECTION_VERSION,
 ) -> InspectionRun:
     # Repository는 DB 객체 생성과 flush만 담당하고, commit은 Service가 담당합니다.
     inspection_run = InspectionRun(
         source_filename=source_filename,
+        file_sha256=file_sha256,
+        inspection_version=inspection_version,
         total_products=total_products,
         total_issues=total_issues,
         error_count=error_count,
@@ -78,6 +83,24 @@ def get_inspection_run_by_id(
     inspection_run_id: int,
 ) -> InspectionRun | None:
     return session.get(InspectionRun, inspection_run_id)
+
+
+def get_inspection_run_by_file_identity(
+    session: Session,
+    *,
+    file_sha256: str | None,
+    inspection_version: str,
+) -> InspectionRun | None:
+    if file_sha256 is None:
+        return None
+
+    statement = (
+        select(InspectionRun)
+        .where(InspectionRun.file_sha256 == file_sha256)
+        .where(InspectionRun.inspection_version == inspection_version)
+        .limit(1)
+    )
+    return session.scalar(statement)
 
 
 def get_inspection_results_by_run_id(

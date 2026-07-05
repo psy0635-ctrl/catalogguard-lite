@@ -33,6 +33,8 @@ def test_inspection_runs_columns_and_types():
     assert set(columns.keys()) == {
         "id",
         "source_filename",
+        "file_sha256",
+        "inspection_version",
         "total_products",
         "total_issues",
         "error_count",
@@ -43,6 +45,13 @@ def test_inspection_runs_columns_and_types():
     assert columns.id.primary_key
     assert isinstance(columns.source_filename.type, String)
     assert columns.source_filename.type.length == 255
+    assert isinstance(columns.file_sha256.type, String)
+    assert columns.file_sha256.type.length == 64
+    assert columns.file_sha256.nullable is True
+    assert isinstance(columns.inspection_version.type, String)
+    assert columns.inspection_version.type.length == 20
+    assert columns.inspection_version.nullable is False
+    assert columns.inspection_version.server_default is None
     assert isinstance(columns.total_products.type, Integer)
     assert isinstance(columns.total_issues.type, Integer)
     assert isinstance(columns.error_count.type, Integer)
@@ -123,6 +132,9 @@ def test_expected_indexes_are_present():
     assert "ix_inspection_runs_created_at" in get_index_names(
         InspectionRun.__table__
     )
+    assert "ux_inspection_runs_file_sha256_inspection_version" in get_index_names(
+        InspectionRun.__table__
+    )
     assert {
         "ix_inspection_results_inspection_run_id",
         "ix_inspection_results_product_id",
@@ -138,7 +150,26 @@ def test_inspection_run_count_columns_have_non_negative_constraints():
         "ck_inspection_runs_total_issues_non_negative",
         "ck_inspection_runs_error_count_non_negative",
         "ck_inspection_runs_warning_count_non_negative",
+        "ck_inspection_runs_file_sha256_length",
+        "ck_inspection_runs_inspection_version_not_blank",
     }.issubset(constraint_names)
+
+
+def test_file_identity_unique_index_is_partial_for_non_null_hashes():
+    index = next(
+        index
+        for index in InspectionRun.__table__.indexes
+        if index.name == "ux_inspection_runs_file_sha256_inspection_version"
+    )
+
+    assert index.unique is True
+    assert [column.name for column in index.columns] == [
+        "file_sha256",
+        "inspection_version",
+    ]
+    where_clause = index.dialect_options["postgresql"]["where"]
+    assert where_clause is not None
+    assert "file_sha256 IS NOT NULL" in str(where_clause)
 
 
 def test_existing_apps_and_database_models_import_without_database_url(monkeypatch):

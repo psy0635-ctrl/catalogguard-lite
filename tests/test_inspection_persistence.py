@@ -1,4 +1,5 @@
 # 역할: 검수 결과 저장 Service와 Repository가 PostgreSQL에 안전하게 저장하는지 테스트합니다.
+import hashlib
 import importlib
 import sys
 from types import SimpleNamespace
@@ -6,15 +7,19 @@ from uuid import uuid4
 
 import pandas as pd
 import pytest
-from sqlalchemy import delete, event, select
+from sqlalchemy import delete, event, func, select
+from sqlalchemy.exc import IntegrityError
 
 from config.database import get_optional_database_url
+from config.settings import INSPECTION_VERSION
 from core.inspection_service import InspectionSummary, inspect_dataframe
 from core.product_template import build_product_template_csv, get_product_template_filename
 from core.upload_validator import validate_and_read_uploaded_csv
 from db import persistence_service, repositories
 from db.models import InspectionResult, InspectionRun
 from db.persistence_service import (
+    FILE_IDENTITY_UNIQUE_INDEX_NAME,
+    InspectionSaveOutcome,
     build_result_create_items,
     normalize_source_filename,
     save_inspection_report,
@@ -123,6 +128,60 @@ def unique_filename(prefix: str = "products") -> str:
     return f"{prefix}_{uuid4().hex}.csv"
 
 
+def make_file_hash(value: bytes = b"same csv bytes") -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def save_inspection_report_id(*args, **kwargs) -> int:
+    return save_inspection_report(*args, **kwargs).inspection_run_id
+
+
+def count_inspection_runs(session, *, file_sha256: str | None = None) -> int:
+    statement = select(func.count()).select_from(InspectionRun)
+    if file_sha256 is not None:
+        statement = statement.where(InspectionRun.file_sha256 == file_sha256)
+    return int(session.scalar(statement) or 0)
+
+
+def count_inspection_results(session, *, inspection_run_id: int | None = None) -> int:
+    statement = select(func.count()).select_from(InspectionResult)
+    if inspection_run_id is not None:
+        statement = statement.where(
+            InspectionResult.inspection_run_id == inspection_run_id
+        )
+    return int(session.scalar(statement) or 0)
+
+
+class FakePostgresIntegrityOrig(Exception):
+    def __init__(self, constraint_name: str):
+        super().__init__(constraint_name)
+        self.diag = SimpleNamespace(constraint_name=constraint_name)
+
+
+class FakeTransaction:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+
+class FakeSession:
+    def begin(self):
+        return FakeTransaction()
+
+    def begin_nested(self):
+        return FakeTransaction()
+
+
+def make_integrity_error(constraint_name: str = FILE_IDENTITY_UNIQUE_INDEX_NAME):
+    return IntegrityError(
+        "insert failed",
+        params={},
+        orig=FakePostgresIntegrityOrig(constraint_name),
+    )
+
+
 def test_normalize_source_filename_strips_windows_and_unix_paths():
     assert (
         normalize_source_filename(r"C:\Users\user\Downloads\products.csv")
@@ -182,7 +241,7 @@ def test_save_inspection_report_rejects_mismatched_summary_before_db_work(databa
     report.summary.total_issues = report.summary.total_issues + 1
 
     with pytest.raises(ValueError, match="total_issues"):
-        save_inspection_report(session, source_filename=source_filename, report=report)
+        save_inspection_report_id(session, source_filename=source_filename, report=report)
 
     assert (
         session.scalar(
@@ -196,6 +255,7 @@ def test_save_inspection_report_persists_run_and_multiple_results(database_sessi
     session, created_source_filenames = database_session
     source_filename = unique_filename("products_dev")
     created_source_filenames.append(source_filename)
+    file_sha256 = make_file_hash(b"first save")
     report = make_report(
         [
             BASE_ROW,
@@ -209,16 +269,23 @@ def test_save_inspection_report_persists_run_and_multiple_results(database_sessi
         ]
     )
 
-    inspection_run_id = save_inspection_report(
+    outcome = save_inspection_report(
         session,
         source_filename=source_filename,
         report=report,
+        file_sha256=file_sha256,
+        inspection_version=INSPECTION_VERSION,
     )
+    inspection_run_id = outcome.inspection_run_id
 
     persisted_run = session.get(InspectionRun, inspection_run_id)
+    assert isinstance(outcome, InspectionSaveOutcome)
+    assert outcome.created is True
     assert inspection_run_id > 0
     assert persisted_run is not None
     assert persisted_run.source_filename == source_filename
+    assert persisted_run.file_sha256 == file_sha256
+    assert persisted_run.inspection_version == INSPECTION_VERSION
     assert persisted_run.total_products == report.summary.total_products
     assert persisted_run.total_issues == report.summary.total_issues
     assert persisted_run.error_count == report.summary.error_count
@@ -229,13 +296,145 @@ def test_save_inspection_report_persists_run_and_multiple_results(database_sessi
     assert "높음" in {result.risk_level for result in persisted_run.results}
 
 
+def test_save_inspection_report_returns_existing_run_for_same_hash_and_version(
+    database_session,
+):
+    session, created_source_filenames = database_session
+    first_source_filename = unique_filename("duplicate_first")
+    second_source_filename = unique_filename("duplicate_second")
+    created_source_filenames.extend([first_source_filename, second_source_filename])
+    file_sha256 = make_file_hash(first_source_filename.encode("utf-8"))
+    report = make_report([{**BASE_ROW, "price": "0"}])
+
+    first_outcome = save_inspection_report(
+        session,
+        source_filename=first_source_filename,
+        report=report,
+        file_sha256=file_sha256,
+        inspection_version=INSPECTION_VERSION,
+    )
+    second_outcome = save_inspection_report(
+        session,
+        source_filename=second_source_filename,
+        report=report,
+        file_sha256=file_sha256,
+        inspection_version=INSPECTION_VERSION,
+    )
+
+    assert first_outcome.created is True
+    assert second_outcome.created is False
+    assert second_outcome.inspection_run_id == first_outcome.inspection_run_id
+    assert count_inspection_runs(session, file_sha256=file_sha256) == 1
+    assert (
+        count_inspection_results(
+            session,
+            inspection_run_id=first_outcome.inspection_run_id,
+        )
+        == report.summary.total_issues
+    )
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(InspectionRun)
+            .where(InspectionRun.source_filename == second_source_filename)
+        )
+        == 0
+    )
+
+
+def test_save_inspection_report_allows_same_filename_with_different_hash(
+    database_session,
+):
+    session, created_source_filenames = database_session
+    source_filename = unique_filename("same_name")
+    created_source_filenames.append(source_filename)
+    report = make_report([{**BASE_ROW, "price": "0"}])
+
+    first_outcome = save_inspection_report(
+        session,
+        source_filename=source_filename,
+        report=report,
+        file_sha256=make_file_hash(b"first bytes"),
+        inspection_version=INSPECTION_VERSION,
+    )
+    second_outcome = save_inspection_report(
+        session,
+        source_filename=source_filename,
+        report=report,
+        file_sha256=make_file_hash(b"second bytes"),
+        inspection_version=INSPECTION_VERSION,
+    )
+
+    assert first_outcome.created is True
+    assert second_outcome.created is True
+    assert second_outcome.inspection_run_id != first_outcome.inspection_run_id
+
+
+def test_save_inspection_report_allows_same_hash_with_different_version(
+    database_session,
+):
+    session, created_source_filenames = database_session
+    first_source_filename = unique_filename("version_first")
+    second_source_filename = unique_filename("version_second")
+    created_source_filenames.extend([first_source_filename, second_source_filename])
+    file_sha256 = make_file_hash(b"versioned bytes")
+    report = make_report([{**BASE_ROW, "price": "0"}])
+
+    first_outcome = save_inspection_report(
+        session,
+        source_filename=first_source_filename,
+        report=report,
+        file_sha256=file_sha256,
+        inspection_version="1",
+    )
+    second_outcome = save_inspection_report(
+        session,
+        source_filename=second_source_filename,
+        report=report,
+        file_sha256=file_sha256,
+        inspection_version="2",
+    )
+
+    assert first_outcome.created is True
+    assert second_outcome.created is True
+    assert second_outcome.inspection_run_id != first_outcome.inspection_run_id
+
+
+def test_save_inspection_report_ignores_legacy_null_file_hash_rows(database_session):
+    session, created_source_filenames = database_session
+    legacy_source_filename = unique_filename("legacy_null")
+    hashed_source_filename = unique_filename("legacy_hashed")
+    created_source_filenames.extend([legacy_source_filename, hashed_source_filename])
+    file_sha256 = make_file_hash(b"legacy bytes")
+    report = make_report([{**BASE_ROW, "price": "0"}])
+
+    legacy_outcome = save_inspection_report(
+        session,
+        source_filename=legacy_source_filename,
+        report=report,
+        file_sha256=None,
+        inspection_version=INSPECTION_VERSION,
+    )
+    hashed_outcome = save_inspection_report(
+        session,
+        source_filename=hashed_source_filename,
+        report=report,
+        file_sha256=file_sha256,
+        inspection_version=INSPECTION_VERSION,
+    )
+
+    assert legacy_outcome.created is True
+    assert hashed_outcome.created is True
+    assert hashed_outcome.inspection_run_id != legacy_outcome.inspection_run_id
+
+
 def test_save_inspection_report_strips_source_path_before_persisting(database_session):
     session, created_source_filenames = database_session
     stored_filename = unique_filename("path")
     created_source_filenames.append(stored_filename)
     report = make_report([{**BASE_ROW, "price": "0"}])
 
-    inspection_run_id = save_inspection_report(
+    inspection_run_id = save_inspection_report_id(
         session,
         source_filename=rf"C:\Users\user\Downloads\{stored_filename}",
         report=report,
@@ -255,7 +454,7 @@ def test_save_inspection_report_persists_zero_result_report(database_session):
     )
     report = inspect_dataframe(dataframe)
 
-    inspection_run_id = save_inspection_report(
+    inspection_run_id = save_inspection_report_id(
         session,
         source_filename=source_filename,
         report=report,
@@ -283,7 +482,7 @@ def test_save_inspection_report_does_not_store_raw_personal_information(database
         ]
     )
 
-    inspection_run_id = save_inspection_report(
+    inspection_run_id = save_inspection_report_id(
         session,
         source_filename=source_filename,
         report=report,
@@ -350,7 +549,7 @@ def test_save_inspection_report_rolls_back_when_result_insert_fails(
     )
 
     with pytest.raises(RuntimeError, match="forced result insert failure"):
-        save_inspection_report(
+        save_inspection_report_id(
             session,
             source_filename=source_filename,
             report=report,
@@ -363,6 +562,101 @@ def test_save_inspection_report_rolls_back_when_result_insert_fails(
             .limit(1)
         )
         assert persisted_run_count is None
+
+
+def test_save_inspection_report_returns_existing_run_after_file_identity_integrity_error(
+    monkeypatch,
+):
+    session = FakeSession()
+    file_sha256 = make_file_hash(b"race bytes")
+    existing_run = SimpleNamespace(id=77)
+    lookup_results = [None, existing_run]
+
+    def fake_get_by_identity(session_arg, *, file_sha256, inspection_version):
+        return lookup_results.pop(0)
+
+    def fake_create_inspection_run(*args, **kwargs):
+        raise make_integrity_error()
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "get_inspection_run_by_file_identity",
+        fake_get_by_identity,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "create_inspection_run",
+        fake_create_inspection_run,
+        raising=False,
+    )
+
+    outcome = save_inspection_report(
+        session,
+        source_filename="products.csv",
+        report=make_report([{**BASE_ROW, "price": "0"}]),
+        file_sha256=file_sha256,
+        inspection_version=INSPECTION_VERSION,
+    )
+
+    assert outcome == InspectionSaveOutcome(inspection_run_id=77, created=False)
+
+
+def test_save_inspection_report_reraises_file_identity_integrity_error_without_existing_run(
+    monkeypatch,
+):
+    session = FakeSession()
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "get_inspection_run_by_file_identity",
+        lambda *args, **kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "create_inspection_run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(make_integrity_error()),
+        raising=False,
+    )
+
+    with pytest.raises(IntegrityError):
+        save_inspection_report(
+            session,
+            source_filename="products.csv",
+            report=make_report([{**BASE_ROW, "price": "0"}]),
+            file_sha256=make_file_hash(b"race bytes"),
+            inspection_version=INSPECTION_VERSION,
+        )
+
+
+def test_save_inspection_report_does_not_hide_other_integrity_errors(monkeypatch):
+    session = FakeSession()
+    lookup_results = [None, SimpleNamespace(id=77)]
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "get_inspection_run_by_file_identity",
+        lambda *args, **kwargs: lookup_results.pop(0),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "create_inspection_run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            make_integrity_error("ck_inspection_runs_total_products_non_negative")
+        ),
+        raising=False,
+    )
+
+    with pytest.raises(IntegrityError):
+        save_inspection_report(
+            session,
+            source_filename="products.csv",
+            report=make_report([{**BASE_ROW, "price": "0"}]),
+            file_sha256=make_file_hash(b"race bytes"),
+            inspection_version=INSPECTION_VERSION,
+        )
 
 
 def test_get_inspection_detail_returns_none_when_run_is_missing(monkeypatch):
@@ -651,12 +945,12 @@ def test_repository_list_inspection_runs_returns_recent_runs_with_limit(
     second_source_filename = unique_filename("list_second")
     created_source_filenames.extend([first_source_filename, second_source_filename])
     report = make_report([{**BASE_ROW, "price": "0"}])
-    first_run_id = save_inspection_report(
+    first_run_id = save_inspection_report_id(
         session,
         source_filename=first_source_filename,
         report=report,
     )
-    second_run_id = save_inspection_report(
+    second_run_id = save_inspection_report_id(
         session,
         source_filename=second_source_filename,
         report=report,
@@ -673,12 +967,12 @@ def test_repository_list_inspection_runs_applies_offset(database_session):
     second_source_filename = unique_filename("list_offset_second")
     created_source_filenames.extend([first_source_filename, second_source_filename])
     report = make_report([{**BASE_ROW, "price": "0"}])
-    first_run_id = save_inspection_report(
+    first_run_id = save_inspection_report_id(
         session,
         source_filename=first_source_filename,
         report=report,
     )
-    second_run_id = save_inspection_report(
+    second_run_id = save_inspection_report_id(
         session,
         source_filename=second_source_filename,
         report=report,
@@ -703,17 +997,17 @@ def test_repository_list_and_count_filter_by_filename_with_pagination(
         [first_source_filename, second_source_filename, third_source_filename]
     )
     report = make_report([{**BASE_ROW, "price": "0"}])
-    first_run_id = save_inspection_report(
+    first_run_id = save_inspection_report_id(
         session,
         source_filename=first_source_filename,
         report=report,
     )
-    second_run_id = save_inspection_report(
+    second_run_id = save_inspection_report_id(
         session,
         source_filename=second_source_filename,
         report=report,
     )
-    save_inspection_report(
+    save_inspection_report_id(
         session,
         source_filename=third_source_filename,
         report=report,
@@ -762,12 +1056,12 @@ def test_repository_filename_filter_treats_like_wildcards_as_literals(
     other_source_filename = f"{token}_literal_X_file.csv"
     created_source_filenames.extend([percent_source_filename, other_source_filename])
     report = make_report([{**BASE_ROW, "price": "0"}])
-    percent_run_id = save_inspection_report(
+    percent_run_id = save_inspection_report_id(
         session,
         source_filename=percent_source_filename,
         report=report,
     )
-    save_inspection_report(
+    save_inspection_report_id(
         session,
         source_filename=other_source_filename,
         report=report,
@@ -793,7 +1087,7 @@ def test_repository_list_inspection_runs_does_not_query_results_table(
     session, created_source_filenames = database_session
     source_filename = unique_filename("no_results_join")
     created_source_filenames.append(source_filename)
-    save_inspection_report(
+    save_inspection_report_id(
         session,
         source_filename=source_filename,
         report=make_report([{**BASE_ROW, "price": "0"}]),
@@ -827,12 +1121,12 @@ def test_repository_count_inspection_runs_counts_created_runs(database_session):
     created_source_filenames.extend([first_source_filename, second_source_filename])
     report = make_report([{**BASE_ROW, "price": "0"}])
 
-    save_inspection_report(
+    save_inspection_report_id(
         session,
         source_filename=first_source_filename,
         report=report,
     )
-    save_inspection_report(
+    save_inspection_report_id(
         session,
         source_filename=second_source_filename,
         report=report,
@@ -846,7 +1140,7 @@ def test_repository_get_inspection_run_by_id_returns_saved_run(database_session)
     source_filename = unique_filename("lookup")
     created_source_filenames.append(source_filename)
     report = make_report([{**BASE_ROW, "price": "0"}])
-    inspection_run_id = save_inspection_report(
+    inspection_run_id = save_inspection_report_id(
         session,
         source_filename=source_filename,
         report=report,
@@ -896,12 +1190,12 @@ def test_repository_get_inspection_results_by_run_id_filters_and_orders_results(
         ]
     )
     second_report = make_report([{**BASE_ROW, "price": "0"}])
-    first_run_id = save_inspection_report(
+    first_run_id = save_inspection_report_id(
         session,
         source_filename=first_source_filename,
         report=first_report,
     )
-    second_run_id = save_inspection_report(
+    second_run_id = save_inspection_report_id(
         session,
         source_filename=second_source_filename,
         report=second_report,
@@ -929,7 +1223,7 @@ def test_repository_get_inspection_results_by_run_id_returns_empty_list(
         build_product_template_csv(),
     )
     report = inspect_dataframe(dataframe)
-    inspection_run_id = save_inspection_report(
+    inspection_run_id = save_inspection_report_id(
         session,
         source_filename=source_filename,
         report=report,

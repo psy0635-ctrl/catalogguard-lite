@@ -2,10 +2,13 @@
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePath
+import re
 
 import pandas as pd
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from config.settings import INSPECTION_VERSION
 from core.inspection_service import InspectionReport
 from db import repositories
 from db.repositories import InspectionResultCreate
@@ -24,6 +27,11 @@ RESULT_COLUMN_MAP = {
 
 DEFAULT_SOURCE_FILENAME = "uploaded.csv"
 MAX_SOURCE_FILENAME_LENGTH = 255
+MAX_INSPECTION_VERSION_LENGTH = 20
+FILE_IDENTITY_UNIQUE_INDEX_NAME = (
+    "ux_inspection_runs_file_sha256_inspection_version"
+)
+FILE_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 REQUIRED_RESULT_FIELDS = (
     "status",
     "error_field",
@@ -64,6 +72,12 @@ class InspectionList:
     offset: int
 
 
+@dataclass(frozen=True)
+class InspectionSaveOutcome:
+    inspection_run_id: int
+    created: bool
+
+
 def normalize_source_filename(source_filename: str | None) -> str:
     # 경로 전체가 들어와도 DB에는 파일명만 저장합니다.
     cleaned_filename = "" if source_filename is None else str(source_filename)
@@ -80,6 +94,27 @@ def normalize_source_filename(source_filename: str | None) -> str:
         return f"{filename[:-len(suffix)][:stem_length]}{suffix}"
 
     return filename[:MAX_SOURCE_FILENAME_LENGTH]
+
+
+def normalize_file_sha256(file_sha256: str | None) -> str | None:
+    if file_sha256 is None:
+        return None
+
+    normalized_hash = str(file_sha256).strip().lower()
+    if not FILE_SHA256_PATTERN.fullmatch(normalized_hash):
+        raise ValueError("file_sha256 must be a 64 character lowercase SHA-256 hex string")
+    return normalized_hash
+
+
+def normalize_inspection_version(inspection_version: str) -> str:
+    normalized_version = str(inspection_version).strip()
+    if not normalized_version:
+        raise ValueError("inspection_version must not be blank")
+    if len(normalized_version) > MAX_INSPECTION_VERSION_LENGTH:
+        raise ValueError(
+            f"inspection_version must be {MAX_INSPECTION_VERSION_LENGTH} characters or fewer"
+        )
+    return normalized_version
 
 
 def _clean_text_value(value: object) -> str:
@@ -121,6 +156,13 @@ def _validate_summary_matches_results(
         )
 
 
+def _is_file_identity_unique_violation(error: IntegrityError) -> bool:
+    orig = getattr(error, "orig", None)
+    diag = getattr(orig, "diag", None)
+    constraint_name = getattr(diag, "constraint_name", None)
+    return constraint_name == FILE_IDENTITY_UNIQUE_INDEX_NAME
+
+
 def build_result_create_items(
     report: InspectionReport,
 ) -> list[InspectionResultCreate]:
@@ -152,29 +194,65 @@ def save_inspection_report(
     *,
     source_filename: str | None,
     report: InspectionReport,
-) -> int:
+    file_sha256: str | None = None,
+    inspection_version: str = INSPECTION_VERSION,
+) -> InspectionSaveOutcome:
     # 이 Service가 하나의 트랜잭션 경계를 맡아 run과 results를 함께 저장합니다.
     source_basename = normalize_source_filename(source_filename)
+    normalized_file_sha256 = normalize_file_sha256(file_sha256)
+    normalized_inspection_version = normalize_inspection_version(inspection_version)
     result_items = build_result_create_items(report)
     _validate_summary_matches_results(report, result_items)
 
+    created_run_id: int | None = None
     with session.begin():
-        # run을 먼저 저장하고 flush된 id를 이용해 상세 결과를 연결합니다.
-        inspection_run = repositories.create_inspection_run(
+        existing_run = repositories.get_inspection_run_by_file_identity(
             session,
-            source_filename=source_basename,
-            total_products=report.summary.total_products,
-            total_issues=report.summary.total_issues,
-            error_count=report.summary.error_count,
-            warning_count=report.summary.warning_count,
+            file_sha256=normalized_file_sha256,
+            inspection_version=normalized_inspection_version,
         )
-        repositories.create_inspection_results(
-            session,
-            inspection_run_id=inspection_run.id,
-            result_items=result_items,
-        )
+        if existing_run is not None:
+            return InspectionSaveOutcome(
+                inspection_run_id=existing_run.id,
+                created=False,
+            )
 
-    return inspection_run.id
+        # run을 먼저 저장하고 flush된 id를 이용해 상세 결과를 연결합니다.
+        try:
+            with session.begin_nested():
+                inspection_run = repositories.create_inspection_run(
+                    session,
+                    source_filename=source_basename,
+                    total_products=report.summary.total_products,
+                    total_issues=report.summary.total_issues,
+                    error_count=report.summary.error_count,
+                    warning_count=report.summary.warning_count,
+                    file_sha256=normalized_file_sha256,
+                    inspection_version=normalized_inspection_version,
+                )
+                repositories.create_inspection_results(
+                    session,
+                    inspection_run_id=inspection_run.id,
+                    result_items=result_items,
+                )
+                created_run_id = inspection_run.id
+        except IntegrityError as error:
+            if _is_file_identity_unique_violation(error):
+                existing_run = repositories.get_inspection_run_by_file_identity(
+                    session,
+                    file_sha256=normalized_file_sha256,
+                    inspection_version=normalized_inspection_version,
+                )
+                if existing_run is not None:
+                    return InspectionSaveOutcome(
+                        inspection_run_id=existing_run.id,
+                        created=False,
+                    )
+            raise
+
+    if created_run_id is None:
+        raise RuntimeError("inspection run was not created")
+    return InspectionSaveOutcome(inspection_run_id=created_run_id, created=True)
 
 
 def get_inspection_detail(
