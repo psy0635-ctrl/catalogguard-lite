@@ -88,10 +88,13 @@ def get_overall_status(error_count: int, warning_count: int) -> str:
 
 
 def build_file_hash(file_bytes: bytes) -> str:
+    # Streamlit 세션 안에서 같은 파일을 다시 저장하려는 클릭을 줄이기 위한 해시입니다.
+    # 최종 중복 판단은 서버와 DB가 다시 수행하므로, 이 값은 화면 편의용입니다.
     return hashlib.sha256(file_bytes).hexdigest()
 
 
 def get_saved_inspection_run_id(session_state, file_hash: str) -> int | None:
+    # 현재 세션에 저장해 둔 파일 해시와 다르면 다른 CSV로 보고 저장 ID를 재사용하지 않습니다.
     if session_state.get("saved_file_hash") != file_hash:
         return None
     return session_state.get("saved_inspection_run_id")
@@ -123,6 +126,8 @@ def apply_inspection_save_response(
     file_hash: str,
     response: dict,
 ) -> tuple[int, bool, str]:
+    # API는 새로 저장했는지(created=True), 이미 있던 이력인지(created=False)를 알려 줍니다.
+    # Streamlit은 두 경우 모두 같은 파일이 저장된 상태로 기록해 반복 클릭을 막습니다.
     inspection_run_id = int(response["inspection_run_id"])
     created = bool(response.get("created", True))
     mark_inspection_saved(
@@ -324,6 +329,8 @@ def render_inspection_save_button(
     file_bytes: bytes,
     content_type: str,
 ) -> None:
+    # 이 함수는 "화면 버튼 중복 클릭 방지"만 담당합니다.
+    # 브라우저/서버 재시작 뒤의 중복 저장 방지는 FastAPI와 PostgreSQL이 담당합니다.
     file_hash = build_file_hash(file_bytes)
     saved_inspection_run_id = get_saved_inspection_run_id(
         st.session_state,
@@ -339,6 +346,7 @@ def render_inspection_save_button(
             return
 
         try:
+            # 저장 API에는 원본 CSV bytes를 다시 보내야 서버가 같은 검수 로직과 DB 중복 검사를 수행할 수 있습니다.
             api_client = create_catalogguard_api_client()
             response = api_client.create_inspection(
                 source_filename=source_filename,

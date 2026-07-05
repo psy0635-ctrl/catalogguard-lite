@@ -91,9 +91,11 @@ def get_inspection_run_by_file_identity(
     file_sha256: str | None,
     inspection_version: str,
 ) -> InspectionRun | None:
+    # file_sha256이 없는 기존 이력은 중복 판단 기준으로 쓰지 않습니다.
     if file_sha256 is None:
         return None
 
+    # 같은 CSV bytes라도 검수 규칙 버전이 다르면 새로 저장할 수 있어야 합니다.
     statement = (
         select(InspectionRun)
         .where(InspectionRun.file_sha256 == file_sha256)

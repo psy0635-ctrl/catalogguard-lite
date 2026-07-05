@@ -97,6 +97,7 @@ def normalize_source_filename(source_filename: str | None) -> str:
 
 
 def normalize_file_sha256(file_sha256: str | None) -> str | None:
+    # None은 migration 이전 이력이나 해시 없는 저장 경로를 뜻하므로 그대로 둡니다.
     if file_sha256 is None:
         return None
 
@@ -157,6 +158,8 @@ def _validate_summary_matches_results(
 
 
 def _is_file_identity_unique_violation(error: IntegrityError) -> bool:
+    # PostgreSQL은 어떤 제약조건이 깨졌는지 constraint_name으로 알려 줍니다.
+    # 같은 IntegrityError라도 파일 중복 unique index일 때만 "기존 이력 반환"으로 처리합니다.
     orig = getattr(error, "orig", None)
     diag = getattr(orig, "diag", None)
     constraint_name = getattr(diag, "constraint_name", None)
@@ -206,6 +209,8 @@ def save_inspection_report(
 
     created_run_id: int | None = None
     with session.begin():
+        # 먼저 조회해서 대부분의 중복 요청을 빠르게 처리합니다.
+        # 단, 동시에 들어온 요청은 이 조회만으로 막을 수 없어 아래 unique index 처리도 필요합니다.
         existing_run = repositories.get_inspection_run_by_file_identity(
             session,
             file_sha256=normalized_file_sha256,
@@ -219,6 +224,7 @@ def save_inspection_report(
 
         # run을 먼저 저장하고 flush된 id를 이용해 상세 결과를 연결합니다.
         try:
+            # SAVEPOINT를 사용하면 unique 충돌이 나도 바깥 트랜잭션 전체가 즉시 망가지지 않습니다.
             with session.begin_nested():
                 inspection_run = repositories.create_inspection_run(
                     session,
@@ -238,6 +244,7 @@ def save_inspection_report(
                 created_run_id = inspection_run.id
         except IntegrityError as error:
             if _is_file_identity_unique_violation(error):
+                # 거의 동시에 같은 파일이 저장된 경우, 실패한 요청은 방금 성공한 기존 이력을 다시 조회합니다.
                 existing_run = repositories.get_inspection_run_by_file_identity(
                     session,
                     file_sha256=normalized_file_sha256,

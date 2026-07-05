@@ -52,6 +52,8 @@ class CatalogGuardApiResponseError(CatalogGuardApiError):
 
 
 class CatalogGuardApiClient:
+    # Streamlit 화면은 이 클라이언트만 알면 되고, requests 예외나 HTTP 상태 코드는 여기서 숨깁니다.
+    # 그래서 app.py는 사용자에게 보여 줄 메시지만 선택하면 됩니다.
     def __init__(
         self,
         base_url: str,
@@ -103,6 +105,8 @@ class CatalogGuardApiClient:
         file_content: bytes,
         content_type: str = "text/csv",
     ) -> dict[str, Any]:
+        # 파일 검수 저장 API는 multipart/form-data를 사용합니다.
+        # 서버가 직접 SHA-256을 계산해야 하므로 클라이언트는 해시를 보내지 않습니다.
         normalized_filename = str(source_filename).strip()
         if not normalized_filename:
             raise ValueError("source_filename must not be empty")
@@ -233,6 +237,8 @@ class CatalogGuardApiClient:
             raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
 
     def _normalize_create_response(self, data: dict[str, Any]) -> dict[str, Any]:
+        # created는 새 서버가 추가한 필드입니다.
+        # 구버전 서버 응답에는 없을 수 있으므로 True로 보정하되, 있으면 반드시 bool이어야 합니다.
         normalized_data = dict(data)
         if "created" not in normalized_data:
             normalized_data["created"] = True

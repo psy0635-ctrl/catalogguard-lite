@@ -46,9 +46,12 @@ def build_inspection_summary(
 
 def inspect_dataframe(dataframe: pd.DataFrame) -> InspectionReport:
     """검증된 DataFrame을 검수하고 화면/API에서 쓸 결과를 반환합니다."""
+    # 원본 DataFrame은 실제 검수에 사용하고, 화면 미리보기에는 개인정보가 가려진 복사본을 씁니다.
     masked_preview_dataframe = create_masked_preview(dataframe)
+    # Product는 한 CSV 행을 검수 규칙이 다루기 쉬운 Python 객체로 바꾼 형태입니다.
     products = load_products_from_dataframe(dataframe)
     issues = run_all_rules(products)
+    # 내부 문제 목록을 Streamlit 표와 API 응답에서 쓰기 쉬운 한글 DataFrame으로 바꿉니다.
     result_dataframe = build_result_dataframe(issues)
 
     return InspectionReport(

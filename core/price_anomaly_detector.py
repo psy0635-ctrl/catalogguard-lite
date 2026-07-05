@@ -51,6 +51,7 @@ def calculate_category_price_medians(products: list[Product]) -> dict[str, float
 
     medians = {}
     for category, prices in prices_by_category.items():
+        # 샘플이 너무 적으면 정상 가격대를 판단하기 어려워 이상치 계산에서 제외합니다.
         if len(prices) < MIN_CATEGORY_SAMPLE_SIZE:
             continue
         medians[category] = float(median(prices))

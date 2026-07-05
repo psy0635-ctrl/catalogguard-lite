@@ -170,6 +170,8 @@ async def create_inspection(
     session: Session = Depends(get_session),
 ) -> InspectionResponse:
     file_bytes = await file.read()
+    # 중복 저장 판단에 쓰는 해시는 서버가 업로드 bytes로 직접 계산합니다.
+    # 클라이언트가 보낸 값을 믿으면 조작된 해시로 DB 중복 방지가 깨질 수 있습니다.
     file_sha256 = hashlib.sha256(file_bytes).hexdigest()
 
     try:
@@ -186,6 +188,8 @@ async def create_inspection(
     )
 
     if not save_outcome.created:
+        # 중복이면 방금 계산한 report가 아니라 DB에 이미 저장된 기존 상세 결과를 반환합니다.
+        # 이렇게 해야 기존 실행 ID와 다른 요약/상세 결과가 섞이지 않습니다.
         detail = get_inspection_detail(
             session,
             inspection_run_id=save_outcome.inspection_run_id,

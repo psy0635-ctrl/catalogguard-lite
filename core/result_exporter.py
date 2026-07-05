@@ -16,6 +16,7 @@ def sanitize_csv_cell(value: object) -> object:
         return value
     if not value:
         return value
+    # 이미 작은따옴표로 보호된 값은 다시 붙이지 않아 다운로드 결과가 지저분해지지 않게 합니다.
     if value.startswith("'") and len(value) > 1 and value[1] in CSV_FORMULA_PREFIXES:
         return value
     if value[0] in CSV_FORMULA_PREFIXES:

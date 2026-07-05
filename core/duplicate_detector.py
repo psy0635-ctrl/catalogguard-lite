@@ -24,6 +24,7 @@ def normalize_option_value(value: object) -> str:
 
 
 def has_explicit_option_difference(first: Product, second: Product) -> bool:
+    # 같은 상품 그룹 안에서 색상이나 사이즈가 명확히 다르면 정상 옵션으로 볼 수 있습니다.
     first_color = normalize_option_value(first.color)
     second_color = normalize_option_value(second.color)
     first_size = normalize_option_value(first.size)
@@ -61,6 +62,7 @@ def _format_product_ids(products: list[Product]) -> str:
 def find_duplicate_product_ids(products: list[Product]) -> list[ValidationIssue]:
     products_by_id: dict[str, list[tuple[int, Product]]] = {}
 
+    # CSV의 1행은 헤더이므로 사용자에게 보여 줄 데이터 행 번호는 2부터 시작합니다.
     for row_number, product in enumerate(products, start=2):
         product_id = product.product_id.strip()
         if not product_id:
@@ -91,6 +93,7 @@ def find_duplicate_product_ids(products: list[Product]) -> list[ValidationIssue]
 def find_duplicate_product_names(products: list[Product]) -> list[ValidationIssue]:
     products_by_name: dict[str, list[tuple[int, Product]]] = {}
 
+    # 상품명은 공백, 특수문자, 대소문자를 정리한 뒤 비교해야 눈에 보이는 중복을 잡기 쉽습니다.
     for row_number, product in enumerate(products, start=2):
         normalized_name = normalize_product_name(product.product_name)
         if not normalized_name:

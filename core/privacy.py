@@ -12,6 +12,7 @@ RESIDENT_REGISTRATION_NUMBER_PATTERN = re.compile(r"(?<!\d)\d{6}-[1-4]\d{6}(?!\d
 
 PREVIEW_MASK_EXCLUDED_COLUMNS = frozenset(
     {
+        # ID와 숫자 컬럼은 검수 이해에 필요하고 개인정보 패턴과 겹칠 가능성이 낮아 미리보기 마스킹에서 제외합니다.
         "product_group_id",
         "product_id",
         "stock",

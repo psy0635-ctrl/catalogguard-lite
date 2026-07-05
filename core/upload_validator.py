@@ -132,6 +132,7 @@ def validate_csv_row_lengths(csv_text: str, expected_column_count: int) -> None:
     try:
         next(reader)
         for row in reader:
+            # 완전히 빈 줄은 사용자가 파일 끝에 실수로 넣을 수 있으므로 데이터 행으로 보지 않습니다.
             if _is_blank_csv_row(row):
                 continue
             if len(row) != expected_column_count:
@@ -179,6 +180,7 @@ def validate_and_read_uploaded_csv(
     file_bytes: bytes,
 ) -> pd.DataFrame:
     """업로드 CSV를 검증하고 정상 DataFrame을 반환합니다."""
+    # 아래 순서는 사용자에게 가장 빠르고 이해하기 쉬운 오류를 먼저 보여 주기 위한 단계입니다.
     validate_csv_filename(filename)
     validate_csv_file_size(file_bytes)
     validate_no_nul_bytes(file_bytes)

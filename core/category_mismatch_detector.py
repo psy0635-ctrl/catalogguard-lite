@@ -73,6 +73,7 @@ def find_category_mismatches(products: list[Product]) -> list[ValidationIssue]:
 
         keyword_matches = _find_category_keyword_matches(product.product_name)
         inferred_categories = set(keyword_matches)
+        # 여러 카테고리 키워드가 동시에 보이면 애매하므로 불일치라고 단정하지 않습니다.
         if len(inferred_categories) != 1:
             continue
 

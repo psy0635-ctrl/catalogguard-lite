@@ -51,6 +51,8 @@ class InspectionRun(Base):
         ),
         Index("ix_inspection_runs_created_at", "created_at"),
         Index(
+            # file_sha256이 있는 신규 이력만 중복 저장을 막습니다.
+            # migration 이전 기존 이력은 file_sha256이 NULL이라 이 unique index 대상에서 빠집니다.
             "ux_inspection_runs_file_sha256_inspection_version",
             "file_sha256",
             "inspection_version",
@@ -66,7 +68,9 @@ class InspectionRun(Base):
         autoincrement=True,
     )
     source_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 원본 CSV bytes는 저장하지 않고, 동일성 비교용 SHA-256 문자열만 저장합니다.
     file_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # DB 기본값을 두지 않고 애플리케이션이 명시적으로 검수 규칙 버전을 넣습니다.
     inspection_version: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
