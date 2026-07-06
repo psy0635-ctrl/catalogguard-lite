@@ -1,6 +1,7 @@
 # 역할: CSV 업로드 검수 API 엔드포인트와 응답 변환 로직을 제공합니다.
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
@@ -31,6 +32,7 @@ from db.session import get_session
 router = APIRouter()
 KOREA_TIME_ZONE = ZoneInfo("Asia/Seoul")
 INVALID_DATE_RANGE_MESSAGE = "시작일은 종료일보다 늦을 수 없습니다."
+InspectionStatusQuery = Literal["error", "warning", "normal"]
 
 
 # core/presentation.py의 한글 표시 컬럼명을 API 응답 필드명으로 바꿉니다.
@@ -182,6 +184,10 @@ def list_inspection_runs(
     filename: str | None = Query(default=None, max_length=100),
     start_date: date | None = Query(default=None),
     end_date: date | None = Query(default=None),
+    inspection_status: InspectionStatusQuery | None = Query(
+        default=None,
+        alias="status",
+    ),
     session: Session = Depends(get_session),
 ) -> InspectionListResponse:
     created_at_start, created_at_end_exclusive = build_created_at_bounds(
@@ -195,6 +201,7 @@ def list_inspection_runs(
         filename=normalize_filename_query(filename),
         created_at_start=created_at_start,
         created_at_end_exclusive=created_at_end_exclusive,
+        status_filter=inspection_status,
     )
 
     return build_inspection_list_response(inspection_list)

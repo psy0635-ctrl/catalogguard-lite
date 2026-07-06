@@ -311,6 +311,7 @@ def list_inspections(
     filename: str | None = None,
     created_at_start: datetime | None = None,
     created_at_end_exclusive: datetime | None = None,
+    status_filter: str | None = None,
 ) -> InspectionList:
     # 목록과 total은 같은 검색 조건을 써야 화면의 페이지 수가 정확합니다.
     filter_kwargs = {"filename": filename}
@@ -318,6 +319,8 @@ def list_inspections(
         filter_kwargs["created_at_start"] = created_at_start
     if created_at_end_exclusive is not None:
         filter_kwargs["created_at_end_exclusive"] = created_at_end_exclusive
+    if status_filter is not None:
+        filter_kwargs["status_filter"] = status_filter
 
     inspection_runs = repositories.list_inspection_runs(
         session,

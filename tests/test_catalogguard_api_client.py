@@ -270,6 +270,59 @@ def test_list_inspections_includes_filename_and_date_filters_together():
     ]
 
 
+@pytest.mark.parametrize("status_value", ["error", "warning", "normal"])
+def test_list_inspections_includes_status_when_provided(status_value):
+    client, session = make_client(response=FakeResponse(payload=LIST_RESPONSE))
+
+    data = client.list_inspections(status=status_value)
+
+    assert data == LIST_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/inspections",
+            "params": {"limit": 20, "offset": 0, "status": status_value},
+            "timeout": 5.0,
+        }
+    ]
+
+
+def test_list_inspections_includes_filename_date_and_status_filters_together():
+    client, session = make_client(response=FakeResponse(payload=LIST_RESPONSE))
+
+    client.list_inspections(
+        limit=10,
+        offset=20,
+        filename=" products ",
+        start_date=date(2026, 7, 1),
+        end_date=date(2026, 7, 5),
+        status="warning",
+    )
+
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/inspections",
+            "params": {
+                "limit": 10,
+                "offset": 20,
+                "filename": "products",
+                "start_date": "2026-07-01",
+                "end_date": "2026-07-05",
+                "status": "warning",
+            },
+            "timeout": 5.0,
+        }
+    ]
+
+
+def test_list_inspections_rejects_invalid_status_without_request():
+    client, session = make_client(response=FakeResponse(payload=LIST_RESPONSE))
+
+    with pytest.raises(ValueError, match="status"):
+        client.list_inspections(status="all")
+
+    assert session.calls == []
+
+
 def test_get_inspection_detail_calls_expected_endpoint_with_timeout():
     client, session = make_client(
         response=FakeResponse(payload=DETAIL_RESPONSE),

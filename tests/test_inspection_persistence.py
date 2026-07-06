@@ -153,6 +153,28 @@ def count_inspection_results(session, *, inspection_run_id: int | None = None) -
     return int(session.scalar(statement) or 0)
 
 
+def create_summary_run(
+    session,
+    *,
+    source_filename: str,
+    error_count: int,
+    warning_count: int,
+    created_at: datetime | None = None,
+) -> int:
+    inspection_run = repositories.create_inspection_run(
+        session,
+        source_filename=source_filename,
+        total_products=1,
+        total_issues=error_count + warning_count,
+        error_count=error_count,
+        warning_count=warning_count,
+    )
+    if created_at is not None:
+        inspection_run.created_at = created_at
+    session.flush()
+    return inspection_run.id
+
+
 class FakePostgresIntegrityOrig(Exception):
     def __init__(self, constraint_name: str):
         super().__init__(constraint_name)
@@ -1002,6 +1024,95 @@ def test_list_inspections_passes_created_at_bounds_to_repository(monkeypatch):
     ]
 
 
+def test_list_inspections_passes_status_filter_to_repository(monkeypatch):
+    session = object()
+    created_at = pd.Timestamp("2026-07-04T12:30:00+09:00").to_pydatetime()
+    runs = [
+        SimpleNamespace(
+            id=11,
+            source_filename="products_dev.csv",
+            total_products=5,
+            total_issues=2,
+            error_count=1,
+            warning_count=1,
+            created_at=created_at,
+        ),
+    ]
+    calls = []
+
+    def fake_list_inspection_runs(
+        session_arg,
+        *,
+        limit,
+        offset,
+        filename=None,
+        created_at_start=None,
+        created_at_end_exclusive=None,
+        status_filter=None,
+    ):
+        calls.append(
+            (
+                "list",
+                session_arg,
+                limit,
+                offset,
+                filename,
+                created_at_start,
+                created_at_end_exclusive,
+                status_filter,
+            )
+        )
+        return runs
+
+    def fake_count_inspection_runs(
+        session_arg,
+        *,
+        filename=None,
+        created_at_start=None,
+        created_at_end_exclusive=None,
+        status_filter=None,
+    ):
+        calls.append(
+            (
+                "count",
+                session_arg,
+                filename,
+                created_at_start,
+                created_at_end_exclusive,
+                status_filter,
+            )
+        )
+        return 1
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "list_inspection_runs",
+        fake_list_inspection_runs,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "count_inspection_runs",
+        fake_count_inspection_runs,
+        raising=False,
+    )
+
+    listing = persistence_service.list_inspections(
+        session,
+        limit=10,
+        offset=0,
+        filename="products",
+        status_filter="error",
+    )
+
+    assert listing.total == 1
+    assert [item.source_filename for item in listing.items] == ["products_dev.csv"]
+    assert calls == [
+        ("list", session, 10, 0, "products", None, None, "error"),
+        ("count", session, "products", None, None, "error"),
+    ]
+
+
 def test_list_inspections_handles_empty_repository_result(monkeypatch):
     session = object()
 
@@ -1242,6 +1353,243 @@ def test_repository_list_and_count_filter_by_created_at_bounds(database_session)
             ),
         )
         == 2
+    )
+
+
+def test_repository_list_and_count_filter_by_status_categories(database_session):
+    session, created_source_filenames = database_session
+    token = f"status_{uuid4().hex}"
+    error_source_filename = f"{token}_error.csv"
+    warning_source_filename = f"{token}_warning.csv"
+    normal_source_filename = f"{token}_normal.csv"
+    mixed_source_filename = f"{token}_mixed.csv"
+    created_source_filenames.extend(
+        [
+            error_source_filename,
+            warning_source_filename,
+            normal_source_filename,
+            mixed_source_filename,
+        ]
+    )
+    error_run_id = create_summary_run(
+        session,
+        source_filename=error_source_filename,
+        error_count=2,
+        warning_count=0,
+    )
+    warning_run_id = create_summary_run(
+        session,
+        source_filename=warning_source_filename,
+        error_count=0,
+        warning_count=3,
+    )
+    normal_run_id = create_summary_run(
+        session,
+        source_filename=normal_source_filename,
+        error_count=0,
+        warning_count=0,
+    )
+    mixed_run_id = create_summary_run(
+        session,
+        source_filename=mixed_source_filename,
+        error_count=1,
+        warning_count=4,
+    )
+    session.commit()
+
+    all_runs = repositories.list_inspection_runs(
+        session,
+        limit=10,
+        offset=0,
+        filename=token,
+    )
+    error_runs = repositories.list_inspection_runs(
+        session,
+        limit=10,
+        offset=0,
+        filename=token,
+        status_filter="error",
+    )
+    warning_runs = repositories.list_inspection_runs(
+        session,
+        limit=10,
+        offset=0,
+        filename=token,
+        status_filter="warning",
+    )
+    normal_runs = repositories.list_inspection_runs(
+        session,
+        limit=10,
+        offset=0,
+        filename=token,
+        status_filter="normal",
+    )
+
+    assert repositories.count_inspection_runs(session, filename=token) == 4
+    assert {run.id for run in all_runs} == {
+        error_run_id,
+        warning_run_id,
+        normal_run_id,
+        mixed_run_id,
+    }
+    assert [run.id for run in error_runs] == [mixed_run_id, error_run_id]
+    assert [run.id for run in warning_runs] == [warning_run_id]
+    assert [run.id for run in normal_runs] == [normal_run_id]
+    assert (
+        repositories.count_inspection_runs(
+            session,
+            filename=token,
+            status_filter="error",
+        )
+        == 2
+    )
+    assert (
+        repositories.count_inspection_runs(
+            session,
+            filename=token,
+            status_filter="warning",
+        )
+        == 1
+    )
+    assert (
+        repositories.count_inspection_runs(
+            session,
+            filename=token,
+            status_filter="normal",
+        )
+        == 1
+    )
+
+
+def test_repository_status_filter_combines_with_filename_date_and_pagination(
+    database_session,
+):
+    session, created_source_filenames = database_session
+    token = f"status_combo_{uuid4().hex}"
+    alpha_first = f"{token}_alpha_first.csv"
+    alpha_second = f"{token}_alpha_second.csv"
+    beta_second = f"{token}_beta_second.csv"
+    alpha_warning = f"{token}_alpha_warning.csv"
+    alpha_before = f"{token}_alpha_before.csv"
+    alpha_after = f"{token}_alpha_after.csv"
+    created_source_filenames.extend(
+        [
+            alpha_first,
+            alpha_second,
+            beta_second,
+            alpha_warning,
+            alpha_before,
+            alpha_after,
+        ]
+    )
+    first_run_id = create_summary_run(
+        session,
+        source_filename=alpha_first,
+        error_count=1,
+        warning_count=0,
+        created_at=datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    second_run_id = create_summary_run(
+        session,
+        source_filename=alpha_second,
+        error_count=2,
+        warning_count=0,
+        created_at=datetime(2026, 7, 2, 12, 0, tzinfo=timezone.utc),
+    )
+    beta_run_id = create_summary_run(
+        session,
+        source_filename=beta_second,
+        error_count=1,
+        warning_count=0,
+        created_at=datetime(2026, 7, 2, 13, 0, tzinfo=timezone.utc),
+    )
+    create_summary_run(
+        session,
+        source_filename=alpha_warning,
+        error_count=0,
+        warning_count=1,
+        created_at=datetime(2026, 7, 2, 14, 0, tzinfo=timezone.utc),
+    )
+    before_run_id = create_summary_run(
+        session,
+        source_filename=alpha_before,
+        error_count=1,
+        warning_count=0,
+        created_at=datetime(2026, 6, 30, 23, 59, tzinfo=timezone.utc),
+    )
+    after_run_id = create_summary_run(
+        session,
+        source_filename=alpha_after,
+        error_count=1,
+        warning_count=0,
+        created_at=datetime(2026, 7, 3, 0, 0, tzinfo=timezone.utc),
+    )
+    session.commit()
+
+    filename_status_runs = repositories.list_inspection_runs(
+        session,
+        limit=10,
+        offset=0,
+        filename=f"{token}_alpha",
+        status_filter="error",
+    )
+    date_status_runs = repositories.list_inspection_runs(
+        session,
+        limit=10,
+        offset=0,
+        created_at_start=datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc),
+        created_at_end_exclusive=datetime(2026, 7, 3, 0, 0, tzinfo=timezone.utc),
+        status_filter="error",
+    )
+    first_page = repositories.list_inspection_runs(
+        session,
+        limit=1,
+        offset=0,
+        filename=f"{token}_alpha",
+        created_at_start=datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc),
+        created_at_end_exclusive=datetime(2026, 7, 3, 0, 0, tzinfo=timezone.utc),
+        status_filter="error",
+    )
+    second_page = repositories.list_inspection_runs(
+        session,
+        limit=1,
+        offset=1,
+        filename=f"{token}_alpha",
+        created_at_start=datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc),
+        created_at_end_exclusive=datetime(2026, 7, 3, 0, 0, tzinfo=timezone.utc),
+        status_filter="error",
+    )
+
+    assert {run.id for run in filename_status_runs} == {
+        first_run_id,
+        second_run_id,
+        before_run_id,
+        after_run_id,
+    }
+    assert {run.id for run in date_status_runs} == {
+        first_run_id,
+        second_run_id,
+        beta_run_id,
+    }
+    assert [run.id for run in first_page] == [second_run_id]
+    assert [run.id for run in second_page] == [first_run_id]
+    assert (
+        repositories.count_inspection_runs(
+            session,
+            filename=f"{token}_alpha",
+            created_at_start=datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc),
+            created_at_end_exclusive=datetime(2026, 7, 3, 0, 0, tzinfo=timezone.utc),
+            status_filter="error",
+        )
+        == 2
+    )
+    assert (
+        repositories.count_inspection_runs(
+            session,
+            filename=token,
+            status_filter="normal",
+        )
+        == 0
     )
 
 

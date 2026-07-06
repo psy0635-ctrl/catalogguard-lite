@@ -175,6 +175,7 @@ def fake_inspection_persistence(monkeypatch):
         filename=None,
         created_at_start=None,
         created_at_end_exclusive=None,
+        status_filter=None,
     ):
         list_call = {
             "session": session,
@@ -187,6 +188,8 @@ def fake_inspection_persistence(monkeypatch):
             list_call["created_at_start"] = created_at_start
         if created_at_end_exclusive is not None:
             list_call["created_at_end_exclusive"] = created_at_end_exclusive
+        if status_filter is not None:
+            list_call["status_filter"] = status_filter
         list_calls.append(list_call)
         if list_state.mode == "empty":
             return SimpleNamespace(items=[], total=0, limit=limit, offset=offset)
@@ -405,6 +408,41 @@ def test_list_inspections_api_passes_end_date_only(
     ]
 
 
+@pytest.mark.parametrize(
+    ("status_value", "expected_status_filter"),
+    [
+        ("error", "error"),
+        ("warning", "warning"),
+        ("normal", "normal"),
+    ],
+)
+def test_list_inspections_api_passes_status_filter(
+    fake_inspection_persistence,
+    status_value,
+    expected_status_filter,
+):
+    response = client.get(ENDPOINT, params={"status": status_value})
+
+    assert response.status_code == 200
+    assert fake_inspection_persistence.list_calls == [
+        {
+            "session": fake_inspection_persistence.session,
+            "limit": 20,
+            "offset": 0,
+            "status_filter": expected_status_filter,
+        }
+    ]
+
+
+def test_list_inspections_api_rejects_invalid_status_without_service_call(
+    fake_inspection_persistence,
+):
+    response = client.get(ENDPOINT, params={"status": "all"})
+
+    assert response.status_code == 422
+    assert fake_inspection_persistence.list_calls == []
+
+
 def test_list_inspections_api_passes_filename_and_date_filters_together(
     fake_inspection_persistence,
 ):
@@ -435,6 +473,62 @@ def test_list_inspections_api_passes_filename_and_date_filters_together(
                 0,
                 tzinfo=timezone.utc,
             ),
+        }
+    ]
+
+
+def test_list_inspections_api_passes_filename_date_and_status_filters_together(
+    fake_inspection_persistence,
+):
+    response = client.get(
+        ENDPOINT,
+        params={
+            "filename": "  products  ",
+            "start_date": "2026-07-01",
+            "end_date": "2026-07-05",
+            "status": "warning",
+            "limit": 10,
+            "offset": 20,
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake_inspection_persistence.list_calls == [
+        {
+            "session": fake_inspection_persistence.session,
+            "limit": 10,
+            "offset": 20,
+            "filename": "products",
+            "created_at_start": datetime(2026, 6, 30, 15, 0, tzinfo=timezone.utc),
+            "created_at_end_exclusive": datetime(
+                2026,
+                7,
+                5,
+                15,
+                0,
+                tzinfo=timezone.utc,
+            ),
+            "status_filter": "warning",
+        }
+    ]
+
+
+def test_list_inspections_api_passes_limit_offset_and_status(
+    fake_inspection_persistence,
+):
+    response = client.get(ENDPOINT, params={"limit": 10, "offset": 20, "status": "error"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 37
+    assert data["limit"] == 10
+    assert data["offset"] == 20
+    assert fake_inspection_persistence.list_calls == [
+        {
+            "session": fake_inspection_persistence.session,
+            "limit": 10,
+            "offset": 20,
+            "status_filter": "error",
         }
     ]
 

@@ -24,3 +24,5 @@ def test_app_initial_render_without_upload(monkeypatch):
     assert app.session_state["history_offset"] == 0
     assert app.session_state["history_filename_input"] == ""
     assert app.session_state["history_filename_query"] == ""
+    assert app.session_state["history_status_input"] == "전체"
+    assert app.session_state["history_status_query"] is None

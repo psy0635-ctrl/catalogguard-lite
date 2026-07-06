@@ -133,6 +133,49 @@ def test_apply_history_search_applies_filename_and_dates_and_resets_offset(
     assert session_state["history_offset"] == 0
 
 
+def test_apply_history_search_applies_status_and_resets_offset(app_module):
+    session_state = {
+        "history_filename_input": "",
+        "history_filename_query": "",
+        "history_start_date_input": None,
+        "history_end_date_input": None,
+        "history_start_date_query": None,
+        "history_end_date_query": None,
+        "history_status_input": "오류",
+        "history_status_query": None,
+        "history_filter_error": None,
+        "history_offset": 20,
+    }
+
+    app_module.apply_history_search(session_state)
+
+    assert session_state["history_status_input"] == "오류"
+    assert session_state["history_status_query"] == "error"
+    assert session_state["history_filter_error"] is None
+    assert session_state["history_offset"] == 0
+
+
+def test_apply_history_search_keeps_status_query_none_for_all(app_module):
+    session_state = {
+        "history_filename_input": "",
+        "history_filename_query": "products",
+        "history_start_date_input": None,
+        "history_end_date_input": None,
+        "history_start_date_query": None,
+        "history_end_date_query": None,
+        "history_status_input": "전체",
+        "history_status_query": "warning",
+        "history_filter_error": None,
+        "history_offset": 10,
+    }
+
+    app_module.apply_history_search(session_state)
+
+    assert session_state["history_status_input"] == "전체"
+    assert session_state["history_status_query"] is None
+    assert session_state["history_offset"] == 0
+
+
 def test_apply_history_search_rejects_start_after_end_without_changing_query(
     app_module,
 ):
@@ -143,6 +186,8 @@ def test_apply_history_search_rejects_start_after_end_without_changing_query(
         "history_end_date_input": date(2026, 7, 5),
         "history_start_date_query": None,
         "history_end_date_query": None,
+        "history_status_input": "오류",
+        "history_status_query": "warning",
         "history_offset": 20,
     }
 
@@ -152,6 +197,7 @@ def test_apply_history_search_rejects_start_after_end_without_changing_query(
     assert session_state["history_filename_query"] == ""
     assert session_state["history_start_date_query"] is None
     assert session_state["history_end_date_query"] is None
+    assert session_state["history_status_query"] == "warning"
     assert session_state["history_offset"] == 20
 
 
@@ -188,6 +234,36 @@ def test_build_history_list_request_params_includes_date_queries(app_module):
     }
 
 
+def test_build_history_list_request_params_includes_status_query(app_module):
+    session_state = {
+        "history_filename_query": "",
+        "history_status_query": "normal",
+    }
+
+    params = app_module.build_history_list_request_params(
+        session_state,
+        limit=10,
+        offset=0,
+    )
+
+    assert params == {"limit": 10, "offset": 0, "status": "normal"}
+
+
+def test_build_history_list_request_params_omits_status_for_all(app_module):
+    session_state = {
+        "history_filename_query": "",
+        "history_status_query": None,
+    }
+
+    params = app_module.build_history_list_request_params(
+        session_state,
+        limit=10,
+        offset=0,
+    )
+
+    assert params == {"limit": 10, "offset": 0}
+
+
 def test_build_history_list_request_params_omits_blank_filename_query(app_module):
     session_state = {"history_filename_query": "   "}
 
@@ -201,7 +277,10 @@ def test_build_history_list_request_params_omits_blank_filename_query(app_module
 
 
 def test_history_filename_query_is_kept_for_pagination_offsets(app_module):
-    session_state = {"history_filename_query": "products"}
+    session_state = {
+        "history_filename_query": "products",
+        "history_status_query": "warning",
+    }
 
     params = app_module.build_history_list_request_params(
         session_state,
@@ -210,6 +289,7 @@ def test_history_filename_query_is_kept_for_pagination_offsets(app_module):
     )
 
     assert params["filename"] == "products"
+    assert params["status"] == "warning"
     assert params["offset"] == 10
 
 
@@ -251,6 +331,8 @@ def test_reset_history_search_clears_filename_dates_error_and_offset(app_module)
         "history_end_date_input": date(2026, 7, 5),
         "history_start_date_query": date(2026, 7, 1),
         "history_end_date_query": date(2026, 7, 5),
+        "history_status_input": "오류",
+        "history_status_query": "error",
         "history_filter_error": "시작일은 종료일보다 늦을 수 없습니다.",
         "history_offset": 20,
     }
@@ -263,6 +345,8 @@ def test_reset_history_search_clears_filename_dates_error_and_offset(app_module)
     assert session_state["history_end_date_input"] is None
     assert session_state["history_start_date_query"] is None
     assert session_state["history_end_date_query"] is None
+    assert session_state["history_status_input"] == "전체"
+    assert session_state["history_status_query"] is None
     assert session_state["history_filter_error"] is None
     assert session_state["history_offset"] == 0
 

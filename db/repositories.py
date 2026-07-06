@@ -2,6 +2,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -10,6 +11,7 @@ from config.settings import INSPECTION_VERSION
 from db.models import InspectionResult, InspectionRun
 
 LIKE_ESCAPE_CHARACTER = "\\"
+InspectionRunStatusFilter = Literal["error", "warning", "normal"]
 
 
 @dataclass(frozen=True)
@@ -162,19 +164,41 @@ def apply_created_at_filter(
     return statement
 
 
+def apply_status_filter(
+    statement,
+    *,
+    status_filter: InspectionRunStatusFilter | None = None,
+):
+    if status_filter is None:
+        return statement
+    if status_filter == "error":
+        return statement.where(InspectionRun.error_count > 0)
+    if status_filter == "warning":
+        return statement.where(InspectionRun.error_count == 0).where(
+            InspectionRun.warning_count > 0
+        )
+    if status_filter == "normal":
+        return statement.where(InspectionRun.error_count == 0).where(
+            InspectionRun.warning_count == 0
+        )
+    raise ValueError("status_filter must be one of: error, warning, normal")
+
+
 def apply_inspection_run_filters(
     statement,
     *,
     filename: str | None = None,
     created_at_start: datetime | None = None,
     created_at_end_exclusive: datetime | None = None,
+    status_filter: InspectionRunStatusFilter | None = None,
 ):
     statement = apply_filename_filter(statement, filename)
-    return apply_created_at_filter(
+    statement = apply_created_at_filter(
         statement,
         created_at_start=created_at_start,
         created_at_end_exclusive=created_at_end_exclusive,
     )
+    return apply_status_filter(statement, status_filter=status_filter)
 
 
 def list_inspection_runs(
@@ -185,6 +209,7 @@ def list_inspection_runs(
     filename: str | None = None,
     created_at_start: datetime | None = None,
     created_at_end_exclusive: datetime | None = None,
+    status_filter: InspectionRunStatusFilter | None = None,
 ) -> list[InspectionRun]:
     statement = (
         apply_inspection_run_filters(
@@ -192,6 +217,7 @@ def list_inspection_runs(
             filename=filename,
             created_at_start=created_at_start,
             created_at_end_exclusive=created_at_end_exclusive,
+            status_filter=status_filter,
         )
         # 최신 검수 이력이 먼저 보이도록 기존 정렬 순서를 그대로 유지합니다.
         .order_by(InspectionRun.created_at.desc(), InspectionRun.id.desc())
@@ -207,6 +233,7 @@ def count_inspection_runs(
     filename: str | None = None,
     created_at_start: datetime | None = None,
     created_at_end_exclusive: datetime | None = None,
+    status_filter: InspectionRunStatusFilter | None = None,
 ) -> int:
     # total도 목록과 같은 조건으로 세야 pagination이 맞습니다.
     statement = apply_inspection_run_filters(
@@ -214,5 +241,6 @@ def count_inspection_runs(
         filename=filename,
         created_at_start=created_at_start,
         created_at_end_exclusive=created_at_end_exclusive,
+        status_filter=status_filter,
     )
     return int(session.scalar(statement) or 0)

@@ -55,6 +55,18 @@ HISTORY_DETAIL_DISPLAY_COLUMNS = [
 ]
 WINDOWS_RESERVED_FILENAME_CHARS = re.compile(r'[\\/:\*\?"<>\|]+')
 HISTORY_INVALID_DATE_RANGE_MESSAGE = "시작일은 종료일보다 늦을 수 없습니다."
+HISTORY_STATUS_OPTIONS = ["전체", "오류", "주의", "정상"]
+HISTORY_STATUS_LABEL_TO_QUERY = {
+    "전체": None,
+    "오류": "error",
+    "주의": "warning",
+    "정상": "normal",
+}
+HISTORY_STATUS_QUERY_TO_LABEL = {
+    query_value: label
+    for label, query_value in HISTORY_STATUS_LABEL_TO_QUERY.items()
+    if query_value is not None
+}
 
 
 def format_value_error(error: ValueError) -> str:
@@ -271,6 +283,20 @@ def normalize_history_date_query(value: object) -> date | None:
         return None
 
 
+def normalize_history_status_input(value: object) -> str:
+    status_label = str(value or "").strip()
+    if status_label in HISTORY_STATUS_LABEL_TO_QUERY:
+        return status_label
+    return "전체"
+
+
+def normalize_history_status_query(value: object) -> str | None:
+    status_query = "" if value is None else str(value).strip()
+    if status_query in HISTORY_STATUS_QUERY_TO_LABEL:
+        return status_query
+    return None
+
+
 def get_history_filename_query(session_state) -> str:
     return normalize_history_filename_query(
         session_state.get("history_filename_query", "")
@@ -285,6 +311,10 @@ def get_history_end_date_query(session_state) -> date | None:
     return normalize_history_date_query(session_state.get("history_end_date_query"))
 
 
+def get_history_status_query(session_state) -> str | None:
+    return normalize_history_status_query(session_state.get("history_status_query"))
+
+
 def apply_history_search(session_state) -> None:
     # 검색 버튼을 누른 순간의 입력값만 실제 검색 조건으로 확정합니다.
     filename_query = normalize_history_filename_query(
@@ -296,6 +326,10 @@ def apply_history_search(session_state) -> None:
     end_date_query = normalize_history_date_query(
         session_state.get("history_end_date_input")
     )
+    status_input = normalize_history_status_input(
+        session_state.get("history_status_input", "전체")
+    )
+    status_query = HISTORY_STATUS_LABEL_TO_QUERY[status_input]
     if (
         start_date_query is not None
         and end_date_query is not None
@@ -308,6 +342,8 @@ def apply_history_search(session_state) -> None:
     session_state["history_filename_query"] = filename_query
     session_state["history_start_date_query"] = start_date_query
     session_state["history_end_date_query"] = end_date_query
+    session_state["history_status_input"] = status_input
+    session_state["history_status_query"] = status_query
     session_state["history_filter_error"] = None
     # 새 검색은 항상 첫 페이지부터 보여줘야 하므로 offset을 0으로 돌립니다.
     session_state["history_offset"] = 0
@@ -325,6 +361,8 @@ def reset_history_search(session_state) -> None:
     session_state["history_end_date_input"] = None
     session_state["history_start_date_query"] = None
     session_state["history_end_date_query"] = None
+    session_state["history_status_input"] = "전체"
+    session_state["history_status_query"] = None
     session_state["history_filter_error"] = None
     session_state["history_offset"] = 0
 
@@ -350,6 +388,9 @@ def build_history_list_request_params(
     end_date_query = get_history_end_date_query(session_state)
     if end_date_query is not None:
         params["end_date"] = end_date_query.isoformat()
+    status_query = get_history_status_query(session_state)
+    if status_query is not None:
+        params["status"] = status_query
     return params
 
 
@@ -357,11 +398,14 @@ def get_empty_history_message(
     filename_query: str,
     start_date_query: date | None = None,
     end_date_query: date | None = None,
+    status_query: str | None = None,
 ) -> str:
     if normalize_history_filename_query(filename_query):
         return "입력한 파일명과 일치하는 검수 이력이 없습니다."
     if start_date_query is not None or end_date_query is not None:
         return "선택한 날짜 조건과 일치하는 검수 이력이 없습니다."
+    if normalize_history_status_query(status_query) is not None:
+        return "선택한 검수 상태와 일치하는 검수 이력이 없습니다."
     return "저장된 검수 이력이 없습니다."
 
 
@@ -377,6 +421,9 @@ def build_history_filter_caption(session_state) -> str:
         parts.append(f"시작일: {start_date_query.isoformat()}")
     if end_date_query is not None:
         parts.append(f"종료일: {end_date_query.isoformat()}")
+    status_query = get_history_status_query(session_state)
+    if status_query is not None:
+        parts.append(f"검수 상태: {HISTORY_STATUS_QUERY_TO_LABEL[status_query]}")
 
     if not parts:
         return ""
@@ -410,6 +457,10 @@ def initialize_history_state() -> None:
         st.session_state.history_start_date_query = None
     if "history_end_date_query" not in st.session_state:
         st.session_state.history_end_date_query = None
+    if "history_status_input" not in st.session_state:
+        st.session_state.history_status_input = "전체"
+    if "history_status_query" not in st.session_state:
+        st.session_state.history_status_query = None
     if "history_filter_error" not in st.session_state:
         st.session_state.history_filter_error = None
 
@@ -649,8 +700,8 @@ def render_inspection_history_tab() -> None:
 
 def render_history_filename_search_controls() -> None:
     # 입력만으로는 검색하지 않고, 사용자가 검색 버튼을 누를 때만 목록을 다시 조회합니다.
-    input_col, start_col, end_col, search_col, reset_col = st.columns(
-        [3, 1.4, 1.4, 1, 1]
+    input_col, start_col, end_col, status_col, search_col, reset_col = st.columns(
+        [3, 1.4, 1.4, 1.2, 1, 1]
     )
     with input_col:
         st.text_input(
@@ -670,6 +721,12 @@ def render_history_filename_search_controls() -> None:
             "종료일",
             value=st.session_state.get("history_end_date_input"),
             key="history_end_date_input",
+        )
+    with status_col:
+        st.selectbox(
+            "검수 상태",
+            options=HISTORY_STATUS_OPTIONS,
+            key="history_status_input",
         )
     with search_col:
         st.button(
@@ -733,12 +790,14 @@ def render_inspection_history_list(api_client) -> None:
     filename_query = get_history_filename_query(st.session_state)
     start_date_query = get_history_start_date_query(st.session_state)
     end_date_query = get_history_end_date_query(st.session_state)
+    status_query = get_history_status_query(st.session_state)
     if history_dataframe.empty:
         st.info(
             get_empty_history_message(
                 filename_query,
                 start_date_query,
                 end_date_query,
+                status_query,
             )
         )
     else:
