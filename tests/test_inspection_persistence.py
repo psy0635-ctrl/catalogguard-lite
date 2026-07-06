@@ -2,6 +2,7 @@
 import hashlib
 import importlib
 import sys
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -913,6 +914,94 @@ def test_list_inspections_passes_filename_to_repository(monkeypatch):
     ]
 
 
+def test_list_inspections_passes_created_at_bounds_to_repository(monkeypatch):
+    session = object()
+    start_bound = datetime(2026, 6, 30, 15, 0, tzinfo=timezone.utc)
+    end_bound = datetime(2026, 7, 5, 15, 0, tzinfo=timezone.utc)
+    created_at = pd.Timestamp("2026-07-04T12:30:00+09:00").to_pydatetime()
+    runs = [
+        SimpleNamespace(
+            id=11,
+            source_filename="products_dev.csv",
+            total_products=5,
+            total_issues=2,
+            error_count=1,
+            warning_count=1,
+            created_at=created_at,
+        ),
+    ]
+    calls = []
+
+    def fake_list_inspection_runs(
+        session_arg,
+        *,
+        limit,
+        offset,
+        filename=None,
+        created_at_start=None,
+        created_at_end_exclusive=None,
+    ):
+        calls.append(
+            (
+                "list",
+                session_arg,
+                limit,
+                offset,
+                filename,
+                created_at_start,
+                created_at_end_exclusive,
+            )
+        )
+        return runs
+
+    def fake_count_inspection_runs(
+        session_arg,
+        *,
+        filename=None,
+        created_at_start=None,
+        created_at_end_exclusive=None,
+    ):
+        calls.append(
+            (
+                "count",
+                session_arg,
+                filename,
+                created_at_start,
+                created_at_end_exclusive,
+            )
+        )
+        return 1
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "list_inspection_runs",
+        fake_list_inspection_runs,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "count_inspection_runs",
+        fake_count_inspection_runs,
+        raising=False,
+    )
+
+    listing = persistence_service.list_inspections(
+        session,
+        limit=10,
+        offset=0,
+        filename="products",
+        created_at_start=start_bound,
+        created_at_end_exclusive=end_bound,
+    )
+
+    assert listing.total == 1
+    assert [item.source_filename for item in listing.items] == ["products_dev.csv"]
+    assert calls == [
+        ("list", session, 10, 0, "products", start_bound, end_bound),
+        ("count", session, "products", start_bound, end_bound),
+    ]
+
+
 def test_list_inspections_handles_empty_repository_result(monkeypatch):
     session = object()
 
@@ -1079,6 +1168,81 @@ def test_repository_filename_filter_treats_like_wildcards_as_literals(
         session,
         filename=f"{token}_literal_%",
     ) == 1
+
+
+def test_repository_list_and_count_filter_by_created_at_bounds(database_session):
+    session, created_source_filenames = database_session
+    token = f"date_range_{uuid4().hex}"
+    before_source_filename = f"{token}_before.csv"
+    start_source_filename = f"{token}_start.csv"
+    inside_source_filename = f"{token}_inside.csv"
+    end_source_filename = f"{token}_end.csv"
+    created_source_filenames.extend(
+        [
+            before_source_filename,
+            start_source_filename,
+            inside_source_filename,
+            end_source_filename,
+        ]
+    )
+    report = make_report([{**BASE_ROW, "price": "0"}])
+    before_run_id = save_inspection_report_id(
+        session,
+        source_filename=before_source_filename,
+        report=report,
+    )
+    start_run_id = save_inspection_report_id(
+        session,
+        source_filename=start_source_filename,
+        report=report,
+    )
+    inside_run_id = save_inspection_report_id(
+        session,
+        source_filename=inside_source_filename,
+        report=report,
+    )
+    end_run_id = save_inspection_report_id(
+        session,
+        source_filename=end_source_filename,
+        report=report,
+    )
+    created_at_values = {
+        before_run_id: datetime(2026, 6, 30, 14, 59, 59, tzinfo=timezone.utc),
+        start_run_id: datetime(2026, 6, 30, 15, 0, 0, tzinfo=timezone.utc),
+        inside_run_id: datetime(2026, 7, 5, 14, 59, 59, tzinfo=timezone.utc),
+        end_run_id: datetime(2026, 7, 5, 15, 0, 0, tzinfo=timezone.utc),
+    }
+    for run_id, created_at in created_at_values.items():
+        session.get(InspectionRun, run_id).created_at = created_at
+    session.commit()
+
+    runs = repositories.list_inspection_runs(
+        session,
+        limit=10,
+        offset=0,
+        filename=token,
+        created_at_start=datetime(2026, 6, 30, 15, 0, 0, tzinfo=timezone.utc),
+        created_at_end_exclusive=datetime(2026, 7, 5, 15, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert [run.id for run in runs] == [inside_run_id, start_run_id]
+    assert (
+        repositories.count_inspection_runs(
+            session,
+            filename=token,
+            created_at_start=datetime(2026, 6, 30, 15, 0, 0, tzinfo=timezone.utc),
+            created_at_end_exclusive=datetime(
+                2026,
+                7,
+                5,
+                15,
+                0,
+                0,
+                tzinfo=timezone.utc,
+            ),
+        )
+        == 2
+    )
 
 
 def test_repository_list_inspection_runs_does_not_query_results_table(

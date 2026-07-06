@@ -167,7 +167,15 @@ def fake_inspection_persistence(monkeypatch):
         )
         return fake_details.get(inspection_run_id)
 
-    def fake_list_inspections(session, *, limit, offset, filename=None):
+    def fake_list_inspections(
+        session,
+        *,
+        limit,
+        offset,
+        filename=None,
+        created_at_start=None,
+        created_at_end_exclusive=None,
+    ):
         list_call = {
             "session": session,
             "limit": limit,
@@ -175,6 +183,10 @@ def fake_inspection_persistence(monkeypatch):
         }
         if filename is not None:
             list_call["filename"] = filename
+        if created_at_start is not None:
+            list_call["created_at_start"] = created_at_start
+        if created_at_end_exclusive is not None:
+            list_call["created_at_end_exclusive"] = created_at_end_exclusive
         list_calls.append(list_call)
         if list_state.mode == "empty":
             return SimpleNamespace(items=[], total=0, limit=limit, offset=offset)
@@ -322,6 +334,160 @@ def test_list_inspections_api_treats_blank_filename_as_no_filter(
             "offset": 0,
         }
     ]
+
+
+def test_list_inspections_api_passes_start_and_end_dates_as_utc_bounds(
+    fake_inspection_persistence,
+):
+    response = client.get(
+        ENDPOINT,
+        params={
+            "start_date": "2026-07-01",
+            "end_date": "2026-07-05",
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake_inspection_persistence.list_calls == [
+        {
+            "session": fake_inspection_persistence.session,
+            "limit": 20,
+            "offset": 0,
+            "created_at_start": datetime(2026, 6, 30, 15, 0, tzinfo=timezone.utc),
+            "created_at_end_exclusive": datetime(
+                2026,
+                7,
+                5,
+                15,
+                0,
+                tzinfo=timezone.utc,
+            ),
+        }
+    ]
+
+
+def test_list_inspections_api_passes_start_date_only(
+    fake_inspection_persistence,
+):
+    response = client.get(ENDPOINT, params={"start_date": "2026-07-01"})
+
+    assert response.status_code == 200
+    assert fake_inspection_persistence.list_calls == [
+        {
+            "session": fake_inspection_persistence.session,
+            "limit": 20,
+            "offset": 0,
+            "created_at_start": datetime(2026, 6, 30, 15, 0, tzinfo=timezone.utc),
+        }
+    ]
+
+
+def test_list_inspections_api_passes_end_date_only(
+    fake_inspection_persistence,
+):
+    response = client.get(ENDPOINT, params={"end_date": "2026-07-05"})
+
+    assert response.status_code == 200
+    assert fake_inspection_persistence.list_calls == [
+        {
+            "session": fake_inspection_persistence.session,
+            "limit": 20,
+            "offset": 0,
+            "created_at_end_exclusive": datetime(
+                2026,
+                7,
+                5,
+                15,
+                0,
+                tzinfo=timezone.utc,
+            ),
+        }
+    ]
+
+
+def test_list_inspections_api_passes_filename_and_date_filters_together(
+    fake_inspection_persistence,
+):
+    response = client.get(
+        ENDPOINT,
+        params={
+            "filename": "  products  ",
+            "start_date": "2026-07-01",
+            "end_date": "2026-07-05",
+            "limit": 10,
+            "offset": 20,
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake_inspection_persistence.list_calls == [
+        {
+            "session": fake_inspection_persistence.session,
+            "limit": 10,
+            "offset": 20,
+            "filename": "products",
+            "created_at_start": datetime(2026, 6, 30, 15, 0, tzinfo=timezone.utc),
+            "created_at_end_exclusive": datetime(
+                2026,
+                7,
+                5,
+                15,
+                0,
+                tzinfo=timezone.utc,
+            ),
+        }
+    ]
+
+
+def test_list_inspections_api_accepts_same_start_and_end_date(
+    fake_inspection_persistence,
+):
+    response = client.get(
+        ENDPOINT,
+        params={"start_date": "2026-07-05", "end_date": "2026-07-05"},
+    )
+
+    assert response.status_code == 200
+    assert fake_inspection_persistence.list_calls == [
+        {
+            "session": fake_inspection_persistence.session,
+            "limit": 20,
+            "offset": 0,
+            "created_at_start": datetime(2026, 7, 4, 15, 0, tzinfo=timezone.utc),
+            "created_at_end_exclusive": datetime(
+                2026,
+                7,
+                5,
+                15,
+                0,
+                tzinfo=timezone.utc,
+            ),
+        }
+    ]
+
+
+def test_list_inspections_api_rejects_start_date_after_end_date_without_service_call(
+    fake_inspection_persistence,
+):
+    response = client.get(
+        ENDPOINT,
+        params={"start_date": "2026-07-06", "end_date": "2026-07-05"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "시작일은 종료일보다 늦을 수 없습니다."
+    assert fake_inspection_persistence.list_calls == []
+
+
+@pytest.mark.parametrize("query", ["start_date=2026-99-99", "end_date=bad-date"])
+def test_list_inspections_api_rejects_invalid_date_format_without_service_call(
+    fake_inspection_persistence,
+    query,
+):
+    response = client.get(f"{ENDPOINT}?{query}")
+
+    assert response.status_code == 422
+    assert fake_inspection_persistence.list_calls == []
 
 
 def test_list_inspections_api_accepts_100_character_filename(

@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Any
 
 import requests
@@ -77,6 +78,8 @@ class CatalogGuardApiClient:
         limit: int = 20,
         offset: int = 0,
         filename: str | None = None,
+        start_date: date | str | None = None,
+        end_date: date | str | None = None,
     ) -> dict[str, Any]:
         if not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
@@ -90,6 +93,13 @@ class CatalogGuardApiClient:
             raise ValueError("filename must be 100 characters or fewer")
         if normalized_filename:
             params["filename"] = normalized_filename
+
+        normalized_start_date = self._normalize_date_param(start_date)
+        normalized_end_date = self._normalize_date_param(end_date)
+        if normalized_start_date:
+            params["start_date"] = normalized_start_date
+        if normalized_end_date:
+            params["end_date"] = normalized_end_date
 
         data = self._get_json(
             "/api/v1/inspections",
@@ -235,6 +245,15 @@ class CatalogGuardApiClient:
     ) -> None:
         if any(key not in data for key in required_keys):
             raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+
+    def _normalize_date_param(self, value: date | str | None) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, date):
+            return value.isoformat()
+
+        normalized_value = str(value).strip()
+        return normalized_value or None
 
     def _normalize_create_response(self, data: dict[str, Any]) -> dict[str, Any]:
         # created는 새 서버가 추가한 필드입니다.

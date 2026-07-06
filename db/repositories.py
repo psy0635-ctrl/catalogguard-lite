@@ -1,6 +1,7 @@
 # 역할: 검수 실행과 상세 검수 결과를 DB에 저장하는 순수 Repository 함수들을 제공합니다.
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -148,15 +149,50 @@ def apply_filename_filter(statement, filename: str | None):
     )
 
 
+def apply_created_at_filter(
+    statement,
+    *,
+    created_at_start: datetime | None = None,
+    created_at_end_exclusive: datetime | None = None,
+):
+    if created_at_start is not None:
+        statement = statement.where(InspectionRun.created_at >= created_at_start)
+    if created_at_end_exclusive is not None:
+        statement = statement.where(InspectionRun.created_at < created_at_end_exclusive)
+    return statement
+
+
+def apply_inspection_run_filters(
+    statement,
+    *,
+    filename: str | None = None,
+    created_at_start: datetime | None = None,
+    created_at_end_exclusive: datetime | None = None,
+):
+    statement = apply_filename_filter(statement, filename)
+    return apply_created_at_filter(
+        statement,
+        created_at_start=created_at_start,
+        created_at_end_exclusive=created_at_end_exclusive,
+    )
+
+
 def list_inspection_runs(
     session: Session,
     *,
     limit: int,
     offset: int,
     filename: str | None = None,
+    created_at_start: datetime | None = None,
+    created_at_end_exclusive: datetime | None = None,
 ) -> list[InspectionRun]:
     statement = (
-        apply_filename_filter(select(InspectionRun), filename)
+        apply_inspection_run_filters(
+            select(InspectionRun),
+            filename=filename,
+            created_at_start=created_at_start,
+            created_at_end_exclusive=created_at_end_exclusive,
+        )
         # 최신 검수 이력이 먼저 보이도록 기존 정렬 순서를 그대로 유지합니다.
         .order_by(InspectionRun.created_at.desc(), InspectionRun.id.desc())
         .limit(limit)
@@ -169,10 +205,14 @@ def count_inspection_runs(
     session: Session,
     *,
     filename: str | None = None,
+    created_at_start: datetime | None = None,
+    created_at_end_exclusive: datetime | None = None,
 ) -> int:
-    # total도 목록과 같은 filename 조건으로 세야 pagination이 맞습니다.
-    statement = apply_filename_filter(
+    # total도 목록과 같은 조건으로 세야 pagination이 맞습니다.
+    statement = apply_inspection_run_filters(
         select(func.count()).select_from(InspectionRun),
-        filename,
+        filename=filename,
+        created_at_start=created_at_start,
+        created_at_end_exclusive=created_at_end_exclusive,
     )
     return int(session.scalar(statement) or 0)

@@ -1,6 +1,7 @@
 import copy
 import importlib
 import sys
+from datetime import date
 
 import pandas as pd
 import pytest
@@ -108,6 +109,52 @@ def test_apply_history_filename_search_trims_query_and_resets_offset(app_module)
     assert session_state["history_offset"] == 0
 
 
+def test_apply_history_search_applies_filename_and_dates_and_resets_offset(
+    app_module,
+):
+    session_state = {
+        "history_filename_input": "  products  ",
+        "history_filename_query": "",
+        "history_start_date_input": date(2026, 7, 1),
+        "history_end_date_input": date(2026, 7, 5),
+        "history_start_date_query": None,
+        "history_end_date_query": None,
+        "history_filter_error": "old error",
+        "history_offset": 20,
+    }
+
+    app_module.apply_history_search(session_state)
+
+    assert session_state["history_filename_input"] == "products"
+    assert session_state["history_filename_query"] == "products"
+    assert session_state["history_start_date_query"] == date(2026, 7, 1)
+    assert session_state["history_end_date_query"] == date(2026, 7, 5)
+    assert session_state["history_filter_error"] is None
+    assert session_state["history_offset"] == 0
+
+
+def test_apply_history_search_rejects_start_after_end_without_changing_query(
+    app_module,
+):
+    session_state = {
+        "history_filename_input": "products",
+        "history_filename_query": "",
+        "history_start_date_input": date(2026, 7, 6),
+        "history_end_date_input": date(2026, 7, 5),
+        "history_start_date_query": None,
+        "history_end_date_query": None,
+        "history_offset": 20,
+    }
+
+    app_module.apply_history_search(session_state)
+
+    assert session_state["history_filter_error"] == "시작일은 종료일보다 늦을 수 없습니다."
+    assert session_state["history_filename_query"] == ""
+    assert session_state["history_start_date_query"] is None
+    assert session_state["history_end_date_query"] is None
+    assert session_state["history_offset"] == 20
+
+
 def test_build_history_list_request_params_includes_filename_query(app_module):
     session_state = {"history_filename_query": "products"}
 
@@ -118,6 +165,27 @@ def test_build_history_list_request_params_includes_filename_query(app_module):
     )
 
     assert params == {"limit": 10, "offset": 20, "filename": "products"}
+
+
+def test_build_history_list_request_params_includes_date_queries(app_module):
+    session_state = {
+        "history_filename_query": "",
+        "history_start_date_query": date(2026, 7, 1),
+        "history_end_date_query": date(2026, 7, 5),
+    }
+
+    params = app_module.build_history_list_request_params(
+        session_state,
+        limit=10,
+        offset=0,
+    )
+
+    assert params == {
+        "limit": 10,
+        "offset": 0,
+        "start_date": "2026-07-01",
+        "end_date": "2026-07-05",
+    }
 
 
 def test_build_history_list_request_params_omits_blank_filename_query(app_module):
@@ -172,6 +240,30 @@ def test_reset_history_filename_search_clears_query_and_offset(app_module):
 
     assert session_state["history_filename_input"] == ""
     assert session_state["history_filename_query"] == ""
+    assert session_state["history_offset"] == 0
+
+
+def test_reset_history_search_clears_filename_dates_error_and_offset(app_module):
+    session_state = {
+        "history_filename_input": "products",
+        "history_filename_query": "products",
+        "history_start_date_input": date(2026, 7, 1),
+        "history_end_date_input": date(2026, 7, 5),
+        "history_start_date_query": date(2026, 7, 1),
+        "history_end_date_query": date(2026, 7, 5),
+        "history_filter_error": "시작일은 종료일보다 늦을 수 없습니다.",
+        "history_offset": 20,
+    }
+
+    app_module.reset_history_search(session_state)
+
+    assert session_state["history_filename_input"] == ""
+    assert session_state["history_filename_query"] == ""
+    assert session_state["history_start_date_input"] is None
+    assert session_state["history_end_date_input"] is None
+    assert session_state["history_start_date_query"] is None
+    assert session_state["history_end_date_query"] is None
+    assert session_state["history_filter_error"] is None
     assert session_state["history_offset"] == 0
 
 

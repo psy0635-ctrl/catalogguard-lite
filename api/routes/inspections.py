@@ -1,5 +1,7 @@
 # 역할: CSV 업로드 검수 API 엔드포인트와 응답 변환 로직을 제공합니다.
+from datetime import date, datetime, time, timedelta, timezone
 import hashlib
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 import pandas as pd
@@ -27,6 +29,8 @@ from db.session import get_session
 
 
 router = APIRouter()
+KOREA_TIME_ZONE = ZoneInfo("Asia/Seoul")
+INVALID_DATE_RANGE_MESSAGE = "시작일은 종료일보다 늦을 수 없습니다."
 
 
 # core/presentation.py의 한글 표시 컬럼명을 API 응답 필드명으로 바꿉니다.
@@ -140,6 +144,33 @@ def normalize_filename_query(filename: str | None) -> str | None:
     return cleaned_filename or None
 
 
+def _korea_date_midnight_to_utc(value: date) -> datetime:
+    korea_midnight = datetime.combine(value, time.min, tzinfo=KOREA_TIME_ZONE)
+    return korea_midnight.astimezone(timezone.utc)
+
+
+def build_created_at_bounds(
+    *,
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[datetime | None, datetime | None]:
+    if start_date is not None and end_date is not None and start_date > end_date:
+        raise HTTPException(
+            status_code=422,
+            detail=INVALID_DATE_RANGE_MESSAGE,
+        )
+
+    created_at_start = (
+        _korea_date_midnight_to_utc(start_date) if start_date is not None else None
+    )
+    created_at_end_exclusive = (
+        _korea_date_midnight_to_utc(end_date + timedelta(days=1))
+        if end_date is not None
+        else None
+    )
+    return created_at_start, created_at_end_exclusive
+
+
 @router.get(
     "/api/v1/inspections",
     response_model=InspectionListResponse,
@@ -149,13 +180,21 @@ def list_inspection_runs(
     offset: int = Query(default=0, ge=0),
     # filename은 선택 검색어입니다. 없으면 기존 목록 API와 같은 결과를 반환합니다.
     filename: str | None = Query(default=None, max_length=100),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> InspectionListResponse:
+    created_at_start, created_at_end_exclusive = build_created_at_bounds(
+        start_date=start_date,
+        end_date=end_date,
+    )
     inspection_list = list_inspections(
         session,
         limit=limit,
         offset=offset,
         filename=normalize_filename_query(filename),
+        created_at_start=created_at_start,
+        created_at_end_exclusive=created_at_end_exclusive,
     )
 
     return build_inspection_list_response(inspection_list)

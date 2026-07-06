@@ -1,4 +1,5 @@
 import importlib
+from datetime import date
 
 import pytest
 import requests
@@ -215,6 +216,55 @@ def test_list_inspections_omits_blank_filename():
         {
             "url": "https://api.example.com/api/v1/inspections",
             "params": {"limit": 20, "offset": 0},
+            "timeout": 5.0,
+        }
+    ]
+
+
+def test_list_inspections_includes_iso_start_and_end_dates_when_provided():
+    client, session = make_client(response=FakeResponse(payload=LIST_RESPONSE))
+
+    data = client.list_inspections(
+        start_date=date(2026, 7, 1),
+        end_date=date(2026, 7, 5),
+    )
+
+    assert data == LIST_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/inspections",
+            "params": {
+                "limit": 20,
+                "offset": 0,
+                "start_date": "2026-07-01",
+                "end_date": "2026-07-05",
+            },
+            "timeout": 5.0,
+        }
+    ]
+
+
+def test_list_inspections_includes_filename_and_date_filters_together():
+    client, session = make_client(response=FakeResponse(payload=LIST_RESPONSE))
+
+    client.list_inspections(
+        limit=10,
+        offset=20,
+        filename=" products ",
+        start_date=date(2026, 7, 1),
+        end_date=date(2026, 7, 5),
+    )
+
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/inspections",
+            "params": {
+                "limit": 10,
+                "offset": 20,
+                "filename": "products",
+                "start_date": "2026-07-01",
+                "end_date": "2026-07-05",
+            },
             "timeout": 5.0,
         }
     ]
