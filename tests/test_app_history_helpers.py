@@ -15,6 +15,68 @@ def app_module(monkeypatch):
     return importlib.import_module("app")
 
 
+class FakeHistoryApiClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def list_inspections(self, **params):
+        self.calls.append(params)
+        if not self.responses:
+            raise AssertionError("unexpected list_inspections call")
+
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def make_history_item(
+    inspection_run_id: int,
+    *,
+    error_count: int = 0,
+    warning_count: int = 0,
+) -> dict:
+    return {
+        "inspection_run_id": inspection_run_id,
+        "source_filename": f"products_{inspection_run_id}.csv",
+        "created_at": "2026-07-04T13:42:39.495949+09:00",
+        "total_products": 5,
+        "total_issues": error_count + warning_count,
+        "error_count": error_count,
+        "warning_count": warning_count,
+    }
+
+
+def make_history_response(items: list[dict], *, total: int) -> dict:
+    return {
+        "items": items,
+        "total": total,
+        "limit": 100,
+        "offset": 0,
+    }
+
+
+def make_prepared_history_summary_download_state(app_module) -> dict:
+    return {
+        app_module.HISTORY_SUMMARY_DOWNLOAD_CACHE_STATE_KEY: {
+            "cache_key": (("status", "error"),),
+            "csv_bytes": b"old-csv",
+            "file_name": "old.csv",
+            "total": 10,
+        },
+        app_module.HISTORY_SUMMARY_DOWNLOAD_ERROR_STATE_KEY: "old error",
+    }
+
+
+def assert_prepared_history_summary_download_is_cleared(
+    app_module,
+    session_state,
+) -> None:
+    assert app_module.HISTORY_SUMMARY_DOWNLOAD_CACHE_STATE_KEY not in session_state
+    assert app_module.HISTORY_SUMMARY_DOWNLOAD_ERROR_STATE_KEY not in session_state
+
+
 @pytest.mark.parametrize(
     ("total", "limit", "offset", "expected"),
     [
@@ -155,6 +217,70 @@ def test_apply_history_search_applies_status_and_resets_offset(app_module):
     assert session_state["history_offset"] == 0
 
 
+def test_apply_history_search_clears_prepared_csv_when_filename_query_changes(
+    app_module,
+):
+    session_state = {
+        **make_prepared_history_summary_download_state(app_module),
+        "history_filename_input": "normal-products",
+        "history_filename_query": "error-products",
+        "history_start_date_input": None,
+        "history_end_date_input": None,
+        "history_status_input": "전체",
+        "history_filter_error": None,
+        "history_offset": 20,
+    }
+
+    app_module.apply_history_search(session_state)
+
+    assert session_state["history_filename_query"] == "normal-products"
+    assert_prepared_history_summary_download_is_cleared(app_module, session_state)
+
+
+def test_apply_history_search_clears_prepared_csv_when_date_query_changes(
+    app_module,
+):
+    session_state = {
+        **make_prepared_history_summary_download_state(app_module),
+        "history_filename_input": "",
+        "history_filename_query": "",
+        "history_start_date_input": date(2026, 7, 2),
+        "history_end_date_input": date(2026, 7, 5),
+        "history_start_date_query": date(2026, 7, 1),
+        "history_end_date_query": date(2026, 7, 5),
+        "history_status_input": "전체",
+        "history_filter_error": None,
+        "history_offset": 20,
+    }
+
+    app_module.apply_history_search(session_state)
+
+    assert session_state["history_start_date_query"] == date(2026, 7, 2)
+    assert session_state["history_end_date_query"] == date(2026, 7, 5)
+    assert_prepared_history_summary_download_is_cleared(app_module, session_state)
+
+
+def test_apply_history_search_clears_prepared_csv_when_status_query_changes(
+    app_module,
+):
+    session_state = {
+        **make_prepared_history_summary_download_state(app_module),
+        "history_filename_input": "",
+        "history_filename_query": "",
+        "history_start_date_input": None,
+        "history_end_date_input": None,
+        "history_status_input": app_module.HISTORY_STATUS_QUERY_TO_LABEL["normal"],
+        "history_status_query": "error",
+        "history_filter_error": None,
+        "history_offset": 20,
+    }
+
+    app_module.apply_history_search(session_state)
+
+    assert session_state["history_status_query"] == "normal"
+    assert_prepared_history_summary_download_is_cleared(app_module, session_state)
+
+
 def test_apply_history_search_keeps_status_query_none_for_all(app_module):
     session_state = {
         "history_filename_input": "",
@@ -293,6 +419,165 @@ def test_history_filename_query_is_kept_for_pagination_offsets(app_module):
     assert params["offset"] == 10
 
 
+def test_fetch_all_history_summary_items_fetches_single_page_under_limit(app_module):
+    items = [make_history_item(index) for index in range(1, 51)]
+    api_client = FakeHistoryApiClient([make_history_response(items, total=50)])
+
+    fetched_items, total = app_module.fetch_all_history_summary_items(api_client, {})
+
+    assert fetched_items == items
+    assert total == 50
+    assert api_client.calls == [
+        {"limit": app_module.HISTORY_SUMMARY_DOWNLOAD_LIMIT, "offset": 0}
+    ]
+
+
+def test_fetch_all_history_summary_items_fetches_multiple_pages(app_module):
+    first_page = [make_history_item(index) for index in range(1, 101)]
+    second_page = [make_history_item(index) for index in range(101, 126)]
+    api_client = FakeHistoryApiClient(
+        [
+            make_history_response(first_page, total=125),
+            make_history_response(second_page, total=125),
+        ]
+    )
+
+    fetched_items, total = app_module.fetch_all_history_summary_items(api_client, {})
+
+    assert fetched_items == first_page + second_page
+    assert total == 125
+    assert [call["offset"] for call in api_client.calls] == [0, 100]
+
+
+def test_fetch_all_history_summary_items_stops_at_exactly_100_results(app_module):
+    items = [make_history_item(index) for index in range(1, 101)]
+    api_client = FakeHistoryApiClient([make_history_response(items, total=100)])
+
+    fetched_items, total = app_module.fetch_all_history_summary_items(api_client, {})
+
+    assert fetched_items == items
+    assert total == 100
+    assert len(api_client.calls) == 1
+
+
+def test_fetch_all_history_summary_items_returns_empty_result(app_module):
+    api_client = FakeHistoryApiClient([make_history_response([], total=0)])
+
+    fetched_items, total = app_module.fetch_all_history_summary_items(api_client, {})
+
+    assert fetched_items == []
+    assert total == 0
+    assert len(api_client.calls) == 1
+
+
+def test_fetch_all_history_summary_items_keeps_filters_for_every_page(app_module):
+    first_page = [make_history_item(index) for index in range(1, 101)]
+    second_page = [make_history_item(index) for index in range(101, 121)]
+    api_client = FakeHistoryApiClient(
+        [
+            make_history_response(first_page, total=120),
+            make_history_response(second_page, total=120),
+        ]
+    )
+    session_state = {
+        "history_filename_query": "products",
+        "history_start_date_query": date(2026, 7, 1),
+        "history_end_date_query": date(2026, 7, 5),
+        "history_status_query": "warning",
+        "history_offset": 30,
+    }
+
+    app_module.fetch_all_history_summary_items(api_client, session_state)
+
+    assert api_client.calls == [
+        {
+            "limit": app_module.HISTORY_SUMMARY_DOWNLOAD_LIMIT,
+            "offset": 0,
+            "filename": "products",
+            "start_date": "2026-07-01",
+            "end_date": "2026-07-05",
+            "status": "warning",
+        },
+        {
+            "limit": app_module.HISTORY_SUMMARY_DOWNLOAD_LIMIT,
+            "offset": 100,
+            "filename": "products",
+            "start_date": "2026-07-01",
+            "end_date": "2026-07-05",
+            "status": "warning",
+        },
+    ]
+    assert session_state["history_offset"] == 30
+
+
+def test_fetch_all_history_summary_items_fails_when_later_page_fails(app_module):
+    first_page = [make_history_item(index) for index in range(1, 101)]
+    api_client = FakeHistoryApiClient(
+        [
+            make_history_response(first_page, total=150),
+            app_module.CatalogGuardApiTimeoutError("timeout"),
+        ]
+    )
+
+    with pytest.raises(app_module.CatalogGuardApiTimeoutError):
+        app_module.fetch_all_history_summary_items(api_client, {})
+
+    assert [call["offset"] for call in api_client.calls] == [0, 100]
+
+
+def test_fetch_all_history_summary_items_rejects_duplicate_run_ids(app_module):
+    first_page = [make_history_item(index) for index in range(1, 101)]
+    second_page = [make_history_item(100)]
+    api_client = FakeHistoryApiClient(
+        [
+            make_history_response(first_page, total=101),
+            make_history_response(second_page, total=101),
+        ]
+    )
+
+    with pytest.raises(app_module.CatalogGuardApiResponseError):
+        app_module.fetch_all_history_summary_items(api_client, {})
+
+
+def test_fetch_all_history_summary_items_has_max_page_guard(
+    app_module,
+    monkeypatch,
+):
+    monkeypatch.setattr(app_module, "HISTORY_SUMMARY_DOWNLOAD_MAX_PAGES", 2)
+    first_page = [make_history_item(index) for index in range(1, 101)]
+    second_page = [make_history_item(index) for index in range(101, 201)]
+    api_client = FakeHistoryApiClient(
+        [
+            make_history_response(first_page, total=999),
+            make_history_response(second_page, total=999),
+        ]
+    )
+
+    with pytest.raises(app_module.CatalogGuardApiResponseError):
+        app_module.fetch_all_history_summary_items(api_client, {})
+
+    assert [call["offset"] for call in api_client.calls] == [0, 100]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"items": "not-a-list", "total": 1, "limit": 100, "offset": 0},
+        {"items": [], "total": "1", "limit": 100, "offset": 0},
+        {"items": [make_history_item(1)], "total": 0, "limit": 100, "offset": 0},
+        {"items": [], "total": 5, "limit": 100, "offset": 0},
+    ],
+)
+def test_fetch_all_history_summary_items_rejects_invalid_response_shape(
+    app_module,
+    response,
+):
+    api_client = FakeHistoryApiClient([response])
+
+    with pytest.raises(app_module.CatalogGuardApiResponseError):
+        app_module.fetch_all_history_summary_items(api_client, {})
+
+
 def test_return_history_list_state_keeps_search_query_and_offset(app_module):
     session_state = {
         "history_view_mode": "detail",
@@ -325,6 +610,7 @@ def test_reset_history_filename_search_clears_query_and_offset(app_module):
 
 def test_reset_history_search_clears_filename_dates_error_and_offset(app_module):
     session_state = {
+        **make_prepared_history_summary_download_state(app_module),
         "history_filename_input": "products",
         "history_filename_query": "products",
         "history_start_date_input": date(2026, 7, 1),
@@ -349,6 +635,7 @@ def test_reset_history_search_clears_filename_dates_error_and_offset(app_module)
     assert session_state["history_status_query"] is None
     assert session_state["history_filter_error"] is None
     assert session_state["history_offset"] == 0
+    assert_prepared_history_summary_download_is_cleared(app_module, session_state)
 
 
 def test_get_empty_history_message_distinguishes_search_result(app_module):

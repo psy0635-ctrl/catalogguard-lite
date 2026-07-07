@@ -44,6 +44,12 @@ HISTORY_DISPLAY_COLUMNS = [
     "오류",
     "주의",
 ]
+HISTORY_SUMMARY_DOWNLOAD_COLUMNS = [*HISTORY_DISPLAY_COLUMNS, "검수 상태"]
+HISTORY_SUMMARY_DOWNLOAD_LIMIT = 100
+HISTORY_SUMMARY_DOWNLOAD_MAX_PAGES = 10000
+HISTORY_SUMMARY_DOWNLOAD_CACHE_STATE_KEY = "history_summary_download_cache"
+HISTORY_SUMMARY_DOWNLOAD_ERROR_STATE_KEY = "history_summary_download_error"
+HISTORY_SUMMARY_DOWNLOAD_PREPARE_BUTTON_KEY = "history_summary_download_prepare"
 HISTORY_DETAIL_DISPLAY_COLUMNS = [
     "검수 상태",
     "오류 항목",
@@ -55,6 +61,11 @@ HISTORY_DETAIL_DISPLAY_COLUMNS = [
 ]
 WINDOWS_RESERVED_FILENAME_CHARS = re.compile(r'[\\/:\*\?"<>\|]+')
 HISTORY_INVALID_DATE_RANGE_MESSAGE = "시작일은 종료일보다 늦을 수 없습니다."
+HISTORY_SUMMARY_DOWNLOAD_EMPTY_MESSAGE = "다운로드할 검수 이력이 없습니다."
+HISTORY_SUMMARY_DOWNLOAD_INVALID_RESPONSE_MESSAGE = (
+    "검수 이력 서버의 응답 형식이 올바르지 않습니다."
+)
+CSV_FORMULA_PREFIX_CHARS = ("=", "+", "-", "@")
 HISTORY_STATUS_OPTIONS = ["전체", "오류", "주의", "정상"]
 HISTORY_STATUS_LABEL_TO_QUERY = {
     "전체": None,
@@ -207,6 +218,147 @@ def build_history_dataframe(items: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=HISTORY_DISPLAY_COLUMNS)
 
 
+def build_history_summary_dataframe(items: list[dict]) -> pd.DataFrame:
+    rows = []
+    for item in items:
+        error_count = int(item.get("error_count") or 0)
+        warning_count = int(item.get("warning_count") or 0)
+        rows.append(
+            {
+                "실행 ID": item.get("inspection_run_id"),
+                "파일명": escape_csv_formula_value(item.get("source_filename")),
+                "검수 시간": format_history_datetime(item.get("created_at")),
+                "전체 상품": item.get("total_products"),
+                "전체 문제": item.get("total_issues"),
+                "오류": error_count,
+                "주의": warning_count,
+                "검수 상태": get_overall_status(error_count, warning_count),
+            }
+        )
+    return pd.DataFrame(rows, columns=HISTORY_SUMMARY_DOWNLOAD_COLUMNS)
+
+
+def escape_csv_formula_value(value: object) -> object:
+    if value is None:
+        return None
+
+    text_value = str(value)
+    if text_value.startswith(CSV_FORMULA_PREFIX_CHARS):
+        return f"'{text_value}"
+    return value
+
+
+def build_history_summary_csv(items: list[dict]) -> bytes:
+    dataframe = build_history_summary_dataframe(items)
+    return dataframe.to_csv(index=False).encode("utf-8-sig")
+
+
+def build_history_summary_download_filename(now: datetime | None = None) -> str:
+    timestamp_source = now or datetime.now()
+    return f"inspection_history_{timestamp_source:%Y%m%d_%H%M%S}.csv"
+
+
+def build_history_summary_download_cache_key(
+    session_state,
+    *,
+    total: int,
+) -> tuple[tuple[str, str], ...]:
+    request_params = build_history_list_request_params(
+        session_state,
+        limit=HISTORY_SUMMARY_DOWNLOAD_LIMIT,
+        offset=0,
+    )
+    return (
+        ("total", str(max(0, int(total)))),
+        ("filename", str(request_params.get("filename", ""))),
+        ("start_date", str(request_params.get("start_date", ""))),
+        ("end_date", str(request_params.get("end_date", ""))),
+        ("status", str(request_params.get("status", ""))),
+    )
+
+
+def clear_history_summary_download_cache(session_state) -> None:
+    session_state.pop(HISTORY_SUMMARY_DOWNLOAD_CACHE_STATE_KEY, None)
+    session_state.pop(HISTORY_SUMMARY_DOWNLOAD_ERROR_STATE_KEY, None)
+
+
+def show_history_summary_download_error(session_state, message: str) -> None:
+    session_state[HISTORY_SUMMARY_DOWNLOAD_ERROR_STATE_KEY] = message
+    st.error(message)
+
+
+def validate_history_summary_page_response(response: dict) -> tuple[list[dict], int]:
+    if not isinstance(response, dict):
+        raise CatalogGuardApiResponseError(
+            HISTORY_SUMMARY_DOWNLOAD_INVALID_RESPONSE_MESSAGE
+        )
+
+    page_items = response.get("items")
+    total = response.get("total")
+    if (
+        not isinstance(page_items, list)
+        or type(total) is not int
+        or total < 0
+        or len(page_items) > HISTORY_SUMMARY_DOWNLOAD_LIMIT
+        or any(not isinstance(item, dict) for item in page_items)
+    ):
+        raise CatalogGuardApiResponseError(
+            HISTORY_SUMMARY_DOWNLOAD_INVALID_RESPONSE_MESSAGE
+        )
+    if total == 0 and page_items:
+        raise CatalogGuardApiResponseError(
+            HISTORY_SUMMARY_DOWNLOAD_INVALID_RESPONSE_MESSAGE
+        )
+    if total > 0 and not page_items:
+        raise CatalogGuardApiResponseError(
+            HISTORY_SUMMARY_DOWNLOAD_INVALID_RESPONSE_MESSAGE
+        )
+    return page_items, total
+
+
+def fetch_all_history_summary_items(api_client, session_state) -> tuple[list[dict], int]:
+    all_items: list[dict] = []
+    seen_inspection_run_ids: set[object] = set()
+    offset = 0
+
+    for _ in range(HISTORY_SUMMARY_DOWNLOAD_MAX_PAGES):
+        request_params = build_history_list_request_params(
+            session_state,
+            limit=HISTORY_SUMMARY_DOWNLOAD_LIMIT,
+            offset=offset,
+        )
+        page_response = api_client.list_inspections(**request_params)
+        page_items, total = validate_history_summary_page_response(page_response)
+        if total == 0:
+            return [], 0
+
+        for page_item in page_items:
+            inspection_run_id = page_item.get("inspection_run_id")
+            if inspection_run_id is None:
+                continue
+            if inspection_run_id in seen_inspection_run_ids:
+                raise CatalogGuardApiResponseError(
+                    HISTORY_SUMMARY_DOWNLOAD_INVALID_RESPONSE_MESSAGE
+                )
+            seen_inspection_run_ids.add(inspection_run_id)
+
+        all_items.extend(page_items)
+        if len(all_items) > total:
+            raise CatalogGuardApiResponseError(
+                HISTORY_SUMMARY_DOWNLOAD_INVALID_RESPONSE_MESSAGE
+            )
+        if len(all_items) >= total:
+            return all_items, total
+        if len(page_items) < HISTORY_SUMMARY_DOWNLOAD_LIMIT:
+            raise CatalogGuardApiResponseError(
+                HISTORY_SUMMARY_DOWNLOAD_INVALID_RESPONSE_MESSAGE
+            )
+
+        offset += HISTORY_SUMMARY_DOWNLOAD_LIMIT
+
+    raise CatalogGuardApiResponseError(HISTORY_SUMMARY_DOWNLOAD_INVALID_RESPONSE_MESSAGE)
+
+
 def format_history_option_label(item: dict) -> str:
     return (
         f"{item.get('inspection_run_id')} · "
@@ -347,6 +499,7 @@ def apply_history_search(session_state) -> None:
     session_state["history_filter_error"] = None
     # 새 검색은 항상 첫 페이지부터 보여줘야 하므로 offset을 0으로 돌립니다.
     session_state["history_offset"] = 0
+    clear_history_summary_download_cache(session_state)
 
 
 def apply_history_filename_search(session_state) -> None:
@@ -365,6 +518,7 @@ def reset_history_search(session_state) -> None:
     session_state["history_status_query"] = None
     session_state["history_filter_error"] = None
     session_state["history_offset"] = 0
+    clear_history_summary_download_cache(session_state)
 
 
 def reset_history_filename_search(session_state) -> None:
@@ -744,6 +898,95 @@ def render_history_filename_search_controls() -> None:
         )
 
 
+def render_history_summary_download(api_client, session_state, *, total: int) -> None:
+    if total <= 0:
+        clear_history_summary_download_cache(session_state)
+        st.info(HISTORY_SUMMARY_DOWNLOAD_EMPTY_MESSAGE)
+        return
+
+    cache_key = build_history_summary_download_cache_key(
+        session_state,
+        total=total,
+    )
+    prepared_download = session_state.get(HISTORY_SUMMARY_DOWNLOAD_CACHE_STATE_KEY)
+    if not (
+        isinstance(prepared_download, dict)
+        and prepared_download.get("cache_key") == cache_key
+    ):
+        st.caption(f"현재 검색 조건에 맞는 전체 {total}건을 다운로드할 수 있습니다.")
+
+    if st.button(
+        "CSV 다운로드 준비",
+        key=HISTORY_SUMMARY_DOWNLOAD_PREPARE_BUTTON_KEY,
+    ):
+        try:
+            history_items, download_total = fetch_all_history_summary_items(
+                api_client,
+                session_state,
+            )
+            if not history_items:
+                clear_history_summary_download_cache(session_state)
+                st.info(HISTORY_SUMMARY_DOWNLOAD_EMPTY_MESSAGE)
+                return
+            csv_bytes = build_history_summary_csv(history_items)
+        except CatalogGuardApiConnectionError:
+            clear_history_summary_download_cache(session_state)
+            show_history_summary_download_error(
+                session_state,
+                "전체 검수 이력 CSV를 준비하는 중 서버에 연결할 수 없습니다.",
+            )
+            return
+        except CatalogGuardApiTimeoutError:
+            clear_history_summary_download_cache(session_state)
+            show_history_summary_download_error(
+                session_state,
+                "전체 검수 이력 CSV를 준비하는 중 서버 응답 시간이 초과되었습니다.",
+            )
+            return
+        except CatalogGuardApiResponseError:
+            clear_history_summary_download_cache(session_state)
+            show_history_summary_download_error(
+                session_state,
+                "전체 검수 이력 CSV를 준비하는 중 오류가 발생했습니다.",
+            )
+            return
+        except ValueError:
+            clear_history_summary_download_cache(session_state)
+            show_history_summary_download_error(
+                session_state,
+                "현재 검색 조건으로 전체 검수 이력 CSV를 준비할 수 없습니다.",
+            )
+            return
+
+        session_state.pop(HISTORY_SUMMARY_DOWNLOAD_ERROR_STATE_KEY, None)
+        cache_key = build_history_summary_download_cache_key(
+            session_state,
+            total=download_total,
+        )
+        session_state[HISTORY_SUMMARY_DOWNLOAD_CACHE_STATE_KEY] = {
+            "cache_key": cache_key,
+            "csv_bytes": csv_bytes,
+            "file_name": build_history_summary_download_filename(),
+            "total": download_total,
+        }
+
+    prepared_download = session_state.get(HISTORY_SUMMARY_DOWNLOAD_CACHE_STATE_KEY)
+    if not (
+        isinstance(prepared_download, dict)
+        and prepared_download.get("cache_key") == cache_key
+    ):
+        return
+
+    st.caption(f"준비된 전체 {prepared_download['total']}건을 다운로드합니다.")
+    st.download_button(
+        "전체 검수 이력 요약 CSV 다운로드",
+        data=prepared_download["csv_bytes"],
+        file_name=prepared_download["file_name"],
+        mime="text/csv",
+        key="history_summary_download",
+    )
+
+
 def render_inspection_history_list(api_client) -> None:
     render_history_filename_search_controls()
     if st.session_state.get("history_filter_error"):
@@ -800,11 +1043,17 @@ def render_inspection_history_list(api_client) -> None:
                 status_query,
             )
         )
+        st.caption(HISTORY_SUMMARY_DOWNLOAD_EMPTY_MESSAGE)
     else:
         st.dataframe(
             history_dataframe,
             use_container_width=True,
             hide_index=True,
+        )
+        render_history_summary_download(
+            api_client,
+            st.session_state,
+            total=total,
         )
         run_options = [
             item["inspection_run_id"]
