@@ -114,6 +114,42 @@ def test_create_session_factory_binds_to_engine_without_connecting():
         engine.dispose()
 
 
+def test_check_database_connection_uses_shared_engine_and_closes_connection(
+    monkeypatch,
+):
+    class FakeConnection:
+        def __init__(self):
+            self.executed_statements: list[str] = []
+            self.closed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            self.closed = True
+
+        def execute(self, statement):
+            self.executed_statements.append(str(statement))
+
+    class FakeEngine:
+        def __init__(self):
+            self.connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            return fake_connection
+
+    fake_connection = FakeConnection()
+    fake_engine = FakeEngine()
+    monkeypatch.setattr(db_session, "get_engine", lambda: fake_engine)
+
+    db_session.check_database_connection()
+
+    assert fake_engine.connect_calls == 1
+    assert fake_connection.executed_statements == ["SELECT 1"]
+    assert fake_connection.closed is True
+
+
 def test_get_session_closes_session(monkeypatch):
     # get_session()은 요청이 끝났을 때 세션 close()를 호출해야 합니다.
     class FakeSession:

@@ -1,7 +1,7 @@
-# 역할: SQLAlchemy 엔진과 세션 팩토리를 생성하고 요청 후 세션을 닫습니다.
+# 역할: SQLAlchemy 엔진과 세션 팩토리를 관리하고 DB 연결 상태를 확인합니다.
 from collections.abc import Generator
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from config.database import get_database_url, normalize_database_url
@@ -45,6 +45,12 @@ def get_engine() -> Engine:
     if _engine is None:
         _engine = create_database_engine()
     return _engine
+
+
+def check_database_connection() -> None:
+    engine = get_engine()
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
 
 
 def get_session_factory() -> sessionmaker[Session]:
