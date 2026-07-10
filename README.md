@@ -510,21 +510,43 @@ curl.exe -X POST "http://127.0.0.1:8001/api/v1/inspections" `
 
 ### Railway FastAPI 배포 설정
 
-Railway에는 FastAPI 서비스와 PostgreSQL 서비스를 각각 만든 뒤, FastAPI 서비스에서 PostgreSQL의 `DATABASE_URL`을 환경변수로 연결합니다. 현재 저장소는 API 의존성을 `requirements-api.txt`에 분리해 두었으므로 Railway 대시보드에서 Build Command는 비워 두고 `RAILPACK_INSTALL_CMD` 환경변수로 설치 명령을 설정합니다.
+production 환경에는 `catalogguard-lite` FastAPI 서비스와 `Postgres` PostgreSQL 서비스가 배포되어 있습니다. API 의존성은 `requirements-api.txt`에 분리되어 있으므로 Railway 대시보드에서 Build Command는 비워 두고, 다음 설정을 사용합니다.
 
 ```text
 Root Directory: /
 Build Command: (비워 둠)
-RAILPACK_INSTALL_CMD: pip install -r requirements-api.txt
-Start Command: uvicorn api.main:app --host 0.0.0.0 --port $PORT
-Pre-deploy Command: alembic upgrade head
-Health Check Path: /health
-Required Variables: DATABASE_URL
+RAILPACK_INSTALL_CMD: python -m venv /app/.venv && /app/.venv/bin/python -m pip install -r requirements-api.txt
+Pre-deploy Command: cd /app && /app/.venv/bin/alembic upgrade head
+Start Command: cd /app && /app/.venv/bin/uvicorn api.main:app --host 0.0.0.0 --port $PORT
+Healthcheck Path: /health
+DATABASE_URL: Postgres 서비스의 DATABASE_URL을 Reference Variable로 연결
 ```
 
-Start Command에는 운영 배포용으로 `--reload`, `127.0.0.1`, 고정 포트 `8000`을 넣지 않습니다. `/health`는 FastAPI 프로세스 상태만 빠르게 확인하며 PostgreSQL 연결까지 확인하지 않습니다.
+실제 `DATABASE_URL` 값이나 비밀번호는 저장소에 기록하지 않습니다. Start Command에는 운영 배포용으로 `--reload`, `127.0.0.1`, 고정 포트 `8000`을 넣지 않습니다. `/health`는 FastAPI 프로세스 상태만 빠르게 확인하며 PostgreSQL 연결까지 확인하지 않습니다.
 
 Railway가 제공하는 driverless `postgresql://` 형식의 `DATABASE_URL`은 애플리케이션에서 `postgresql+psycopg://`로 정규화해 SQLAlchemy가 설치된 `psycopg` 드라이버를 사용하게 합니다.
+
+공개 API 주소와 확인 경로는 다음과 같습니다.
+
+- API Base URL: https://catalogguard-lite-production.up.railway.app
+- Health: https://catalogguard-lite-production.up.railway.app/health
+- Swagger Docs: https://catalogguard-lite-production.up.railway.app/docs
+
+Streamlit Community Cloud의 Secrets에는 다음 값을 설정합니다.
+
+```toml
+CATALOGGUARD_API_BASE_URL = "https://catalogguard-lite-production.up.railway.app"
+CATALOGGUARD_API_TIMEOUT_SECONDS = "10"
+```
+
+현재 배포에서는 `/health`, `/docs`, Streamlit Community Cloud 연결, CSV 검수, PostgreSQL 검수 이력 저장, 목록·상세 조회, 상세·전체 CSV 다운로드와 동일 파일 중복 저장 방지를 확인했습니다.
+
+#### 첫 배포 오류 해결
+
+- 첫 빌드에서는 Railway가 `requirements.txt`를 설치해 FastAPI, SQLAlchemy, Alembic, psycopg 등 API·DB 패키지가 누락되었습니다.
+- `RAILPACK_INSTALL_CMD`로 `requirements-api.txt`를 설치하도록 바꿨지만, 설치 명령을 덮어쓰면서 `/app/.venv`가 생성되지 않았습니다. 현재 명령은 `python -m venv /app/.venv`로 가상환경을 먼저 생성합니다.
+- Pre-deploy에서 `alembic command not found`가 발생해 `/app/.venv/bin/alembic` 절대 경로를 사용하도록 수정했습니다.
+- Start Command의 `uvicorn`도 같은 이유로 `/app/.venv/bin/uvicorn` 절대 경로를 사용합니다.
 
 ## 17. Streamlit 실행 방법
 
@@ -864,8 +886,6 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - migration 이전 기존 이력은 `file_sha256=NULL`이라 과거 이력까지 소급해 중복 판단할 수 없습니다.
 - `INSPECTION_VERSION`은 검수 규칙이 변경될 때 개발자가 직접 올려야 합니다.
 - 공개 Streamlit 앱에서는 FastAPI와 PostgreSQL 연동 상태에 따라 검수 이력 기능을 사용할 수 없을 수 있습니다.
-- Railway FastAPI와 Railway PostgreSQL 서비스 생성은 아직 완료되지 않았습니다.
-- Streamlit Cloud와 원격 FastAPI 연결은 아직 완료되지 않았습니다.
 - 인증과 권한 관리는 구현되어 있지 않습니다.
 - 저장된 검수 이력 삭제 기능은 구현되어 있지 않습니다.
 - 전체 요약 CSV는 목록 API를 반복 조회하므로 다운로드 중 DB 내용이 바뀌는 상황의 완전한 스냅샷 보장은 별도 트랜잭션/내보내기 API가 필요합니다.
@@ -879,7 +899,6 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - 과거 이력 backfill 정책 검토
 - 날짜 범위와 상태별 이력 검색
 - 검수 이력 삭제와 보관 정책
-- 원격 FastAPI/PostgreSQL 배포
 - 인증과 사용자별 이력 분리
 - 중복 저장 이벤트 로그 또는 감사 기록 검토
 - 검수 이력 화면 스크린샷 문서화
