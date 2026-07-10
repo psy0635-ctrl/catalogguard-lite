@@ -508,6 +508,24 @@ curl.exe -X POST "http://127.0.0.1:8001/api/v1/inspections" `
 
 서버는 실행 중인 PowerShell에서 `Ctrl+C`로 종료합니다.
 
+### Railway FastAPI 배포 설정
+
+Railway에는 FastAPI 서비스와 PostgreSQL 서비스를 각각 만든 뒤, FastAPI 서비스에서 PostgreSQL의 `DATABASE_URL`을 환경변수로 연결합니다. 현재 저장소는 API 의존성을 `requirements-api.txt`에 분리해 두었으므로 Railway 대시보드에서 Build Command는 비워 두고 `RAILPACK_INSTALL_CMD` 환경변수로 설치 명령을 설정합니다.
+
+```text
+Root Directory: /
+Build Command: (비워 둠)
+RAILPACK_INSTALL_CMD: pip install -r requirements-api.txt
+Start Command: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+Pre-deploy Command: alembic upgrade head
+Health Check Path: /health
+Required Variables: DATABASE_URL
+```
+
+Start Command에는 운영 배포용으로 `--reload`, `127.0.0.1`, 고정 포트 `8000`을 넣지 않습니다. `/health`는 FastAPI 프로세스 상태만 빠르게 확인하며 PostgreSQL 연결까지 확인하지 않습니다.
+
+Railway가 제공하는 driverless `postgresql://` 형식의 `DATABASE_URL`은 애플리케이션에서 `postgresql+psycopg://`로 정규화해 SQLAlchemy가 설치된 `psycopg` 드라이버를 사용하게 합니다.
+
 ## 17. Streamlit 실행 방법
 
 Streamlit 화면만 실행하려면 아래 명령을 사용합니다.
@@ -791,7 +809,7 @@ python -m pytest -q
 현재 확인된 테스트 결과는 다음과 같습니다.
 
 ```text
-526 passed, 25 skipped, 1 warning
+530 passed, 25 skipped, 1 warning
 ```
 
 이 결과는 `python -m pytest -q -rs`로 확인했습니다. 현재 환경에는 `TEST_DATABASE_URL`이 설정되지 않아 PostgreSQL 연결 및 저장 통합 테스트 25개는 skipped 처리되었습니다. warning은 기능 실패가 아니라 `.pytest_cache` 디렉터리 생성 권한과 관련된 `PytestCacheWarning`입니다.
@@ -846,7 +864,7 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - migration 이전 기존 이력은 `file_sha256=NULL`이라 과거 이력까지 소급해 중복 판단할 수 없습니다.
 - `INSPECTION_VERSION`은 검수 규칙이 변경될 때 개발자가 직접 올려야 합니다.
 - 공개 Streamlit 앱에서는 FastAPI와 PostgreSQL 연동 상태에 따라 검수 이력 기능을 사용할 수 없을 수 있습니다.
-- 원격 FastAPI 배포는 아직 완료되지 않았습니다.
+- Railway FastAPI와 Railway PostgreSQL 서비스 생성은 아직 완료되지 않았습니다.
 - Streamlit Cloud와 원격 FastAPI 연결은 아직 완료되지 않았습니다.
 - 인증과 권한 관리는 구현되어 있지 않습니다.
 - 저장된 검수 이력 삭제 기능은 구현되어 있지 않습니다.

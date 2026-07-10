@@ -6,6 +6,7 @@ from config.database import (
     DatabaseConfigurationError,
     get_database_url,
     get_optional_database_url,
+    normalize_database_url,
 )
 import db.session as db_session
 from db.session import (
@@ -23,6 +24,39 @@ def test_get_database_url_reads_environment(monkeypatch):
 
     assert (
         get_database_url()
+        == "postgresql+psycopg://user:pass@localhost:5432/catalogguard_lite"
+    )
+
+
+def test_get_database_url_normalizes_driverless_postgresql_url(monkeypatch):
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://user:pass@localhost:5432/catalogguard_lite",
+    )
+
+    assert (
+        get_database_url()
+        == "postgresql+psycopg://user:pass@localhost:5432/catalogguard_lite"
+    )
+
+
+def test_get_optional_database_url_normalizes_driverless_postgresql_url(monkeypatch):
+    monkeypatch.setenv(
+        "TEST_DATABASE_URL",
+        "postgresql://user:pass@localhost:5432/catalogguard_lite_test",
+    )
+
+    assert (
+        get_optional_database_url()
+        == "postgresql+psycopg://user:pass@localhost:5432/catalogguard_lite_test"
+    )
+
+
+def test_normalize_database_url_keeps_explicit_driver():
+    assert (
+        normalize_database_url(
+            "postgresql+psycopg://user:pass@localhost:5432/catalogguard_lite"
+        )
         == "postgresql+psycopg://user:pass@localhost:5432/catalogguard_lite"
     )
 
@@ -50,6 +84,17 @@ def test_create_database_engine_is_lazy_and_uses_pool_pre_ping():
     try:
         assert engine.url.drivername == "postgresql+psycopg"
         assert engine.pool._pre_ping is True
+    finally:
+        engine.dispose()
+
+
+def test_create_database_engine_accepts_driverless_postgresql_url():
+    engine = create_database_engine(
+        "postgresql://user:pass@localhost:5432/catalogguard_lite"
+    )
+    try:
+        assert engine.url.drivername == "postgresql+psycopg"
+        assert engine.dialect.driver == "psycopg"
     finally:
         engine.dispose()
 

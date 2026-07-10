@@ -4,7 +4,7 @@ from collections.abc import Generator
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from config.database import get_database_url
+from config.database import get_database_url, normalize_database_url
 
 
 # 앱에서 기본으로 사용할 엔진과 세션 팩토리는 필요해지는 순간에만 만듭니다.
@@ -14,8 +14,13 @@ _session_factory: sessionmaker[Session] | None = None
 
 def create_database_engine(database_url: str | None = None) -> Engine:
     # pool_pre_ping=True는 오래된 DB 연결을 쓰기 전에 살아 있는지 확인하게 해 줍니다.
+    resolved_database_url = (
+        normalize_database_url(database_url)
+        if database_url is not None
+        else get_database_url()
+    )
     return create_engine(
-        database_url or get_database_url(),
+        resolved_database_url,
         pool_pre_ping=True,
     )
 
