@@ -321,6 +321,102 @@ def build_result_dataframe(issues: list[ValidationIssue]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=RESULT_COLUMNS)
 
 
+def _normalize_statistics_text(value: object, empty_value: str) -> str:
+    """통계 집계용 단일 값을 문자열로 정규화합니다."""
+    if value is None or pd.isna(value):
+        return empty_value
+
+    normalized = str(value).strip()
+    return normalized or empty_value
+
+
+def build_inspection_statistics(
+    results_df: pd.DataFrame,
+) -> dict[str, pd.DataFrame | int]:
+    """전체 검수 결과를 오류 항목, 위험 수준, 상품 ID별로 집계합니다."""
+    required_columns = ("오류 항목", "위험 수준", "상품 ID")
+    if any(column not in results_df.columns for column in required_columns):
+        raise ValueError("통계 집계에 필요한 컬럼이 없습니다.")
+
+    issue_values = results_df["오류 항목"].map(
+        lambda value: _normalize_statistics_text(value, "분류 없음")
+    )
+    issue_counts = (
+        issue_values.value_counts(sort=False)
+        .rename_axis("오류 항목")
+        .reset_index(name="문제 수")
+        .sort_values(
+            ["문제 수", "오류 항목"],
+            ascending=[False, True],
+            kind="stable",
+        )
+        .reset_index(drop=True)
+    )
+
+    supported_risk_levels = {"높음", "중간", "낮음"}
+    risk_values = results_df["위험 수준"].map(
+        lambda value: _normalize_statistics_text(value, "미분류")
+    )
+    risk_values = risk_values.where(
+        risk_values.isin(supported_risk_levels), "미분류"
+    )
+    risk_counts = (
+        risk_values.value_counts(sort=False)
+        .rename_axis("위험 수준")
+        .reset_index(name="문제 수")
+    )
+    risk_order = {"높음": 0, "중간": 1, "낮음": 2, "미분류": 3}
+    risk_counts["_정렬 순서"] = risk_counts["위험 수준"].map(risk_order)
+    risk_counts = (
+        risk_counts.sort_values("_정렬 순서", kind="stable")
+        .drop(columns="_정렬 순서")
+        .reset_index(drop=True)
+    )
+
+    product_values = results_df["상품 ID"].map(
+        lambda value: _normalize_statistics_text(value, "")
+    )
+    product_rows = pd.DataFrame(
+        {
+            "_상품 ID": product_values,
+            "_상품 ID 없음": product_values.eq(""),
+        }
+    )
+    product_counts = (
+        product_rows.groupby(
+            ["_상품 ID", "_상품 ID 없음"], sort=False, dropna=False
+        )
+        .size()
+        .reset_index(name="문제 수")
+        .sort_values(
+            ["문제 수", "_상품 ID 없음", "_상품 ID"],
+            ascending=[False, True, True],
+            kind="stable",
+        )
+        .reset_index(drop=True)
+    )
+    product_counts["상품 ID"] = product_counts.apply(
+        lambda row: (
+            "상품 ID 없음"
+            if row["_상품 ID 없음"]
+            else (
+                "상품 ID 없음 (입력값)"
+                if row["_상품 ID"] == "상품 ID 없음"
+                else row["_상품 ID"]
+            )
+        ),
+        axis=1,
+    )
+    product_counts = product_counts[["상품 ID", "문제 수"]]
+
+    return {
+        "issue_counts": issue_counts,
+        "risk_counts": risk_counts,
+        "product_counts": product_counts,
+        "total_issues": len(results_df),
+    }
+
+
 def build_validation_summary_message(
     total_issue_count: int,
     error_count: int,

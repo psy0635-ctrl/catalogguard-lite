@@ -2,6 +2,7 @@
 import pandas as pd
 import pytest
 
+from core import presentation
 from core.models import ValidationIssue
 from core.presentation import (
     FIELD_LABELS,
@@ -67,6 +68,277 @@ def make_result_dataframe() -> pd.DataFrame:
         ],
         columns=RESULT_COLUMNS,
     )
+
+
+def make_statistics_dataframe(rows: list[dict]) -> pd.DataFrame:
+    defaults = {
+        "검수 상태": "오류",
+        "오류 항목": "가격 오류",
+        "상품 그룹 ID": "G001",
+        "상품 ID": "P001",
+        "오류 이유": "테스트 오류 이유",
+        "수정 권장사항": "테스트 수정 권장사항",
+        "위험 수준": "높음",
+    }
+    return pd.DataFrame(
+        [{**defaults, **row} for row in rows],
+        columns=RESULT_COLUMNS,
+    )
+
+
+def test_build_inspection_statistics_counts_all_categories_and_totals():
+    results_df = make_statistics_dataframe(
+        [
+            {"오류 항목": "가격 오류", "위험 수준": "높음", "상품 ID": "P003"},
+            {"오류 항목": "가격 오류", "위험 수준": "높음", "상품 ID": "P003"},
+            {"오류 항목": "상품 ID 중복", "위험 수준": "높음", "상품 ID": "P001"},
+            {"오류 항목": "필수 값 누락", "위험 수준": "중간", "상품 ID": "P001"},
+            {"오류 항목": "재고 형식 오류", "위험 수준": "낮음", "상품 ID": "P002"},
+        ]
+    )
+
+    statistics = presentation.build_inspection_statistics(results_df)
+
+    expected_issue_counts = pd.DataFrame(
+        {
+            "오류 항목": ["가격 오류", "상품 ID 중복", "재고 형식 오류", "필수 값 누락"],
+            "문제 수": [2, 1, 1, 1],
+        }
+    )
+    expected_risk_counts = pd.DataFrame(
+        {
+            "위험 수준": ["높음", "중간", "낮음"],
+            "문제 수": [3, 1, 1],
+        }
+    )
+    expected_product_counts = pd.DataFrame(
+        {
+            "상품 ID": ["P001", "P003", "P002"],
+            "문제 수": [2, 2, 1],
+        }
+    )
+
+    pd.testing.assert_frame_equal(statistics["issue_counts"], expected_issue_counts)
+    pd.testing.assert_frame_equal(statistics["risk_counts"], expected_risk_counts)
+    pd.testing.assert_frame_equal(statistics["product_counts"], expected_product_counts)
+    assert statistics["total_issues"] == 5
+    assert statistics["issue_counts"]["문제 수"].sum() == 5
+    assert statistics["risk_counts"]["문제 수"].sum() == 5
+    assert statistics["product_counts"]["문제 수"].sum() == 5
+
+
+def test_build_inspection_statistics_sorts_tied_issue_counts_by_name():
+    results_df = make_statistics_dataframe(
+        [
+            {"오류 항목": "상품 ID 중복"},
+            {"오류 항목": "가격 오류"},
+            {"오류 항목": "필수 값 누락"},
+            {"오류 항목": "상품 ID 중복"},
+            {"오류 항목": "가격 오류"},
+        ]
+    )
+
+    statistics = presentation.build_inspection_statistics(results_df)
+
+    assert statistics["issue_counts"].to_dict(orient="records") == [
+        {"오류 항목": "가격 오류", "문제 수": 2},
+        {"오류 항목": "상품 ID 중복", "문제 수": 2},
+        {"오류 항목": "필수 값 누락", "문제 수": 1},
+    ]
+
+
+def test_build_inspection_statistics_uses_semantic_risk_order():
+    results_df = make_statistics_dataframe(
+        [
+            {"위험 수준": "낮음"},
+            {"위험 수준": "높음"},
+            {"위험 수준": "중간"},
+            {"위험 수준": "알 수 없음"},
+        ]
+    )
+
+    statistics = presentation.build_inspection_statistics(results_df)
+
+    assert statistics["risk_counts"].to_dict(orient="records") == [
+        {"위험 수준": "높음", "문제 수": 1},
+        {"위험 수준": "중간", "문제 수": 1},
+        {"위험 수준": "낮음", "문제 수": 1},
+        {"위험 수준": "미분류", "문제 수": 1},
+    ]
+
+
+def test_build_inspection_statistics_groups_blank_issue_and_risk_values():
+    blank_values = [None, pd.NA, float("nan"), "", "   "]
+    results_df = make_statistics_dataframe(
+        [
+            {"오류 항목": value, "위험 수준": value}
+            for value in blank_values
+        ]
+    )
+
+    statistics = presentation.build_inspection_statistics(results_df)
+
+    assert statistics["issue_counts"].to_dict(orient="records") == [
+        {"오류 항목": "분류 없음", "문제 수": 5}
+    ]
+    assert statistics["risk_counts"].to_dict(orient="records") == [
+        {"위험 수준": "미분류", "문제 수": 5}
+    ]
+
+
+def test_build_inspection_statistics_groups_blank_product_ids():
+    results_df = make_statistics_dataframe(
+        [
+            {"상품 ID": value}
+            for value in [None, pd.NA, float("nan"), "", "   "]
+        ]
+    )
+
+    statistics = presentation.build_inspection_statistics(results_df)
+
+    assert statistics["product_counts"].to_dict(orient="records") == [
+        {"상품 ID": "상품 ID 없음", "문제 수": 5}
+    ]
+
+
+def test_build_inspection_statistics_distinguishes_missing_product_id_label_input():
+    results_df = make_statistics_dataframe(
+        [
+            {"상품 ID": None},
+            {"상품 ID": "상품 ID 없음"},
+            {"상품 ID": " 상품 ID 없음 "},
+        ]
+    )
+
+    statistics = presentation.build_inspection_statistics(results_df)
+
+    assert statistics["product_counts"].to_dict(orient="records") == [
+        {"상품 ID": "상품 ID 없음 (입력값)", "문제 수": 2},
+        {"상품 ID": "상품 ID 없음", "문제 수": 1},
+    ]
+
+
+def test_build_inspection_statistics_sorts_product_ids_and_missing_id_stably():
+    results_df = make_statistics_dataframe(
+        [
+            {"상품 ID": "P002"},
+            {"상품 ID": None},
+            {"상품 ID": "P001"},
+            {"상품 ID": "P002"},
+            {"상품 ID": ""},
+            {"상품 ID": "P001"},
+        ]
+    )
+
+    first_statistics = presentation.build_inspection_statistics(results_df)
+    second_statistics = presentation.build_inspection_statistics(results_df)
+
+    expected_product_counts = pd.DataFrame(
+        {
+            "상품 ID": ["P001", "P002", "상품 ID 없음"],
+            "문제 수": [2, 2, 2],
+        }
+    )
+    pd.testing.assert_frame_equal(
+        first_statistics["product_counts"],
+        expected_product_counts,
+    )
+    pd.testing.assert_frame_equal(
+        second_statistics["product_counts"],
+        expected_product_counts,
+    )
+
+
+def test_build_inspection_statistics_returns_all_products_without_top_five_limit():
+    results_df = make_statistics_dataframe(
+        [{"상품 ID": f"P{index:03d}"} for index in range(1, 7)]
+    )
+
+    statistics = presentation.build_inspection_statistics(results_df)
+
+    assert len(statistics["product_counts"]) == 6
+    assert statistics["product_counts"]["상품 ID"].tolist() == [
+        "P001",
+        "P002",
+        "P003",
+        "P004",
+        "P005",
+        "P006",
+    ]
+
+
+def test_build_inspection_statistics_handles_empty_dataframe_with_columns():
+    results_df = pd.DataFrame(columns=RESULT_COLUMNS)
+
+    statistics = presentation.build_inspection_statistics(results_df)
+
+    assert statistics["total_issues"] == 0
+    assert list(statistics["issue_counts"].columns) == ["오류 항목", "문제 수"]
+    assert list(statistics["risk_counts"].columns) == ["위험 수준", "문제 수"]
+    assert list(statistics["product_counts"].columns) == ["상품 ID", "문제 수"]
+    assert statistics["issue_counts"].empty
+    assert statistics["risk_counts"].empty
+    assert statistics["product_counts"].empty
+
+
+@pytest.mark.parametrize("missing_column", ["오류 항목", "위험 수준", "상품 ID"])
+def test_build_inspection_statistics_rejects_missing_required_column(missing_column):
+    private_test_value = "FAKE_PRIVATE_TEST_VALUE"
+    results_df = make_statistics_dataframe(
+        [{"오류 이유": private_test_value}]
+    ).drop(columns=missing_column)
+
+    with pytest.raises(
+        ValueError,
+        match="^통계 집계에 필요한 컬럼이 없습니다\\.$",
+    ) as error_info:
+        presentation.build_inspection_statistics(results_df)
+
+    assert private_test_value not in str(error_info.value)
+
+
+def test_build_inspection_statistics_does_not_change_original_dataframe():
+    results_df = make_statistics_dataframe(
+        [
+            {"오류 항목": " 가격 오류 ", "위험 수준": " 높음 ", "상품 ID": " P001 "},
+            {"오류 항목": None, "위험 수준": pd.NA, "상품 ID": None},
+        ]
+    )
+    results_df.index = [7, 3]
+    original_df = results_df.copy(deep=True)
+
+    presentation.build_inspection_statistics(results_df)
+
+    pd.testing.assert_frame_equal(results_df, original_df)
+
+
+def test_build_inspection_statistics_does_not_return_unused_private_columns():
+    private_test_values = [
+        "FAKE_EMAIL_TEST_VALUE",
+        "FAKE_PHONE_TEST_VALUE",
+        "FAKE_ACCOUNT_TEST_VALUE",
+    ]
+    results_df = make_statistics_dataframe(
+        [
+            {
+                "오류 이유": private_test_values[0],
+                "수정 권장사항": private_test_values[1],
+                "상품 그룹 ID": private_test_values[2],
+            }
+        ]
+    )
+
+    statistics = presentation.build_inspection_statistics(results_df)
+
+    assert list(statistics["issue_counts"].columns) == ["오류 항목", "문제 수"]
+    assert list(statistics["risk_counts"].columns) == ["위험 수준", "문제 수"]
+    assert list(statistics["product_counts"].columns) == ["상품 ID", "문제 수"]
+    result_text = " ".join(
+        statistics[key].to_string(index=False)
+        for key in ("issue_counts", "risk_counts", "product_counts")
+    )
+    for private_test_value in private_test_values:
+        assert private_test_value not in result_text
 
 
 def test_translate_duplicate_product_id_message_to_korean():
