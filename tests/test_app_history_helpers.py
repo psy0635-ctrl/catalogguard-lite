@@ -994,7 +994,7 @@ def test_render_inspection_statistics_displays_three_complete_statistics(
     )
     assert all(
         dataframe_kwargs["hide_index"] is True
-        and dataframe_kwargs["use_container_width"] is True
+        and dataframe_kwargs["width"] == "stretch"
         and dataframe_kwargs["height"] <= 420
         for _, _, dataframe_kwargs in fake_st.dataframes
     )

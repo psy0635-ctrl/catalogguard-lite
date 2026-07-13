@@ -683,7 +683,7 @@ def render_inspection_statistics(
             st.dataframe(
                 dataframe,
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
                 height=table_height,
             )
 
@@ -815,7 +815,7 @@ def render_csv_inspection_tab() -> None:
     st.dataframe(
         preview_rows,
         height=calculate_dataframe_height(len(preview_rows)),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
     if len(masked_preview_df) > len(preview_rows):
@@ -898,7 +898,7 @@ def render_csv_inspection_tab() -> None:
     st.dataframe(
         filtered_result_df,
         height=calculate_dataframe_height(len(filtered_result_df)),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -1134,7 +1134,7 @@ def render_inspection_history_list(api_client) -> None:
     else:
         st.dataframe(
             history_dataframe,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
         render_history_summary_download(
@@ -1241,7 +1241,7 @@ def render_inspection_history_detail(api_client) -> None:
     st.dataframe(
         detail_dataframe,
         height=calculate_dataframe_height(len(detail_dataframe)),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
     st.download_button(
