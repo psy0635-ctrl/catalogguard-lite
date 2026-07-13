@@ -19,6 +19,7 @@ from clients.catalogguard_api import (
 from config.settings import OPTIONAL_COLUMNS, REQUIRED_COLUMNS
 from core.inspection_service import inspect_dataframe
 from core.presentation import (
+    build_inspection_statistics,
     build_validation_summary_message,
     calculate_dataframe_height,
     filter_result_dataframe,
@@ -638,6 +639,55 @@ def initialize_history_state() -> None:
         st.session_state.history_filter_error = None
 
 
+def render_inspection_statistics(
+    results_df: pd.DataFrame,
+    expected_total_issues: int | None = None,
+) -> None:
+    st.subheader("검수 결과 통계")
+    st.caption("아래 통계는 필터 적용 전 전체 검수 결과를 기준으로 합니다.")
+
+    try:
+        statistics = build_inspection_statistics(results_df)
+    except ValueError:
+        st.error("검수 결과 통계를 표시할 수 없습니다.")
+        return
+
+    issue_counts = statistics["issue_counts"]
+    risk_counts = statistics["risk_counts"]
+    product_counts = statistics["product_counts"]
+    total_issues = statistics["total_issues"]
+
+    if expected_total_issues is not None and expected_total_issues != total_issues:
+        st.error(
+            "검수 요약과 상세 결과 수가 일치하지 않아 통계를 표시할 수 없습니다."
+        )
+        return
+
+    if total_issues == 0:
+        st.info("발견된 문제가 없어 통계로 표시할 항목이 없습니다.")
+        return
+
+    top_products = product_counts.head(5)
+    table_height = calculate_dataframe_height(
+        max(len(issue_counts), len(risk_counts), len(top_products))
+    )
+    issue_column, risk_column, product_column = st.columns(3)
+
+    for column, title, dataframe in (
+        (issue_column, "오류 항목별 발생 건수", issue_counts),
+        (risk_column, "위험 수준별 발생 건수", risk_counts),
+        (product_column, "문제가 많은 상품 TOP 5", top_products),
+    ):
+        with column:
+            st.markdown(f"**{title}**")
+            st.dataframe(
+                dataframe,
+                hide_index=True,
+                use_container_width=True,
+                height=table_height,
+            )
+
+
 def render_inspection_save_failure(
     detail_message: str,
     error: Exception | None = None,
@@ -797,6 +847,13 @@ def render_csv_inspection_tab() -> None:
     else:
         st.success("검사가 완료되었습니다. 발견된 문제가 없습니다.")
 
+    # 통계는 상세 결과 필터와 무관한 전체 검수 결과를 사용합니다.
+    result_df = inspection_report.result_dataframe
+    render_inspection_statistics(
+        result_df,
+        expected_total_issues=issue_count,
+    )
+
     render_inspection_save_button(
         source_filename=uploaded_file.name,
         file_bytes=file_bytes,
@@ -806,8 +863,6 @@ def render_csv_inspection_tab() -> None:
     if issue_count <= 0:
         return
 
-    # 내부 검수 결과를 화면 표시와 CSV 다운로드에 쓰는 표 형태로 바꿉니다.
-    result_df = inspection_report.result_dataframe
     rule_options = [
         "전체",
         *sorted(
@@ -1175,6 +1230,10 @@ def render_inspection_history_detail(api_client) -> None:
     warning_col.metric("주의", summary.get("warning_count", 0))
 
     detail_dataframe = build_history_detail_dataframe(detail_response.get("results", []))
+    render_inspection_statistics(
+        detail_dataframe,
+        expected_total_issues=summary.get("total_issues", 0),
+    )
     if not should_show_history_detail_download(detail_dataframe):
         st.info("이 검수 실행에서 발견된 문제가 없습니다.")
         return

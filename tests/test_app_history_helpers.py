@@ -2,6 +2,7 @@ import copy
 import importlib
 import sys
 from datetime import date
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -32,6 +33,131 @@ class FakeHistoryApiClient:
         if isinstance(response, Exception):
             raise response
         return response
+
+
+class FakeStreamlitColumn:
+    def __init__(self, streamlit, index):
+        self.streamlit = streamlit
+        self.index = index
+
+    def __enter__(self):
+        self.streamlit.active_column = self.index
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.streamlit.active_column = None
+
+    def metric(self, label, value):
+        self.streamlit.metrics.append((self.index, label, value))
+
+
+class FakeAppStreamlit:
+    def __init__(
+        self,
+        *,
+        uploaded_file=None,
+        session_state=None,
+        selectbox_values=None,
+        text_input_values=None,
+    ):
+        self.uploaded_file = uploaded_file
+        self.session_state = session_state or SimpleNamespace()
+        self.selectbox_values = selectbox_values or {}
+        self.text_input_values = text_input_values or {}
+        self.active_column = None
+        self.call_log = []
+        self.subheaders = []
+        self.captions = []
+        self.errors = []
+        self.infos = []
+        self.warnings = []
+        self.successes = []
+        self.markdowns = []
+        self.dataframes = []
+        self.columns_calls = []
+        self.metrics = []
+        self.downloads = []
+
+    def subheader(self, message):
+        self.subheaders.append(message)
+        self.call_log.append(("subheader", message))
+
+    def write(self, message):
+        self.call_log.append(("write", message))
+
+    def caption(self, message):
+        self.captions.append(message)
+        self.call_log.append(("caption", message))
+
+    def error(self, message):
+        self.errors.append(message)
+        self.call_log.append(("error", message))
+
+    def info(self, message):
+        self.infos.append(message)
+        self.call_log.append(("info", message))
+
+    def warning(self, message):
+        self.warnings.append(message)
+        self.call_log.append(("warning", message))
+
+    def success(self, message):
+        self.successes.append(message)
+        self.call_log.append(("success", message))
+
+    def markdown(self, message):
+        self.markdowns.append((self.active_column, message))
+        self.call_log.append(("markdown", self.active_column, message))
+
+    def columns(self, specification):
+        count = specification if isinstance(specification, int) else len(specification)
+        self.columns_calls.append(specification)
+        return tuple(FakeStreamlitColumn(self, index) for index in range(count))
+
+    def dataframe(self, dataframe, **kwargs):
+        self.dataframes.append(
+            (self.active_column, dataframe.copy(deep=True), kwargs.copy())
+        )
+        self.call_log.append(("dataframe", self.active_column))
+
+    def download_button(self, label, **kwargs):
+        self.downloads.append((label, kwargs.copy()))
+
+    def file_uploader(self, *args, **kwargs):
+        return self.uploaded_file
+
+    def selectbox(self, label, options, **kwargs):
+        return self.selectbox_values.get(label, options[0])
+
+    def text_input(self, label, **kwargs):
+        return self.text_input_values.get(label, "")
+
+    def button(self, *args, **kwargs):
+        return False
+
+
+def make_statistics_dataframes():
+    return {
+        "issue_counts": pd.DataFrame(
+            {
+                "오류 항목": ["가격 오류", "필수 값 누락"],
+                "문제 수": [4, 2],
+            }
+        ),
+        "risk_counts": pd.DataFrame(
+            {
+                "위험 수준": ["높음", "중간", "낮음"],
+                "문제 수": [3, 2, 1],
+            }
+        ),
+        "product_counts": pd.DataFrame(
+            {
+                "상품 ID": ["P001", "P002", "P003", "P004", "P005", "P006"],
+                "문제 수": [6, 5, 4, 3, 2, 1],
+            }
+        ),
+        "total_issues": 6,
+    }
 
 
 def make_history_item(
@@ -815,3 +941,359 @@ def test_build_history_detail_dataframe_tolerates_missing_values(app_module):
         "수정 권장사항": None,
         "위험 수준": None,
     }
+
+
+def test_render_inspection_statistics_displays_three_complete_statistics(
+    app_module,
+    monkeypatch,
+):
+    fake_st = FakeAppStreamlit()
+    statistics = make_statistics_dataframes()
+    original_product_counts = statistics["product_counts"].copy(deep=True)
+    results_df = pd.DataFrame({"unused": range(6)})
+    build_calls = []
+
+    def fake_build_inspection_statistics(dataframe):
+        build_calls.append(dataframe)
+        return statistics
+
+    monkeypatch.setattr(app_module, "st", fake_st)
+    monkeypatch.setattr(
+        app_module,
+        "build_inspection_statistics",
+        fake_build_inspection_statistics,
+        raising=False,
+    )
+
+    app_module.render_inspection_statistics(results_df, expected_total_issues=6)
+
+    assert len(build_calls) == 1
+    assert build_calls[0] is results_df
+    assert fake_st.subheaders == ["검수 결과 통계"]
+    assert fake_st.captions == [
+        "아래 통계는 필터 적용 전 전체 검수 결과를 기준으로 합니다."
+    ]
+    assert fake_st.columns_calls == [3]
+    assert [message for _, message in fake_st.markdowns] == [
+        "**오류 항목별 발생 건수**",
+        "**위험 수준별 발생 건수**",
+        "**문제가 많은 상품 TOP 5**",
+    ]
+    assert len(fake_st.dataframes) == 3
+    pd.testing.assert_frame_equal(
+        fake_st.dataframes[0][1], statistics["issue_counts"]
+    )
+    pd.testing.assert_frame_equal(
+        fake_st.dataframes[1][1], statistics["risk_counts"]
+    )
+    pd.testing.assert_frame_equal(
+        fake_st.dataframes[2][1], statistics["product_counts"].head(5)
+    )
+    pd.testing.assert_frame_equal(
+        statistics["product_counts"], original_product_counts
+    )
+    assert all(
+        dataframe_kwargs["hide_index"] is True
+        and dataframe_kwargs["use_container_width"] is True
+        and dataframe_kwargs["height"] <= 420
+        for _, _, dataframe_kwargs in fake_st.dataframes
+    )
+
+
+def test_render_inspection_statistics_limits_only_product_table_to_top_five(
+    app_module,
+    monkeypatch,
+):
+    fake_st = FakeAppStreamlit()
+    statistics = make_statistics_dataframes()
+    monkeypatch.setattr(app_module, "st", fake_st)
+    monkeypatch.setattr(
+        app_module,
+        "build_inspection_statistics",
+        lambda dataframe: statistics,
+        raising=False,
+    )
+
+    app_module.render_inspection_statistics(pd.DataFrame(), expected_total_issues=6)
+
+    displayed_products = fake_st.dataframes[2][1]
+    assert len(displayed_products) == 5
+    assert displayed_products["상품 ID"].tolist() == [
+        "P001",
+        "P002",
+        "P003",
+        "P004",
+        "P005",
+    ]
+    assert "P006" not in displayed_products["상품 ID"].tolist()
+    assert len(statistics["product_counts"]) == 6
+
+
+def test_render_inspection_statistics_handles_empty_results_without_tables(
+    app_module,
+    monkeypatch,
+):
+    fake_st = FakeAppStreamlit()
+    empty_statistics = {
+        "issue_counts": pd.DataFrame(columns=["오류 항목", "문제 수"]),
+        "risk_counts": pd.DataFrame(columns=["위험 수준", "문제 수"]),
+        "product_counts": pd.DataFrame(columns=["상품 ID", "문제 수"]),
+        "total_issues": 0,
+    }
+    monkeypatch.setattr(app_module, "st", fake_st)
+    monkeypatch.setattr(
+        app_module,
+        "build_inspection_statistics",
+        lambda dataframe: empty_statistics,
+        raising=False,
+    )
+
+    app_module.render_inspection_statistics(
+        pd.DataFrame(columns=app_module.HISTORY_DETAIL_DISPLAY_COLUMNS),
+        expected_total_issues=0,
+    )
+
+    assert fake_st.subheaders == ["검수 결과 통계"]
+    assert fake_st.captions == [
+        "아래 통계는 필터 적용 전 전체 검수 결과를 기준으로 합니다."
+    ]
+    assert fake_st.infos == [
+        "발견된 문제가 없어 통계로 표시할 항목이 없습니다."
+    ]
+    assert fake_st.columns_calls == []
+    assert fake_st.dataframes == []
+    assert fake_st.errors == []
+
+
+def test_render_inspection_statistics_hides_value_error_details(
+    app_module,
+    monkeypatch,
+):
+    fake_st = FakeAppStreamlit()
+
+    def raise_sensitive_error(dataframe):
+        raise ValueError("SENSITIVE_FAKE_ERROR")
+
+    monkeypatch.setattr(app_module, "st", fake_st)
+    monkeypatch.setattr(
+        app_module,
+        "build_inspection_statistics",
+        raise_sensitive_error,
+        raising=False,
+    )
+
+    app_module.render_inspection_statistics(pd.DataFrame())
+
+    assert fake_st.errors == ["검수 결과 통계를 표시할 수 없습니다."]
+    assert fake_st.columns_calls == []
+    assert fake_st.dataframes == []
+    visible_text = " ".join(
+        [*fake_st.subheaders, *fake_st.captions, *fake_st.errors, *fake_st.infos]
+    )
+    assert "SENSITIVE_FAKE_ERROR" not in visible_text
+
+
+def test_render_inspection_statistics_rejects_summary_detail_count_mismatch(
+    app_module,
+    monkeypatch,
+):
+    fake_st = FakeAppStreamlit()
+    statistics = make_statistics_dataframes()
+    statistics["total_issues"] = 5
+    monkeypatch.setattr(app_module, "st", fake_st)
+    monkeypatch.setattr(
+        app_module,
+        "build_inspection_statistics",
+        lambda dataframe: statistics,
+        raising=False,
+    )
+
+    app_module.render_inspection_statistics(
+        pd.DataFrame(),
+        expected_total_issues=6,
+    )
+
+    assert fake_st.errors == [
+        "검수 요약과 상세 결과 수가 일치하지 않아 통계를 표시할 수 없습니다."
+    ]
+    assert fake_st.columns_calls == []
+    assert fake_st.dataframes == []
+    assert str(statistics) not in " ".join(fake_st.errors)
+
+
+@pytest.mark.parametrize("expected_total_issues", [6, None])
+def test_render_inspection_statistics_displays_when_count_matches_or_is_not_provided(
+    app_module,
+    monkeypatch,
+    expected_total_issues,
+):
+    fake_st = FakeAppStreamlit()
+    statistics = make_statistics_dataframes()
+    monkeypatch.setattr(app_module, "st", fake_st)
+    monkeypatch.setattr(
+        app_module,
+        "build_inspection_statistics",
+        lambda dataframe: statistics,
+        raising=False,
+    )
+
+    app_module.render_inspection_statistics(
+        pd.DataFrame(),
+        expected_total_issues=expected_total_issues,
+    )
+
+    assert fake_st.errors == []
+    assert fake_st.columns_calls == [3]
+    assert len(fake_st.dataframes) == 3
+
+
+def test_render_csv_inspection_tab_passes_unfiltered_results_to_statistics(
+    app_module,
+    monkeypatch,
+):
+    uploaded_file = SimpleNamespace(
+        name="products.csv",
+        type="text/csv",
+        getvalue=lambda: b"fake csv",
+    )
+    fake_st = FakeAppStreamlit(
+        uploaded_file=uploaded_file,
+        selectbox_values={"검수 상태": "오류", "오류 항목": "전체"},
+    )
+    result_df = pd.DataFrame(
+        [
+            {
+                "검수 상태": "오류",
+                "오류 항목": "가격 오류",
+                "상품 그룹 ID": "G001",
+                "상품 ID": "P001",
+                "오류 이유": "fake reason",
+                "수정 권장사항": "fake recommendation",
+                "위험 수준": "높음",
+            },
+            {
+                "검수 상태": "주의",
+                "오류 항목": "품절 상품",
+                "상품 그룹 ID": "G002",
+                "상품 ID": "P002",
+                "오류 이유": "fake reason",
+                "수정 권장사항": "fake recommendation",
+                "위험 수준": "낮음",
+            },
+        ]
+    )
+    inspection_report = SimpleNamespace(
+        masked_preview_dataframe=pd.DataFrame({"상품 ID": ["P001", "P002"]}),
+        products=[object(), object()],
+        issues=[object(), object()],
+        summary=SimpleNamespace(error_count=1, warning_count=1, total_issues=2),
+        result_dataframe=result_df,
+    )
+    statistics_calls = []
+    events = []
+    original_filter = app_module.filter_result_dataframe
+
+    def record_statistics(dataframe, expected_total_issues=None):
+        statistics_calls.append((dataframe, expected_total_issues))
+        events.append("statistics")
+
+    def record_filter(*args, **kwargs):
+        events.append("filter")
+        return original_filter(*args, **kwargs)
+
+    monkeypatch.setattr(app_module, "st", fake_st)
+    monkeypatch.setattr(
+        app_module,
+        "validate_and_read_uploaded_csv",
+        lambda filename, file_bytes: pd.DataFrame(),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "inspect_dataframe",
+        lambda dataframe: inspection_report,
+    )
+    monkeypatch.setattr(app_module, "render_inspection_save_button", lambda **kwargs: None)
+    monkeypatch.setattr(
+        app_module,
+        "render_inspection_statistics",
+        record_statistics,
+        raising=False,
+    )
+    monkeypatch.setattr(app_module, "filter_result_dataframe", record_filter)
+
+    app_module.render_csv_inspection_tab()
+
+    assert len(statistics_calls) == 1
+    assert statistics_calls[0][0] is result_df
+    assert statistics_calls[0][1] == 2
+    assert len(fake_st.dataframes[-1][1]) == 1
+    assert events == ["statistics", "filter"]
+
+
+def test_render_history_detail_passes_complete_dataframe_to_statistics_before_table(
+    app_module,
+    monkeypatch,
+):
+    fake_st = FakeAppStreamlit(
+        session_state=SimpleNamespace(selected_inspection_run_id=11)
+    )
+    detail_response = {
+        "inspection_run_id": 11,
+        "source_filename": "products.csv",
+        "created_at": "2026-07-04T13:42:39.495949+09:00",
+        "summary": {
+            "total_products": 2,
+            "total_issues": 2,
+            "error_count": 1,
+            "warning_count": 1,
+        },
+        "results": [
+            {
+                "status": "오류",
+                "error_field": "가격 오류",
+                "product_group_id": "G001",
+                "product_id": "P001",
+                "reason": "fake reason",
+                "recommendation": "fake recommendation",
+                "risk_level": "높음",
+            },
+            {
+                "status": "주의",
+                "error_field": "품절 상품",
+                "product_group_id": "G002",
+                "product_id": "P002",
+                "reason": "fake reason",
+                "recommendation": "fake recommendation",
+                "risk_level": "낮음",
+            },
+        ],
+    }
+    api_client = SimpleNamespace(
+        get_inspection_detail=lambda inspection_run_id: detail_response
+    )
+    statistics_calls = []
+
+    def record_statistics(dataframe, expected_total_issues=None):
+        statistics_calls.append((dataframe.copy(deep=True), expected_total_issues))
+        fake_st.call_log.append(("statistics",))
+
+    monkeypatch.setattr(app_module, "st", fake_st)
+    monkeypatch.setattr(
+        app_module,
+        "render_inspection_statistics",
+        record_statistics,
+        raising=False,
+    )
+
+    app_module.render_inspection_history_detail(api_client)
+
+    expected_dataframe = app_module.build_history_detail_dataframe(
+        detail_response["results"]
+    )
+    assert len(statistics_calls) == 1
+    pd.testing.assert_frame_equal(statistics_calls[0][0], expected_dataframe)
+    assert statistics_calls[0][1] == 2
+    assert fake_st.call_log.index(("statistics",)) < fake_st.call_log.index(
+        ("dataframe", None)
+    )
+    pd.testing.assert_frame_equal(fake_st.dataframes[0][1], expected_dataframe)
