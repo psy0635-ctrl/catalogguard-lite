@@ -80,6 +80,20 @@ HISTORY_STATUS_QUERY_TO_LABEL = {
 }
 
 
+def build_api_error_display_message(
+    message: str,
+    error: Exception | None = None,
+) -> str:
+    request_id = getattr(error, "request_id", None)
+    if request_id is None:
+        return message
+
+    request_id_message = f"요청 ID: {request_id}"
+    if request_id_message in message:
+        return message
+    return f"{message}\n\n{request_id_message}"
+
+
 def format_value_error(error: ValueError) -> str:
     # 로더에서 올라온 내부 오류를 화면에 보여 줄 한국어 안내문으로 바꿉니다.
     message = str(error)
@@ -282,9 +296,14 @@ def clear_history_summary_download_cache(session_state) -> None:
     session_state.pop(HISTORY_SUMMARY_DOWNLOAD_ERROR_STATE_KEY, None)
 
 
-def show_history_summary_download_error(session_state, message: str) -> None:
-    session_state[HISTORY_SUMMARY_DOWNLOAD_ERROR_STATE_KEY] = message
-    st.error(message)
+def show_history_summary_download_error(
+    session_state,
+    message: str,
+    error: Exception | None = None,
+) -> None:
+    display_message = build_api_error_display_message(message, error)
+    session_state[HISTORY_SUMMARY_DOWNLOAD_ERROR_STATE_KEY] = display_message
+    st.error(display_message)
 
 
 def validate_history_summary_page_response(response: dict) -> tuple[list[dict], int]:
@@ -619,9 +638,12 @@ def initialize_history_state() -> None:
         st.session_state.history_filter_error = None
 
 
-def render_inspection_save_failure(detail_message: str) -> None:
+def render_inspection_save_failure(
+    detail_message: str,
+    error: Exception | None = None,
+) -> None:
     st.error("검수 결과는 확인할 수 있지만 이력 저장에 실패했습니다.")
-    st.caption(detail_message)
+    st.caption(build_api_error_display_message(detail_message, error))
 
 
 def render_inspection_save_button(
@@ -659,22 +681,24 @@ def render_inspection_save_button(
                 file_hash=file_hash,
                 response=response,
             )
-        except CatalogGuardApiConfigurationError:
+        except CatalogGuardApiConfigurationError as error:
             render_inspection_save_failure(
-                "검수 이력 API 주소가 설정되지 않았습니다."
+                "검수 이력 API 주소가 설정되지 않았습니다.", error
             )
             return
-        except CatalogGuardApiConnectionError:
-            render_inspection_save_failure("검수 이력 서버에 연결할 수 없습니다.")
-            return
-        except CatalogGuardApiTimeoutError:
+        except CatalogGuardApiConnectionError as error:
             render_inspection_save_failure(
-                "검수 이력 서버 응답 시간이 초과되었습니다."
+                "검수 이력 서버에 연결할 수 없습니다.", error
             )
             return
-        except (CatalogGuardApiResponseError, KeyError, TypeError, ValueError):
+        except CatalogGuardApiTimeoutError as error:
             render_inspection_save_failure(
-                "검수 이력 서버에서 오류가 발생했습니다."
+                "검수 이력 서버 응답 시간이 초과되었습니다.", error
+            )
+            return
+        except (CatalogGuardApiResponseError, KeyError, TypeError, ValueError) as error:
+            render_inspection_save_failure(
+                "검수 이력 서버에서 오류가 발생했습니다.", error
             )
             return
 
@@ -929,32 +953,36 @@ def render_history_summary_download(api_client, session_state, *, total: int) ->
                 st.info(HISTORY_SUMMARY_DOWNLOAD_EMPTY_MESSAGE)
                 return
             csv_bytes = build_history_summary_csv(history_items)
-        except CatalogGuardApiConnectionError:
+        except CatalogGuardApiConnectionError as error:
             clear_history_summary_download_cache(session_state)
             show_history_summary_download_error(
                 session_state,
                 "전체 검수 이력 CSV를 준비하는 중 서버에 연결할 수 없습니다.",
+                error,
             )
             return
-        except CatalogGuardApiTimeoutError:
+        except CatalogGuardApiTimeoutError as error:
             clear_history_summary_download_cache(session_state)
             show_history_summary_download_error(
                 session_state,
                 "전체 검수 이력 CSV를 준비하는 중 서버 응답 시간이 초과되었습니다.",
+                error,
             )
             return
-        except CatalogGuardApiResponseError:
+        except CatalogGuardApiResponseError as error:
             clear_history_summary_download_cache(session_state)
             show_history_summary_download_error(
                 session_state,
                 "전체 검수 이력 CSV를 준비하는 중 오류가 발생했습니다.",
+                error,
             )
             return
-        except ValueError:
+        except ValueError as error:
             clear_history_summary_download_cache(session_state)
             show_history_summary_download_error(
                 session_state,
                 "현재 검색 조건으로 전체 검수 이력 CSV를 준비할 수 없습니다.",
+                error,
             )
             return
 
@@ -1004,17 +1032,21 @@ def render_inspection_history_list(api_client) -> None:
 
     try:
         history_response = api_client.list_inspections(**request_params)
-    except CatalogGuardApiConnectionError:
-        st.error("검수 이력 서버에 연결할 수 없습니다.")
+    except CatalogGuardApiConnectionError as error:
+        st.error(build_api_error_display_message("검수 이력 서버에 연결할 수 없습니다.", error))
         return
-    except CatalogGuardApiTimeoutError:
-        st.error("검수 이력 서버 응답 시간이 초과되었습니다.")
+    except CatalogGuardApiTimeoutError as error:
+        st.error(
+            build_api_error_display_message("검수 이력 서버 응답 시간이 초과되었습니다.", error)
+        )
         return
-    except InspectionNotFoundError:
-        st.error("검수 실행 결과를 찾을 수 없습니다.")
+    except InspectionNotFoundError as error:
+        st.error(build_api_error_display_message("검수 실행 결과를 찾을 수 없습니다.", error))
         return
-    except CatalogGuardApiResponseError:
-        st.error("검수 이력을 불러오는 중 오류가 발생했습니다.")
+    except CatalogGuardApiResponseError as error:
+        st.error(
+            build_api_error_display_message("검수 이력을 불러오는 중 오류가 발생했습니다.", error)
+        )
         return
     except ValueError:
         st.error("파일명 검색어는 최대 100자까지 입력할 수 있습니다.")
@@ -1112,17 +1144,23 @@ def render_inspection_history_detail(api_client) -> None:
 
     try:
         detail_response = api_client.get_inspection_detail(inspection_run_id)
-    except InspectionNotFoundError:
-        st.error("선택한 검수 실행 결과를 찾을 수 없습니다.")
+    except InspectionNotFoundError as error:
+        st.error(
+            build_api_error_display_message("선택한 검수 실행 결과를 찾을 수 없습니다.", error)
+        )
         return
-    except CatalogGuardApiConnectionError:
-        st.error("검수 이력 서버에 연결할 수 없습니다.")
+    except CatalogGuardApiConnectionError as error:
+        st.error(build_api_error_display_message("검수 이력 서버에 연결할 수 없습니다.", error))
         return
-    except CatalogGuardApiTimeoutError:
-        st.error("검수 이력 서버 응답 시간이 초과되었습니다.")
+    except CatalogGuardApiTimeoutError as error:
+        st.error(
+            build_api_error_display_message("검수 이력 서버 응답 시간이 초과되었습니다.", error)
+        )
         return
-    except CatalogGuardApiResponseError:
-        st.error("검수 상세 결과를 불러오는 중 오류가 발생했습니다.")
+    except CatalogGuardApiResponseError as error:
+        st.error(
+            build_api_error_display_message("검수 상세 결과를 불러오는 중 오류가 발생했습니다.", error)
+        )
         return
 
     st.write(f"파일명: {detail_response.get('source_filename', '')}")

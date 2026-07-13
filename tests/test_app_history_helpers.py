@@ -8,6 +8,9 @@ import pytest
 import streamlit as st
 
 
+VALID_REQUEST_ID = "a29ae9a1c62f4152bb96f6513c323d96"
+
+
 @pytest.fixture()
 def app_module(monkeypatch):
     sys.modules.pop("app", None)
@@ -75,6 +78,91 @@ def assert_prepared_history_summary_download_is_cleared(
 ) -> None:
     assert app_module.HISTORY_SUMMARY_DOWNLOAD_CACHE_STATE_KEY not in session_state
     assert app_module.HISTORY_SUMMARY_DOWNLOAD_ERROR_STATE_KEY not in session_state
+
+
+def test_build_api_error_display_message_appends_request_id_once(app_module):
+    error = app_module.CatalogGuardApiResponseError(
+        "private upstream error",
+        request_id=VALID_REQUEST_ID,
+    )
+
+    message = app_module.build_api_error_display_message(
+        "검수 이력을 불러오는 중 오류가 발생했습니다.",
+        error,
+    )
+
+    assert "검수 이력을 불러오는 중 오류가 발생했습니다." in message
+    assert f"요청 ID: {VALID_REQUEST_ID}" in message
+    assert message.count(VALID_REQUEST_ID) == 1
+
+
+def test_build_api_error_display_message_omits_missing_request_id(app_module):
+    error = app_module.CatalogGuardApiTimeoutError(
+        "private timeout detail",
+        request_id=None,
+    )
+
+    message = app_module.build_api_error_display_message(
+        "검수 이력 서버 응답 시간이 초과되었습니다.",
+        error,
+    )
+
+    assert message == "검수 이력 서버 응답 시간이 초과되었습니다."
+    assert "요청 ID:" not in message
+
+
+def test_build_api_error_display_message_omits_invalid_request_id(app_module):
+    invalid_request_id = "not-valid\ninternal-host.example"
+    error = app_module.CatalogGuardApiResponseError(
+        "private upstream error",
+        request_id=invalid_request_id,
+    )
+
+    message = app_module.build_api_error_display_message(
+        "검수 이력을 불러오는 중 오류가 발생했습니다.",
+        error,
+    )
+
+    assert message == "검수 이력을 불러오는 중 오류가 발생했습니다."
+    assert "요청 ID:" not in message
+    assert invalid_request_id not in message
+
+
+def test_build_api_error_display_message_does_not_expose_private_error(app_module):
+    private_details = [
+        "Traceback: private stack trace",
+        "postgresql://catalog:fake-password@internal-db.example/catalog",
+        "fake-password",
+        "internal-db.example",
+    ]
+    error = app_module.CatalogGuardApiResponseError(
+        " ".join(private_details),
+        request_id=VALID_REQUEST_ID,
+    )
+
+    message = app_module.build_api_error_display_message(
+        "전체 검수 이력 CSV를 준비하는 중 오류가 발생했습니다.",
+        error,
+    )
+
+    assert "전체 검수 이력 CSV를 준비하는 중 오류가 발생했습니다." in message
+    assert all(detail not in message for detail in private_details)
+
+
+def test_build_api_error_display_message_does_not_duplicate_request_id(app_module):
+    error = app_module.CatalogGuardApiResponseError(
+        "private upstream error",
+        request_id=VALID_REQUEST_ID,
+    )
+    existing_message = (
+        "검수 상세 결과를 불러오는 중 오류가 발생했습니다."
+        f"\n\n요청 ID: {VALID_REQUEST_ID}"
+    )
+
+    message = app_module.build_api_error_display_message(existing_message, error)
+
+    assert message == existing_message
+    assert message.count(VALID_REQUEST_ID) == 1
 
 
 @pytest.mark.parametrize(

@@ -72,13 +72,24 @@ CREATE_DUPLICATE_RESPONSE = {
     "results": [],
 }
 
+VALID_REQUEST_ID = "a29ae9a1c62f4152bb96f6513c323d96"
+
 
 class FakeResponse:
-    def __init__(self, *, payload=None, status_code=200, json_error=None, text=""):
+    def __init__(
+        self,
+        *,
+        payload=None,
+        status_code=200,
+        json_error=None,
+        text="",
+        headers=None,
+    ):
         self.payload = payload
         self.status_code = status_code
         self.json_error = json_error
         self.text = text
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -420,6 +431,7 @@ def test_list_inspections_converts_connection_error_without_leaking_url():
     message = str(error.value)
     assert "검수 이력 서버에 연결할 수 없습니다." in message
     assert "http://internal.example" not in message
+    assert error.value.request_id is None
 
 
 def test_list_inspections_converts_timeout_error():
@@ -430,6 +442,7 @@ def test_list_inspections_converts_timeout_error():
         client.list_inspections()
 
     assert "검수 이력 서버 응답 시간이 초과되었습니다." in str(error.value)
+    assert error.value.request_id is None
 
 
 def test_create_inspection_converts_connection_error_without_leaking_url():
@@ -447,6 +460,7 @@ def test_create_inspection_converts_connection_error_without_leaking_url():
     message = str(error.value)
     assert "검수 이력 서버에 연결할 수 없습니다." in message
     assert "http://internal.example" not in message
+    assert error.value.request_id is None
 
 
 def test_create_inspection_converts_timeout_error():
@@ -460,6 +474,7 @@ def test_create_inspection_converts_timeout_error():
         )
 
     assert "검수 이력 서버 응답 시간이 초과되었습니다." in str(error.value)
+    assert error.value.request_id is None
 
 
 def test_get_inspection_detail_converts_404_to_not_found():
@@ -470,6 +485,22 @@ def test_get_inspection_detail_converts_404_to_not_found():
         client.get_inspection_detail(11)
 
     assert "검수 실행 결과를 찾을 수 없습니다." in str(error.value)
+
+
+def test_get_inspection_detail_preserves_valid_request_id_for_404():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=404,
+            text="not found",
+            headers={"X-Request-ID": VALID_REQUEST_ID},
+        )
+    )
+
+    with pytest.raises(client_module.InspectionNotFoundError) as error:
+        client.get_inspection_detail(11)
+
+    assert error.value.request_id == VALID_REQUEST_ID
 
 
 def test_list_inspections_converts_server_error_without_leaking_body():
@@ -485,6 +516,73 @@ def test_list_inspections_converts_server_error_without_leaking_body():
     assert "검수 이력 서버에서 오류가 발생했습니다." in message
     assert "Traceback" not in message
     assert "secret" not in message
+
+
+def test_list_inspections_preserves_valid_request_id_for_server_error():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=500,
+            headers={"X-Request-ID": VALID_REQUEST_ID},
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.list_inspections()
+
+    assert error.value.request_id == VALID_REQUEST_ID
+
+
+def test_list_inspections_uses_none_request_id_when_header_is_missing():
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(status_code=500))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.list_inspections()
+
+    assert error.value.request_id is None
+
+
+def test_list_inspections_trims_valid_request_id_header():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=500,
+            headers={"X-Request-ID": f"  {VALID_REQUEST_ID}  "},
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.list_inspections()
+
+    assert error.value.request_id == VALID_REQUEST_ID
+
+
+@pytest.mark.parametrize(
+    "header_value",
+    [
+        "",
+        "   ",
+        VALID_REQUEST_ID.upper(),
+        "a" * 31,
+        "a" * 33,
+        f"{VALID_REQUEST_ID[:-1]}-",
+        "a" * 10000,
+    ],
+)
+def test_list_inspections_rejects_invalid_request_id_header(header_value):
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=500,
+            headers={"X-Request-ID": header_value},
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.list_inspections()
+
+    assert error.value.request_id is None
 
 
 def test_create_inspection_converts_server_error_without_leaking_body():
@@ -505,6 +603,47 @@ def test_create_inspection_converts_server_error_without_leaking_body():
     assert "secret" not in message
 
 
+def test_create_inspection_preserves_valid_request_id_for_server_error():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=500,
+            headers={"X-Request-ID": VALID_REQUEST_ID},
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.create_inspection(
+            source_filename="products_dev.csv",
+            file_content=b"product_id,price\nP001,1000\n",
+        )
+
+    assert error.value.request_id == VALID_REQUEST_ID
+
+
+def test_server_error_does_not_leak_sensitive_response_body_values():
+    client_module = import_client_module()
+    sensitive_values = [
+        "postgresql://catalog:fake-password@internal-db.example:5432/catalog",
+        "fake-password",
+        "internal-db.example",
+    ]
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=500,
+            text=" ".join(sensitive_values),
+            headers={"X-Request-ID": VALID_REQUEST_ID},
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.list_inspections()
+
+    message = str(error.value)
+    assert message == "검수 이력 서버에서 오류가 발생했습니다."
+    assert all(value not in message for value in sensitive_values)
+
+
 def test_list_inspections_converts_invalid_json():
     client_module = import_client_module()
     client, _ = make_client(
@@ -517,6 +656,21 @@ def test_list_inspections_converts_invalid_json():
         client.list_inspections()
 
     assert "검수 이력 서버의 응답 형식이 올바르지 않습니다." in str(error.value)
+
+
+def test_list_inspections_preserves_request_id_for_invalid_json():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            json_error=requests.JSONDecodeError("bad json", "", 0),
+            headers={"X-Request-ID": VALID_REQUEST_ID},
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.list_inspections()
+
+    assert error.value.request_id == VALID_REQUEST_ID
 
 
 def test_create_inspection_converts_invalid_json():
@@ -534,6 +688,24 @@ def test_create_inspection_converts_invalid_json():
         )
 
     assert "검수 이력 서버의 응답 형식이 올바르지 않습니다." in str(error.value)
+
+
+def test_create_inspection_preserves_request_id_for_invalid_json():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            json_error=requests.JSONDecodeError("bad json", "", 0),
+            headers={"X-Request-ID": VALID_REQUEST_ID},
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.create_inspection(
+            source_filename="products_dev.csv",
+            file_content=b"product_id,price\nP001,1000\n",
+        )
+
+    assert error.value.request_id == VALID_REQUEST_ID
 
 
 def test_list_inspections_rejects_missing_required_keys():

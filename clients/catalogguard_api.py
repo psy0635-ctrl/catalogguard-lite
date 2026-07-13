@@ -1,4 +1,5 @@
 from datetime import date
+import re
 from typing import Any
 
 import requests
@@ -17,6 +18,7 @@ NOT_FOUND_ERROR_MESSAGE = "검수 실행 결과를 찾을 수 없습니다."
 SERVER_ERROR_MESSAGE = "검수 이력 서버에서 오류가 발생했습니다."
 INVALID_RESPONSE_MESSAGE = "검수 이력 서버의 응답 형식이 올바르지 않습니다."
 VALID_INSPECTION_STATUS_FILTERS = {"error", "warning", "normal"}
+REQUEST_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 LIST_RESPONSE_KEYS = ("items", "total", "limit", "offset")
 CREATE_RESPONSE_KEYS = ("inspection_run_id", "summary", "results")
@@ -29,8 +31,33 @@ DETAIL_RESPONSE_KEYS = (
 )
 
 
+def _normalize_request_id(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+
+    normalized_value = value.strip()
+    if REQUEST_ID_PATTERN.fullmatch(normalized_value) is None:
+        return None
+    return normalized_value
+
+
+def _get_response_request_id(response: object | None) -> str | None:
+    headers = getattr(response, "headers", None)
+    get_header = getattr(headers, "get", None)
+    if not callable(get_header):
+        return None
+    return _normalize_request_id(get_header("X-Request-ID"))
+
+
 class CatalogGuardApiError(Exception):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.request_id = _normalize_request_id(request_id)
 
 
 class CatalogGuardApiConfigurationError(CatalogGuardApiError):
@@ -148,7 +175,7 @@ class CatalogGuardApiClient:
 
         data = self._get_json(
             f"/api/v1/inspections/{inspection_run_id}",
-            not_found_error=InspectionNotFoundError(NOT_FOUND_ERROR_MESSAGE),
+            raise_not_found=True,
         )
         self._validate_response_keys(data, DETAIL_RESPONSE_KEYS)
         return data
@@ -158,17 +185,27 @@ class CatalogGuardApiClient:
         path: str,
         *,
         params: dict[str, int | str] | None = None,
-        not_found_error: InspectionNotFoundError | None = None,
+        raise_not_found: bool = False,
     ) -> dict[str, Any]:
-        response = self._get_response(path, params=params, not_found_error=not_found_error)
+        response = self._get_response(
+            path,
+            params=params,
+            raise_not_found=raise_not_found,
+        )
 
         try:
             data = response.json()
         except ValueError as error:
-            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE) from error
+            raise CatalogGuardApiResponseError(
+                INVALID_RESPONSE_MESSAGE,
+                request_id=_get_response_request_id(response),
+            ) from error
 
         if not isinstance(data, dict):
-            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+            raise CatalogGuardApiResponseError(
+                INVALID_RESPONSE_MESSAGE,
+                request_id=_get_response_request_id(response),
+            )
         return data
 
     def _post_json(
@@ -182,10 +219,16 @@ class CatalogGuardApiClient:
         try:
             data = response.json()
         except ValueError as error:
-            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE) from error
+            raise CatalogGuardApiResponseError(
+                INVALID_RESPONSE_MESSAGE,
+                request_id=_get_response_request_id(response),
+            ) from error
 
         if not isinstance(data, dict):
-            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+            raise CatalogGuardApiResponseError(
+                INVALID_RESPONSE_MESSAGE,
+                request_id=_get_response_request_id(response),
+            )
         return data
 
     def _get_response(
@@ -193,7 +236,7 @@ class CatalogGuardApiClient:
         path: str,
         *,
         params: dict[str, int | str] | None,
-        not_found_error: InspectionNotFoundError | None,
+        raise_not_found: bool,
     ):
         url = f"{self._base_url}{path}"
 
@@ -209,10 +252,18 @@ class CatalogGuardApiClient:
         except requests.ConnectionError as error:
             raise CatalogGuardApiConnectionError(CONNECTION_ERROR_MESSAGE) from error
         except requests.HTTPError as error:
-            status_code = getattr(getattr(error, "response", None), "status_code", None)
-            if status_code == 404 and not_found_error is not None:
-                raise not_found_error from error
-            raise CatalogGuardApiResponseError(SERVER_ERROR_MESSAGE) from error
+            error_response = getattr(error, "response", None)
+            request_id = _get_response_request_id(error_response)
+            status_code = getattr(error_response, "status_code", None)
+            if status_code == 404 and raise_not_found:
+                raise InspectionNotFoundError(
+                    NOT_FOUND_ERROR_MESSAGE,
+                    request_id=request_id,
+                ) from error
+            raise CatalogGuardApiResponseError(
+                SERVER_ERROR_MESSAGE,
+                request_id=request_id,
+            ) from error
         except requests.RequestException as error:
             raise CatalogGuardApiResponseError(SERVER_ERROR_MESSAGE) from error
 
@@ -238,7 +289,11 @@ class CatalogGuardApiClient:
         except requests.ConnectionError as error:
             raise CatalogGuardApiConnectionError(CONNECTION_ERROR_MESSAGE) from error
         except requests.HTTPError as error:
-            raise CatalogGuardApiResponseError(SERVER_ERROR_MESSAGE) from error
+            request_id = _get_response_request_id(getattr(error, "response", None))
+            raise CatalogGuardApiResponseError(
+                SERVER_ERROR_MESSAGE,
+                request_id=request_id,
+            ) from error
         except requests.RequestException as error:
             raise CatalogGuardApiResponseError(SERVER_ERROR_MESSAGE) from error
 
