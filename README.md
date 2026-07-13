@@ -224,13 +224,20 @@ API Client는 헤더 값의 앞뒤 공백을 제거한 뒤 정확히 32자리인
 | 데이터베이스 | PostgreSQL, SQLAlchemy `2.0.51`, psycopg `3.3.4` |
 | 마이그레이션 | Alembic `1.18.5` |
 | 테스트 | pytest |
+| CI | GitHub Actions |
+| CI 테스트 DB | PostgreSQL `18` 서비스 컨테이너 |
 
 `requirements.txt`에는 Streamlit 앱 실행에 필요한 기본 패키지가 있고, `requirements-api.txt`에는 FastAPI와 PostgreSQL 저장 계층에 필요한 패키지가 있습니다. FastAPI도 pandas 기반 검수 로직을 사용하므로 로컬 전체 시스템을 실행할 때는 두 파일을 모두 설치하는 것이 안전합니다.
+
+GitHub Actions는 PostgreSQL 테스트 DB 마이그레이션과 전체 테스트 자동 실행에 사용하며 배포는 수행하지 않습니다.
 
 ## 8. 프로젝트 폴더 구조
 
 ```text
 catalogguard-lite/
+  .github/
+    workflows/
+      test.yml
   README.md
   app.py
   clients/
@@ -340,6 +347,7 @@ catalogguard-lite/
 | `db/session.py` | SQLAlchemy 엔진, 세션 팩토리, DB 연결 확인, FastAPI 세션 의존성 |
 | `alembic/versions/20260703_0001_create_inspection_tables.py` | 검수 이력 저장 테이블 생성 마이그레이션 |
 | `alembic/versions/20260705_0002_add_inspection_file_identity.py` | 파일 해시와 검수 버전 컬럼, CHECK constraint, partial unique index 추가 마이그레이션 |
+| `.github/workflows/test.yml` | PostgreSQL 18 테스트 DB에 마이그레이션을 적용하고 전체 pytest를 실행하는 GitHub Actions workflow |
 | `.env.example` | 로컬 PostgreSQL 연결 환경변수 예시 |
 | `requirements.txt` | Streamlit 앱 기본 실행 패키지 |
 | `requirements-api.txt` | FastAPI, PostgreSQL, Alembic 관련 패키지 |
@@ -916,7 +924,9 @@ python -m pytest tests/test_inspection_persistence.py -q
 python -m pytest -q
 ```
 
-현재 확인된 테스트 결과는 다음과 같습니다.
+### 로컬 테스트 결과
+
+현재 로컬 환경에서 확인된 테스트 결과는 다음과 같습니다.
 
 ```text
 관련 테스트: 103 passed, 0 failed, 1 warning
@@ -924,6 +934,29 @@ python -m pytest -q
 ```
 
 요청 ID 기능 관련 테스트와 전체 테스트 결과는 기능 구현 단계에서 확인했습니다. 현재 환경에는 `TEST_DATABASE_URL`이 설정되지 않아 PostgreSQL 연결 및 저장 통합 테스트 25개는 skipped 처리되었습니다. warning은 기능 실패가 아니라 `.pytest_cache` 디렉터리 생성 권한과 관련된 `PytestCacheWarning`입니다.
+
+### GitHub Actions 자동 테스트
+
+`.github/workflows/test.yml`의 `Test` workflow는 `main` 브랜치 push와 `main` 브랜치를 대상으로 한 pull request에서 실행됩니다. `ubuntu-latest` 환경에 Python 3.11을 준비하고 PostgreSQL 18 서비스 컨테이너를 시작한 뒤, 의존성을 설치하고 Alembic 마이그레이션을 적용한 다음 전체 pytest를 한 번 실행합니다.
+
+```text
+main push 또는 main 대상 pull request
+-> GitHub Actions Test workflow
+-> PostgreSQL 18 서비스 컨테이너
+-> Python 3.11과 의존성 설치
+-> Alembic upgrade head
+-> 전체 pytest 1회 실행
+```
+
+서비스 컨테이너는 workflow가 실행되는 동안만 사용하는 일회성 CI 테스트 DB입니다. Railway나 운영 PostgreSQL에 연결하지 않으며, 단위 테스트와 실제 PostgreSQL 연결·저장 통합 테스트를 함께 실행합니다.
+
+커밋 `50467ac9fb8bcc2cf7bd4d5182dc3c99a4bb5a31`의 최초 CI 실행에서는 `20260703_0001`, `20260705_0002` 마이그레이션 적용 후 전체 테스트가 다음과 같이 완료되었습니다.
+
+```text
+최초 CI 확인 결과: 588 passed in 4.47s
+skipped: 0
+failed: 0
+```
 
 ## 24. 데이터 저장 범위와 보안
 
@@ -989,7 +1022,6 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - 인증과 사용자별 이력 분리
 - 중복 저장 이벤트 로그 또는 감사 기록 검토
 - 원본 CSV를 저장하지 않는 범위 안에서 통계 리포트 강화
-- 테스트 DB 준비 자동화와 CI 연동
 - 대용량 CSV 처리 성능 개선
 - 카테고리와 가격 이상치 기준을 설정 파일이나 관리 화면에서 조정
 
