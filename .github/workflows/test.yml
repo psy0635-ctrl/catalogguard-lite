@@ -55,3 +55,159 @@ jobs:
         run: python -m alembic upgrade head
       - name: Run tests
         run: python -m pytest -q
+      - name: Smoke test Streamlit startup
+        shell: bash
+        env:
+          CATALOGGUARD_API_BASE_URL: ""
+          CATALOGGUARD_API_TIMEOUT_SECONDS: ""
+          DATABASE_URL: ""
+          TEST_DATABASE_URL: ""
+        run: |
+          set -Eeuo pipefail
+
+          log_file="${RUNNER_TEMP}/streamlit-startup.log"
+          body_file="${RUNNER_TEMP}/streamlit-health-body.txt"
+          curl_error_file="${RUNNER_TEMP}/streamlit-health-error.txt"
+          health_url="http://127.0.0.1:8501/_stcore/health"
+          streamlit_pid=""
+          launched_pid=""
+
+          cleanup() {
+            if [[ -z "${streamlit_pid}" ]]; then
+              return
+            fi
+
+            if ! kill -0 "${streamlit_pid}" 2>/dev/null; then
+              wait "${streamlit_pid}" 2>/dev/null || true
+              return
+            fi
+
+            echo "Stopping Streamlit process ${streamlit_pid}."
+            kill "${streamlit_pid}" 2>/dev/null || true
+
+            for _ in {1..5}; do
+              if ! kill -0 "${streamlit_pid}" 2>/dev/null; then
+                wait "${streamlit_pid}" 2>/dev/null || true
+                echo "Streamlit process stopped."
+                return
+              fi
+              sleep 1
+            done
+
+            echo "Streamlit did not stop in 5 seconds; sending SIGKILL."
+            kill -KILL "${streamlit_pid}" 2>/dev/null || true
+            wait "${streamlit_pid}" 2>/dev/null || true
+          }
+
+          trap cleanup EXIT
+
+          command=(
+            python -m streamlit run app.py
+            --server.headless=true
+            --server.address=127.0.0.1
+            --server.port=8501
+            --browser.gatherUsageStats=false
+          )
+
+          printf "Starting command:"
+          printf " %q" "${command[@]}"
+          printf "\n"
+
+          "${command[@]}" >"${log_file}" 2>&1 &
+          streamlit_pid=$!
+          launched_pid="${streamlit_pid}"
+
+          started_at=${SECONDS}
+          deadline=$((started_at + 30))
+          attempt=0
+          last_result="No health request completed."
+          last_curl_exit="not-run"
+          last_http_code="not-run"
+          last_body="<empty>"
+          last_curl_error="<none>"
+
+          echo "Streamlit PID: ${streamlit_pid}"
+
+          while (( SECONDS < deadline )); do
+            attempt=$((attempt + 1))
+
+            if ! kill -0 "${streamlit_pid}" 2>/dev/null; then
+              set +e
+              wait "${streamlit_pid}"
+              process_exit=$?
+              set -e
+
+              streamlit_pid=""
+              last_result="Process exited before readiness: exit=${process_exit}"
+              break
+            fi
+
+            : >"${body_file}"
+            : >"${curl_error_file}"
+
+            if http_code="$(
+              curl \
+                --silent \
+                --show-error \
+                --connect-timeout 1 \
+                --max-time 2 \
+                --output "${body_file}" \
+                --write-out "%{http_code}" \
+                "${health_url}" \
+                2>"${curl_error_file}"
+            )"; then
+              curl_exit=0
+            else
+              curl_exit=$?
+            fi
+
+            body="$(tr '\r\n' '  ' <"${body_file}")"
+            curl_error="$(tr '\r\n' '  ' <"${curl_error_file}")"
+
+            last_curl_exit="${curl_exit}"
+            last_http_code="${http_code:-none}"
+            last_body="${body:-<empty>}"
+            last_curl_error="${curl_error:-<none>}"
+            last_result="attempt=${attempt} curl_exit=${last_curl_exit} http=${last_http_code} body=${last_body} error=${last_curl_error}"
+
+            if [[ "${curl_exit}" -eq 0 && "${http_code}" == "200" ]]; then
+              sleep 2
+
+              if ! kill -0 "${streamlit_pid}" 2>/dev/null; then
+                set +e
+                wait "${streamlit_pid}"
+                process_exit=$?
+                set -e
+
+                streamlit_pid=""
+                last_result="Health returned 200, but process exited: exit=${process_exit}"
+                break
+              fi
+
+              elapsed=$((SECONDS - started_at))
+
+              echo "Streamlit startup smoke test passed."
+              echo "Waited: ${elapsed} seconds"
+              echo "Last result: ${last_result}"
+              echo "----- streamlit-startup.log -----"
+              cat "${log_file}" || true
+              exit 0
+            fi
+
+            sleep 1
+          done
+
+          elapsed=$((SECONDS - started_at))
+
+          echo "::error::Streamlit startup smoke test failed."
+          echo "Streamlit PID: ${launched_pid:-not-started}"
+          echo "Waited: ${elapsed} seconds"
+          echo "Last curl exit code: ${last_curl_exit}"
+          echo "Last HTTP status code: ${last_http_code}"
+          echo "Last response body: ${last_body}"
+          echo "Last curl error: ${last_curl_error}"
+          echo "Last result: ${last_result}"
+          echo "----- streamlit-startup.log -----"
+          cat "${log_file}" || true
+
+          exit 1
