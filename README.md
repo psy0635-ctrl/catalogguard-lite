@@ -252,7 +252,7 @@ API Client는 헤더 값의 앞뒤 공백을 제거한 뒤 정확히 32자리인
 
 `requirements.txt`에는 Streamlit 앱 실행에 필요한 기본 패키지가 있고, `requirements-api.txt`에는 FastAPI와 PostgreSQL 저장 계층에 필요한 패키지가 있습니다. FastAPI도 pandas 기반 검수 로직을 사용하므로 로컬 전체 시스템을 실행할 때는 두 파일을 모두 설치하는 것이 안전합니다.
 
-GitHub Actions는 PostgreSQL 테스트 DB 마이그레이션과 전체 테스트 자동 실행에 사용하며 배포는 수행하지 않습니다.
+GitHub Actions는 PostgreSQL 테스트 DB 마이그레이션, 전체 테스트 자동 실행, Streamlit 서버 시작과 Health 응답 확인에 사용하며 배포는 수행하지 않습니다.
 
 ## 8. 프로젝트 폴더 구조
 
@@ -371,7 +371,7 @@ catalogguard-lite/
 | `db/session.py` | SQLAlchemy 엔진, 세션 팩토리, DB 연결 확인, FastAPI 세션 의존성 |
 | `alembic/versions/20260703_0001_create_inspection_tables.py` | 검수 이력 저장 테이블 생성 마이그레이션 |
 | `alembic/versions/20260705_0002_add_inspection_file_identity.py` | 파일 해시와 검수 버전 컬럼, CHECK constraint, partial unique index 추가 마이그레이션 |
-| `.github/workflows/test.yml` | PostgreSQL 18 테스트 DB에 마이그레이션을 적용하고 전체 pytest를 실행하는 GitHub Actions workflow |
+| `.github/workflows/test.yml` | PostgreSQL 18 테스트 DB에 마이그레이션을 적용하고 전체 pytest와 Streamlit 시작 스모크 테스트를 실행하는 GitHub Actions workflow |
 | `.env.example` | 로컬 PostgreSQL 연결 환경변수 예시 |
 | `requirements.txt` | Streamlit 앱 기본 실행 패키지 |
 | `requirements-api.txt` | FastAPI, PostgreSQL, Alembic 관련 패키지 |
@@ -962,7 +962,7 @@ pytest 실행 시간: 2.21초
 
 ### GitHub Actions 자동 테스트
 
-`.github/workflows/test.yml`의 `Test` workflow는 `main` 브랜치 push와 `main` 브랜치를 대상으로 한 pull request에서 실행됩니다. `ubuntu-latest` 환경에 Python 3.11을 준비하고 PostgreSQL 18 서비스 컨테이너를 시작한 뒤, 의존성을 설치하고 Alembic 마이그레이션을 적용한 다음 전체 pytest를 한 번 실행합니다.
+`.github/workflows/test.yml`의 `Test` workflow는 `main` 브랜치 push와 `main` 브랜치를 대상으로 한 pull request에서 실행됩니다. `ubuntu-latest` 환경에 Python 3.11을 준비하고 PostgreSQL 18 서비스 컨테이너를 시작한 뒤, 의존성을 설치하고 Alembic 마이그레이션을 적용합니다. 이어서 전체 pytest와 Streamlit 시작 스모크 테스트를 실행합니다.
 
 ```text
 main push 또는 main 대상 pull request
@@ -971,19 +971,34 @@ main push 또는 main 대상 pull request
 -> Python 3.11과 의존성 설치
 -> Alembic upgrade head
 -> 전체 pytest 1회 실행
+-> Streamlit 서버 시작
+-> /_stcore/health 응답 확인
+-> Streamlit 프로세스 종료
 ```
 
 서비스 컨테이너는 workflow가 실행되는 동안만 사용하는 일회성 CI 테스트 DB입니다. Railway나 운영 PostgreSQL에 연결하지 않으며, 단위 테스트와 실제 PostgreSQL 연결·저장 통합 테스트를 함께 실행합니다.
 
-최신 GitHub Actions `Test` workflow에서는 Alembic 마이그레이션 적용 후 전체 테스트가 다음과 같이 완료되었습니다.
+Streamlit 시작 스모크 테스트는 `python -m streamlit run app.py`로 실제 서버를 `127.0.0.1:8501`에서 실행하고, 최대 30초 동안 `/_stcore/health`를 반복 확인합니다. 각 요청에는 1초의 연결 제한과 2초의 전체 제한을 적용합니다. HTTP `200`을 받은 뒤에도 2초 동안 프로세스가 살아 있는지 확인하므로, Streamlit 실행 명령이 성공하고 서버 Health endpoint가 응답하는 시작 단계를 검사합니다.
+
+성공과 실패 경로 모두 `trap cleanup EXIT`로 프로세스를 정리합니다. 먼저 SIGTERM을 보낸 뒤 최대 5초 동안 기다리고, 종료되지 않으면 SIGKILL을 보낸 다음 `wait`로 프로세스를 회수합니다. 실패 시에는 마지막 `curl` 종료 코드, HTTP 상태, 응답 본문, 오류와 Streamlit 시작 로그를 출력해 원인을 확인할 수 있게 합니다.
+
+이 Step에서는 `CATALOGGUARD_API_BASE_URL`, `CATALOGGUARD_API_TIMEOUT_SECONDS`, `DATABASE_URL`, `TEST_DATABASE_URL`을 빈 값으로 덮어씁니다. 따라서 Railway 운영 API나 운영 PostgreSQL에 연결하거나 운영 데이터와 검수 이력을 읽고 저장하지 않고, Streamlit 서버 자체가 시작되는지만 확인합니다. 환경변수의 실제 값과 Secret은 workflow 로그나 문서에 기록하지 않습니다.
+
+`tests/test_app_smoke.py`의 AppTest는 `app.py`의 초기 화면이 예외 없이 렌더링되고 API 주소가 없을 때 안전한 안내가 표시되는지 확인합니다. GitHub Actions의 시작 스모크 테스트는 실제 Streamlit 서버 프로세스, 포트와 Health 응답을 확인하므로 두 검사는 서로 다른 범위를 보완합니다.
+
+이 스모크 테스트는 브라우저 UI 전체 렌더링, CSV 업로드와 검수 실행, 필터 클릭, Railway API 실제 통신, 운영 Secrets 설정, Streamlit Community Cloud 전용 장애나 모든 Segmentation fault를 검증하지 않습니다.
+
+최신 GitHub Actions `Test` workflow에서는 Alembic 마이그레이션 적용 후 전체 pytest와 Streamlit 시작 스모크 테스트가 다음과 같이 완료되었습니다.
 
 ```text
 전체 테스트: 611 passed
 skipped: 0
 failed: 0
-warning: 표시 없음
-pytest 실행 시간: 3.62초
-전체 Job 실행 시간: 약 58초
+pytest 실행 시간: 4.51초
+Streamlit Health: HTTP 200, body ok
+Streamlit 준비 시간: 3초
+Streamlit 프로세스 종료: 성공
+전체 Job 실행 시간: 약 59초
 ```
 
 ## 24. 데이터 저장 범위와 보안
