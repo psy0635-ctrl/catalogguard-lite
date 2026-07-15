@@ -5,10 +5,13 @@ from config.settings import DEV_DATA_PATH
 from core.loader import load_products
 from core.models import Product
 from core.rules import (
+    RULES,
     check_duplicate_product_content,
     check_duplicate_product_id,
     check_invalid_category,
     check_missing_required_fields,
+    check_non_standard_color,
+    check_non_standard_size,
     check_price,
     check_price_outliers,
     check_prohibited_and_personal_information,
@@ -878,3 +881,102 @@ def test_run_all_rules_products_dev_has_expected_issue_counts_after_option_filte
     assert sum(issue.severity == "error" for issue in issues) == 6
     assert sum(issue.severity == "warning" for issue in issues) == 0
     assert "duplicate_product_name" not in {issue.rule for issue in issues}
+
+
+def test_check_non_standard_color_allows_exact_standard_value():
+    issues = check_non_standard_color([make_product(color="BLACK")])
+
+    assert issues == []
+
+
+@pytest.mark.parametrize("color", ["black", "Black", "블랙"])
+def test_check_non_standard_color_warns_for_known_aliases(color):
+    issues = check_non_standard_color([make_product(color=color)])
+
+    assert len(issues) == 1
+    assert issues[0].rule == "non_standard_color"
+    assert issues[0].severity == "warning"
+    assert color in issues[0].message
+    assert "BLACK" in issues[0].message
+
+
+def test_check_non_standard_color_ignores_custom_and_blank_values():
+    assert check_non_standard_color([make_product(color="MELANGE GRAY")]) == []
+    assert check_non_standard_color([make_product(color="")]) == []
+
+
+def test_blank_color_only_creates_existing_missing_required_field_issue():
+    issues = run_all_rules([make_product(color="")])
+    relevant_issues = [
+        issue
+        for issue in issues
+        if issue.rule in {"missing_required_field", "non_standard_color"}
+    ]
+
+    assert [issue.rule for issue in relevant_issues] == ["missing_required_field"]
+    assert "color" in relevant_issues[0].message
+
+
+def test_run_all_rules_creates_non_standard_color_warning_once():
+    issues = run_all_rules([make_product(color="black")])
+
+    assert sum(issue.rule == "non_standard_color" for issue in issues) == 1
+
+
+def test_color_rule_is_registered_once():
+    assert RULES.count(check_non_standard_color) == 1
+
+
+def test_check_non_standard_size_allows_exact_standard_value():
+    issues = check_non_standard_size([make_product(size="M")])
+
+    assert issues == []
+
+
+@pytest.mark.parametrize(
+    ("size", "expected_standard"),
+    [("m", "M"), ("medium", "M"), ("2XL", "XXL")],
+)
+def test_check_non_standard_size_warns_for_known_aliases(size, expected_standard):
+    issues = check_non_standard_size([make_product(size=size)])
+
+    assert len(issues) == 1
+    assert issues[0].rule == "non_standard_size"
+    assert issues[0].severity == "warning"
+    assert size in issues[0].message
+    assert expected_standard in issues[0].message
+
+
+def test_check_non_standard_size_ignores_numeric_and_blank_values():
+    assert check_non_standard_size([make_product(size="95")]) == []
+    assert check_non_standard_size([make_product(size="")]) == []
+
+
+def test_blank_size_only_creates_existing_missing_required_field_issue():
+    issues = run_all_rules([make_product(size="")])
+    relevant_issues = [
+        issue
+        for issue in issues
+        if issue.rule in {"missing_required_field", "non_standard_size"}
+    ]
+
+    assert [issue.rule for issue in relevant_issues] == ["missing_required_field"]
+    assert "size" in relevant_issues[0].message
+
+
+def test_run_all_rules_creates_non_standard_size_warning_once():
+    issues = run_all_rules([make_product(size="medium")])
+
+    assert sum(issue.rule == "non_standard_size" for issue in issues) == 1
+
+
+def test_size_rule_is_registered_once():
+    assert RULES.count(check_non_standard_size) == 1
+
+
+def test_products_dev_standard_fashion_values_do_not_create_new_warnings():
+    issues = run_all_rules(load_products(DEV_DATA_PATH))
+    issue_rules = {issue.rule for issue in issues}
+
+    assert "non_standard_color" not in issue_rules
+    assert "non_standard_size" not in issue_rules

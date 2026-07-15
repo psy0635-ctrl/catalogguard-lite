@@ -764,6 +764,42 @@ def test_build_result_dataframe_uses_positive_price_recommendation_for_zero_pric
     assert "가격을 0 이상의 정수로 입력하세요." not in df.iloc[0]["수정 권장사항"]
 
 
+def test_build_result_dataframe_displays_non_standard_color_warning_in_korean():
+    issue = make_issue(
+        rule="non_standard_color",
+        severity="warning",
+        message="color '블랙' should be standardized to 'BLACK'",
+    )
+
+    df = build_result_dataframe([issue])
+    row = df.iloc[0]
+
+    assert row["검수 상태"] == "주의"
+    assert row["오류 항목"] == "색상 표기 비표준"
+    assert row["오류 이유"] == "색상 '블랙'은 표준값 'BLACK'으로 통일하는 것이 좋습니다."
+    assert row["수정 권장사항"] == "오류 이유에 표시된 표준 색상값으로 수정하세요."
+    assert row["위험 수준"] == "낮음"
+    assert issue.message not in row["오류 이유"]
+
+
+def test_build_result_dataframe_displays_non_standard_size_warning_in_korean():
+    issue = make_issue(
+        rule="non_standard_size",
+        severity="warning",
+        message="size 'medium' should be standardized to 'M'",
+    )
+
+    df = build_result_dataframe([issue])
+    row = df.iloc[0]
+
+    assert row["검수 상태"] == "주의"
+    assert row["오류 항목"] == "사이즈 표기 비표준"
+    assert row["오류 이유"] == "사이즈 'medium'은 표준값 'M'으로 통일하는 것이 좋습니다."
+    assert row["수정 권장사항"] == "오류 이유에 표시된 표준 사이즈값으로 수정하세요."
+    assert row["위험 수준"] == "낮음"
+    assert issue.message not in row["오류 이유"]
+
+
 @pytest.mark.parametrize(
     ("total_issue_count", "error_count", "warning_count", "expected"),
     [

@@ -11,6 +11,8 @@ RULE_LABELS = {
     "duplicate_product_id": "상품 ID 중복",
     "duplicate_product_name": "상품명 중복",
     "missing_required_field": "필수 값 누락",
+    "non_standard_color": "색상 표기 비표준",
+    "non_standard_size": "사이즈 표기 비표준",
     "invalid_category": "카테고리 오류",
     "invalid_stock": "재고 형식 오류",
     "out_of_stock": "품절 상품",
@@ -35,6 +37,8 @@ RECOMMENDATIONS = {
     "duplicate_product_id": "각 상품에 고유한 상품 ID를 입력하십시오.",
     "duplicate_product_name": "모델명, 색상, 옵션, 용량 또는 상품 ID를 확인하십시오.",
     "missing_required_field": "누락된 필수 값을 입력하세요.",
+    "non_standard_color": "오류 이유에 표시된 표준 색상값으로 수정하세요.",
+    "non_standard_size": "오류 이유에 표시된 표준 사이즈값으로 수정하세요.",
     "invalid_category": "허용된 카테고리 값으로 수정하세요.",
     "invalid_stock": "재고를 0 이상의 정수로 입력하세요.",
     "out_of_stock": "판매 상태와 재입고 여부를 확인하세요.",
@@ -72,6 +76,8 @@ RISK_LEVELS = {
     "duplicate_product_name": "중간",
     "duplicate_product_content": "높음",
     "missing_required_field": "높음",
+    "non_standard_color": "낮음",
+    "non_standard_size": "낮음",
     "invalid_category": "중간",
     "invalid_stock": "중간",
     "out_of_stock": "낮음",
@@ -198,6 +204,30 @@ def translate_issue_message(issue: ValidationIssue) -> str:
         if match:
             field_name = match.group(1)
             return f"필수 항목 '{field_name}' 값이 누락되었습니다."
+
+    if issue.rule == "non_standard_color":
+        match = re.fullmatch(
+            r"color '([^']*)' should be standardized to '([^']*)'",
+            message,
+        )
+        if match:
+            original_color, standard_color = match.groups()
+            return (
+                f"색상 '{original_color}'은 표준값 '{standard_color}'으로 "
+                "통일하는 것이 좋습니다."
+            )
+
+    if issue.rule == "non_standard_size":
+        match = re.fullmatch(
+            r"size '([^']*)' should be standardized to '([^']*)'",
+            message,
+        )
+        if match:
+            original_size, standard_size = match.groups()
+            return (
+                f"사이즈 '{original_size}'은 표준값 '{standard_size}'으로 "
+                "통일하는 것이 좋습니다."
+            )
 
     if issue.rule == "duplicate_product_content":
         match = re.fullmatch(

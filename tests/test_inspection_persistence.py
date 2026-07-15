@@ -249,6 +249,40 @@ def test_build_result_create_items_maps_display_columns_and_blank_ids():
     assert all(item.risk_level for item in result_items)
 
 
+def test_build_result_create_items_maps_fashion_standardization_warnings():
+    report = make_report(
+        [
+            {
+                **BASE_ROW,
+                "color": "블랙",
+                "size": "medium",
+            }
+        ]
+    )
+
+    result_items = build_result_create_items(report)
+    items_by_error_field = {
+        item.error_field: item
+        for item in result_items
+    }
+
+    assert {"색상 표기 비표준", "사이즈 표기 비표준"}.issubset(
+        items_by_error_field
+    )
+
+    color_item = items_by_error_field["색상 표기 비표준"]
+    assert color_item.status == "주의"
+    assert color_item.reason == "색상 '블랙'은 표준값 'BLACK'으로 통일하는 것이 좋습니다."
+    assert color_item.recommendation
+    assert color_item.risk_level == "낮음"
+
+    size_item = items_by_error_field["사이즈 표기 비표준"]
+    assert size_item.status == "주의"
+    assert size_item.reason == "사이즈 'medium'은 표준값 'M'으로 통일하는 것이 좋습니다."
+    assert size_item.recommendation
+    assert size_item.risk_level == "낮음"
+
+
 def test_build_result_create_items_rejects_blank_required_result_fields():
     report = make_invalid_required_field_report()
 

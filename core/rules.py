@@ -13,6 +13,10 @@ from core.duplicate_detector import (
     find_duplicate_product_ids,
     find_duplicate_product_names,
 )
+from core.fashion_attribute_validator import (
+    find_standard_color,
+    find_standard_size,
+)
 from core.models import Product, ValidationIssue
 from core.price_anomaly_detector import find_category_price_anomalies
 from core.privacy import (
@@ -204,6 +208,60 @@ def check_missing_required_fields(products: list[Product]) -> list[ValidationIss
                         message=f"'{field}' is missing",
                     )
                 )
+    return issues
+
+
+def check_non_standard_color(
+    products: list[Product],
+) -> list[ValidationIssue]:
+    issues = []
+    for product in products:
+        if not product.color:
+            continue
+
+        standard_color = find_standard_color(product.color)
+        if standard_color is None or product.color == standard_color:
+            continue
+
+        issues.append(
+            ValidationIssue(
+                rule="non_standard_color",
+                severity="warning",
+                product_id=product.product_id,
+                product_group_id=product.product_group_id,
+                message=(
+                    f"color '{product.color}' should be standardized to "
+                    f"'{standard_color}'"
+                ),
+            )
+        )
+    return issues
+
+
+def check_non_standard_size(
+    products: list[Product],
+) -> list[ValidationIssue]:
+    issues = []
+    for product in products:
+        if not product.size:
+            continue
+
+        standard_size = find_standard_size(product.size)
+        if standard_size is None or product.size == standard_size:
+            continue
+
+        issues.append(
+            ValidationIssue(
+                rule="non_standard_size",
+                severity="warning",
+                product_id=product.product_id,
+                product_group_id=product.product_group_id,
+                message=(
+                    f"size '{product.size}' should be standardized to "
+                    f"'{standard_size}'"
+                ),
+            )
+        )
     return issues
 
 
@@ -408,6 +466,8 @@ RULES = [
     check_duplicate_product_name,
     check_duplicate_product_content,
     check_missing_required_fields,
+    check_non_standard_color,
+    check_non_standard_size,
     check_invalid_category,
     check_stock,
     check_price,
