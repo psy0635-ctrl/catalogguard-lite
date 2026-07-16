@@ -1,6 +1,7 @@
 # 역할: 패션 색상과 사이즈 별칭이 정확한 표준값으로만 변환되는지 테스트합니다.
 import pytest
 
+from core import fashion_attribute_validator
 from core.fashion_attribute_validator import find_standard_color, find_standard_size
 
 
@@ -45,3 +46,44 @@ def test_find_standard_color_returns_only_known_exact_aliases(value, expected):
 )
 def test_find_standard_size_returns_only_known_exact_aliases(value, expected):
     assert find_standard_size(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("BLACK", "BLACK"),
+        ("black", "BLACK"),
+        (" 블랙 ", "BLACK"),
+        ("MELANGE GRAY", "melange gray"),
+        (" melange gray ", "melange gray"),
+        ("", None),
+        ("   ", None),
+        (None, None),
+    ],
+)
+def test_build_color_comparison_key_uses_standard_or_casefolded_value(
+    value,
+    expected,
+):
+    assert fashion_attribute_validator.build_color_comparison_key(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("M", "M"),
+        ("medium", "M"),
+        (" 2XL ", "XXL"),
+        ("95", "95"),
+        (" 95 ", "95"),
+        ("custom size", "custom size"),
+        ("", None),
+        ("   ", None),
+        (None, None),
+    ],
+)
+def test_build_size_comparison_key_uses_standard_or_casefolded_value(
+    value,
+    expected,
+):
+    assert fashion_attribute_validator.build_size_comparison_key(value) == expected

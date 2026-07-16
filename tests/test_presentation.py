@@ -383,6 +383,23 @@ def test_translate_duplicate_product_name_message_to_korean():
     )
 
 
+def test_translate_duplicate_variant_combination_message_to_korean():
+    issue = make_issue(
+        rule="duplicate_variant_combination",
+        message=(
+            "product_group_id 'G001' has duplicate variant color 'BLACK' "
+            "and size 'M' for product_ids 'P001, P002'"
+        ),
+    )
+
+    message = translate_issue_message(issue)
+
+    assert message == (
+        "상품 그룹 'G001'에서 색상 'BLACK', 사이즈 'M' 조합이 "
+        "상품 ID 'P001', 'P002'에 중복되어 있습니다."
+    )
+
+
 def test_translate_missing_required_field_message_to_korean():
     issue = make_issue(rule="missing_required_field", message="'color' is missing")
 
@@ -869,6 +886,33 @@ def test_build_result_dataframe_displays_duplicate_product_content_label_and_rec
     )
     assert "중복 등록된 상품을 삭제하거나 하나로 통합" in df.iloc[0]["수정 권장사항"]
     assert df.iloc[0]["위험 수준"] == "높음"
+
+
+def test_build_result_dataframe_displays_duplicate_variant_combination_in_korean():
+    issue = make_issue(
+        rule="duplicate_variant_combination",
+        severity="error",
+        product_id="P002",
+        product_group_id="G001",
+        message=(
+            "product_group_id 'G001' has duplicate variant color 'BLACK' "
+            "and size 'M' for product_ids 'P001, P002'"
+        ),
+    )
+
+    df = build_result_dataframe([issue])
+
+    assert df.iloc[0]["검수 상태"] == "오류"
+    assert df.iloc[0]["오류 항목"] == "상품 옵션 조합 중복"
+    assert df.iloc[0]["오류 이유"] == (
+        "상품 그룹 'G001'에서 색상 'BLACK', 사이즈 'M' 조합이 "
+        "상품 ID 'P001', 'P002'에 중복되어 있습니다."
+    )
+    assert df.iloc[0]["수정 권장사항"] == (
+        "같은 상품 그룹 안에서 색상과 사이즈 조합이 한 번만 사용되도록 "
+        "중복 상품을 통합하거나 옵션 값을 수정하세요."
+    )
+    assert df.iloc[0]["위험 수준"] == "중간"
 
 
 def test_build_result_dataframe_displays_duplicate_product_name_warning():

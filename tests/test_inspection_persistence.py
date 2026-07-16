@@ -283,6 +283,41 @@ def test_build_result_create_items_maps_fashion_standardization_warnings():
     assert size_item.risk_level == "낮음"
 
 
+def test_build_result_create_items_maps_duplicate_variant_without_schema_changes():
+    report = make_report(
+        [
+            BASE_ROW,
+            {
+                **BASE_ROW,
+                "product_id": "P002",
+                "product_name": "다른 상품",
+                "color": "black",
+                "size": "medium",
+                "image_path": "image2.jpg",
+            },
+        ]
+    )
+
+    result_items = build_result_create_items(report)
+    duplicate_items = [
+        item
+        for item in result_items
+        if item.error_field == "상품 옵션 조합 중복"
+    ]
+
+    assert len(duplicate_items) == 2
+    assert [item.product_id for item in duplicate_items] == ["P001", "P002"]
+    assert {item.product_group_id for item in duplicate_items} == {"G001"}
+    assert {item.status for item in duplicate_items} == {"오류"}
+    assert all("색상 'BLACK', 사이즈 'M'" in item.reason for item in duplicate_items)
+    assert all(item.recommendation for item in duplicate_items)
+    assert {item.risk_level for item in duplicate_items} == {"중간"}
+
+
+def test_current_inspection_version_is_three_for_duplicate_variant_rule():
+    assert INSPECTION_VERSION == "3"
+
+
 def test_build_result_create_items_rejects_blank_required_result_fields():
     report = make_invalid_required_field_report()
 
@@ -442,14 +477,14 @@ def test_save_inspection_report_allows_same_hash_with_different_version(
         source_filename=first_source_filename,
         report=report,
         file_sha256=file_sha256,
-        inspection_version="1",
+        inspection_version="2",
     )
     second_outcome = save_inspection_report(
         session,
         source_filename=second_source_filename,
         report=report,
         file_sha256=file_sha256,
-        inspection_version="2",
+        inspection_version=INSPECTION_VERSION,
     )
 
     assert first_outcome.created is True

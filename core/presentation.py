@@ -3,12 +3,14 @@ import re
 
 import pandas as pd
 
+from core.duplicate_detector import parse_duplicate_variant_message
 from core.models import ValidationIssue
 
 
 # 내부 규칙 이름을 사용자가 볼 한국어 이름으로 바꾸는 표입니다.
 RULE_LABELS = {
     "duplicate_product_id": "상품 ID 중복",
+    "duplicate_variant_combination": "상품 옵션 조합 중복",
     "duplicate_product_name": "상품명 중복",
     "missing_required_field": "필수 값 누락",
     "non_standard_color": "색상 표기 비표준",
@@ -35,6 +37,10 @@ PRICE_RECOMMENDATION = "0보다 큰 정상 판매 가격을 입력하십시오."
 
 RECOMMENDATIONS = {
     "duplicate_product_id": "각 상품에 고유한 상품 ID를 입력하십시오.",
+    "duplicate_variant_combination": (
+        "같은 상품 그룹 안에서 색상과 사이즈 조합이 한 번만 사용되도록 "
+        "중복 상품을 통합하거나 옵션 값을 수정하세요."
+    ),
     "duplicate_product_name": "모델명, 색상, 옵션, 용량 또는 상품 ID를 확인하십시오.",
     "missing_required_field": "누락된 필수 값을 입력하세요.",
     "non_standard_color": "오류 이유에 표시된 표준 색상값으로 수정하세요.",
@@ -73,6 +79,7 @@ RECOMMENDATIONS = {
 
 RISK_LEVELS = {
     "duplicate_product_id": "높음",
+    "duplicate_variant_combination": "중간",
     "duplicate_product_name": "중간",
     "duplicate_product_content": "높음",
     "missing_required_field": "높음",
@@ -197,6 +204,33 @@ def translate_issue_message(issue: ValidationIssue) -> str:
                 f"상품명 '{product_name}'이 다른 상품과 동일하거나 정리 후 "
                 f"같은 값으로 확인되었습니다. 중복 후보 상품 ID: {product_ids}. "
                 f"중복 행: {rows}."
+            )
+
+    if issue.rule == "duplicate_variant_combination":
+        parsed_message = parse_duplicate_variant_message(message)
+        if parsed_message is not None:
+            product_group_id, color, size, product_ids = parsed_message
+            quoted_product_ids = ", ".join(
+                f"'{product_id}'" for product_id in product_ids
+            )
+            return (
+                f"상품 그룹 '{product_group_id}'에서 색상 '{color}', 사이즈 "
+                f"'{size}' 조합이 상품 ID {quoted_product_ids}에 중복되어 있습니다."
+            )
+
+        match = re.fullmatch(
+            r"product_group_id '([^']*)' has duplicate variant color '([^']*)' "
+            r"and size '([^']*)' for product_ids '([^']*)'",
+            message,
+        )
+        if match:
+            product_group_id, color, size, product_ids = match.groups()
+            quoted_product_ids = ", ".join(
+                f"'{product_id}'" for product_id in product_ids.split(", ")
+            )
+            return (
+                f"상품 그룹 '{product_group_id}'에서 색상 '{color}', 사이즈 "
+                f"'{size}' 조합이 상품 ID {quoted_product_ids}에 중복되어 있습니다."
             )
 
     if issue.rule == "missing_required_field":

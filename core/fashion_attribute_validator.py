@@ -1,4 +1,5 @@
 # 역할: 패션 상품의 색상과 사이즈 표기를 권장 표준값과 비교하기 위한 기준을 제공합니다.
+from collections.abc import Callable
 
 
 COLOR_ALIASES = {
@@ -112,3 +113,29 @@ def find_standard_color(value: object) -> str | None:
 
 def find_standard_size(value: object) -> str | None:
     return _find_standard_value(value, SIZE_ALIASES)
+
+
+def _build_comparison_key(
+    value: object,
+    standard_value_finder: Callable[[object], str | None],
+) -> str | None:
+    """원본을 바꾸지 않고 표준값 또는 대소문자 무시 비교 키를 만듭니다."""
+    if not isinstance(value, str):
+        return None
+
+    normalized_value = value.strip()
+    if not normalized_value:
+        return None
+
+    standard_value = standard_value_finder(normalized_value)
+    if standard_value is not None:
+        return standard_value
+    return normalized_value.casefold()
+
+
+def build_color_comparison_key(value: object) -> str | None:
+    return _build_comparison_key(value, find_standard_color)
+
+
+def build_size_comparison_key(value: object) -> str | None:
+    return _build_comparison_key(value, find_standard_size)

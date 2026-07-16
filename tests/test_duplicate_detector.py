@@ -1,6 +1,7 @@
 # 역할: 상품 ID와 상품명 중복 탐지 유틸의 다양한 비교 조건을 테스트합니다.
 from dataclasses import asdict
 
+from core import duplicate_detector
 from core.duplicate_detector import (
     detect_duplicate_products,
     find_duplicate_product_ids,
@@ -406,3 +407,143 @@ def test_personal_information_masking_still_masks_sentence_values():
     masked_text = mask_personal_information("문의 010-1234-5678 seller@test.com")
 
     assert masked_text == "문의 010-****-5678 se****@test.com"
+
+
+def test_find_duplicate_variant_combinations_flags_all_rows_with_standardized_options():
+    products = [
+        make_product(product_id="P001", product_name="상품 A", color="BLACK", size="M"),
+        make_product(product_id="P002", product_name="상품 B", color="black", size="medium"),
+    ]
+
+    issues = duplicate_detector.find_duplicate_variant_combinations(products)
+
+    assert len(issues) == 2
+    assert [issue.product_id for issue in issues] == ["P001", "P002"]
+    assert all(issue.rule == "duplicate_variant_combination" for issue in issues)
+    assert all(issue.severity == "error" for issue in issues)
+    assert all(
+        duplicate_detector.parse_duplicate_variant_message(issue.message)
+        == ("G001", "BLACK", "M", ["P001", "P002"])
+        for issue in issues
+    )
+
+
+def test_find_duplicate_variant_combinations_flags_custom_color_and_numeric_size():
+    products = [
+        make_product(product_id="P001", color="MELANGE GRAY", size="95"),
+        make_product(
+            product_id="P002",
+            color="melange gray",
+            size=" 95 ",
+            price=11000,
+        ),
+    ]
+
+    issues = duplicate_detector.find_duplicate_variant_combinations(products)
+
+    assert len(issues) == 2
+    assert all(
+        duplicate_detector.parse_duplicate_variant_message(issue.message)
+        == ("G001", "melange gray", "95", ["P001", "P002"])
+        for issue in issues
+    )
+
+
+def test_find_duplicate_variant_combinations_ignores_different_options_or_groups():
+    products = [
+        make_product(product_group_id="G001", product_id="P001", color="BLACK", size="M"),
+        make_product(product_group_id="G001", product_id="P002", color="BLACK", size="L"),
+        make_product(product_group_id="G001", product_id="P003", color="WHITE", size="M"),
+        make_product(product_group_id="G002", product_id="P004", color="BLACK", size="M"),
+    ]
+
+    assert duplicate_detector.find_duplicate_variant_combinations(products) == []
+
+
+def test_find_duplicate_variant_combinations_ignores_blank_color_or_size():
+    products = [
+        make_product(product_id="P001", color="BLACK", size=""),
+        make_product(product_id="P002", color="BLACK", size=""),
+        make_product(product_id="P003", color="", size="M"),
+        make_product(product_id="P004", color="", size="M"),
+    ]
+
+    assert duplicate_detector.find_duplicate_variant_combinations(products) == []
+
+
+def test_find_duplicate_variant_combinations_leaves_same_product_id_to_existing_rule():
+    products = [
+        make_product(product_id="P001", color="BLACK", size="M"),
+        make_product(product_id="P001", color="black", size="medium"),
+    ]
+
+    assert duplicate_detector.find_duplicate_variant_combinations(products) == []
+    assert len(find_duplicate_product_ids(products)) == 2
+
+
+def test_find_duplicate_variant_combinations_keeps_input_order_for_three_rows():
+    products = [
+        make_product(product_id="P003", color="BLACK", size="M"),
+        make_product(product_id="P001", color="black", size="medium"),
+        make_product(product_id="P002", color="블랙", size="M"),
+    ]
+
+    first_run = duplicate_detector.find_duplicate_variant_combinations(products)
+    second_run = duplicate_detector.find_duplicate_variant_combinations(products)
+
+    assert [issue.product_id for issue in first_run] == ["P003", "P001", "P002"]
+    assert [issue.message for issue in first_run] == [issue.message for issue in second_run]
+    assert all(
+        duplicate_detector.parse_duplicate_variant_message(issue.message)
+        == ("G001", "BLACK", "M", ["P003", "P001", "P002"])
+        for issue in first_run
+    )
+
+
+def test_find_duplicate_variant_combinations_keeps_global_input_order_across_buckets():
+    products = [
+        make_product(
+            product_group_id="G001",
+            product_id="P001",
+            product_name="상품 A1",
+            color="BLACK",
+            size="M",
+        ),
+        make_product(
+            product_group_id="G002",
+            product_id="P002",
+            product_name="상품 B1",
+            color="WHITE",
+            size="L",
+        ),
+        make_product(
+            product_group_id="G002",
+            product_id="P003",
+            product_name="상품 B2",
+            color="white",
+            size="large",
+        ),
+        make_product(
+            product_group_id="G001",
+            product_id="P004",
+            product_name="상품 A2",
+            color="black",
+            size="medium",
+        ),
+    ]
+
+    issues = duplicate_detector.find_duplicate_variant_combinations(products)
+
+    assert [issue.product_id for issue in issues] == ["P001", "P002", "P003", "P004"]
+
+
+def test_find_duplicate_variant_combinations_does_not_modify_products():
+    products = [
+        make_product(product_id="P001", color=" 블랙 ", size=" medium "),
+        make_product(product_id="P002", color="BLACK", size="M"),
+    ]
+    before_products = [asdict(product) for product in products]
+
+    duplicate_detector.find_duplicate_variant_combinations(products)
+
+    assert [asdict(product) for product in products] == before_products

@@ -10,8 +10,10 @@ from config.settings import (
 )
 from core.category_mismatch_detector import find_category_mismatches
 from core.duplicate_detector import (
+    find_duplicate_product_content,
     find_duplicate_product_ids,
     find_duplicate_product_names,
+    find_duplicate_variant_combinations,
 )
 from core.fashion_attribute_validator import (
     find_standard_color,
@@ -31,11 +33,6 @@ from core.privacy import (
 
 
 BANK_ACCOUNT_PATTERN = re.compile(r"(?<![\d-])(?:\d[-\s]?){9,13}\d(?![-\s]?\d)")
-
-
-def normalize_duplicate_text(value: str) -> str:
-    """중복 비교를 위해 공백과 영문 대소문자를 정리합니다."""
-    return " ".join(value.split()).casefold()
 
 
 def normalize_content_text(value: str) -> str:
@@ -140,58 +137,18 @@ def check_duplicate_product_id(products: list[Product]) -> list[ValidationIssue]
     return find_duplicate_product_ids(products)
 
 
+def check_duplicate_variant_combination(
+    products: list[Product],
+) -> list[ValidationIssue]:
+    return find_duplicate_variant_combinations(products)
+
+
 def check_duplicate_product_name(products: list[Product]) -> list[ValidationIssue]:
     return find_duplicate_product_names(products)
 
 
 def check_duplicate_product_content(products: list[Product]) -> list[ValidationIssue]:
-    """상품 핵심 정보가 모두 같은 중복 상품을 찾습니다."""
-    seen: dict[tuple[str, str, str, str, int], Product] = {}
-    issues = []
-
-    for product in products:
-        # 비교 기준이 부족하거나 잘못된 상품은 중복 판단에서 제외합니다.
-        if not product.product_group_id or not product.product_id:
-            continue
-        if not product.product_name or not product.category:
-            continue
-        if product.category not in VALID_CATEGORIES:
-            continue
-        if not product.color or not product.size:
-            continue
-        if product.price is None or product.price <= 0:
-            continue
-
-        # 상품명/카테고리/색상/사이즈/가격이 모두 같으면 같은 상품으로 봅니다.
-        duplicate_key = (
-            normalize_duplicate_text(product.product_name),
-            normalize_duplicate_text(product.category),
-            normalize_duplicate_text(product.color),
-            normalize_duplicate_text(product.size),
-            product.price,
-        )
-        first_product = seen.get(duplicate_key)
-        if first_product is None:
-            seen[duplicate_key] = product
-            continue
-
-        issues.append(
-            ValidationIssue(
-                rule="duplicate_product_content",
-                severity="error",
-                product_id=product.product_id,
-                product_group_id=product.product_group_id,
-                message=(
-                    f"product_id '{product.product_id}' in group "
-                    f"'{product.product_group_id}' duplicates product_id "
-                    f"'{first_product.product_id}' in group "
-                    f"'{first_product.product_group_id}' with same product_name, "
-                    "category, color, size, and price"
-                ),
-            )
-        )
-
-    return issues
+    return find_duplicate_product_content(products)
 
 
 def check_missing_required_fields(products: list[Product]) -> list[ValidationIssue]:
@@ -463,6 +420,7 @@ def check_prohibited_and_personal_information(
 RULES = [
     # 이 순서대로 실행되므로, 새 규칙을 추가할 때 결과 순서도 함께 고려해야 합니다.
     check_duplicate_product_id,
+    check_duplicate_variant_combination,
     check_duplicate_product_name,
     check_duplicate_product_content,
     check_missing_required_fields,

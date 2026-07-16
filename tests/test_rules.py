@@ -2,6 +2,8 @@
 import pytest
 
 from config.settings import DEV_DATA_PATH
+from core import rules
+from core.duplicate_detector import parse_duplicate_variant_message
 from core.loader import load_products
 from core.models import Product
 from core.rules import (
@@ -980,3 +982,106 @@ def test_products_dev_standard_fashion_values_do_not_create_new_warnings():
 
     assert "non_standard_color" not in issue_rules
     assert "non_standard_size" not in issue_rules
+
+
+def test_duplicate_variant_rule_is_registered_once_after_duplicate_product_id():
+    duplicate_variant_rule = rules.check_duplicate_variant_combination
+
+    assert RULES.count(duplicate_variant_rule) == 1
+    assert RULES.index(duplicate_variant_rule) == RULES.index(check_duplicate_product_id) + 1
+
+
+def test_run_all_rules_flags_custom_duplicate_variant_without_standardization_warnings():
+    products = [
+        make_product(product_id="P001", product_name="상품 A", color="MELANGE GRAY", size="95"),
+        make_product(product_id="P002", product_name="상품 B", color="melange gray", size="95"),
+    ]
+
+    issues = run_all_rules(products)
+    relevant_issues = [
+        issue
+        for issue in issues
+        if issue.rule
+        in {
+            "duplicate_variant_combination",
+            "non_standard_color",
+            "non_standard_size",
+        }
+    ]
+
+    assert [issue.rule for issue in relevant_issues] == [
+        "duplicate_variant_combination",
+        "duplicate_variant_combination",
+    ]
+
+
+def test_products_dev_does_not_create_duplicate_variant_regression():
+    issues = run_all_rules(load_products(DEV_DATA_PATH))
+
+    assert "duplicate_variant_combination" not in {issue.rule for issue in issues}
+
+
+def test_run_all_rules_prefers_complete_duplicate_over_same_variant_pair():
+    products = [
+        make_product(product_id="P001", color="BLACK", size="M"),
+        make_product(product_id="P002", color="black", size="m"),
+    ]
+
+    issues = run_all_rules(products)
+    complete_issues = [
+        issue for issue in issues if issue.rule == "duplicate_product_content"
+    ]
+    variant_issues = [
+        issue for issue in issues if issue.rule == "duplicate_variant_combination"
+    ]
+
+    assert [issue.product_id for issue in complete_issues] == ["P002"]
+    assert variant_issues == []
+    assert any(
+        issue.rule == "non_standard_color" and issue.product_id == "P002"
+        for issue in issues
+    )
+    assert any(
+        issue.rule == "non_standard_size" and issue.product_id == "P002"
+        for issue in issues
+    )
+
+
+def test_run_all_rules_keeps_variant_when_complete_content_does_not_match():
+    products = [
+        make_product(product_id="P001", color="BLACK", size="M", price=19000),
+        make_product(product_id="P002", color="black", size="medium", price=20000),
+    ]
+
+    issues = run_all_rules(products)
+
+    assert [
+        issue.product_id
+        for issue in issues
+        if issue.rule == "duplicate_variant_combination"
+    ] == ["P001", "P002"]
+    assert not any(issue.rule == "duplicate_product_content" for issue in issues)
+
+
+def test_run_all_rules_keeps_non_complete_relations_in_three_product_variant():
+    products = [
+        make_product(product_id="P001", color="BLACK", size="M", price=19000),
+        make_product(product_id="P002", color="black", size="m", price=19000),
+        make_product(product_id="P003", color="black", size="medium", price=20000),
+    ]
+
+    issues = run_all_rules(products)
+    complete_issues = [
+        issue for issue in issues if issue.rule == "duplicate_product_content"
+    ]
+    variant_issues = [
+        issue for issue in issues if issue.rule == "duplicate_variant_combination"
+    ]
+
+    assert [issue.product_id for issue in complete_issues] == ["P002"]
+    assert [issue.product_id for issue in variant_issues] == ["P001", "P002", "P003"]
+    assert all(
+        parse_duplicate_variant_message(issue.message)
+        == ("G001", "BLACK", "M", ["P001", "P002", "P003"])
+        for issue in variant_issues
+    )
