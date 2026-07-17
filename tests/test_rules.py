@@ -10,6 +10,7 @@ from core.rules import (
     RULES,
     check_duplicate_product_content,
     check_duplicate_product_id,
+    check_inconsistent_group_category,
     check_invalid_category,
     check_missing_required_fields,
     check_non_standard_color,
@@ -984,11 +985,105 @@ def test_products_dev_standard_fashion_values_do_not_create_new_warnings():
     assert "non_standard_size" not in issue_rules
 
 
-def test_duplicate_variant_rule_is_registered_once_after_duplicate_product_id():
+def test_group_category_rule_is_registered_once_after_duplicate_product_id():
+    assert RULES.count(check_inconsistent_group_category) == 1
+    assert (
+        RULES.index(check_inconsistent_group_category)
+        == RULES.index(check_duplicate_product_id) + 1
+    )
+
+
+def test_duplicate_variant_rule_is_registered_once_after_group_category_rule():
     duplicate_variant_rule = rules.check_duplicate_variant_combination
 
     assert RULES.count(duplicate_variant_rule) == 1
-    assert RULES.index(duplicate_variant_rule) == RULES.index(check_duplicate_product_id) + 1
+    assert (
+        RULES.index(duplicate_variant_rule)
+        == RULES.index(check_inconsistent_group_category) + 1
+    )
+
+
+def test_check_inconsistent_group_category_returns_all_participating_products():
+    products = [
+        make_product(product_id="P001", product_name="상품 A", category="TOP"),
+        make_product(product_id="P002", product_name="상품 B", category="BOTTOM"),
+    ]
+
+    issues = check_inconsistent_group_category(products)
+
+    assert [issue.product_id for issue in issues] == ["P001", "P002"]
+    assert all(issue.rule == "inconsistent_group_category" for issue in issues)
+
+
+def test_run_all_rules_keeps_missing_category_separate_from_group_mismatch():
+    products = [
+        make_product(product_id="P001", product_name="상품 A", category="TOP"),
+        make_product(product_id="P002", product_name="상품 B", category="BOTTOM"),
+        make_product(product_id="P003", product_name="상품 C", category=""),
+    ]
+
+    issues = run_all_rules(products)
+    group_issues = [
+        issue for issue in issues if issue.rule == "inconsistent_group_category"
+    ]
+    missing_issues = [
+        issue
+        for issue in issues
+        if issue.rule == "missing_required_field" and "category" in issue.message
+    ]
+
+    assert [issue.product_id for issue in group_issues] == ["P001", "P002"]
+    assert [issue.product_id for issue in missing_issues] == ["P003"]
+
+
+def test_run_all_rules_keeps_invalid_and_group_category_issues_distinct():
+    products = [
+        make_product(product_id="P001", product_name="상품 A", category="SHOES"),
+        make_product(product_id="P002", product_name="상품 B", category="BAG"),
+    ]
+
+    issues = run_all_rules(products)
+
+    assert [
+        issue.product_id
+        for issue in issues
+        if issue.rule == "inconsistent_group_category"
+    ] == ["P001", "P002"]
+    assert [
+        issue.product_id for issue in issues if issue.rule == "invalid_category"
+    ] == ["P001", "P002"]
+
+
+def test_run_all_rules_keeps_name_mismatch_and_group_category_issues_distinct():
+    products = [
+        make_product(
+            product_id="P001",
+            product_name="러닝 운동화 A",
+            category="TOP",
+            color="BLACK",
+            size="M",
+        ),
+        make_product(
+            product_id="P002",
+            product_name="러닝 운동화 B",
+            category="SHOES",
+            color="WHITE",
+            size="L",
+        ),
+    ]
+
+    issues = run_all_rules(products)
+
+    assert [
+        issue.product_id
+        for issue in issues
+        if issue.rule == "inconsistent_group_category"
+    ] == ["P001", "P002"]
+    assert [
+        issue.product_id
+        for issue in issues
+        if issue.rule == "product_category_mismatch"
+    ] == ["P001"]
 
 
 def test_run_all_rules_flags_custom_duplicate_variant_without_standardization_warnings():

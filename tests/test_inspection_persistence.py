@@ -314,8 +314,43 @@ def test_build_result_create_items_maps_duplicate_variant_without_schema_changes
     assert {item.risk_level for item in duplicate_items} == {"중간"}
 
 
-def test_current_inspection_version_is_three_for_duplicate_variant_rule():
-    assert INSPECTION_VERSION == "3"
+def test_build_result_create_items_maps_group_category_without_schema_changes():
+    report = make_report(
+        [
+            {
+                **BASE_ROW,
+                "product_name": "상품 A",
+            },
+            {
+                **BASE_ROW,
+                "product_id": "P002",
+                "product_name": "상품 B",
+                "category": "BOTTOM",
+                "color": "WHITE",
+                "size": "L",
+                "image_path": "image2.jpg",
+            },
+        ]
+    )
+
+    result_items = build_result_create_items(report)
+    category_items = [
+        item
+        for item in result_items
+        if item.error_field == "상품 그룹 카테고리 불일치"
+    ]
+
+    assert len(category_items) == 2
+    assert [item.product_id for item in category_items] == ["P001", "P002"]
+    assert {item.product_group_id for item in category_items} == {"G001"}
+    assert {item.status for item in category_items} == {"오류"}
+    assert all("'TOP', 'BOTTOM'" in item.reason for item in category_items)
+    assert all(item.recommendation for item in category_items)
+    assert {item.risk_level for item in category_items} == {"중간"}
+
+
+def test_current_inspection_version_is_four_for_group_category_rule():
+    assert INSPECTION_VERSION == "4"
 
 
 def test_build_result_create_items_rejects_blank_required_result_fields():
@@ -477,7 +512,7 @@ def test_save_inspection_report_allows_same_hash_with_different_version(
         source_filename=first_source_filename,
         report=report,
         file_sha256=file_sha256,
-        inspection_version="2",
+        inspection_version="3",
     )
     second_outcome = save_inspection_report(
         session,

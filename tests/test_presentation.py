@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 from core import presentation
+from core.group_category_consistency_detector import build_group_category_message
 from core.models import ValidationIssue
 from core.presentation import (
     FIELD_LABELS,
@@ -1129,3 +1130,100 @@ def test_filter_result_dataframe_does_not_change_original_dataframe():
     filter_result_dataframe(df, status_filter="오류", product_id_query="P004")
 
     pd.testing.assert_frame_equal(df, original_df)
+
+
+def test_build_result_dataframe_presents_group_category_issue_in_korean():
+    message = build_group_category_message(
+        'G"한글, 001',
+        [
+            {
+                "display_value": "TOP, PREMIUM",
+                "product_ids": ["P'001", 'P"002'],
+            },
+            {
+                "display_value": '가방 "한정판"',
+                "product_ids": ["상품 003"],
+            },
+        ],
+    )
+    issue = make_issue(
+        rule="inconsistent_group_category",
+        severity="error",
+        product_group_id='G"한글, 001',
+        product_id="P'001",
+        message=message,
+    )
+
+    result = build_result_dataframe([issue])
+
+    assert result.iloc[0].to_dict() == {
+        "검수 상태": "오류",
+        "오류 항목": "상품 그룹 카테고리 불일치",
+        "상품 그룹 ID": 'G"한글, 001',
+        "상품 ID": "P'001",
+        "오류 이유": (
+            "상품 그룹 'G\"한글, 001'에 서로 다른 카테고리 "
+            "'TOP, PREMIUM', '가방 \"한정판\"'가 함께 등록되어 있습니다."
+        ),
+        "수정 권장사항": (
+            "같은 상품 그룹의 상품이 동일한 카테고리를 사용하도록 "
+            "product_group_id 또는 category 값을 확인하세요."
+        ),
+        "위험 수준": "중간",
+    }
+    assert "inconsistent_group_category" not in result.iloc[0]["오류 이유"]
+    assert "product_ids" not in result.iloc[0]["오류 이유"]
+
+
+def test_translate_group_category_message_uses_safe_korean_fallback_for_bad_json():
+    internal_message = "inconsistent_group_category:{broken-json"
+    issue = make_issue(
+        rule="inconsistent_group_category",
+        message=internal_message,
+    )
+
+    reason = translate_issue_message(issue)
+    result = build_result_dataframe([issue])
+
+    assert reason == "상품 그룹의 카테고리 값이 서로 다릅니다."
+    assert result.iloc[0]["오류 이유"] == reason
+    assert internal_message not in reason
+    assert result.iloc[0]["수정 권장사항"]
+
+
+def test_translate_group_category_message_uses_safe_fallback_for_deep_json():
+    deeply_nested_categories = "[" * 1500 + "0" + "]" * 1500
+    internal_message = (
+        'inconsistent_group_category:{"product_group_id":"G001","categories":'
+        f"{deeply_nested_categories}}}"
+    )
+    issue = make_issue(
+        rule="inconsistent_group_category",
+        message=internal_message,
+    )
+
+    assert translate_issue_message(issue) == "상품 그룹의 카테고리 값이 서로 다릅니다."
+
+
+def test_filter_result_dataframe_filters_group_category_rule_label():
+    issue = make_issue(
+        rule="inconsistent_group_category",
+        message=build_group_category_message(
+            "G001",
+            [
+                {"display_value": "TOP", "product_ids": ["P001"]},
+                {"display_value": "BOTTOM", "product_ids": ["P002"]},
+            ],
+        ),
+    )
+    result = build_result_dataframe([issue])
+
+    filtered = filter_result_dataframe(
+        result,
+        status_filter="오류",
+        rule_filter="상품 그룹 카테고리 불일치",
+        product_id_query="p001",
+    )
+
+    assert len(filtered) == 1
+    assert filtered.iloc[0]["상품 ID"] == "P001"

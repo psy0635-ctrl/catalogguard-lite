@@ -4,12 +4,14 @@ import re
 import pandas as pd
 
 from core.duplicate_detector import parse_duplicate_variant_message
+from core.group_category_consistency_detector import parse_group_category_message
 from core.models import ValidationIssue
 
 
 # 내부 규칙 이름을 사용자가 볼 한국어 이름으로 바꾸는 표입니다.
 RULE_LABELS = {
     "duplicate_product_id": "상품 ID 중복",
+    "inconsistent_group_category": "상품 그룹 카테고리 불일치",
     "duplicate_variant_combination": "상품 옵션 조합 중복",
     "duplicate_product_name": "상품명 중복",
     "missing_required_field": "필수 값 누락",
@@ -37,6 +39,10 @@ PRICE_RECOMMENDATION = "0보다 큰 정상 판매 가격을 입력하십시오."
 
 RECOMMENDATIONS = {
     "duplicate_product_id": "각 상품에 고유한 상품 ID를 입력하십시오.",
+    "inconsistent_group_category": (
+        "같은 상품 그룹의 상품이 동일한 카테고리를 사용하도록 "
+        "product_group_id 또는 category 값을 확인하세요."
+    ),
     "duplicate_variant_combination": (
         "같은 상품 그룹 안에서 색상과 사이즈 조합이 한 번만 사용되도록 "
         "중복 상품을 통합하거나 옵션 값을 수정하세요."
@@ -79,6 +85,7 @@ RECOMMENDATIONS = {
 
 RISK_LEVELS = {
     "duplicate_product_id": "높음",
+    "inconsistent_group_category": "중간",
     "duplicate_variant_combination": "중간",
     "duplicate_product_name": "중간",
     "duplicate_product_content": "높음",
@@ -205,6 +212,21 @@ def translate_issue_message(issue: ValidationIssue) -> str:
                 f"같은 값으로 확인되었습니다. 중복 후보 상품 ID: {product_ids}. "
                 f"중복 행: {rows}."
             )
+
+    if issue.rule == "inconsistent_group_category":
+        parsed_message = parse_group_category_message(message)
+        if parsed_message is None:
+            return "상품 그룹의 카테고리 값이 서로 다릅니다."
+
+        product_group_id, category_groups = parsed_message
+        categories = ", ".join(
+            f"'{category_group['display_value']}'"
+            for category_group in category_groups
+        )
+        return (
+            f"상품 그룹 '{product_group_id}'에 서로 다른 카테고리 "
+            f"{categories}가 함께 등록되어 있습니다."
+        )
 
     if issue.rule == "duplicate_variant_combination":
         parsed_message = parse_duplicate_variant_message(message)

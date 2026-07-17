@@ -19,6 +19,9 @@ from core.fashion_attribute_validator import (
     find_standard_color,
     find_standard_size,
 )
+from core.group_category_consistency_detector import (
+    find_inconsistent_group_categories,
+)
 from core.models import Product, ValidationIssue
 from core.price_anomaly_detector import find_category_price_anomalies
 from core.privacy import (
@@ -135,6 +138,12 @@ def mask_account_number(value: str) -> str:
 
 def check_duplicate_product_id(products: list[Product]) -> list[ValidationIssue]:
     return find_duplicate_product_ids(products)
+
+
+def check_inconsistent_group_category(
+    products: list[Product],
+) -> list[ValidationIssue]:
+    return find_inconsistent_group_categories(products)
 
 
 def check_duplicate_variant_combination(
@@ -420,6 +429,7 @@ def check_prohibited_and_personal_information(
 RULES = [
     # 이 순서대로 실행되므로, 새 규칙을 추가할 때 결과 순서도 함께 고려해야 합니다.
     check_duplicate_product_id,
+    check_inconsistent_group_category,
     check_duplicate_variant_combination,
     check_duplicate_product_name,
     check_duplicate_product_content,

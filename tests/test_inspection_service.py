@@ -175,3 +175,103 @@ def test_inspect_dataframe_translates_duplicate_variant_values_losslessly():
         "product_group_id" in reason
         for reason in report.result_dataframe["오류 이유"]
     )
+
+
+def test_inspect_dataframe_reports_group_category_issues_and_preserves_source_values():
+    dataframe = pd.DataFrame(
+        [
+            {
+                "product_group_id": "G001",
+                "product_id": "P001",
+                "product_name": "상품 A",
+                "category": " TOP ",
+                "color": "BLACK",
+                "size": "M",
+                "stock": "10",
+                "price": "19900",
+                "image_path": "image1.jpg",
+            },
+            {
+                "product_group_id": "G001",
+                "product_id": "P002",
+                "product_name": "상품 B",
+                "category": "BOTTOM",
+                "color": "WHITE",
+                "size": "L",
+                "stock": "10",
+                "price": "29900",
+                "image_path": "image2.jpg",
+            },
+        ]
+    )
+    original_dataframe = dataframe.copy(deep=True)
+
+    report = inspect_dataframe(dataframe)
+    group_issues = [
+        issue
+        for issue in report.issues
+        if issue.rule == "inconsistent_group_category"
+    ]
+
+    assert [issue.product_id for issue in group_issues] == ["P001", "P002"]
+    assert report.summary.total_products == 2
+    assert report.summary.error_count == 2
+    assert report.summary.warning_count == 0
+    assert report.summary.total_issues == 2
+    pd.testing.assert_frame_equal(dataframe, original_dataframe)
+    pd.testing.assert_frame_equal(report.source_dataframe, original_dataframe)
+    assert report.source_dataframe.loc[0, "category"] == " TOP "
+    assert [product.category for product in report.products] == ["TOP", "BOTTOM"]
+
+
+def test_inspect_dataframe_excludes_blank_category_from_group_category_issues():
+    dataframe = pd.DataFrame(
+        [
+            {
+                "product_group_id": "G001",
+                "product_id": "P001",
+                "product_name": "상품 A",
+                "category": "TOP",
+                "color": "BLACK",
+                "size": "M",
+                "stock": "10",
+                "price": "19900",
+                "image_path": "image1.jpg",
+            },
+            {
+                "product_group_id": "G001",
+                "product_id": "P002",
+                "product_name": "상품 B",
+                "category": "SHOES",
+                "color": "WHITE",
+                "size": "L",
+                "stock": "10",
+                "price": "29900",
+                "image_path": "image2.jpg",
+            },
+            {
+                "product_group_id": "G001",
+                "product_id": "P003",
+                "product_name": "상품 C",
+                "category": "",
+                "color": "NAVY",
+                "size": "XL",
+                "stock": "10",
+                "price": "39900",
+                "image_path": "image3.jpg",
+            },
+        ]
+    )
+
+    report = inspect_dataframe(dataframe)
+
+    assert [
+        issue.product_id
+        for issue in report.issues
+        if issue.rule == "inconsistent_group_category"
+    ] == ["P001", "P002"]
+    assert [
+        issue.product_id
+        for issue in report.issues
+        if issue.rule == "missing_required_field" and "category" in issue.message
+    ] == ["P003"]
