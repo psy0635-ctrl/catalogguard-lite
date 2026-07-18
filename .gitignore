@@ -34,3 +34,4 @@ Thumbs.db
 .env.*
 !.env.example
 !.env.local.example
+!.env.aws.example

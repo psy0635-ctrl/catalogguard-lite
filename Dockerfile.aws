@@ -1,0 +1,28 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+COPY requirements-api.txt ./
+RUN python -m pip install --no-cache-dir -r requirements-api.txt
+
+RUN groupadd --gid 10001 catalogguard \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin catalogguard
+
+COPY --chown=catalogguard:catalogguard alembic.ini ./
+COPY --chown=catalogguard:catalogguard alembic ./alembic
+COPY --chown=catalogguard:catalogguard api ./api
+COPY --chown=catalogguard:catalogguard config ./config
+COPY --chown=catalogguard:catalogguard core ./core
+COPY --chown=catalogguard:catalogguard db ./db
+
+USER catalogguard
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).close()"]
+
+CMD ["sh", "-c", "python -m alembic upgrade head && exec uvicorn api.main:app --host 0.0.0.0 --port 8000 --no-access-log"]
