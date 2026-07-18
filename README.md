@@ -670,95 +670,55 @@ curl.exe -X POST "http://127.0.0.1:8001/api/v1/inspections" `
 
 서버는 실행 중인 PowerShell에서 `Ctrl+C`로 종료합니다.
 
-### FastAPI Docker 로컬 실행
+### FastAPI + PostgreSQL Docker Compose 로컬 실행
 
-이 절에서는 Streamlit과 PostgreSQL은 컨테이너로 만들지 않고 FastAPI 서버만 Docker로 실행합니다. `Dockerfile.local`은 로컬 FastAPI 컨테이너 실행용이며, 루트 `Dockerfile` 자동 감지로 기존 Railway Railpack 배포 방식이 바뀌지 않도록 일반적인 Dockerfile 이름과 구분했습니다. 저장소 루트에서 이미지를 빌드합니다.
+이 절은 `compose.local.yaml`로 FastAPI와 PostgreSQL만 실행합니다. Streamlit은 기존처럼 호스트에서 실행하며 컨테이너화하지 않습니다. API 이미지는 기존 `Dockerfile.local`을 재사용하고, 컨테이너 내부 포트 `8000`은 Windows 호스트의 기본 `8001`에 연결합니다. PostgreSQL은 CI와 같은 메이저 버전 18을 사용하며, Windows PostgreSQL의 기본 포트 `5432`와 겹치지 않도록 호스트의 `5433`에 연결합니다.
+
+#### 로컬 환경변수 파일 준비
+
+저장소 루트에서 예시 파일을 복사하고 `.env.local`의 `CHANGE_ME`만 URL-safe 임의 문자열로 바꿉니다. 실제 비밀번호나 전체 DB 연결 문자열은 문서, 명령 출력 또는 Git에 기록하지 않습니다. `.env.local`과 일반 `.env`는 `.gitignore` 및 `.dockerignore`에서 제외됩니다.
 
 ```powershell
 cd C:\study\catalogguard-lite
-docker build `
-  -f Dockerfile.local `
-  -t catalogguard-lite-api:local `
-  .
+Copy-Item .env.local.example .env.local
+notepad .env.local
 ```
 
-먼저 DB 환경변수 없이 컨테이너를 실행합니다. Windows의 포트 충돌을 피하기 위해 호스트의 `8001` 포트를 컨테이너의 `8000` 포트에 연결합니다.
+호스트 포트가 이미 사용 중이면 `.env.local`의 `POSTGRES_HOST_PORT` 또는 `API_HOST_PORT`만 다른 빈 포트로 바꿉니다. 컨테이너끼리는 호스트 포트와 관계없이 API가 `db` 서비스의 PostgreSQL `5432` 포트에 연결합니다.
+
+#### 빌드와 실행
 
 ```powershell
-docker run --rm -d `
-  --name catalogguard-lite-api-local `
-  -p 8001:8000 `
-  catalogguard-lite-api:local
+docker compose --env-file .env.local -f compose.local.yaml build
+docker compose --env-file .env.local -f compose.local.yaml up -d
 ```
 
-실행 중인 컨테이너와 시작 로그를 확인합니다.
+`db`의 `pg_isready` healthcheck가 통과한 뒤 `api`가 시작됩니다. API 시작 명령은 먼저 `python -m alembic upgrade head`를 적용하고, 성공한 경우에만 Uvicorn을 `--no-access-log`로 실행합니다. 임의의 `sleep`은 사용하지 않습니다.
+
+서비스 상태와 필요한 로그만 확인합니다. 정상 기동이면 `db`와 `api` 모두 `healthy` 상태입니다.
 
 ```powershell
-docker ps --filter "name=catalogguard-lite-api-local"
-docker logs catalogguard-lite-api-local
+docker compose --env-file .env.local -f compose.local.yaml ps
+docker compose --env-file .env.local -f compose.local.yaml logs --tail 100 db api
 ```
 
-`/health`는 FastAPI 프로세스가 요청에 응답하는지만 확인하므로 DB 설정 없이도 HTTP `200`을 반환합니다. 응답 본문의 `status`는 `ok`, `service`는 `catalogguard-lite-api`이고 `X-Request-ID` 응답 헤더가 있어야 합니다.
+마이그레이션의 현재 revision과 head가 같은지 확인합니다.
 
 ```powershell
-$healthResponse = Invoke-WebRequest `
-  -Uri "http://127.0.0.1:8001/health" `
-  -UseBasicParsing
-
-$healthResponse.StatusCode
-$healthResponse.Content
-$healthResponse.Headers["X-Request-ID"]
+docker compose --env-file .env.local -f compose.local.yaml exec api `
+  python -m alembic current
+docker compose --env-file .env.local -f compose.local.yaml exec api `
+  python -m alembic heads
 ```
 
-`/ready`는 FastAPI와 PostgreSQL 연결을 함께 확인합니다. `DATABASE_URL`을 전달하지 않은 현재 컨테이너에서 HTTP `503`을 반환하는 것은 정상입니다. FastAPI 프로세스는 살아 있지만 PostgreSQL 연결 정보가 없기 때문입니다.
+#### Health와 readiness 확인
 
-```powershell
-try {
-    Invoke-WebRequest `
-      -Uri "http://127.0.0.1:8001/ready" `
-      -UseBasicParsing
-} catch {
-    $_.Exception.Response.StatusCode.value__
-}
-```
-
-Windows 호스트에 설치된 PostgreSQL과 연결하려면 먼저 위 컨테이너를 종료합니다. `--rm`으로 실행했으므로 종료된 컨테이너는 자동 삭제됩니다.
-
-```powershell
-docker stop catalogguard-lite-api-local
-docker ps -a --filter "name=catalogguard-lite-api-local"
-```
-
-컨테이너 안의 `localhost`는 Windows 호스트가 아니라 컨테이너 자신입니다. 현재 PowerShell 세션의 `DATABASE_URL`이 Windows PostgreSQL을 가리킨다면 호스트 부분만 `host.docker.internal`로 바꿉니다. 환경변수가 없다면 실제 연결 문자열을 README나 소스 코드에 적지 말고 먼저 현재 PowerShell 세션에 직접 설정하세요.
-
-```powershell
-if ([string]::IsNullOrWhiteSpace($env:DATABASE_URL)) {
-    throw "현재 PowerShell 세션에 DATABASE_URL을 먼저 설정해 주세요."
-}
-
-$dockerDatabaseUrl = $env:DATABASE_URL.Replace(
-    "@localhost:",
-    "@host.docker.internal:"
-)
-```
-
-이미 Alembic 마이그레이션이 적용된 Windows PostgreSQL에 연결해 FastAPI 컨테이너를 다시 실행합니다.
-
-```powershell
-docker run --rm -d `
-  --name catalogguard-lite-api-local `
-  -p 8001:8000 `
-  -e "DATABASE_URL=$dockerDatabaseUrl" `
-  catalogguard-lite-api:local
-```
-
-DB 연결 상태에서도 `/health`는 HTTP `200`이어야 합니다. `/ready`도 HTTP `200`을 반환하고 응답 본문의 `database`가 `ok`이어야 하며, 두 응답 모두 `X-Request-ID` 헤더를 포함합니다.
+`/health`는 API 프로세스를, `/ready`는 PostgreSQL 연결까지 확인합니다. 두 응답이 HTTP `200`이고 `/ready` 본문의 `database`가 `ok`인지, 두 응답에 `X-Request-ID`가 있는지 확인합니다.
 
 ```powershell
 $healthResponse = Invoke-WebRequest `
   -Uri "http://127.0.0.1:8001/health" `
   -UseBasicParsing
-
 $readyResponse = Invoke-WebRequest `
   -Uri "http://127.0.0.1:8001/ready" `
   -UseBasicParsing
@@ -769,25 +729,44 @@ $healthResponse.Headers["X-Request-ID"]
 $readyResponse.StatusCode
 $readyResponse.Content
 $readyResponse.Headers["X-Request-ID"]
-docker logs catalogguard-lite-api-local
 ```
 
-로그에는 애플리케이션의 요청별 한 줄 JSON 구조화 로그가 남습니다. Docker 실행 명령의 `--no-access-log` 때문에 Uvicorn 기본 access log는 남지 않습니다. DB 연결에 실패하면 비밀번호나 전체 URL을 출력하지 말고 Windows PostgreSQL 서비스 실행 여부, `5432` 포트, `host.docker.internal` 해석, 사용자·비밀번호, `pg_hba.conf`, PostgreSQL listen address와 `DATABASE_URL` 형식을 차례로 확인합니다.
+API 문서는 http://127.0.0.1:8001/docs 에서 확인할 수 있습니다. CSV 저장·목록·상세 조회 API는 위의 기존 FastAPI 사용법과 동일합니다.
 
-검증이 끝나면 컨테이너를 종료합니다. `docker ps -a` 결과에 해당 컨테이너 행이 없다면 `--rm` 자동 삭제도 완료된 것입니다.
+#### 중지, 삭제, 데이터 보존
+
+다음 명령은 컨테이너와 네트워크만 제거합니다. `postgres_data` named volume은 남으므로 같은 Compose 프로젝트를 다시 실행하면 검수 이력이 유지됩니다.
 
 ```powershell
-docker stop catalogguard-lite-api-local
-docker ps -a --filter "name=catalogguard-lite-api-local"
+docker compose --env-file .env.local -f compose.local.yaml down
 ```
 
-로컬 이미지까지 더 이상 필요하지 않으면 실행 중인 컨테이너를 먼저 종료한 뒤 삭제합니다.
+컨테이너만 잠시 멈추고 나중에 그대로 재개하려면 `stop`과 `start`를 사용합니다.
 
 ```powershell
-docker image rm catalogguard-lite-api:local
+docker compose --env-file .env.local -f compose.local.yaml stop
+docker compose --env-file .env.local -f compose.local.yaml start
 ```
 
-실제 DB 비밀번호, API 키와 `.env` 파일은 README, `Dockerfile.local`, `.dockerignore` 또는 Git에 기록하지 않습니다. 이 Docker 실행 절은 기존 Railway의 `DATABASE_URL`, Pre-deploy Command와 Start Command를 변경하지 않습니다.
+아래 명령의 `-v`는 PostgreSQL named volume과 모든 로컬 검수 데이터를 삭제합니다. 복구할 수 없는 로컬 DB 초기화가 목적일 때만 실행합니다.
+
+```powershell
+# 주의: 로컬 PostgreSQL 데이터를 영구 삭제합니다.
+docker compose --env-file .env.local -f compose.local.yaml down -v
+```
+
+데이터를 보존하려면 `down -v`와 named volume 수동 삭제를 피하고, 동일한 저장소 경로와 `compose.local.yaml`을 사용합니다. 볼륨 존재 여부는 `docker volume ls --filter "name=catalogguard-lite-local"`로 확인할 수 있습니다.
+
+#### 오류 확인 항목
+
+- Docker Desktop이 실행 중이고 `docker version`에서 Server 정보가 보이는지 확인합니다.
+- `docker compose ... ps`에서 `db` healthcheck와 `api` 상태를 확인합니다.
+- `docker compose ... logs --tail 100 db api`에서 PostgreSQL 초기화, Alembic, Uvicorn 시작 오류를 확인합니다.
+- Windows에서 `5433` 또는 `8001`이 사용 중이면 `.env.local`의 호스트 포트를 바꿉니다.
+- `.env.local`의 필수 값이 비어 있지 않은지 확인하되, 비밀번호나 DB 연결 문자열을 터미널에 출력하지 않습니다.
+- migration 오류가 있으면 `alembic current`와 `alembic heads`를 비교합니다.
+
+`compose.local.yaml`, `.env.local.example`, `Dockerfile.local`은 로컬 개발 전용입니다. 루트 `Dockerfile`을 추가하지 않고 Railway 설정도 수정하지 않으므로 기존 Railpack 빌드, Pre-deploy Command, Start Command, 운영 `DATABASE_URL`과 Railway 배포 방식에는 영향을 주지 않습니다.
 
 ### Railway FastAPI 배포 설정
 
