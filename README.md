@@ -768,6 +768,12 @@ docker compose --env-file .env.local -f compose.local.yaml down -v
 
 `compose.local.yaml`, `.env.local.example`, `Dockerfile.local`은 로컬 개발 전용입니다. 루트 `Dockerfile`을 추가하지 않고 Railway 설정도 수정하지 않으므로 기존 Railpack 빌드, Pre-deploy Command, Start Command, 운영 `DATABASE_URL`과 Railway 배포 방식에는 영향을 주지 않습니다.
 
+### AWS EC2·RDS staging 배포 준비
+
+별도의 AWS staging 환경을 위한 저장소 파일과 수동 배포 절차는 [AWS staging 배포 런북](docs/aws-staging-deployment.md)에 정리되어 있습니다. AWS용 이미지는 `Dockerfile.aws`로만 빌드하며 로컬 `Dockerfile.local`, `compose.local.yaml`, Railway Railpack 운영 설정을 변경하거나 대체하지 않습니다.
+
+현재 단계에서는 AWS 리소스를 생성하지 않았고 Streamlit Community Cloud의 production 설정도 변경하지 않았습니다. 실제 staging 배포 전에는 런북에 따라 서울 리전의 RDS PostgreSQL 지원 버전, 보안 그룹, TLS 인증서, 백업 및 비용을 AWS 공식 콘솔과 문서에서 다시 확인해야 합니다.
+
 ### Railway FastAPI 배포 설정
 
 production 환경에는 `catalogguard-lite` FastAPI 서비스와 `Postgres` PostgreSQL 서비스가 배포되어 있습니다. API 의존성은 `requirements-api.txt`에 분리되어 있으므로 Railway 대시보드에서 Build Command는 비워 두고, 다음 설정을 사용합니다.
