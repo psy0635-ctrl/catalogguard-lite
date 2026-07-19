@@ -768,11 +768,15 @@ docker compose --env-file .env.local -f compose.local.yaml down -v
 
 `compose.local.yaml`, `.env.local.example`, `Dockerfile.local`은 로컬 개발 전용입니다. 루트 `Dockerfile`을 추가하지 않고 Railway 설정도 수정하지 않으므로 기존 Railpack 빌드, Pre-deploy Command, Start Command, 운영 `DATABASE_URL`과 Railway 배포 방식에는 영향을 주지 않습니다.
 
-### AWS EC2·RDS staging 배포 준비
+### AWS EC2·RDS staging 수동 배포 및 검증
 
-별도의 AWS staging 환경을 위한 저장소 파일과 수동 배포 절차는 [AWS staging 배포 런북](docs/aws-staging-deployment.md)에 정리되어 있습니다. AWS용 이미지는 `Dockerfile.aws`로만 빌드하며 로컬 `Dockerfile.local`, `compose.local.yaml`, Railway Railpack 운영 설정을 변경하거나 대체하지 않습니다.
-
-현재 단계에서는 AWS 리소스를 생성하지 않았고 Streamlit Community Cloud의 production 설정도 변경하지 않았습니다. 실제 staging 배포 전에는 런북에 따라 서울 리전의 RDS PostgreSQL 지원 버전, 보안 그룹, TLS 인증서, 백업 및 비용을 AWS 공식 콘솔과 문서에서 다시 확인해야 합니다.
+2026-07-19 AWS 서울 리전에서 Amazon Linux 2023 EC2의 Docker 기반 FastAPI와
+PostgreSQL RDS를 사용한 staging 수동 배포를 검증했습니다.
+TLS 기반 RDS 연결과 Alembic migration을 적용하고 `/health`와 `/ready`의 HTTP 200 응답을 확인했으며,
+CSV 저장·목록·상세 조회와 동일 CSV 중복 저장 방지를 검증했습니다.
+별도 Streamlit AWS 검증 앱에서도 화면 저장과 검수 이력 조회를 확인했습니다.
+상세 배포 절차와 재시작·중지 방법은 [AWS staging 배포 런북](docs/aws-staging-deployment.md)을 참고합니다.
+기존 Railway production과 production Streamlit 설정은 변경하지 않았습니다.
 
 ### Railway FastAPI 배포 설정
 
