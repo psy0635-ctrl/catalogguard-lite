@@ -1247,6 +1247,8 @@ python -m pytest -q
 
 `scripts/benchmark_inspection.py`는 합성 CSV를 사용해 동기 검수 1회와 같은 입력을 연속 2회 검수하는 경우의 중앙 실행 시간과 Python 추적 메모리를 비교합니다. 기본 설정은 행 수 `100, 1,000, 5,000, 10,000`, 워밍업 1회, 반복 3회이며, 결과는 `tests/test_benchmark_inspection.py`로 검증합니다.
 
+측정 환경은 Python 3.11.9, Windows 10.0.26200, Intel Core i7-14700F 기반의 개발 PC입니다.
+
 개발 PC에서 측정한 대표 결과는 다음과 같습니다.
 
 | 행 수 | 입력 크기 | 문제 수 | 1회 중앙값 | 연속 2회 중앙값 | Python peak |
