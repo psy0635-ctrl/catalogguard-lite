@@ -1158,37 +1158,42 @@ def test_render_csv_inspection_tab_passes_unfiltered_results_to_statistics(
     )
     fake_st = FakeAppStreamlit(
         uploaded_file=uploaded_file,
+        session_state={"existing_state": True},
         selectbox_values={"검수 상태": "오류", "오류 항목": "전체"},
     )
-    result_df = pd.DataFrame(
-        [
+    detail_response = {
+        "inspection_run_id": 11,
+        "created": True,
+        "source_filename": "products.csv",
+        "created_at": "2026-07-20T12:00:00Z",
+        "summary": {
+            "total_products": 2,
+            "total_issues": 2,
+            "error_count": 1,
+            "warning_count": 1,
+        },
+        "results": [
             {
-                "검수 상태": "오류",
-                "오류 항목": "가격 오류",
-                "상품 그룹 ID": "G001",
-                "상품 ID": "P001",
-                "오류 이유": "fake reason",
-                "수정 권장사항": "fake recommendation",
-                "위험 수준": "높음",
+                "status": "오류",
+                "error_field": "가격 오류",
+                "product_group_id": "G001",
+                "product_id": "P001",
+                "reason": "fake reason",
+                "recommendation": "fake recommendation",
+                "risk_level": "높음",
             },
             {
-                "검수 상태": "주의",
-                "오류 항목": "품절 상품",
-                "상품 그룹 ID": "G002",
-                "상품 ID": "P002",
-                "오류 이유": "fake reason",
-                "수정 권장사항": "fake recommendation",
-                "위험 수준": "낮음",
+                "status": "주의",
+                "error_field": "품절 상품",
+                "product_group_id": "G002",
+                "product_id": "P002",
+                "reason": "fake reason",
+                "recommendation": "fake recommendation",
+                "risk_level": "낮음",
             },
-        ]
-    )
-    inspection_report = SimpleNamespace(
-        masked_preview_dataframe=pd.DataFrame({"상품 ID": ["P001", "P002"]}),
-        products=[object(), object()],
-        issues=[object(), object()],
-        summary=SimpleNamespace(error_count=1, warning_count=1, total_issues=2),
-        result_dataframe=result_df,
-    )
+        ],
+    }
+    result_df = app_module.build_history_detail_dataframe(detail_response["results"])
     statistics_calls = []
     events = []
     original_filter = app_module.filter_result_dataframe
@@ -1205,14 +1210,13 @@ def test_render_csv_inspection_tab_passes_unfiltered_results_to_statistics(
     monkeypatch.setattr(
         app_module,
         "validate_and_read_uploaded_csv",
-        lambda filename, file_bytes: pd.DataFrame(),
+        lambda filename, file_bytes: pd.DataFrame({"상품 ID": ["P001", "P002"]}),
     )
     monkeypatch.setattr(
         app_module,
-        "inspect_dataframe",
-        lambda dataframe: inspection_report,
+        "render_inspection_save_button",
+        lambda **kwargs: detail_response,
     )
-    monkeypatch.setattr(app_module, "render_inspection_save_button", lambda **kwargs: None)
     monkeypatch.setattr(
         app_module,
         "render_inspection_statistics",
@@ -1224,7 +1228,7 @@ def test_render_csv_inspection_tab_passes_unfiltered_results_to_statistics(
     app_module.render_csv_inspection_tab()
 
     assert len(statistics_calls) == 1
-    assert statistics_calls[0][0] is result_df
+    pd.testing.assert_frame_equal(statistics_calls[0][0], result_df)
     assert statistics_calls[0][1] == 2
     assert len(fake_st.dataframes[-1][1]) == 1
     assert events == ["statistics", "filter"]

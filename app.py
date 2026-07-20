@@ -1,5 +1,4 @@
 # 역할: 사용자가 CSV를 업로드하고 검수 결과를 확인하는 Streamlit 웹 화면입니다.
-import ast
 import hashlib
 import re
 from datetime import date, datetime
@@ -17,13 +16,13 @@ from clients.catalogguard_api import (
     create_catalogguard_api_client,
 )
 from config.settings import OPTIONAL_COLUMNS, REQUIRED_COLUMNS
-from core.inspection_service import inspect_dataframe
 from core.presentation import (
     build_inspection_statistics,
     build_validation_summary_message,
     calculate_dataframe_height,
     filter_result_dataframe,
 )
+from core.privacy import create_masked_preview
 from core.product_template import (
     build_product_template_csv,
     get_product_template_filename,
@@ -79,6 +78,9 @@ HISTORY_STATUS_QUERY_TO_LABEL = {
     for label, query_value in HISTORY_STATUS_LABEL_TO_QUERY.items()
     if query_value is not None
 }
+CURRENT_UPLOAD_FILE_HASH_STATE_KEY = "current_upload_file_hash"
+CURRENT_INSPECTION_CREATED_STATE_KEY = "current_inspection_created"
+CURRENT_INSPECTION_DETAIL_STATE_KEY = "current_inspection_detail_response"
 
 
 def build_api_error_display_message(
@@ -93,28 +95,6 @@ def build_api_error_display_message(
     if request_id_message in message:
         return message
     return f"{message}\n\n{request_id_message}"
-
-
-def format_value_error(error: ValueError) -> str:
-    # 로더에서 올라온 내부 오류를 화면에 보여 줄 한국어 안내문으로 바꿉니다.
-    message = str(error)
-    if "CSV 파일에 상품 데이터가 없습니다" in message:
-        return message
-
-    prefix = "Missing required columns:"
-    if prefix not in message:
-        return "필수 컬럼이 없거나 CSV 내용이 올바르지 않습니다."
-
-    missing_text = message.split(prefix, 1)[1].strip()
-    try:
-        missing_columns = ast.literal_eval(missing_text)
-    except (SyntaxError, ValueError):
-        missing_columns = missing_text
-
-    if isinstance(missing_columns, list):
-        missing_text = ", ".join(str(column) for column in missing_columns)
-
-    return f"필수 컬럼이 없습니다: {missing_text}"
 
 
 def get_overall_status(error_count: int, warning_count: int) -> str:
@@ -132,21 +112,31 @@ def build_file_hash(file_bytes: bytes) -> str:
     return hashlib.sha256(file_bytes).hexdigest()
 
 
-def get_saved_inspection_run_id(session_state, file_hash: str) -> int | None:
-    # 현재 세션에 저장해 둔 파일 해시와 다르면 다른 CSV로 보고 저장 ID를 재사용하지 않습니다.
+def clear_current_inspection_result(session_state) -> None:
+    for key in (
+        "saved_file_hash",
+        "saved_inspection_run_id",
+        CURRENT_INSPECTION_CREATED_STATE_KEY,
+        CURRENT_INSPECTION_DETAIL_STATE_KEY,
+    ):
+        session_state.pop(key, None)
+
+
+def synchronize_current_upload(session_state, file_hash: str) -> None:
+    if session_state.get(CURRENT_UPLOAD_FILE_HASH_STATE_KEY) == file_hash:
+        return
+
+    clear_current_inspection_result(session_state)
+    session_state[CURRENT_UPLOAD_FILE_HASH_STATE_KEY] = file_hash
+
+
+def get_current_inspection_detail(session_state, file_hash: str) -> dict | None:
+    if session_state.get(CURRENT_UPLOAD_FILE_HASH_STATE_KEY) != file_hash:
+        return None
     if session_state.get("saved_file_hash") != file_hash:
         return None
-    return session_state.get("saved_inspection_run_id")
-
-
-def mark_inspection_saved(
-    session_state,
-    *,
-    file_hash: str,
-    inspection_run_id: int,
-) -> None:
-    session_state["saved_file_hash"] = file_hash
-    session_state["saved_inspection_run_id"] = inspection_run_id
+    detail_response = session_state.get(CURRENT_INSPECTION_DETAIL_STATE_KEY)
+    return detail_response if isinstance(detail_response, dict) else None
 
 
 def build_inspection_save_message(
@@ -155,8 +145,11 @@ def build_inspection_save_message(
     created: bool,
 ) -> str:
     if created:
-        return f"검수 이력에 저장되었습니다. 실행 ID: {inspection_run_id}"
-    return f"이미 검수 이력에 저장된 파일입니다. 실행 ID: {inspection_run_id}"
+        return f"검수 결과를 새 이력으로 저장했습니다. 실행 ID: {inspection_run_id}"
+    return (
+        "이미 검수한 동일 파일이므로 기존 검수 결과를 불러왔습니다. "
+        f"실행 ID: {inspection_run_id}"
+    )
 
 
 def apply_inspection_save_response(
@@ -164,16 +157,60 @@ def apply_inspection_save_response(
     *,
     file_hash: str,
     response: dict,
+    detail_response: dict,
 ) -> tuple[int, bool, str]:
-    # API는 새로 저장했는지(created=True), 이미 있던 이력인지(created=False)를 알려 줍니다.
-    # Streamlit은 두 경우 모두 같은 파일이 저장된 상태로 기록해 반복 클릭을 막습니다.
-    inspection_run_id = int(response["inspection_run_id"])
-    created = bool(response.get("created", True))
-    mark_inspection_saved(
-        session_state,
-        file_hash=file_hash,
-        inspection_run_id=inspection_run_id,
+    inspection_run_id = response["inspection_run_id"]
+    detail_run_id = detail_response["inspection_run_id"]
+    if type(inspection_run_id) is not int or inspection_run_id <= 0:
+        raise ValueError("invalid create inspection_run_id")
+    if type(detail_run_id) is not int or detail_run_id <= 0:
+        raise ValueError("invalid detail inspection_run_id")
+    if detail_run_id != inspection_run_id:
+        raise ValueError("create and detail inspection_run_id do not match")
+
+    created = response.get("created", True)
+    if type(created) is not bool:
+        raise ValueError("invalid created value")
+
+    summary = detail_response["summary"]
+    results = detail_response["results"]
+    required_summary_fields = (
+        "total_products",
+        "total_issues",
+        "error_count",
+        "warning_count",
     )
+    if not isinstance(summary, dict) or any(
+        field not in summary
+        or type(summary[field]) is not int
+        or summary[field] < 0
+        for field in required_summary_fields
+    ):
+        raise ValueError("invalid inspection summary")
+
+    required_result_fields = (
+        "status",
+        "product_group_id",
+        "product_id",
+        "error_field",
+        "reason",
+        "recommendation",
+        "risk_level",
+    )
+    if not isinstance(results, list) or any(
+        not isinstance(result, dict)
+        or any(
+            field not in result or not isinstance(result[field], str)
+            for field in required_result_fields
+        )
+        for result in results
+    ):
+        raise ValueError("invalid inspection results")
+
+    session_state["saved_file_hash"] = file_hash
+    session_state["saved_inspection_run_id"] = inspection_run_id
+    session_state[CURRENT_INSPECTION_CREATED_STATE_KEY] = created
+    session_state[CURRENT_INSPECTION_DETAIL_STATE_KEY] = dict(detail_response)
     return (
         inspection_run_id,
         created,
@@ -692,7 +729,7 @@ def render_inspection_save_failure(
     detail_message: str,
     error: Exception | None = None,
 ) -> None:
-    st.error("검수 결과는 확인할 수 있지만 이력 저장에 실패했습니다.")
+    st.error("검수를 완료하지 못했습니다.")
     st.caption(build_api_error_display_message(detail_message, error))
 
 
@@ -701,136 +738,120 @@ def render_inspection_save_button(
     source_filename: str,
     file_bytes: bytes,
     content_type: str,
-) -> None:
-    # 이 함수는 "화면 버튼 중복 클릭 방지"만 담당합니다.
-    # 브라우저/서버 재시작 뒤의 중복 저장 방지는 FastAPI와 PostgreSQL이 담당합니다.
+) -> dict | None:
     file_hash = build_file_hash(file_bytes)
-    saved_inspection_run_id = get_saved_inspection_run_id(
+    synchronize_current_upload(st.session_state, file_hash)
+    detail_response = get_current_inspection_detail(
         st.session_state,
         file_hash,
     )
 
-    if st.button("검수 이력에 저장", key="save_inspection_history"):
-        if saved_inspection_run_id is not None:
-            st.info(
-                "이미 검수 이력에 저장된 파일입니다. "
-                f"실행 ID: {saved_inspection_run_id}"
+    st.caption("검수를 실행하면 결과가 검수 이력에 저장됩니다.")
+    st.caption("동일한 파일과 검수 버전은 중복 저장되지 않습니다.")
+    if st.button("검수 실행 및 이력 저장", key="save_inspection_history"):
+        if detail_response is None:
+            clear_current_inspection_result(st.session_state)
+        else:
+            inspection_run_id = int(detail_response["inspection_run_id"])
+            created = bool(
+                st.session_state.get(CURRENT_INSPECTION_CREATED_STATE_KEY, True)
             )
-            return
+            message = build_inspection_save_message(
+                inspection_run_id=inspection_run_id,
+                created=created,
+            )
+
+        if detail_response is not None:
+            if created:
+                st.success(message)
+            else:
+                st.info(message)
+            return detail_response
 
         try:
-            # 저장 API에는 원본 CSV bytes를 다시 보내야 서버가 같은 검수 로직과 DB 중복 검사를 수행할 수 있습니다.
             api_client = create_catalogguard_api_client()
             response = api_client.create_inspection(
                 source_filename=source_filename,
                 file_content=file_bytes,
                 content_type=content_type,
             )
+            inspection_run_id = int(response["inspection_run_id"])
+            detail_response = api_client.get_inspection_detail(inspection_run_id)
             _, created, message = apply_inspection_save_response(
                 st.session_state,
                 file_hash=file_hash,
                 response=response,
+                detail_response=detail_response,
             )
         except CatalogGuardApiConfigurationError as error:
+            clear_current_inspection_result(st.session_state)
             render_inspection_save_failure(
-                "검수 이력 API 주소가 설정되지 않았습니다.", error
+                "검수 API 주소가 설정되지 않았습니다.", error
             )
-            return
+            return None
         except CatalogGuardApiConnectionError as error:
+            clear_current_inspection_result(st.session_state)
             render_inspection_save_failure(
-                "검수 이력 서버에 연결할 수 없습니다.", error
+                "검수 서버에 연결할 수 없습니다.", error
             )
-            return
+            return None
         except CatalogGuardApiTimeoutError as error:
+            clear_current_inspection_result(st.session_state)
             render_inspection_save_failure(
-                "검수 이력 서버 응답 시간이 초과되었습니다.", error
+                "검수 서버 응답 시간이 초과되었습니다.", error
             )
-            return
+            return None
+        except InspectionNotFoundError as error:
+            clear_current_inspection_result(st.session_state)
+            render_inspection_save_failure(
+                "저장된 검수 상세 결과를 찾을 수 없습니다.", error
+            )
+            return None
         except (CatalogGuardApiResponseError, KeyError, TypeError, ValueError) as error:
+            clear_current_inspection_result(st.session_state)
             render_inspection_save_failure(
-                "검수 이력 서버에서 오류가 발생했습니다.", error
+                "검수 서버에서 오류가 발생했습니다.", error
             )
-            return
+            return None
 
         if created:
             st.success(message)
         else:
             st.info(message)
-        return
+        return detail_response
 
-    if saved_inspection_run_id is not None:
-        st.info(
-            "이미 검수 이력에 저장된 파일입니다. "
-            f"실행 ID: {saved_inspection_run_id}"
-        )
+    if detail_response is None:
+        return None
 
-
-def render_csv_inspection_tab() -> None:
-    st.subheader("CSV 입력 템플릿")
-    st.write("올바른 컬럼 구조가 필요한 경우 아래 템플릿을 내려받아 작성하세요.")
-    st.caption(
-        "템플릿에는 가짜 예시 상품 1개가 포함되어 있습니다. "
-        "실제 사용 전 예시 행을 삭제하거나 상품 정보로 교체해 주세요."
+    inspection_run_id = int(detail_response["inspection_run_id"])
+    created = bool(st.session_state.get(CURRENT_INSPECTION_CREATED_STATE_KEY, True))
+    message = build_inspection_save_message(
+        inspection_run_id=inspection_run_id,
+        created=created,
     )
-    st.caption(f"필수 컬럼: {', '.join(REQUIRED_COLUMNS)}")
-    st.caption(f"선택 컬럼: {', '.join(OPTIONAL_COLUMNS)}")
-    st.download_button(
-        "CSV 입력 템플릿 다운로드",
-        data=build_product_template_csv(),
-        file_name=get_product_template_filename(),
-        mime="text/csv",
-    )
+    if created:
+        st.success(message)
+    else:
+        st.info(message)
+    return detail_response
 
-    uploaded_file = st.file_uploader("CSV 파일 업로드", type=["csv"])
 
-    # 파일이 없으면 아래 검사 코드를 실행하지 않고 CSV 탭 렌더링만 마칩니다.
-    if uploaded_file is None:
-        st.info("검사할 CSV 파일을 업로드해 주세요.")
-        return
-
-    file_bytes = uploaded_file.getvalue()
-
-    try:
-        # 검증된 하나의 DataFrame을 미리보기와 검수에 함께 사용합니다.
-        validated_df = validate_and_read_uploaded_csv(uploaded_file.name, file_bytes)
-        inspection_report = inspect_dataframe(validated_df)
-    except CsvUploadValidationError as error:
-        st.error(str(error))
-        return
-    except ValueError as error:
-        st.error(format_value_error(error))
-        return
-    except Exception:
-        st.error("파일 처리 중 오류가 발생했습니다. CSV 형식과 내용을 확인해 주세요.")
-        return
-
-    # 화면에는 마스킹된 복사본의 상위 100행만 보여주고, 검수에는 원본 Product를 사용합니다.
-    masked_preview_df = inspection_report.masked_preview_dataframe
-    products = inspection_report.products
-    issues = inspection_report.issues
-    summary = inspection_report.summary
-
-    st.subheader("상품 데이터 미리보기")
-    preview_rows = masked_preview_df.head(100)
-    st.dataframe(
-        preview_rows,
-        height=calculate_dataframe_height(len(preview_rows)),
-        width="stretch",
-        hide_index=True,
-    )
-    if len(masked_preview_df) > len(preview_rows):
-        st.caption(f"전체 {len(masked_preview_df)}행 중 앞 100행만 표시합니다.")
-
-    error_count = summary.error_count
-    warning_count = summary.warning_count
-    issue_count = summary.total_issues
+def render_uploaded_inspection_result(
+    detail_response: dict,
+    *,
+    fallback_source_filename: str,
+) -> None:
+    summary = detail_response.get("summary") or {}
+    total_products = summary.get("total_products", 0)
+    issue_count = summary.get("total_issues", 0)
+    error_count = summary.get("error_count", 0)
+    warning_count = summary.get("warning_count", 0)
     overall_status = get_overall_status(error_count, warning_count)
 
-    # 사용자가 현재 CSV 상태를 빠르게 판단할 수 있는 요약 숫자입니다.
     st.subheader("검수 요약")
     status_col, product_col, issue_col, error_col, warning_col = st.columns(5)
     status_col.metric("전체 상태", overall_status)
-    product_col.metric("전체 상품 수", len(products))
+    product_col.metric("전체 상품 수", total_products)
     issue_col.metric("전체 문제 수", issue_count)
     error_col.metric("오류 수", error_count)
     warning_col.metric("주의 수", warning_count)
@@ -847,19 +868,11 @@ def render_csv_inspection_tab() -> None:
     else:
         st.success("검사가 완료되었습니다. 발견된 문제가 없습니다.")
 
-    # 통계는 상세 결과 필터와 무관한 전체 검수 결과를 사용합니다.
-    result_df = inspection_report.result_dataframe
+    result_df = build_history_detail_dataframe(detail_response.get("results", []))
     render_inspection_statistics(
         result_df,
         expected_total_issues=issue_count,
     )
-
-    render_inspection_save_button(
-        source_filename=uploaded_file.name,
-        file_bytes=file_bytes,
-        content_type=getattr(uploaded_file, "type", None) or "text/csv",
-    )
-
     if issue_count <= 0:
         return
 
@@ -888,9 +901,7 @@ def render_csv_inspection_tab() -> None:
         product_id_query=product_id_query,
     )
 
-    # 필터는 화면 표와 다운로드 CSV에 동일하게 적용됩니다.
     st.caption(f"현재 조건에 맞는 검수 결과: {len(filtered_result_df)}건")
-
     if filtered_result_df.empty:
         st.info("선택한 조건에 맞는 검수 결과가 없습니다.")
         return
@@ -901,13 +912,75 @@ def render_csv_inspection_tab() -> None:
         width="stretch",
         hide_index=True,
     )
-
-    csv_bytes = build_validation_result_csv(filtered_result_df)
+    source_filename = (
+        detail_response.get("source_filename") or fallback_source_filename
+    )
     st.download_button(
         "현재 필터 결과 CSV 다운로드",
-        data=csv_bytes,
-        file_name=build_result_filename(uploaded_file.name),
+        data=build_validation_result_csv(filtered_result_df),
+        file_name=build_result_filename(source_filename),
         mime="text/csv",
+    )
+
+
+def render_csv_inspection_tab() -> None:
+    st.subheader("CSV 입력 템플릿")
+    st.write("올바른 컬럼 구조가 필요한 경우 아래 템플릿을 내려받아 작성하세요.")
+    st.caption(
+        "템플릿에는 가짜 예시 상품 1개가 포함되어 있습니다. "
+        "실제 사용 전 예시 행을 삭제하거나 상품 정보로 교체해 주세요."
+    )
+    st.caption(f"필수 컬럼: {', '.join(REQUIRED_COLUMNS)}")
+    st.caption(f"선택 컬럼: {', '.join(OPTIONAL_COLUMNS)}")
+    st.download_button(
+        "CSV 입력 템플릿 다운로드",
+        data=build_product_template_csv(),
+        file_name=get_product_template_filename(),
+        mime="text/csv",
+    )
+
+    uploaded_file = st.file_uploader("CSV 파일 업로드", type=["csv"])
+
+    # 파일이 없으면 아래 검사 코드를 실행하지 않고 CSV 탭 렌더링만 마칩니다.
+    if uploaded_file is None:
+        st.info("검사할 CSV 파일을 업로드해 주세요.")
+        return
+
+    file_bytes = uploaded_file.getvalue()
+    file_hash = build_file_hash(file_bytes)
+    synchronize_current_upload(st.session_state, file_hash)
+
+    try:
+        validated_df = validate_and_read_uploaded_csv(uploaded_file.name, file_bytes)
+        masked_preview_df = create_masked_preview(validated_df)
+    except CsvUploadValidationError as error:
+        st.error(str(error))
+        return
+    except Exception:
+        st.error("파일 처리 중 오류가 발생했습니다. CSV 형식과 내용을 확인해 주세요.")
+        return
+
+    st.subheader("상품 데이터 미리보기")
+    preview_rows = masked_preview_df.head(100)
+    st.dataframe(
+        preview_rows,
+        height=calculate_dataframe_height(len(preview_rows)),
+        width="stretch",
+        hide_index=True,
+    )
+    if len(masked_preview_df) > len(preview_rows):
+        st.caption(f"전체 {len(masked_preview_df)}행 중 앞 100행만 표시합니다.")
+
+    detail_response = render_inspection_save_button(
+        source_filename=uploaded_file.name,
+        file_bytes=file_bytes,
+        content_type=getattr(uploaded_file, "type", None) or "text/csv",
+    )
+    if detail_response is None:
+        return
+    render_uploaded_inspection_result(
+        detail_response,
+        fallback_source_filename=uploaded_file.name,
     )
 
 
