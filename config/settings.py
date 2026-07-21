@@ -8,6 +8,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 CATALOGGUARD_API_BASE_URL_ENV_VAR = "CATALOGGUARD_API_BASE_URL"
 CATALOGGUARD_API_TIMEOUT_SECONDS_ENV_VAR = "CATALOGGUARD_API_TIMEOUT_SECONDS"
 CATALOGGUARD_API_DEFAULT_TIMEOUT_SECONDS = 5.0
+CELERY_BROKER_URL_ENV_VAR = "CELERY_BROKER_URL"
+REDIS_JOB_URL_ENV_VAR = "REDIS_JOB_URL"
+INSPECTION_JOB_DIR_ENV_VAR = "INSPECTION_JOB_DIR"
+INSPECTION_JOB_TTL_SECONDS_ENV_VAR = "INSPECTION_JOB_TTL_SECONDS"
+DEFAULT_CELERY_BROKER_URL = "redis://localhost:6379/0"
+DEFAULT_REDIS_JOB_URL = "redis://localhost:6379/1"
+DEFAULT_INSPECTION_JOB_DIR = BASE_DIR / "var" / "inspection_jobs"
+DEFAULT_INSPECTION_JOB_TTL_SECONDS = 24 * 60 * 60
 # 검수 규칙 버전입니다. 규칙이 바뀌어 같은 CSV도 다시 저장해야 하면 이 값을 올립니다.
 INSPECTION_VERSION = "4"
 
@@ -169,3 +177,43 @@ def get_catalogguard_api_timeout_seconds() -> float:
     if timeout_seconds <= 0:
         return CATALOGGUARD_API_DEFAULT_TIMEOUT_SECONDS
     return timeout_seconds
+
+
+def _get_non_empty_environment_value(
+    environment_name: str,
+    default_value: str,
+) -> str:
+    value = os.environ.get(environment_name, "").strip()
+    return value or default_value
+
+
+def get_celery_broker_url() -> str:
+    return _get_non_empty_environment_value(
+        CELERY_BROKER_URL_ENV_VAR,
+        DEFAULT_CELERY_BROKER_URL,
+    )
+
+
+def get_redis_job_url() -> str:
+    return _get_non_empty_environment_value(
+        REDIS_JOB_URL_ENV_VAR,
+        DEFAULT_REDIS_JOB_URL,
+    )
+
+
+def get_inspection_job_dir() -> Path:
+    configured_directory = os.environ.get(INSPECTION_JOB_DIR_ENV_VAR, "").strip()
+    return Path(configured_directory) if configured_directory else DEFAULT_INSPECTION_JOB_DIR
+
+
+def get_inspection_job_ttl_seconds() -> int:
+    value = os.environ.get(INSPECTION_JOB_TTL_SECONDS_ENV_VAR, "").strip()
+    if not value:
+        return DEFAULT_INSPECTION_JOB_TTL_SECONDS
+
+    try:
+        ttl_seconds = int(value)
+    except ValueError:
+        return DEFAULT_INSPECTION_JOB_TTL_SECONDS
+
+    return ttl_seconds if ttl_seconds > 0 else DEFAULT_INSPECTION_JOB_TTL_SECONDS

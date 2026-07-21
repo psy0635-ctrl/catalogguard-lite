@@ -1,5 +1,6 @@
 # 역할: CSV 검수 API가 반환하는 JSON 응답 구조를 Pydantic 모델로 정의합니다.
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -54,3 +55,24 @@ class InspectionListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+InspectionJobStatus = Literal["queued", "running", "succeeded", "failed"]
+
+
+class InspectionJobSubmissionResponse(BaseModel):
+    job_id: str
+    status: Literal["queued"]
+    status_url: str
+
+
+class InspectionJobStatusResponse(BaseModel):
+    job_id: str
+    status: InspectionJobStatus
+    created: bool | None = None
+    inspection_run_id: int | None = None
+    summary: InspectionSummary | None = None
+    error_code: str | None = None
+    message: str | None = None
+    created_at: datetime
+    updated_at: datetime

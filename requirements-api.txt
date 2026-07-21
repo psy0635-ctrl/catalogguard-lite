@@ -7,3 +7,5 @@ python-multipart==0.0.32
 sqlalchemy==2.0.51
 alembic==1.18.5
 psycopg[binary]==3.3.4
+celery[redis]==5.6.3
+redis==6.4.0

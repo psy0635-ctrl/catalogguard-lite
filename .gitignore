@@ -20,6 +20,7 @@ __pycache__/
 *.log
 logs/*
 outputs/*
+var/inspection_jobs/
 
 # 운영체제 파일
 .DS_Store

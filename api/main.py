@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Request, status
 from starlette.responses import PlainTextResponse, Response
 
 from api.routes.inspections import router as inspections_router
+from api.routes.inspection_jobs import router as inspection_jobs_router
 from config.logging import configure_logging, log_event
 from db.session import check_database_connection
 
@@ -77,6 +78,7 @@ async def log_http_request(request: Request, call_next) -> Response:
 
 # CSV 검수 API 묶음을 현재 앱에 연결합니다.
 app.include_router(inspections_router)
+app.include_router(inspection_jobs_router)
 
 
 @app.get("/health")
