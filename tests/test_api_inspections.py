@@ -16,7 +16,9 @@ from config.settings import (
     REQUIRED_COLUMNS,
 )
 from core.inspection_service import InspectionReport
+from core.inspection_service import inspect_dataframe as real_inspect_dataframe
 from core.product_template import build_product_template_csv, get_product_template_filename
+from core.upload_validator import validate_and_read_uploaded_csv as real_validate_and_read_uploaded_csv
 from db.session import get_session
 
 
@@ -45,6 +47,7 @@ def fake_inspection_persistence(monkeypatch):
     fake_session = object()
     calls = []
     detail_calls = []
+    identity_calls = []
     detail_created_at = datetime(2026, 7, 4, 3, 30, tzinfo=timezone.utc)
     detail_results = [
         SimpleNamespace(
@@ -167,6 +170,23 @@ def fake_inspection_persistence(monkeypatch):
         )
         return fake_details.get(inspection_run_id)
 
+    def fake_find_existing_inspection_run(
+        session,
+        *,
+        file_sha256,
+        inspection_version,
+    ):
+        identity_calls.append(
+            {
+                "session": session,
+                "file_sha256": file_sha256,
+                "inspection_version": inspection_version,
+            }
+        )
+        if save_state.mode == "duplicate":
+            return SimpleNamespace(id=11)
+        return None
+
     def fake_list_inspections(
         session,
         *,
@@ -212,6 +232,12 @@ def fake_inspection_persistence(monkeypatch):
     )
     monkeypatch.setattr(
         inspections_route,
+        "find_existing_inspection_run",
+        fake_find_existing_inspection_run,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        inspections_route,
         "list_inspections",
         fake_list_inspections,
         raising=False,
@@ -221,6 +247,7 @@ def fake_inspection_persistence(monkeypatch):
         session=fake_session,
         calls=calls,
         detail_calls=detail_calls,
+        identity_calls=identity_calls,
         list_calls=list_calls,
         list_state=list_state,
         save_state=save_state,
@@ -784,6 +811,219 @@ def test_inspection_api_returns_existing_detail_when_duplicate(
             "inspection_run_id": 11,
         }
     ]
+
+
+def test_inspection_api_skips_reinspection_when_file_identity_exists(
+    fake_inspection_persistence,
+    monkeypatch,
+):
+    validation_calls = []
+    identity_calls = []
+    inspect_dataframe_calls = []
+    inspect_uploaded_calls = []
+
+    def spy_validate(filename, file_bytes):
+        validation_calls.append((filename, file_bytes))
+        return real_validate_and_read_uploaded_csv(filename, file_bytes)
+
+    def fake_find_existing_run(session, *, file_sha256, inspection_version):
+        identity_calls.append(
+            {
+                "session": session,
+                "file_sha256": file_sha256,
+                "inspection_version": inspection_version,
+            }
+        )
+        return SimpleNamespace(id=11)
+
+    def unexpected_inspect_dataframe(*args, **kwargs):
+        inspect_dataframe_calls.append((args, kwargs))
+        raise AssertionError("duplicate upload must skip inspect_dataframe")
+
+    def unexpected_inspect_uploaded_csv(*args, **kwargs):
+        inspect_uploaded_calls.append((args, kwargs))
+        raise AssertionError("duplicate upload must skip inspect_uploaded_csv")
+
+    monkeypatch.setattr(
+        inspections_route,
+        "validate_and_read_uploaded_csv",
+        spy_validate,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        inspections_route,
+        "find_existing_inspection_run",
+        fake_find_existing_run,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        inspections_route,
+        "inspect_dataframe",
+        unexpected_inspect_dataframe,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        inspections_route,
+        "inspect_uploaded_csv",
+        unexpected_inspect_uploaded_csv,
+        raising=False,
+    )
+
+    response = post_csv(DEV_DATA_PATH.read_bytes(), filename="renamed.csv")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["inspection_run_id"] == 11
+    assert data["created"] is False
+    assert data["summary"] == {
+        "total_products": 5,
+        "total_issues": 2,
+        "error_count": 1,
+        "warning_count": 1,
+    }
+    assert len(validation_calls) == 1
+    assert len(identity_calls) == 1
+    assert inspect_dataframe_calls == []
+    assert inspect_uploaded_calls == []
+    assert fake_inspection_persistence.calls == []
+
+
+def test_inspection_api_validates_and_inspects_new_file_once(
+    fake_inspection_persistence,
+    monkeypatch,
+):
+    validation_calls = []
+    inspect_dataframe_calls = []
+    inspect_uploaded_calls = []
+
+    def spy_validate(filename, file_bytes):
+        validation_calls.append((filename, file_bytes))
+        return real_validate_and_read_uploaded_csv(filename, file_bytes)
+
+    def spy_inspect_dataframe(dataframe):
+        inspect_dataframe_calls.append(dataframe)
+        return real_inspect_dataframe(dataframe)
+
+    def unexpected_inspect_uploaded_csv(*args, **kwargs):
+        inspect_uploaded_calls.append((args, kwargs))
+        raise AssertionError("new upload must use the validated DataFrame")
+
+    monkeypatch.setattr(
+        inspections_route,
+        "validate_and_read_uploaded_csv",
+        spy_validate,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        inspections_route,
+        "inspect_dataframe",
+        spy_inspect_dataframe,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        inspections_route,
+        "inspect_uploaded_csv",
+        unexpected_inspect_uploaded_csv,
+        raising=False,
+    )
+
+    response = post_csv(DEV_DATA_PATH.read_bytes(), filename="new.csv")
+
+    assert response.status_code == 200
+    assert response.json()["created"] is True
+    assert response.json()["inspection_run_id"] == 123
+    assert len(validation_calls) == 1
+    assert len(inspect_dataframe_calls) == 1
+    assert inspect_uploaded_calls == []
+    assert len(fake_inspection_persistence.calls) == 1
+
+
+def test_inspection_api_uses_current_version_for_prelookup(
+    fake_inspection_persistence,
+    monkeypatch,
+):
+    identity_calls = []
+
+    def fake_find_existing_run(session, *, file_sha256, inspection_version):
+        identity_calls.append((file_sha256, inspection_version))
+        return None
+
+    monkeypatch.setattr(
+        inspections_route,
+        "find_existing_inspection_run",
+        fake_find_existing_run,
+        raising=False,
+    )
+
+    response = post_csv(DEV_DATA_PATH.read_bytes(), filename="versioned.csv")
+
+    assert response.status_code == 200
+    assert response.json()["created"] is True
+    assert identity_calls == [
+        (hashlib.sha256(DEV_DATA_PATH.read_bytes()).hexdigest(), INSPECTION_VERSION)
+    ]
+    assert len(fake_inspection_persistence.calls) == 1
+
+
+def test_inspection_api_validates_bad_csv_before_identity_lookup(
+    fake_inspection_persistence,
+    monkeypatch,
+):
+    identity_calls = []
+
+    def unexpected_identity_lookup(*args, **kwargs):
+        identity_calls.append((args, kwargs))
+        raise AssertionError("invalid CSV must fail before database lookup")
+
+    monkeypatch.setattr(
+        inspections_route,
+        "find_existing_inspection_run",
+        unexpected_identity_lookup,
+        raising=False,
+    )
+
+    csv_text = ",".join(REQUIRED_COLUMNS) + '\nG001,P001,"닫히지 않은 상품명,TOP,BLACK,M,5,19000,a.jpg\n'
+    response = post_csv(csv_text.encode("utf-8"))
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "CSV 형식이 올바르지 않습니다. 따옴표와 열 개수를 확인해 주세요."
+    )
+    assert identity_calls == []
+    assert fake_inspection_persistence.calls == []
+
+
+def test_inspection_api_returns_safe_500_when_prelookup_db_fails(
+    fake_inspection_persistence,
+    monkeypatch,
+):
+    def failing_identity_lookup(*args, **kwargs):
+        raise RuntimeError("database password must not be exposed")
+
+    monkeypatch.setattr(
+        inspections_route,
+        "find_existing_inspection_run",
+        failing_identity_lookup,
+        raising=False,
+    )
+
+    safe_client = TestClient(app, raise_server_exceptions=False)
+    response = safe_client.post(
+        ENDPOINT,
+        files={
+            "file": (
+                "products.csv",
+                DEV_DATA_PATH.read_bytes(),
+                "text/csv",
+            )
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+    assert response.headers.get("X-Request-ID")
+    assert "database password" not in response.text
+    assert fake_inspection_persistence.calls == []
 
 
 def test_inspection_api_returns_expected_products_dev_summary():

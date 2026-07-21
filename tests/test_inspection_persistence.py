@@ -22,6 +22,7 @@ from db.persistence_service import (
     FILE_IDENTITY_UNIQUE_INDEX_NAME,
     InspectionSaveOutcome,
     build_result_create_items,
+    find_existing_inspection_run,
     normalize_source_filename,
     save_inspection_report,
 )
@@ -211,6 +212,89 @@ def test_normalize_source_filename_strips_windows_and_unix_paths():
         == "products.csv"
     )
     assert normalize_source_filename("/home/user/products.csv") == "products.csv"
+
+
+def test_find_existing_inspection_run_delegates_file_identity_lookup(monkeypatch):
+    session = object()
+    existing_run = SimpleNamespace(id=42)
+    calls = []
+
+    def fake_get_by_identity(session_arg, *, file_sha256, inspection_version):
+        calls.append((session_arg, file_sha256, inspection_version))
+        return existing_run
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "get_inspection_run_by_file_identity",
+        fake_get_by_identity,
+    )
+
+    result = find_existing_inspection_run(
+        session,
+        file_sha256=make_file_hash(b"same csv bytes"),
+        inspection_version=INSPECTION_VERSION,
+    )
+
+    assert result is existing_run
+    assert calls == [(session, make_file_hash(b"same csv bytes"), INSPECTION_VERSION)]
+
+
+@pytest.mark.parametrize(
+    ("file_sha256", "inspection_version", "expected"),
+    [
+        (make_file_hash(b"same bytes"), INSPECTION_VERSION, "existing"),
+        (make_file_hash(b"different bytes"), INSPECTION_VERSION, None),
+        (make_file_hash(b"same bytes"), "3", None),
+        (None, INSPECTION_VERSION, None),
+    ],
+)
+def test_find_existing_inspection_run_preserves_identity_matching(
+    monkeypatch,
+    file_sha256,
+    inspection_version,
+    expected,
+):
+    existing_run = SimpleNamespace(id=42)
+
+    def fake_get_by_identity(session, *, file_sha256, inspection_version):
+        if file_sha256 == make_file_hash(b"same bytes") and inspection_version == INSPECTION_VERSION:
+            return existing_run
+        return None
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "get_inspection_run_by_file_identity",
+        fake_get_by_identity,
+    )
+
+    result = find_existing_inspection_run(
+        object(),
+        file_sha256=file_sha256,
+        inspection_version=inspection_version,
+    )
+
+    if expected == "existing":
+        assert result is existing_run
+    else:
+        assert result is None
+
+
+def test_find_existing_inspection_run_does_not_hide_repository_errors(monkeypatch):
+    def failing_get_by_identity(*args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "get_inspection_run_by_file_identity",
+        failing_get_by_identity,
+    )
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        find_existing_inspection_run(
+            object(),
+            file_sha256=make_file_hash(b"same bytes"),
+            inspection_version=INSPECTION_VERSION,
+        )
 
 
 def test_normalize_source_filename_uses_default_for_blank_values():

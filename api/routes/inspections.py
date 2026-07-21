@@ -17,11 +17,15 @@ from api.schemas import (
     InspectionSummary,
 )
 from config.settings import INSPECTION_VERSION
-from core.inspection_service import InspectionReport, inspect_uploaded_csv
-from core.upload_validator import CsvUploadValidationError
+from core.inspection_service import InspectionReport, inspect_dataframe
+from core.upload_validator import (
+    CsvUploadValidationError,
+    validate_and_read_uploaded_csv,
+)
 from db.persistence_service import (
     InspectionDetail,
     InspectionList,
+    find_existing_inspection_run,
     get_inspection_detail,
     list_inspections,
     save_inspection_report,
@@ -216,15 +220,33 @@ async def create_inspection(
     session: Session = Depends(get_session),
 ) -> InspectionResponse:
     file_bytes = await file.read()
-    # 중복 저장 판단에 쓰는 해시는 서버가 업로드 bytes로 직접 계산합니다.
-    # 클라이언트가 보낸 값을 믿으면 조작된 해시로 DB 중복 방지가 깨질 수 있습니다.
-    file_sha256 = hashlib.sha256(file_bytes).hexdigest()
 
     try:
-        report = inspect_uploaded_csv(file.filename, file_bytes)
+        dataframe = validate_and_read_uploaded_csv(file.filename, file_bytes)
     except CsvUploadValidationError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
+    # 중복 저장 판단에 쓰는 해시는 서버가 업로드 bytes로 직접 계산합니다.
+    # 클라이언트가 보낸 값을 믿으면 조작된 해시로 DB 중복 방지가 깨질 수 있습니다.
+    file_sha256 = hashlib.sha256(file_bytes).hexdigest()
+    existing_run = find_existing_inspection_run(
+        session,
+        file_sha256=file_sha256,
+        inspection_version=INSPECTION_VERSION,
+    )
+    if existing_run is not None:
+        detail = get_inspection_detail(
+            session,
+            inspection_run_id=existing_run.id,
+        )
+        if detail is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="중복 검수 이력 조회에 실패했습니다.",
+            )
+        return build_inspection_detail_response(detail, created=False)
+
+    report = inspect_dataframe(dataframe)
     save_outcome = save_inspection_report(
         session,
         source_filename=file.filename,

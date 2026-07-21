@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from config.settings import INSPECTION_VERSION
 from core.inspection_service import InspectionReport
 from db import repositories
+from db.models import InspectionRun
 from db.repositories import InspectionResultCreate
 
 
@@ -164,6 +165,22 @@ def _is_file_identity_unique_violation(error: IntegrityError) -> bool:
     diag = getattr(orig, "diag", None)
     constraint_name = getattr(diag, "constraint_name", None)
     return constraint_name == FILE_IDENTITY_UNIQUE_INDEX_NAME
+
+
+def find_existing_inspection_run(
+    session: Session,
+    *,
+    file_sha256: str | None,
+    inspection_version: str = INSPECTION_VERSION,
+) -> InspectionRun | None:
+    """Return the run matching the normalized file identity, if one exists."""
+    normalized_file_sha256 = normalize_file_sha256(file_sha256)
+    normalized_inspection_version = normalize_inspection_version(inspection_version)
+    return repositories.get_inspection_run_by_file_identity(
+        session,
+        file_sha256=normalized_file_sha256,
+        inspection_version=normalized_inspection_version,
+    )
 
 
 def build_result_create_items(
