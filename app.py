@@ -81,6 +81,13 @@ HISTORY_STATUS_QUERY_TO_LABEL = {
 CURRENT_UPLOAD_FILE_HASH_STATE_KEY = "current_upload_file_hash"
 CURRENT_INSPECTION_CREATED_STATE_KEY = "current_inspection_created"
 CURRENT_INSPECTION_DETAIL_STATE_KEY = "current_inspection_detail_response"
+INSPECTION_MODE_STATE_KEY = "inspection_mode"
+ACTIVE_INSPECTION_MODE_STATE_KEY = "active_inspection_mode"
+ASYNC_JOB_ID_STATE_KEY = "async_job_id"
+ASYNC_JOB_STATUS_STATE_KEY = "async_job_status"
+ASYNC_JOB_FILE_HASH_STATE_KEY = "async_job_file_hash"
+ASYNC_JOB_RESPONSE_STATE_KEY = "async_job_response"
+ASYNC_JOB_ERROR_STATE_KEY = "async_job_error"
 
 
 def build_api_error_display_message(
@@ -122,12 +129,37 @@ def clear_current_inspection_result(session_state) -> None:
         session_state.pop(key, None)
 
 
+def clear_async_inspection_job(session_state) -> None:
+    for key in (
+        ASYNC_JOB_ID_STATE_KEY,
+        ASYNC_JOB_STATUS_STATE_KEY,
+        ASYNC_JOB_FILE_HASH_STATE_KEY,
+        ASYNC_JOB_RESPONSE_STATE_KEY,
+        ASYNC_JOB_ERROR_STATE_KEY,
+    ):
+        session_state.pop(key, None)
+
+
 def synchronize_current_upload(session_state, file_hash: str) -> None:
     if session_state.get(CURRENT_UPLOAD_FILE_HASH_STATE_KEY) == file_hash:
         return
 
     clear_current_inspection_result(session_state)
+    clear_async_inspection_job(session_state)
     session_state[CURRENT_UPLOAD_FILE_HASH_STATE_KEY] = file_hash
+
+
+def synchronize_inspection_mode(session_state, inspection_mode: str) -> None:
+    previous_mode = session_state.get(ACTIVE_INSPECTION_MODE_STATE_KEY)
+    if previous_mode is None:
+        session_state[ACTIVE_INSPECTION_MODE_STATE_KEY] = inspection_mode
+        return
+    if previous_mode == inspection_mode:
+        return
+
+    clear_current_inspection_result(session_state)
+    clear_async_inspection_job(session_state)
+    session_state[ACTIVE_INSPECTION_MODE_STATE_KEY] = inspection_mode
 
 
 def get_current_inspection_detail(session_state, file_hash: str) -> dict | None:
@@ -836,6 +868,251 @@ def render_inspection_save_button(
     return detail_response
 
 
+def render_background_job_status(status: str) -> None:
+    if status == "queued":
+        st.info("검수 작업이 대기 중입니다.")
+    elif status == "running":
+        st.info("상품 데이터를 검수하고 있습니다.")
+    elif status == "succeeded":
+        st.success("검수가 완료되었습니다.")
+    elif status == "failed":
+        st.error("검수 처리 중 오류가 발생했습니다.")
+        st.caption("잠시 후 다시 시도하거나 ‘즉시 검수’를 이용해 주세요.")
+
+
+def submit_background_inspection_job(
+    *,
+    source_filename: str,
+    file_bytes: bytes,
+    content_type: str,
+    file_hash: str,
+) -> None:
+    clear_current_inspection_result(st.session_state)
+    clear_async_inspection_job(st.session_state)
+    try:
+        api_client = create_catalogguard_api_client()
+        response = api_client.submit_inspection_job(
+            source_filename=source_filename,
+            file_content=file_bytes,
+            content_type=content_type,
+        )
+        st.session_state[ASYNC_JOB_ID_STATE_KEY] = response["job_id"]
+        st.session_state[ASYNC_JOB_STATUS_STATE_KEY] = response["status"]
+        st.session_state[ASYNC_JOB_FILE_HASH_STATE_KEY] = file_hash
+        st.session_state[ASYNC_JOB_RESPONSE_STATE_KEY] = dict(response)
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        st.session_state[ASYNC_JOB_ERROR_STATE_KEY] = (
+            "백그라운드 검수 서비스를 사용할 수 없습니다."
+        )
+
+
+def load_background_inspection_result(
+    *,
+    api_client,
+    file_hash: str,
+    response: dict,
+) -> dict:
+    inspection_run_id = response.get("inspection_run_id")
+    if type(inspection_run_id) is not int or inspection_run_id <= 0:
+        raise ValueError("invalid inspection_run_id")
+    created = response.get("created")
+    if type(created) is not bool:
+        raise ValueError("invalid created value")
+
+    detail_response = api_client.get_inspection_detail(inspection_run_id)
+    _, created, message = apply_inspection_save_response(
+        st.session_state,
+        file_hash=file_hash,
+        response=response,
+        detail_response=detail_response,
+    )
+    if created:
+        st.success(message)
+    else:
+        st.info(message)
+    return detail_response
+
+
+def refresh_background_inspection_job(
+    *,
+    api_client,
+    file_hash: str,
+) -> dict | None:
+    job_id = st.session_state.get(ASYNC_JOB_ID_STATE_KEY)
+    if not isinstance(job_id, str) or not job_id:
+        st.session_state[ASYNC_JOB_ERROR_STATE_KEY] = (
+            "작업 상태를 확인할 수 없습니다."
+        )
+        return None
+
+    stage = "status"
+    try:
+        response = api_client.get_inspection_job(job_id)
+        status = response["status"]
+        st.session_state[ASYNC_JOB_STATUS_STATE_KEY] = status
+        st.session_state[ASYNC_JOB_RESPONSE_STATE_KEY] = dict(response)
+        st.session_state.pop(ASYNC_JOB_ERROR_STATE_KEY, None)
+
+        if status != "succeeded":
+            return None
+
+        stage = "detail"
+        return load_background_inspection_result(
+            api_client=api_client,
+            file_hash=file_hash,
+            response=response,
+        )
+    except InspectionNotFoundError:
+        if stage == "status":
+            clear_async_inspection_job(st.session_state)
+            message = "검수 작업이 만료되었거나 존재하지 않습니다."
+        else:
+            message = "완료된 검수 결과를 불러올 수 없습니다."
+        st.session_state[ASYNC_JOB_ERROR_STATE_KEY] = message
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        st.session_state[ASYNC_JOB_ERROR_STATE_KEY] = (
+            "완료된 검수 결과를 불러올 수 없습니다."
+            if stage == "detail"
+            else "작업 상태를 확인할 수 없습니다."
+        )
+    return None
+
+
+def retry_background_inspection_result(
+    *,
+    api_client,
+    file_hash: str,
+) -> dict | None:
+    response = st.session_state.get(ASYNC_JOB_RESPONSE_STATE_KEY)
+    if not isinstance(response, dict):
+        st.session_state[ASYNC_JOB_ERROR_STATE_KEY] = (
+            "완료된 검수 결과를 불러올 수 없습니다."
+        )
+        return None
+
+    try:
+        detail_response = load_background_inspection_result(
+            api_client=api_client,
+            file_hash=file_hash,
+            response=response,
+        )
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        InspectionNotFoundError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        st.session_state[ASYNC_JOB_ERROR_STATE_KEY] = (
+            "완료된 검수 결과를 불러올 수 없습니다."
+        )
+        return None
+
+    st.session_state.pop(ASYNC_JOB_ERROR_STATE_KEY, None)
+    return detail_response
+
+
+def render_background_inspection(
+    *,
+    source_filename: str,
+    file_bytes: bytes,
+    content_type: str,
+) -> dict | None:
+    file_hash = build_file_hash(file_bytes)
+    synchronize_current_upload(st.session_state, file_hash)
+    detail_response = get_current_inspection_detail(st.session_state, file_hash)
+    job_id = st.session_state.get(ASYNC_JOB_ID_STATE_KEY)
+
+    st.caption("검수 작업은 백그라운드에서 처리됩니다.")
+    st.caption("상태 새로고침 버튼을 눌러 진행 상태를 확인해 주세요.")
+
+    if job_id is None:
+        if st.button("백그라운드 검수 시작", key="submit_async_inspection"):
+            submit_background_inspection_job(
+                source_filename=source_filename,
+                file_bytes=file_bytes,
+                content_type=content_type,
+                file_hash=file_hash,
+            )
+
+    job_id = st.session_state.get(ASYNC_JOB_ID_STATE_KEY)
+    status = st.session_state.get(ASYNC_JOB_STATUS_STATE_KEY)
+    if isinstance(job_id, str) and status in {"queued", "running"}:
+        if st.button("상태 새로고침", key="refresh_async_inspection"):
+            try:
+                api_client = create_catalogguard_api_client()
+            except CatalogGuardApiConfigurationError:
+                st.session_state[ASYNC_JOB_ERROR_STATE_KEY] = (
+                    "작업 상태를 확인할 수 없습니다."
+                )
+            else:
+                detail_response = refresh_background_inspection_job(
+                    api_client=api_client,
+                    file_hash=file_hash,
+                )
+
+    status = st.session_state.get(ASYNC_JOB_STATUS_STATE_KEY)
+    if status == "failed":
+        if st.button(
+            "백그라운드 검수 다시 시도",
+            key="retry_async_inspection",
+        ):
+            submit_background_inspection_job(
+                source_filename=source_filename,
+                file_bytes=file_bytes,
+                content_type=content_type,
+                file_hash=file_hash,
+            )
+
+    status = st.session_state.get(ASYNC_JOB_STATUS_STATE_KEY)
+    if status in {"queued", "running", "succeeded", "failed"}:
+        render_background_job_status(status)
+
+    detail_response = detail_response or get_current_inspection_detail(
+        st.session_state,
+        file_hash,
+    )
+    if status == "succeeded" and detail_response is None:
+        if st.button("결과 다시 불러오기", key="reload_async_result"):
+            try:
+                api_client = create_catalogguard_api_client()
+            except CatalogGuardApiConfigurationError:
+                st.session_state[ASYNC_JOB_ERROR_STATE_KEY] = (
+                    "완료된 검수 결과를 불러올 수 없습니다."
+                )
+            else:
+                detail_response = retry_background_inspection_result(
+                    api_client=api_client,
+                    file_hash=file_hash,
+                )
+
+    error_message = st.session_state.get(ASYNC_JOB_ERROR_STATE_KEY)
+    if isinstance(error_message, str) and error_message:
+        st.error(error_message)
+        st.caption("잠시 후 다시 시도하거나 ‘즉시 검수’를 이용해 주세요.")
+
+    return detail_response
+
+
 def render_uploaded_inspection_result(
     detail_response: dict,
     *,
@@ -939,6 +1216,15 @@ def render_csv_inspection_tab() -> None:
         mime="text/csv",
     )
 
+    inspection_mode = st.radio(
+        "검수 방식",
+        ["즉시 검수", "백그라운드 검수"],
+        index=0,
+        horizontal=True,
+        key=INSPECTION_MODE_STATE_KEY,
+    )
+    synchronize_inspection_mode(st.session_state, inspection_mode)
+
     uploaded_file = st.file_uploader("CSV 파일 업로드", type=["csv"])
 
     # 파일이 없으면 아래 검사 코드를 실행하지 않고 CSV 탭 렌더링만 마칩니다.
@@ -971,11 +1257,18 @@ def render_csv_inspection_tab() -> None:
     if len(masked_preview_df) > len(preview_rows):
         st.caption(f"전체 {len(masked_preview_df)}행 중 앞 100행만 표시합니다.")
 
-    detail_response = render_inspection_save_button(
-        source_filename=uploaded_file.name,
-        file_bytes=file_bytes,
-        content_type=getattr(uploaded_file, "type", None) or "text/csv",
-    )
+    if inspection_mode == "백그라운드 검수":
+        detail_response = render_background_inspection(
+            source_filename=uploaded_file.name,
+            file_bytes=file_bytes,
+            content_type=getattr(uploaded_file, "type", None) or "text/csv",
+        )
+    else:
+        detail_response = render_inspection_save_button(
+            source_filename=uploaded_file.name,
+            file_bytes=file_bytes,
+            content_type=getattr(uploaded_file, "type", None) or "text/csv",
+        )
     if detail_response is None:
         return
     render_uploaded_inspection_result(

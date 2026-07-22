@@ -126,6 +126,9 @@ class FakeAppStreamlit:
     def file_uploader(self, *args, **kwargs):
         return self.uploaded_file
 
+    def radio(self, label, options, *, index=0, **kwargs):
+        return options[index]
+
     def selectbox(self, label, options, **kwargs):
         return self.selectbox_values.get(label, options[0])
 

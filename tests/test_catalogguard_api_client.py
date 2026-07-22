@@ -72,6 +72,39 @@ CREATE_DUPLICATE_RESPONSE = {
     "results": [],
 }
 
+JOB_ID = "12345678-1234-5678-1234-567812345678"
+JOB_SUBMISSION_RESPONSE = {
+    "job_id": JOB_ID,
+    "status": "queued",
+    "status_url": f"/api/v1/inspection-jobs/{JOB_ID}",
+}
+
+
+def make_job_status_response(status):
+    response = {
+        "job_id": JOB_ID,
+        "status": status,
+        "created": None,
+        "inspection_run_id": None,
+        "summary": None,
+        "error_code": None,
+        "message": None,
+        "created_at": "2026-07-22T10:00:00+09:00",
+        "updated_at": "2026-07-22T10:00:01+09:00",
+    }
+    if status == "succeeded":
+        response.update(
+            created=True,
+            inspection_run_id=12,
+            summary=CREATE_RESPONSE["summary"],
+        )
+    if status == "failed":
+        response.update(
+            error_code="inspection_failed",
+            message="검수 처리 중 오류가 발생했습니다.",
+        )
+    return response
+
 VALID_REQUEST_ID = "a29ae9a1c62f4152bb96f6513c323d96"
 
 
@@ -378,6 +411,211 @@ def test_create_inspection_posts_multipart_file_with_timeout():
             "timeout": 8.5,
         }
     ]
+
+
+def test_submit_inspection_job_posts_multipart_file_and_accepts_202_response():
+    client, session = make_client(
+        response=FakeResponse(payload=JOB_SUBMISSION_RESPONSE, status_code=202),
+        timeout_seconds=7.5,
+    )
+
+    data = client.submit_inspection_job(
+        source_filename="products_dev.csv",
+        file_content=b"product_id,price\nP001,1000\n",
+        content_type="text/csv",
+    )
+
+    assert data == JOB_SUBMISSION_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/inspection-jobs",
+            "files": {
+                "file": (
+                    "products_dev.csv",
+                    b"product_id,price\nP001,1000\n",
+                    "text/csv",
+                )
+            },
+            "timeout": 7.5,
+        }
+    ]
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "succeeded", "failed"])
+def test_get_inspection_job_returns_supported_statuses(status):
+    response = make_job_status_response(status)
+    client, session = make_client(
+        response=FakeResponse(payload=response),
+        timeout_seconds=4.0,
+    )
+
+    data = client.get_inspection_job(JOB_ID)
+
+    assert data == response
+    assert session.calls == [
+        {
+            "url": f"https://api.example.com/api/v1/inspection-jobs/{JOB_ID}",
+            "params": None,
+            "timeout": 4.0,
+        }
+    ]
+
+
+def test_submit_inspection_job_converts_connection_error():
+    client_module = import_client_module()
+    client, _ = make_client(error=requests.ConnectionError("redis.internal:6379"))
+
+    with pytest.raises(client_module.CatalogGuardApiConnectionError) as error:
+        client.submit_inspection_job(
+            source_filename="products_dev.csv",
+            file_content=b"product_id,price\nP001,1000\n",
+        )
+
+    assert str(error.value) == "검수 이력 서버에 연결할 수 없습니다."
+    assert "redis.internal" not in str(error.value)
+
+
+def test_get_inspection_job_converts_timeout_error():
+    client_module = import_client_module()
+    client, _ = make_client(error=requests.Timeout("too slow"))
+
+    with pytest.raises(client_module.CatalogGuardApiTimeoutError):
+        client.get_inspection_job(JOB_ID)
+
+
+def test_get_inspection_job_converts_404_to_not_found():
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(status_code=404))
+
+    with pytest.raises(client_module.InspectionNotFoundError):
+        client.get_inspection_job(JOB_ID)
+
+
+def test_submit_inspection_job_rejects_invalid_json():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(json_error=requests.JSONDecodeError("bad json", "", 0))
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.submit_inspection_job(
+            source_filename="products_dev.csv",
+            file_content=b"product_id,price\nP001,1000\n",
+        )
+
+
+@pytest.mark.parametrize(
+    "method_name,payload",
+    [
+        ("submit_inspection_job", {"job_id": JOB_ID, "status": "queued"}),
+        ("get_inspection_job", {"job_id": JOB_ID}),
+    ],
+)
+def test_inspection_job_methods_reject_missing_required_fields(method_name, payload):
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        if method_name == "submit_inspection_job":
+            client.submit_inspection_job(
+                source_filename="products_dev.csv",
+                file_content=b"product_id,price\nP001,1000\n",
+            )
+        else:
+            client.get_inspection_job(JOB_ID)
+
+
+@pytest.mark.parametrize(
+    "method_name,payload",
+    [
+        (
+            "submit_inspection_job",
+            {**JOB_SUBMISSION_RESPONSE, "status": "running"},
+        ),
+        (
+            "get_inspection_job",
+            {**make_job_status_response("queued"), "status": "unknown"},
+        ),
+    ],
+)
+def test_inspection_job_methods_reject_invalid_status(method_name, payload):
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        if method_name == "submit_inspection_job":
+            client.submit_inspection_job(
+                source_filename="products_dev.csv",
+                file_content=b"product_id,price\nP001,1000\n",
+            )
+        else:
+            client.get_inspection_job(JOB_ID)
+
+
+def test_get_inspection_job_rejects_invalid_job_id_without_request():
+    client, session = make_client(
+        response=FakeResponse(payload=make_job_status_response("queued"))
+    )
+
+    with pytest.raises(ValueError, match="job_id"):
+        client.get_inspection_job("../internal")
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "field,invalid_value",
+    [
+        ("inspection_run_id", None),
+        ("inspection_run_id", "12"),
+        ("inspection_run_id", 0),
+        ("inspection_run_id", True),
+        ("created", None),
+        ("created", "true"),
+        ("created", 1),
+    ],
+)
+def test_get_inspection_job_rejects_invalid_succeeded_completion_fields(
+    field,
+    invalid_value,
+):
+    client_module = import_client_module()
+    payload = {
+        **make_job_status_response("succeeded"),
+        field: invalid_value,
+    }
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.get_inspection_job(JOB_ID)
+
+
+def test_get_inspection_job_rejects_non_object_json_response():
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload=[]))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.get_inspection_job(JOB_ID)
+
+
+@pytest.mark.parametrize(
+    "status_url",
+    [
+        "https://internal.example/api/v1/inspection-jobs/secret",
+        "/api/v1/inspection-jobs/87654321-4321-8765-4321-876543218765",
+        "/api/v1/inspection-jobs",
+    ],
+)
+def test_submit_inspection_job_rejects_mismatched_status_url(status_url):
+    client_module = import_client_module()
+    payload = {**JOB_SUBMISSION_RESPONSE, "status_url": status_url}
+    client, _ = make_client(response=FakeResponse(payload=payload, status_code=202))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.submit_inspection_job(
+            source_filename="products_dev.csv",
+            file_content=b"product_id,price\nP001,1000\n",
+        )
 
 
 def test_create_inspection_defaults_missing_created_to_true():

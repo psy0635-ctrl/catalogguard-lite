@@ -1,6 +1,7 @@
 from datetime import date
 import re
 from typing import Any
+from uuid import UUID
 
 import requests
 
@@ -29,6 +30,9 @@ DETAIL_RESPONSE_KEYS = (
     "summary",
     "results",
 )
+JOB_SUBMISSION_RESPONSE_KEYS = ("job_id", "status", "status_url")
+JOB_STATUS_RESPONSE_KEYS = ("job_id", "status")
+VALID_JOB_STATUSES = {"queued", "running", "succeeded", "failed"}
 
 
 def _normalize_request_id(value: object) -> str | None:
@@ -168,6 +172,66 @@ class CatalogGuardApiClient:
         )
         self._validate_response_keys(data, CREATE_RESPONSE_KEYS)
         return self._normalize_create_response(data)
+
+    def submit_inspection_job(
+        self,
+        *,
+        source_filename: str,
+        file_content: bytes,
+        content_type: str = "text/csv",
+    ) -> dict[str, Any]:
+        normalized_filename = str(source_filename).strip()
+        if not normalized_filename:
+            raise ValueError("source_filename must not be empty")
+        if not file_content:
+            raise ValueError("file_content must not be empty")
+
+        data = self._post_json(
+            "/api/v1/inspection-jobs",
+            files={
+                "file": (
+                    normalized_filename,
+                    file_content,
+                    content_type or "text/csv",
+                )
+            },
+        )
+        self._validate_response_keys(data, JOB_SUBMISSION_RESPONSE_KEYS)
+        normalized_job_id = self._normalize_job_id(data["job_id"])
+        if (
+            normalized_job_id is None
+            or data["status"] != "queued"
+            or data["status_url"]
+            != f"/api/v1/inspection-jobs/{normalized_job_id}"
+        ):
+            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+        return data
+
+    def get_inspection_job(self, job_id: str) -> dict[str, Any]:
+        normalized_job_id = self._normalize_job_id(job_id)
+        if normalized_job_id is None:
+            raise ValueError("job_id must be a valid UUID")
+
+        data = self._get_json(
+            f"/api/v1/inspection-jobs/{normalized_job_id}",
+            raise_not_found=True,
+        )
+        self._validate_response_keys(data, JOB_STATUS_RESPONSE_KEYS)
+        if (
+            self._normalize_job_id(data["job_id"]) != normalized_job_id
+            or data["status"] not in VALID_JOB_STATUSES
+        ):
+            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+        if data["status"] == "succeeded":
+            inspection_run_id = data.get("inspection_run_id")
+            created = data.get("created")
+            if (
+                type(inspection_run_id) is not int
+                or inspection_run_id <= 0
+                or type(created) is not bool
+            ):
+                raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+        return data
 
     def get_inspection_detail(self, inspection_run_id: int) -> dict[str, Any]:
         if inspection_run_id <= 0:
@@ -323,6 +387,14 @@ class CatalogGuardApiClient:
         if normalized_value not in VALID_INSPECTION_STATUS_FILTERS:
             raise ValueError("status must be one of: error, warning, normal")
         return normalized_value
+
+    def _normalize_job_id(self, value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            return str(UUID(value.strip()))
+        except (ValueError, AttributeError):
+            return None
 
     def _normalize_create_response(self, data: dict[str, Any]) -> dict[str, Any]:
         # created는 새 서버가 추가한 필드입니다.
