@@ -1937,6 +1937,53 @@ def test_repository_get_inspection_results_by_run_id_returns_empty_list(
     assert results == []
 
 
+def test_get_inspection_detail_executes_two_selects_without_n_plus_one(
+    database_session,
+):
+    session, created_source_filenames = database_session
+    source_filename = unique_filename("detail_query_count")
+    created_source_filenames.append(source_filename)
+    report = make_report(
+        [
+            {**BASE_ROW, "price": "0"},
+            {
+                **BASE_ROW,
+                "product_group_id": "G002",
+                "product_id": "P002",
+                "price": "0",
+            },
+        ]
+    )
+    inspection_run_id = save_inspection_report_id(
+        session,
+        source_filename=source_filename,
+        report=report,
+    )
+    session.expunge_all()
+    select_statements: list[str] = []
+
+    def collect_selects(conn, cursor, statement, parameters, context, executemany):
+        normalized_statement = statement.lstrip().lower()
+        if normalized_statement.startswith("select"):
+            select_statements.append(normalized_statement)
+
+    engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", collect_selects)
+    try:
+        detail = persistence_service.get_inspection_detail(
+            session,
+            inspection_run_id=inspection_run_id,
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", collect_selects)
+
+    assert detail is not None
+    assert len(detail.results) == report.summary.total_issues
+    assert len(select_statements) == 2
+    assert "inspection_runs" in select_statements[0]
+    assert "inspection_results" in select_statements[1]
+
+
 def test_persistence_imports_without_database_url(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     sys.modules.pop("app", None)
