@@ -1,0 +1,26 @@
+{
+  "profile_name": "sample_fashion_vendor",
+  "profile_version": "1",
+  "source_columns": {
+    "vendor_sku": ["product_group_id", "product_id"],
+    "item_name": "product_name",
+    "main_category": "category",
+    "brand_name": "seller",
+    "list_price": "price",
+    "colour": "color",
+    "size_name": "size",
+    "quantity": "stock",
+    "description_text": "description",
+    "image_link": "image_path"
+  },
+  "required_source_columns": [
+    "vendor_sku",
+    "item_name",
+    "main_category",
+    "list_price",
+    "colour",
+    "size_name",
+    "image_link"
+  ],
+  "defaults": {"stock": 0}
+}

@@ -1,0 +1,4 @@
+vendor_sku,item_name,main_category,brand_name,list_price,discount_price,colour,size_name,quantity,description_text,image_link
+000123,기본 티셔츠,TOP,Sample Brand,"12,000",10000,BLACK,M,10,기본 설명,https://example.test/one.jpg
+,오류 상품,TOP,Sample Brand,무료,0,BLACK,M,1.5,,https://example.test/two.jpg
+000125,할인 품질 확인 상품,TOP,Sample Brand,12000,15000,black,medium,,,https://example.test/three.jpg
