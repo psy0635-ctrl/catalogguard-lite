@@ -445,3 +445,7 @@ CatalogGuard Lite는 상품 운영자가 CSV 업로드만으로 상품 데이터
 검수 실행 10,000건과 상세 결과 100,000건의 합성 데이터를 격리 PostgreSQL 18 DB에 생성한 뒤 동일 CSV, 이력 목록·count, 상세 조회를 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`으로 측정했습니다. 기존 partial unique 복합 인덱스와 PK·외래 키 조회 인덱스가 실제 planner에 선택되었고, 목록용 복합 인덱스 후보는 절대 0.022ms 차이에 그쳤으며 상세용 후보는 사용되지 않고 크기만 증가했습니다. 따라서 보여주기식 migration은 추가하지 않고 opt-in 성능 테스트와 상세 조회 SELECT 2회 회귀 테스트를 추가했습니다.
 
 측정 환경, 실행 계획, buffer, 인덱스 크기, 재현 명령과 한계는 [SQL 쿼리·인덱스 성능 분석](sql_performance_analysis.md)에 기록했습니다.
+
+## 6.17 공급사 상품 CSV ETL MVP
+
+서로 다른 공급사 컬럼명을 CatalogGuard 표준 스키마로 변환하는 설정 기반 ETL MVP를 구현했습니다. JSON 매핑 프로필로 컬럼을 연결하고 가격·재고 형식을 안전하게 변환했으며, 변환할 수 없는 행은 오류 코드와 사용자용 메시지를 포함한 별도 CSV로 분리했습니다. 변환 결과를 실제 기존 업로드 검증과 `inspect_dataframe()`에 전달하는 통합 테스트로 호환성을 확인했습니다.

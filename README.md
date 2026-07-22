@@ -1415,3 +1415,18 @@ PostgreSQL 18의 격리 테스트 DB에서 검수 실행 10,000건과 상세 결
 $env:RUN_SQL_PERFORMANCE="1"
 python -m pytest -m performance tests/performance/test_inspection_query_performance.py -s -q
 ```
+
+## 공급사 CSV ETL MVP
+
+`etl.cli`는 샘플 패션 공급사 CSV를 CatalogGuard 표준 CSV로 변환합니다. JSON 프로필로 공급사 컬럼을 매핑하고, 변환할 수 없는 행은 오류 코드와 함께 별도 CSV로 분리합니다. 결과 CSV는 기존 업로드 검증과 검수 서비스에 그대로 전달할 수 있습니다.
+
+```powershell
+python -m etl.cli `
+  --input .\tests\fixtures\etl\sample_vendor_mixed.csv `
+  --profile .\config\etl\sample_fashion_vendor_v1.json `
+  --output .\output\catalogguard_ready.csv `
+  --rejects .\output\rejected_rows.csv `
+  --summary .\output\etl_summary.json
+```
+
+프로필 구조, 변환·오류 기준, 생성 파일과 제한사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.
