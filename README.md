@@ -309,11 +309,11 @@ API Client는 헤더 값의 앞뒤 공백을 제거한 뒤 정확히 32자리인
 | 마이그레이션 | Alembic `1.18.5` |
 | 테스트 | pytest |
 | CI | GitHub Actions |
-| CI 테스트 DB | PostgreSQL `18` 서비스 컨테이너 |
+| CI 테스트 서비스 | PostgreSQL `18`·Redis `7.4` 서비스 컨테이너 |
 
 `requirements.txt`에는 Streamlit 앱 실행에 필요한 기본 패키지가 있고, `requirements-api.txt`에는 FastAPI와 PostgreSQL 저장 계층에 필요한 패키지가 있습니다. FastAPI도 pandas 기반 검수 로직을 사용하므로 로컬 전체 시스템을 실행할 때는 두 파일을 모두 설치하는 것이 안전합니다.
 
-GitHub Actions는 PostgreSQL 테스트 DB 마이그레이션, 전체 테스트 자동 실행, Streamlit 서버 시작과 Health 응답 확인에 사용하며 배포는 수행하지 않습니다.
+GitHub Actions는 PostgreSQL·Redis 테스트 서비스, Alembic 마이그레이션, E2E를 제외한 전체 pytest, 실제 FastAPI·Celery Worker 비동기 CSV 검수 E2E 스모크 테스트, Streamlit 서버 시작과 Health 응답 확인에 사용하며 배포는 수행하지 않습니다.
 
 ## 8. 프로젝트 폴더 구조
 
@@ -438,7 +438,7 @@ catalogguard-lite/
 | `db/session.py` | SQLAlchemy 엔진, 세션 팩토리, DB 연결 확인, FastAPI 세션 의존성 |
 | `alembic/versions/20260703_0001_create_inspection_tables.py` | 검수 이력 저장 테이블 생성 마이그레이션 |
 | `alembic/versions/20260705_0002_add_inspection_file_identity.py` | 파일 해시와 검수 버전 컬럼, CHECK constraint, partial unique index 추가 마이그레이션 |
-| `.github/workflows/test.yml` | PostgreSQL 18 테스트 DB에 마이그레이션을 적용하고 전체 pytest와 Streamlit 시작 스모크 테스트를 실행하는 GitHub Actions workflow |
+| `.github/workflows/test.yml` | PostgreSQL 18·Redis 7.4 테스트 서비스에서 마이그레이션, E2E 제외 pytest, FastAPI·Celery 비동기 E2E, Streamlit 시작 스모크 테스트를 실행하는 GitHub Actions workflow |
 | `.env.example` | 로컬 PostgreSQL 연결 환경변수 예시 |
 | `requirements.txt` | Streamlit 앱 기본 실행 패키지 |
 | `requirements-api.txt` | FastAPI, PostgreSQL, Alembic 관련 패키지 |
@@ -1275,21 +1275,31 @@ python scripts/benchmark_inspection.py --rows 100 1000 5000 10000 --repeat 3 --w
 
 ### GitHub Actions 자동 테스트
 
-`.github/workflows/test.yml`의 `Test` workflow는 `main` 브랜치 push와 `main` 브랜치를 대상으로 한 pull request에서 실행됩니다. `ubuntu-latest` 환경에 Python 3.11을 준비하고 PostgreSQL 18 서비스 컨테이너를 시작한 뒤, 의존성을 설치하고 Alembic 마이그레이션을 적용합니다. 이어서 전체 pytest와 Streamlit 시작 스모크 테스트를 실행합니다.
+`.github/workflows/test.yml`의 `Test` workflow는 `main` 브랜치 push와 `main` 브랜치를 대상으로 한 pull request에서 실행됩니다. `ubuntu-latest` 환경에 Python 3.11을 준비하고 PostgreSQL 18·Redis 7.4 서비스 컨테이너를 시작한 뒤, 의존성을 설치하고 Alembic 마이그레이션을 적용합니다. 이어서 E2E를 제외한 전체 pytest, 실제 Celery Worker와 FastAPI 프로세스, 비동기 CSV 검수 E2E 스모크 테스트, Streamlit 시작 스모크 테스트를 실행합니다.
 
 ```text
 main push 또는 main 대상 pull request
 -> GitHub Actions Test workflow
--> PostgreSQL 18 서비스 컨테이너
+-> PostgreSQL 18·Redis 7.4 서비스 컨테이너
 -> Python 3.11과 의존성 설치
 -> Alembic upgrade head
--> 전체 pytest 1회 실행
+-> E2E 제외 전체 pytest 1회 실행
+-> Celery Worker와 FastAPI 프로세스 시작
+-> /health·/ready 확인
+-> 비동기 CSV 제출, 상태 polling, 결과·중복 재사용·임시 파일 정리 E2E 확인
+-> 실패 시 FastAPI·Celery 로그 출력 및 프로세스 정리
 -> Streamlit 서버 시작
 -> /_stcore/health 응답 확인
 -> Streamlit 프로세스 종료
 ```
 
-서비스 컨테이너는 workflow가 실행되는 동안만 사용하는 일회성 CI 테스트 DB입니다. Railway나 운영 PostgreSQL에 연결하지 않으며, 단위 테스트와 실제 PostgreSQL 연결·저장 통합 테스트를 함께 실행합니다.
+서비스 컨테이너는 workflow가 실행되는 동안만 사용하는 일회성 PostgreSQL·Redis CI 테스트 구성입니다. Railway나 운영 PostgreSQL·Redis에 연결하지 않으며, E2E를 제외한 단위 테스트와 실제 PostgreSQL 연결·저장 통합 테스트를 함께 실행합니다.
+
+비동기 E2E 테스트는 기본 `pytest`에서 `e2e` marker로 제외하고, workflow에서만 다음 명령으로 명시 실행합니다. 이 검사는 테스트용 PostgreSQL·Redis, FastAPI, Celery Worker가 모두 준비된 환경을 요구하며 운영 Redis·Celery 배포 검증과는 구분됩니다.
+
+```bash
+python -m pytest -m e2e tests/e2e/test_async_inspection_ci.py -q
+```
 
 Streamlit 시작 스모크 테스트는 `python -m streamlit run app.py`로 실제 서버를 `127.0.0.1:8501`에서 실행하고, 최대 30초 동안 `/_stcore/health`를 반복 확인합니다. 각 요청에는 1초의 연결 제한과 2초의 전체 제한을 적용합니다. HTTP `200`을 받은 뒤에도 2초 동안 프로세스가 살아 있는지 확인하므로, Streamlit 실행 명령이 성공하고 서버 Health endpoint가 응답하는 시작 단계를 검사합니다.
 
