@@ -22,6 +22,10 @@ jobs:
     env:
       DATABASE_URL: "postgresql+psycopg://postgres:postgres@localhost:5432/catalogguard_lite_test"
       TEST_DATABASE_URL: "postgresql+psycopg://postgres:postgres@localhost:5432/catalogguard_lite_test"
+      CELERY_BROKER_URL: "redis://127.0.0.1:6379/0"
+      REDIS_JOB_URL: "redis://127.0.0.1:6379/1"
+      INSPECTION_JOB_DIR: "${{ runner.temp }}/catalogguard-inspection-jobs"
+      INSPECTION_JOB_TTL_SECONDS: "300"
     services:
       postgres:
         image: postgres:18
@@ -36,6 +40,15 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -55,6 +68,124 @@ jobs:
         run: python -m alembic upgrade head
       - name: Run tests
         run: python -m pytest -q
+      - name: Prepare async inspection job directory
+        shell: bash
+        run: mkdir -p "$INSPECTION_JOB_DIR"
+      - name: Start Celery worker
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          log_file="${RUNNER_TEMP}/celery-worker.log"
+          pid_file="${RUNNER_TEMP}/celery-worker.pid"
+          nohup python -m celery -A workers.celery_app:celery_app worker --loglevel=INFO --pool=solo >"${log_file}" 2>&1 &
+          echo "$!" >"${pid_file}"
+      - name: Wait for Celery worker readiness
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          log_file="${RUNNER_TEMP}/celery-worker.log"
+          worker_pid="$(cat "${RUNNER_TEMP}/celery-worker.pid")"
+
+          for _ in {1..30}; do
+            if ! kill -0 "${worker_pid}" 2>/dev/null; then
+              echo "Celery worker exited before becoming ready."
+              cat "${log_file}" || true
+              exit 1
+            fi
+
+            if grep -q "ready\." "${log_file}"; then
+              echo "Celery worker is ready."
+              exit 0
+            fi
+
+            sleep 1
+          done
+
+          echo "Celery worker did not become ready within 30 seconds."
+          cat "${log_file}" || true
+          exit 1
+      - name: Start FastAPI server
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          log_file="${RUNNER_TEMP}/fastapi.log"
+          pid_file="${RUNNER_TEMP}/fastapi.pid"
+          nohup python -m uvicorn api.main:app --host 127.0.0.1 --port 8000 --no-access-log >"${log_file}" 2>&1 &
+          echo "$!" >"${pid_file}"
+      - name: Wait for FastAPI readiness
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          log_file="${RUNNER_TEMP}/fastapi.log"
+          api_pid="$(cat "${RUNNER_TEMP}/fastapi.pid")"
+
+          for _ in {1..30}; do
+            if ! kill -0 "${api_pid}" 2>/dev/null; then
+              echo "FastAPI server exited before becoming ready."
+              cat "${log_file}" || true
+              exit 1
+            fi
+
+            if curl --fail --silent --show-error --connect-timeout 1 --max-time 2 http://127.0.0.1:8000/health >/dev/null \
+              && curl --fail --silent --show-error --connect-timeout 1 --max-time 2 http://127.0.0.1:8000/ready >/dev/null; then
+              echo "FastAPI server is ready."
+              exit 0
+            fi
+
+            sleep 1
+          done
+
+          echo "FastAPI server did not become ready within 30 seconds."
+          cat "${log_file}" || true
+          exit 1
+      - name: Run async inspection E2E smoke test
+        env:
+          ASYNC_E2E_API_BASE_URL: "http://127.0.0.1:8000"
+        run: python -m pytest -m e2e tests/e2e/test_async_inspection_ci.py -q
+      - name: Print async process logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          echo "===== FastAPI log ====="
+          cat "${RUNNER_TEMP}/fastapi.log" || true
+          echo "===== Celery Worker log ====="
+          cat "${RUNNER_TEMP}/celery-worker.log" || true
+          echo "===== Async inspection job files ====="
+          find "${INSPECTION_JOB_DIR}" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null || true
+          echo "===== Async process status ====="
+          for process_name in fastapi celery-worker; do
+            pid_file="${RUNNER_TEMP}/${process_name}.pid"
+            if [[ -f "${pid_file}" ]]; then
+              process_id="$(cat "${pid_file}")"
+              ps -p "${process_id}" -o pid=,stat=,command= || true
+            fi
+          done
+          echo "===== Redis health ====="
+          redis-cli -h 127.0.0.1 ping || true
+          echo "===== PostgreSQL health ====="
+          pg_isready -h 127.0.0.1 -U postgres -d catalogguard_lite_test || true
+      - name: Clean up async inspection processes and files
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          for process_name in fastapi celery-worker; do
+            pid_file="${RUNNER_TEMP}/${process_name}.pid"
+            if [[ -f "${pid_file}" ]]; then
+              process_id="$(cat "${pid_file}")"
+              if kill -0 "${process_id}" 2>/dev/null; then
+                kill "${process_id}" 2>/dev/null || true
+                for _ in {1..5}; do
+                  kill -0 "${process_id}" 2>/dev/null || break
+                  sleep 1
+                done
+                kill -0 "${process_id}" 2>/dev/null && kill -KILL "${process_id}" 2>/dev/null || true
+              fi
+            fi
+          done
+
+          rm -rf -- "${RUNNER_TEMP}/catalogguard-inspection-jobs"
       - name: Smoke test Streamlit startup
         shell: bash
         env:
