@@ -440,3 +440,8 @@ CatalogGuard Lite는 상품 운영자가 CSV 업로드만으로 상품 데이터
 - 운영자가 이해할 수 있도록 내부 오류를 한글 메시지와 수정 권장사항으로 바꿨습니다.
 - 일회성 PostgreSQL 18·Redis 7.4 테스트 서비스에 Alembic 마이그레이션을 적용하고, E2E 제외 pytest와 FastAPI·Celery 비동기 E2E를 분리해 운영 DB·Redis와 격리된 검증 흐름을 구성했습니다.
 - 비동기 E2E 뒤에 운영 서비스와 분리된 Streamlit 시작 검사를 실행해 실제 서버 프로세스와 Health 응답까지 검증 범위를 보완했습니다.
+## 6.16 PostgreSQL 쿼리·인덱스 성능 검증
+
+검수 실행 10,000건과 상세 결과 100,000건의 합성 데이터를 격리 PostgreSQL 18 DB에 생성한 뒤 동일 CSV, 이력 목록·count, 상세 조회를 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`으로 측정했습니다. 기존 partial unique 복합 인덱스와 PK·외래 키 조회 인덱스가 실제 planner에 선택되었고, 목록용 복합 인덱스 후보는 절대 0.022ms 차이에 그쳤으며 상세용 후보는 사용되지 않고 크기만 증가했습니다. 따라서 보여주기식 migration은 추가하지 않고 opt-in 성능 테스트와 상세 조회 SELECT 2회 회귀 테스트를 추가했습니다.
+
+측정 환경, 실행 계획, buffer, 인덱스 크기, 재현 명령과 한계는 [SQL 쿼리·인덱스 성능 분석](sql_performance_analysis.md)에 기록했습니다.

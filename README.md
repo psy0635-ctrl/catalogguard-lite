@@ -1405,3 +1405,13 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - 파일명 검색을 수정할 때는 `%`, `_`, `\`가 일반 문자처럼 검색되는지 확인합니다.
 - Streamlit 세션 중복 방지와 DB 수준 중복 방지는 역할이 다르므로 둘 다 유지합니다.
 - 문서에 새 기능을 추가하기 전에는 실제 코드와 테스트가 먼저 구현되어 있는지 확인합니다.
+## SQL 쿼리·인덱스 성능 분석
+
+PostgreSQL 18의 격리 테스트 DB에서 검수 실행 10,000건과 상세 결과 100,000건을 생성하고 동일 CSV, 이력 목록·count, 상세 조회를 `EXPLAIN ANALYZE BUFFERS`로 측정했습니다. 기존 인덱스가 핵심 조회에 사용되었고 새 후보 인덱스의 실질 이득이 확인되지 않아 migration과 Repository 쿼리는 변경하지 않았습니다.
+
+재현 가능한 opt-in 성능 테스트와 실행 계획, 후보 인덱스를 기각한 근거는 [SQL 성능 분석 문서](docs/sql_performance_analysis.md)에 정리했습니다. 기본 pytest에서는 성능 테스트를 제외하며, 전용 test/perf DB에서만 다음과 같이 실행합니다.
+
+```powershell
+$env:RUN_SQL_PERFORMANCE="1"
+python -m pytest -m performance tests/performance/test_inspection_query_performance.py -s -q
+```
