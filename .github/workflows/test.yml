@@ -24,7 +24,6 @@ jobs:
       TEST_DATABASE_URL: "postgresql+psycopg://postgres:postgres@localhost:5432/catalogguard_lite_test"
       CELERY_BROKER_URL: "redis://127.0.0.1:6379/0"
       REDIS_JOB_URL: "redis://127.0.0.1:6379/1"
-      INSPECTION_JOB_DIR: "${{ runner.temp }}/catalogguard-inspection-jobs"
       INSPECTION_JOB_TTL_SECONDS: "300"
     services:
       postgres:
@@ -68,6 +67,9 @@ jobs:
         run: python -m alembic upgrade head
       - name: Run tests
         run: python -m pytest -q
+      - name: Configure async inspection job directory
+        shell: bash
+        run: echo "INSPECTION_JOB_DIR=${RUNNER_TEMP}/catalogguard-inspection-jobs" >> "$GITHUB_ENV"
       - name: Prepare async inspection job directory
         shell: bash
         run: mkdir -p "$INSPECTION_JOB_DIR"
