@@ -17,6 +17,7 @@ PREVIEW_MASK_EXCLUDED_COLUMNS = frozenset(
         "product_id",
         "stock",
         "price",
+        "sale_price",
     }
 )
 

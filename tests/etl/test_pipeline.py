@@ -23,6 +23,7 @@ PROFILE = {
         "size_name": "size",
         "quantity": "stock",
         "list_price": "price",
+        "discount_price": "sale_price",
         "image_link": "image_path",
         "description_text": "description",
         "brand_name": "seller",
@@ -137,6 +138,8 @@ def test_run_pipeline_writes_standard_reject_and_summary_files(tmp_path):
         rejected_rows = list(csv.DictReader(rejects_file))
     assert [row["product_id"] for row in output_rows] == ["000123", "000125"]
     assert output_rows[1]["stock"] == "0"
+    assert output_rows[0]["sale_price"] == "10000"
+    assert output_rows[1]["sale_price"] == "15000"
     assert rejected_rows[0]["source_row_number"] == "3"
     assert "INVALID_PRICE" in rejected_rows[0]["error_code"]
 
@@ -151,6 +154,10 @@ def test_pipeline_output_is_accepted_by_real_catalogguard_validator_and_inspecto
     report = inspect_dataframe(dataframe)
     assert len(dataframe) == 2
     assert report.summary.total_products == 2
+    sale_price_issues = [
+        issue for issue in report.issues if issue.rule == "sale_price_greater_than_price"
+    ]
+    assert [issue.product_id for issue in sale_price_issues] == ["000125"]
 
 
 def test_pipeline_is_deterministic_for_output_and_reject_files(tmp_path):

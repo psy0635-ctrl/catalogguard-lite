@@ -52,10 +52,13 @@ def load_products_from_dataframe(dataframe: pd.DataFrame) -> list[Product]:
         )
 
     products = []
+    has_sale_price_column = "sale_price" in df.columns
     for row in df.to_dict(orient="records"):
         # stock과 price는 비어 있거나 잘못된 숫자일 수 있으므로 안전하게 파싱합니다.
         stock = parse_optional_int(clean_text(row["stock"]))
         price = parse_optional_int(clean_text(row["price"]))
+        sale_price_text = clean_text(row.get("sale_price", ""))
+        sale_price = parse_optional_int(sale_price_text)
         products.append(
             Product(
                 product_group_id=clean_text(row["product_group_id"]),
@@ -67,6 +70,8 @@ def load_products_from_dataframe(dataframe: pd.DataFrame) -> list[Product]:
                 stock=stock,
                 price=price,
                 image_path=clean_text(row["image_path"]),
+                sale_price=sale_price,
+                sale_price_provided=has_sale_price_column and bool(sale_price_text),
                 description=clean_optional_text(row, "description"),
                 seller=clean_optional_text(row, "seller"),
             )

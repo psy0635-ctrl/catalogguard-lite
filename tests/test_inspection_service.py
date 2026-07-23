@@ -42,6 +42,92 @@ def test_inspect_dataframe_reports_fashion_warnings_without_changing_source_data
     assert report.products[0].size == "medium"
 
 
+def test_inspect_dataframe_accepts_sale_price_as_optional_column():
+    dataframe = pd.DataFrame(
+        [
+            {
+                "product_group_id": "G001",
+                "product_id": "P001",
+                "product_name": "상품 A",
+                "category": "TOP",
+                "color": "BLACK",
+                "size": "M",
+                "stock": "10",
+                "price": "50000",
+                "sale_price": "",
+                "image_path": "image.jpg",
+            },
+            {
+                "product_group_id": "G001",
+                "product_id": "P002",
+                "product_name": "상품 B",
+                "category": "TOP",
+                "color": "BLACK",
+                "size": "L",
+                "stock": "10",
+                "price": "50000",
+                "sale_price": "60000",
+                "image_path": "image2.jpg",
+            },
+        ]
+    )
+
+    report = inspect_dataframe(dataframe)
+    sale_price_issues = [
+        issue for issue in report.issues if issue.rule == "sale_price_greater_than_price"
+    ]
+
+    assert [issue.product_id for issue in sale_price_issues] == ["P002"]
+    assert report.products[0].sale_price is None
+    assert report.products[1].sale_price == 60000
+
+
+def test_inspect_dataframe_does_not_compare_sale_price_when_price_is_invalid():
+    dataframe = pd.DataFrame(
+        [
+            {
+                "product_group_id": "G001",
+                "product_id": "P001",
+                "product_name": "상품 A",
+                "category": "TOP",
+                "color": "BLACK",
+                "size": "M",
+                "stock": "10",
+                "price": "무료",
+                "sale_price": "60000",
+                "image_path": "image.jpg",
+            }
+        ]
+    )
+
+    report = inspect_dataframe(dataframe)
+
+    assert [issue.rule for issue in report.issues] == ["invalid_price"]
+
+
+def test_inspect_dataframe_reports_invalid_sale_price_without_stopping():
+    dataframe = pd.DataFrame(
+        [
+            {
+                "product_group_id": "G001",
+                "product_id": "P001",
+                "product_name": "상품 A",
+                "category": "TOP",
+                "color": "BLACK",
+                "size": "M",
+                "stock": "10",
+                "price": "50000",
+                "sale_price": "무료",
+                "image_path": "image.jpg",
+            }
+        ]
+    )
+
+    report = inspect_dataframe(dataframe)
+
+    assert [issue.rule for issue in report.issues] == ["invalid_sale_price"]
+
+
 def test_inspect_dataframe_reports_duplicate_variants_and_preserves_original_values():
     dataframe = pd.DataFrame(
         [

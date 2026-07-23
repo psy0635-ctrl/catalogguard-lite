@@ -15,6 +15,8 @@ class Product:
     stock: int | None
     price: int | None
     image_path: str
+    sale_price: int | None = None
+    sale_price_provided: bool = False
     description: str = ""
     seller: str = ""
 

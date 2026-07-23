@@ -22,6 +22,9 @@ RULE_LABELS = {
     "out_of_stock": "품절 상품",
     "invalid_price": "가격 오류",
     "invalid_non_positive_price": "가격 오류",
+    "invalid_sale_price": "할인가 오류",
+    "invalid_non_positive_sale_price": "할인가 오류",
+    "sale_price_greater_than_price": "할인가 오류",
     "zero_price": "가격 0원",
     "price_outlier": "가격 이상치",
     "category_price_anomaly": "가격 이상치",
@@ -56,6 +59,11 @@ RECOMMENDATIONS = {
     "out_of_stock": "판매 상태와 재입고 여부를 확인하세요.",
     "invalid_price": PRICE_RECOMMENDATION,
     "invalid_non_positive_price": PRICE_RECOMMENDATION,
+    "invalid_sale_price": "할인가를 비워 두거나 숫자로 입력하세요.",
+    "invalid_non_positive_sale_price": "할인가는 0보다 큰 숫자로 입력하세요.",
+    "sale_price_greater_than_price": (
+        "sale_price를 price 이하로 수정하거나 정상가와 할인가가 뒤바뀌었는지 확인하세요."
+    ),
     "zero_price": PRICE_RECOMMENDATION,
     "price_outlier": (
         "같은 카테고리 상품의 일반적인 가격 범위와 비교하여 "
@@ -97,6 +105,9 @@ RISK_LEVELS = {
     "out_of_stock": "낮음",
     "invalid_price": "높음",
     "invalid_non_positive_price": "높음",
+    "invalid_sale_price": "높음",
+    "invalid_non_positive_sale_price": "높음",
+    "sale_price_greater_than_price": "높음",
     "zero_price": "중간",
     "price_outlier": "중간",
     "category_price_anomaly": "중간",
@@ -332,6 +343,25 @@ def translate_issue_message(issue: ValidationIssue) -> str:
         if match:
             price = int(match.group(1))
             return f"상품 가격이 0 이하입니다. 현재 가격: {price:,}원."
+
+    if issue.rule == "invalid_sale_price":
+        if message == "sale_price is missing or not a number":
+            return "할인가가 누락되었거나 숫자 형식이 아닙니다."
+
+    if issue.rule == "invalid_non_positive_sale_price":
+        match = re.fullmatch(r"sale_price (-?\d+) is not positive", message)
+        if match:
+            sale_price = int(match.group(1))
+            return f"할인가가 0 이하입니다. 현재 할인가: {sale_price:,}원."
+
+    if issue.rule == "sale_price_greater_than_price":
+        match = re.fullmatch(
+            r"sale_price (\d+) is greater than price (\d+)",
+            message,
+        )
+        if match:
+            sale_price, price = (int(value) for value in match.groups())
+            return f"할인가 {sale_price:,}원이 정상가 {price:,}원보다 큽니다."
 
     if issue.rule == "zero_price" and message == "price is 0":
         return "가격이 0원으로 입력되었습니다."

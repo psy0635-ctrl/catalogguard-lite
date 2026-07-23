@@ -82,6 +82,14 @@ def test_create_masked_preview_does_not_mask_product_id_stock_or_price_columns()
     assert masked_df.loc[0, "description"] == "010****5678"
 
 
+def test_create_masked_preview_does_not_mask_sale_price_column():
+    original_df = pd.DataFrame({"sale_price": ["010-1234-5678"]})
+
+    masked_df = create_masked_preview(original_df)
+
+    assert masked_df.loc[0, "sale_price"] == "010-1234-5678"
+
+
 def test_create_masked_preview_handles_blank_missing_and_non_string_values():
     list_value = ["010-1234-5678"]
     original_df = pd.DataFrame(

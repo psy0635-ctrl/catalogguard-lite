@@ -15,6 +15,7 @@ PROFILE = ETLProfile(
         "size_name": "size",
         "quantity": "stock",
         "list_price": "price",
+        "discount_price": "sale_price",
         "image_link": "image_path",
         "description_text": "description",
         "brand_name": "seller",
@@ -61,6 +62,7 @@ def test_transform_rows_trims_text_preserves_product_id_and_parses_numbers():
             "size": "medium",
             "stock": "10",
             "price": "12000",
+            "sale_price": "15000",
             "image_path": "https://example.test/t-shirt.jpg",
             "description": "편안한 티셔츠",
             "seller": "Sample Brand",
@@ -75,6 +77,24 @@ def test_transform_rows_uses_stock_default_for_blank_source_value():
 
     assert result.loaded_rows[0]["stock"] == "0"
     assert result.rejected_rows == []
+
+
+def test_transform_rows_allows_blank_discount_price():
+    row = {**VALID_ROW, "discount_price": " "}
+
+    result = transform_rows([row], PROFILE)
+
+    assert result.rejected_rows == []
+    assert result.loaded_rows[0]["sale_price"] == ""
+
+
+def test_transform_rows_rejects_unparseable_discount_price_with_existing_price_error_code():
+    row = {**VALID_ROW, "discount_price": "무료"}
+
+    result = transform_rows([row], PROFILE)
+
+    assert result.loaded_rows == []
+    assert json.loads(result.rejected_rows[0]["error_code"]) == ["INVALID_PRICE"]
 
 
 def test_transform_rows_uses_vendor_sku_as_product_group_id_when_profile_maps_it_twice():

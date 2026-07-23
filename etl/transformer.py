@@ -38,6 +38,13 @@ def _parse_price(value: str) -> tuple[str | None, str | None]:
     return str(parsed), None
 
 
+def _parse_optional_price(value: str) -> tuple[str, str | None]:
+    if not value:
+        return "", None
+    parsed_price, price_error = _parse_price(value)
+    return parsed_price or "", price_error
+
+
 def _parse_stock(value: str) -> tuple[str | None, str | None]:
     if not value:
         return None, "INVALID_STOCK"
@@ -103,6 +110,12 @@ def transform_rows(
             errors.append((price_error, ERROR_MESSAGES[price_error]))
         else:
             row["price"] = parsed_price
+
+        parsed_sale_price, sale_price_error = _parse_optional_price(row["sale_price"])
+        if sale_price_error:
+            errors.append((sale_price_error, ERROR_MESSAGES[sale_price_error]))
+        else:
+            row["sale_price"] = parsed_sale_price
 
         parsed_stock, stock_error = _parse_stock(row["stock"])
         if stock_error:

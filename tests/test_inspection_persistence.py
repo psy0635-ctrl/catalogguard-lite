@@ -433,8 +433,8 @@ def test_build_result_create_items_maps_group_category_without_schema_changes():
     assert {item.risk_level for item in category_items} == {"중간"}
 
 
-def test_current_inspection_version_is_four_for_group_category_rule():
-    assert INSPECTION_VERSION == "4"
+def test_current_inspection_version_is_five_for_sale_price_rule():
+    assert INSPECTION_VERSION == "5"
 
 
 def test_build_result_create_items_rejects_blank_required_result_fields():

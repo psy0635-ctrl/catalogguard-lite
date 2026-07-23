@@ -491,6 +491,17 @@ def test_translate_non_numeric_price_message_to_korean():
     assert message == "가격이 누락되었거나 숫자 형식이 아닙니다."
 
 
+def test_translate_sale_price_greater_than_price_message_to_korean():
+    issue = make_issue(
+        rule="sale_price_greater_than_price",
+        message="sale_price 60000 is greater than price 50000",
+    )
+
+    message = translate_issue_message(issue)
+
+    assert message == "할인가 60,000원이 정상가 50,000원보다 큽니다."
+
+
 def test_translate_non_positive_price_message_to_korean():
     issue = make_issue(
         rule="invalid_non_positive_price",

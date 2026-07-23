@@ -1286,6 +1286,23 @@ def test_inspection_api_keeps_price_anomaly_detection():
     )
 
 
+def test_inspection_api_displays_sale_price_relation_error():
+    rows = [
+        {**BASE_ROW, "product_id": "P001", "price": "50000", "sale_price": "60000"},
+    ]
+
+    response = post_csv(
+        make_csv_text(rows, columns=[*ALL_COLUMNS, "sale_price"]).encode("utf-8")
+    )
+
+    assert response.status_code == 200
+    result = response.json()["results"][0]
+    assert result["product_id"] == "P001"
+    assert result["error_field"] == "할인가 오류"
+    assert result["reason"] == "할인가 60,000원이 정상가 50,000원보다 큽니다."
+    assert "sale_price를 price 이하로 수정" in result["recommendation"]
+
+
 def test_inspection_api_keeps_category_mismatch_detection():
     csv_text = make_csv_text([{**BASE_ROW, "product_name": "가죽 부츠", "category": "TOP"}])
 

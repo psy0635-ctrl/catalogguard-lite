@@ -17,7 +17,7 @@ DEFAULT_REDIS_JOB_URL = "redis://localhost:6379/1"
 DEFAULT_INSPECTION_JOB_DIR = BASE_DIR / "var" / "inspection_jobs"
 DEFAULT_INSPECTION_JOB_TTL_SECONDS = 24 * 60 * 60
 # 검수 규칙 버전입니다. 규칙이 바뀌어 같은 CSV도 다시 저장해야 하면 이 값을 올립니다.
-INSPECTION_VERSION = "4"
+INSPECTION_VERSION = "5"
 
 DATA_DIR = BASE_DIR / "data"
 DEV_DATA_PATH = DATA_DIR / "dev" / "products_dev.csv"
@@ -41,6 +41,7 @@ REQUIRED_COLUMNS = [
 ]
 
 OPTIONAL_COLUMNS = [
+    "sale_price",
     "description",
     "seller",
 ]

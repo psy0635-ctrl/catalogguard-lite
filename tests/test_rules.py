@@ -17,6 +17,7 @@ from core.rules import (
     check_non_standard_size,
     check_price,
     check_price_outliers,
+    check_sale_price,
     check_prohibited_and_personal_information,
     check_stock,
     run_all_rules,
@@ -411,6 +412,32 @@ def test_check_price_flags_non_numeric_price():
     assert len(issues) == 1
     assert issues[0].rule == "invalid_price"
     assert issues[0].message == "price is missing or not a number"
+
+
+@pytest.mark.parametrize("sale_price", [39000, 50000, None])
+def test_check_sale_price_allows_blank_or_non_greater_sale_prices(sale_price):
+    products = [make_product(price=50000, sale_price=sale_price)]
+
+    assert check_sale_price(products) == []
+
+
+def test_check_sale_price_flags_sale_price_greater_than_price():
+    products = [make_product(price=50000, sale_price=60000)]
+
+    issues = check_sale_price(products)
+
+    assert len(issues) == 1
+    assert issues[0].rule == "sale_price_greater_than_price"
+    assert issues[0].severity == "error"
+    assert issues[0].product_id == "P001"
+    assert issues[0].product_group_id == "G001"
+    assert issues[0].message == "sale_price 60000 is greater than price 50000"
+
+
+def test_check_sale_price_skips_comparison_when_price_is_invalid():
+    products = [make_product(price=None, sale_price=60000)]
+
+    assert check_sale_price(products) == []
 
 
 def test_check_price_outliers_flags_high_price_by_category():

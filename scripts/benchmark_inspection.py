@@ -141,6 +141,7 @@ def generate_product_rows(
             "size": random_source.choice(_SIZES),
             "stock": str(random_source.randrange(0, 101)),
             "price": str(price),
+            "sale_price": "",
             "image_path": f"benchmark/images/product_{row_index:05d}.jpg",
             "description": "BENCHMARK SYNTHETIC CATALOG ITEM",
             "seller": f"BENCHMARK_SELLER_{row_index % 10:02d}",

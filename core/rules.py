@@ -309,6 +309,56 @@ def check_price(products: list[Product]) -> list[ValidationIssue]:
     return issues
 
 
+def check_sale_price(products: list[Product]) -> list[ValidationIssue]:
+    issues = []
+    for product in products:
+        sale_price_provided = product.sale_price_provided or product.sale_price is not None
+        if not sale_price_provided:
+            continue
+
+        if product.sale_price is None:
+            issues.append(
+                ValidationIssue(
+                    rule="invalid_sale_price",
+                    severity="error",
+                    product_id=product.product_id,
+                    product_group_id=product.product_group_id,
+                    message="sale_price is missing or not a number",
+                )
+            )
+            continue
+
+        if product.sale_price <= 0:
+            issues.append(
+                ValidationIssue(
+                    rule="invalid_non_positive_sale_price",
+                    severity="error",
+                    product_id=product.product_id,
+                    product_group_id=product.product_group_id,
+                    message=f"sale_price {product.sale_price} is not positive",
+                )
+            )
+            continue
+
+        if product.price is None or product.price <= 0:
+            continue
+
+        if product.sale_price > product.price:
+            issues.append(
+                ValidationIssue(
+                    rule="sale_price_greater_than_price",
+                    severity="error",
+                    product_id=product.product_id,
+                    product_group_id=product.product_group_id,
+                    message=(
+                        f"sale_price {product.sale_price} is greater than "
+                        f"price {product.price}"
+                    ),
+                )
+            )
+    return issues
+
+
 def check_price_outliers(products: list[Product]) -> list[ValidationIssue]:
     """카테고리별 가격 중앙값을 기준으로 지나치게 높거나 낮은 가격을 찾습니다."""
     return find_category_price_anomalies(products)
@@ -439,6 +489,7 @@ RULES = [
     check_invalid_category,
     check_stock,
     check_price,
+    check_sale_price,
     check_price_outliers,
     check_product_category_mismatch,
     check_prohibited_and_personal_information,

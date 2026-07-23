@@ -7,6 +7,7 @@
     "main_category": "category",
     "brand_name": "seller",
     "list_price": "price",
+    "discount_price": "sale_price",
     "colour": "color",
     "size_name": "size",
     "quantity": "stock",
