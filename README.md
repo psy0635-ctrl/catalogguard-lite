@@ -496,10 +496,11 @@ catalogguard-lite/
 | `price` | 판매 가격 |
 | `image_path` | 상품 이미지 경로 |
 
-선택 컬럼은 2개입니다.
+선택 컬럼은 3개입니다.
 
 | 컬럼 | 설명 |
 |---|---|
+| `sale_price` | 할인가. 비어 있으면 할인하지 않는 상품으로 처리하며, 입력된 경우 `price`보다 클 수 없습니다. |
 | `description` | 상품 설명 |
 | `seller` | 판매자 정보 |
 
@@ -1101,7 +1102,7 @@ curl.exe "http://127.0.0.1:8001/api/v1/inspections?limit=10&offset=0&filename=pr
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
 | `file_sha256` | `String(64)`, nullable | CSV bytes의 SHA-256 hex 문자열입니다. migration 이전 기존 이력은 NULL입니다. |
-| `inspection_version` | `String(20)`, nullable 아님 | 검수 규칙 버전입니다. 현재 `INSPECTION_VERSION` 값은 `"4"`입니다. DB `server_default`는 없습니다. |
+| `inspection_version` | `String(20)`, nullable 아님 | 검수 규칙 버전입니다. 현재 `INSPECTION_VERSION` 값은 `"5"`입니다. DB `server_default`는 없습니다. |
 
 중복 판단 기준은 같은 `file_sha256`과 같은 `inspection_version`입니다.
 
@@ -1109,7 +1110,7 @@ curl.exe "http://127.0.0.1:8001/api/v1/inspections?limit=10&offset=0&filename=pr
 - 파일명이 같아도 CSV bytes가 다르면 새로운 이력으로 저장합니다.
 - 같은 CSV라도 검수 규칙 버전이 달라지면 다시 검수하고 새 이력으로 저장할 수 있습니다.
 
-상품 그룹 내 중복 색상·사이즈 옵션 규칙을 추가할 때 검수 버전을 `"3"`으로 올렸고, 상품 그룹 카테고리 일관성 규칙을 추가하면서 현재 `INSPECTION_VERSION`을 `"4"`로 올렸습니다. 동일 CSV라도 버전 3과 버전 4는 별도 검수 결과로 저장할 수 있습니다. 파일 해시와 검수 버전을 함께 사용하는 기존 중복 저장 방지 기준은 그대로 유지됩니다. DB 스키마 변경은 없어 이 기능을 위한 Alembic migration은 추가하지 않았으며, 과거 이력과 기존 migration의 `"1"` backfill 값은 그대로 유지합니다.
+상품 그룹 내 중복 색상·사이즈 옵션 규칙을 추가할 때 검수 버전을 `"3"`으로 올렸고, 상품 그룹 카테고리 일관성 규칙을 추가하면서 `"4"`로 올렸습니다. 이번에 선택적 `sale_price`와 정상가·할인가 관계 규칙을 추가하면서 현재 `INSPECTION_VERSION`을 `"5"`로 올렸습니다. 동일 CSV라도 버전 4와 버전 5는 별도 검수 결과로 저장할 수 있습니다. 파일 해시와 검수 버전을 함께 사용하는 기존 중복 저장 방지 기준은 그대로 유지됩니다. DB 스키마 변경은 없어 이 기능을 위한 Alembic migration은 추가하지 않았으며, 과거 이력과 기존 migration의 `"1"` backfill 값은 그대로 유지합니다.
 
 PostgreSQL에는 다음 partial unique index가 있습니다.
 
@@ -1280,10 +1281,10 @@ python -m pytest -q
 현재 로컬 환경에서 확인된 테스트 결과는 다음과 같습니다.
 
 ```text
-818 passed, 26 skipped, 2 deselected
+831 passed, 26 skipped, 2 deselected
 ```
 
-이 수치는 현재 개발 PC에서 기본 pytest 설정으로 실행한 로컬 결과입니다. `e2e`·`performance` marker는 기본 실행에서 제외되고, PostgreSQL·Redis 등 별도 서비스가 필요한 일부 검증은 로컬 환경에 따라 skipped 처리됩니다. ETL 테스트와 `tests/test_api_inspections.py`를 함께 실행한 통합 검증은 `86 passed`였고, 샘플 공급사 CSV CLI는 전체 3건 중 정상 2건·오류 1건을 종료 코드 0으로 처리했습니다. GitHub Actions의 실행 결과와 테스트 개수는 별도로 확인해야 하며, 이 문서의 로컬 수치를 CI 수치로 해석하면 안 됩니다.
+이 수치는 현재 개발 PC에서 기본 pytest 설정으로 실행한 로컬 결과입니다. `e2e`·`performance` marker는 기본 실행에서 제외되고, PostgreSQL·Redis 등 별도 서비스가 필요한 일부 검증은 로컬 환경에 따라 skipped 처리됩니다. ETL 테스트와 `tests/test_api_inspections.py`를 함께 실행한 통합 검증은 `89 passed`였고, 샘플 공급사 CSV CLI는 전체 3건 중 정상 2건·오류 1건을 종료 코드 0으로 처리했습니다. GitHub Actions의 실행 결과와 테스트 개수는 별도로 확인해야 하며, 이 문서의 로컬 수치를 CI 수치로 해석하면 안 됩니다.
 
 ### 동기 검수 성능 측정
 
@@ -1455,7 +1456,7 @@ python -m pytest -m performance tests/performance/test_inspection_query_performa
 
 ## 공급사 CSV ETL MVP
 
-`etl.cli`는 샘플 패션 공급사 CSV를 CatalogGuard 표준 CSV로 변환합니다. JSON 프로필로 공급사 컬럼을 매핑하고, 변환할 수 없는 행은 오류 코드와 함께 별도 CSV로 분리합니다. 결과 CSV는 기존 업로드 검증과 검수 서비스에 그대로 전달할 수 있습니다.
+`etl.cli`는 샘플 패션 공급사 CSV를 CatalogGuard 표준 CSV로 변환합니다. JSON 프로필로 공급사 컬럼을 매핑하고, `discount_price`를 선택 표준 컬럼 `sale_price`로 변환합니다. 변환할 수 없는 행은 오류 코드와 함께 별도 CSV로 분리하며, 정상가보다 큰 할인가 같은 상품 품질 문제는 정상 행으로 남겨 기존 검수기가 처리하도록 합니다. 결과 CSV는 기존 업로드 검증과 검수 서비스에 그대로 전달할 수 있습니다.
 
 ```powershell
 python -m etl.cli `
