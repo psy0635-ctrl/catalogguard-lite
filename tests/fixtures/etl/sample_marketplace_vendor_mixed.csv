@@ -1,0 +1,4 @@
+style_id,sku_code,title,category_code,label,regular_price,promo_price,tone,fit_size,available_qty,details,photo
+STYLE-100,SKU-100-BLK-M,Essential Tee,TOP,Sample Market,"59,000",49000,BLACK,M,7,Cotton tee,https://example.test/market-black.jpg
+STYLE-100,SKU-100-WHT-L,Essential Tee,TOP,Sample Market,59000,69000,WHITE,L,,,https://example.test/market-white.jpg
+STYLE-100,SKU-100-RED-S,Essential Tee,TOP,Sample Market,가격문의,49000,RED,S,-1,Cotton tee,https://example.test/market-red.jpg

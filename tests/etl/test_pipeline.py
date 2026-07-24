@@ -10,6 +10,7 @@ from core.inspection_service import inspect_dataframe
 from core.upload_validator import validate_and_read_uploaded_csv
 from etl import pipeline as pipeline_module
 from etl.pipeline import ETLPipelineError, run_pipeline
+from etl.profile_loader import load_profile
 
 
 PROFILE = {
@@ -263,3 +264,65 @@ def test_repository_sample_profile_converts_mixed_supplier_fixture(tmp_path):
     with output_path.open(encoding="utf-8", newline="") as output_file:
         output_rows = list(csv.DictReader(output_file))
     assert [row["product_group_id"] for row in output_rows] == ["000123", "000125"]
+
+
+def test_repository_marketplace_profile_preserves_group_and_sku_relationships(tmp_path):
+    profile_path = BASE_DIR / "config" / "etl" / "sample_marketplace_vendor_v1.json"
+    input_path = BASE_DIR / "tests" / "fixtures" / "etl" / "sample_marketplace_vendor_mixed.csv"
+    output_path, rejects_path, summary_path = output_paths(tmp_path)
+
+    profile = load_profile(profile_path)
+    assert profile.name == "sample_marketplace_vendor"
+    assert profile.version == "1"
+    assert profile.source_columns["style_id"] == ("product_group_id",)
+    assert profile.source_columns["sku_code"] == ("product_id",)
+    assert profile.defaults == {"stock": "0"}
+
+    result = run_pipeline(
+        input_path,
+        profile_path,
+        output_path,
+        rejects_path,
+        summary_path,
+    )
+
+    assert (result.total_rows, result.loaded_rows, result.rejected_rows) == (3, 2, 1)
+    with output_path.open(encoding="utf-8", newline="") as output_file:
+        output_rows = list(csv.DictReader(output_file))
+    with rejects_path.open(encoding="utf-8", newline="") as rejects_file:
+        rejected_rows = list(csv.DictReader(rejects_file))
+
+    assert list(output_rows[0]) == [
+        "product_group_id",
+        "product_id",
+        "product_name",
+        "category",
+        "color",
+        "size",
+        "stock",
+        "price",
+        "image_path",
+        "sale_price",
+        "description",
+        "seller",
+    ]
+    assert [row["product_group_id"] for row in output_rows] == ["STYLE-100", "STYLE-100"]
+    assert [row["product_id"] for row in output_rows] == ["SKU-100-BLK-M", "SKU-100-WHT-L"]
+    assert output_rows[0]["sale_price"] == "49000"
+    assert output_rows[1]["sale_price"] == "69000"
+    assert output_rows[1]["stock"] == "0"
+    assert len({row["product_id"] for row in output_rows}) == 2
+
+    assert len(rejected_rows) == 1
+    assert rejected_rows[0]["source_row_number"] == "4"
+    assert json.loads(rejected_rows[0]["error_code"]) == [
+        "INVALID_PRICE",
+        "NEGATIVE_STOCK",
+    ]
+
+    dataframe = validate_and_read_uploaded_csv(output_path.name, output_path.read_bytes())
+    report = inspect_dataframe(dataframe)
+    sale_price_issues = [
+        issue for issue in report.issues if issue.rule == "sale_price_greater_than_price"
+    ]
+    assert [issue.product_id for issue in sale_price_issues] == ["SKU-100-WHT-L"]
