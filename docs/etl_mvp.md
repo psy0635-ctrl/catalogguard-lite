@@ -6,7 +6,7 @@
 
 ## 지원 프로필
 
-`config/etl/sample_fashion_vendor_v1.json`은 다음 공급사 컬럼을 지원한다.
+`config/etl/sample_fashion_vendor_v1.json`은 첫 번째 합성 공급사 컬럼을 지원한다.
 
 | 원본 컬럼 | CatalogGuard 대상 컬럼 | 처리 |
 |---|---|---|
@@ -22,6 +22,34 @@
 | `image_link` | `image_path` | 공백 제거 |
 
 샘플 공급사에는 별도 상품 그룹 컬럼이 없으므로 `vendor_sku`를 `product_group_id`와 `product_id`에 함께 매핑한다. 따라서 서로 다른 SKU가 하나의 그룹으로 잘못 묶이지 않는다. 동일 상품의 옵션 행을 그룹으로 묶어야 하는 공급사는 실제 그룹 식별 컬럼을 두 대상에 맞게 별도 프로필로 매핑해야 한다. 원본 `discount_price`는 표준 CSV의 선택 컬럼 `sale_price`로 변환되며, 기존 CSV에 해당 컬럼이 없어도 업로드·검수할 수 있다.
+
+현재 저장소에는 서로 다른 컬럼 구조를 검증하기 위한 합성 공급사 프로필 2종이 있다.
+
+| 프로필 | 그룹·SKU 구조 | 확인한 범위 |
+|---|---|---|
+| `sample_fashion_vendor_v1.json` | `vendor_sku` 하나를 `product_group_id`와 `product_id`에 함께 매핑 | 단일 공급사 SKU 기반 변환 |
+| `sample_marketplace_vendor_v1.json` | `style_id`와 `sku_code`를 각각 `product_group_id`, `product_id`에 매핑 | 그룹 ID와 개별 SKU가 분리된 변환 |
+
+### 두 번째 프로필 매핑
+
+`config/etl/sample_marketplace_vendor_v1.json`은 다음 매핑을 사용한다.
+
+| 원본 컬럼 | CatalogGuard 컬럼 |
+|---|---|
+| `style_id` | `product_group_id` |
+| `sku_code` | `product_id` |
+| `title` | `product_name` |
+| `category_code` | `category` |
+| `label` | `seller` |
+| `regular_price` | `price` |
+| `promo_price` | `sale_price` |
+| `tone` | `color` |
+| `fit_size` | `size` |
+| `available_qty` | `stock` |
+| `details` | `description` |
+| `photo` | `image_path` |
+
+`promo_price`와 `available_qty`는 선택 입력이다. 빈 `promo_price`는 빈 `sale_price`로 출력하고, 빈 `available_qty`는 기본값 `0`을 적용한다.
 
 ## 프로필 형식
 
@@ -56,6 +84,19 @@ python -m etl.cli `
 
 정상 처리(오류 행 포함)는 종료 코드 0이다. 입력·프로필·출력 경로 오류는 안전한 메시지와 종료 코드 1로 끝난다. 인수 누락은 `argparse`의 종료 코드 2를 사용한다.
 
+### 두 번째 공급사 CLI 예시
+
+```powershell
+.\.venv\Scripts\python.exe -m etl.cli `
+  --input .\tests\fixtures\etl\sample_marketplace_vendor_mixed.csv `
+  --profile .\config\etl\sample_marketplace_vendor_v1.json `
+  --output .\.tmp_etl_marketplace\catalogguard_ready.csv `
+  --rejects .\.tmp_etl_marketplace\rejected_rows.csv `
+  --summary .\.tmp_etl_marketplace\etl_summary.json
+```
+
+`tests/fixtures/etl/sample_marketplace_vendor_mixed.csv`의 처리 결과는 입력 3행, 정상 변환 2행, reject 1행이다. 두 정상 행은 같은 `STYLE-100` 그룹 아래 `SKU-100-BLK-M`과 `SKU-100-WHT-L`을 각각 유지하며, 빈 `available_qty`는 stock `0`으로 변환된다. `가격문의`와 `-1` 재고가 함께 있는 행은 `INVALID_PRICE`와 `NEGATIVE_STOCK`로 reject된다. `59000`과 `69000`은 모두 변환 가능한 숫자이므로 정상 CSV에 남고, `69000 > 59000` 관계는 CatalogGuard 검수 단계에서 `sale_price_greater_than_price`로 탐지된다.
+
 ## 안전성과 호환성
 
 입력은 CSV 확장자, 크기, 인코딩, NUL 바이트, 헤더, 중복 컬럼, 행 수와 행 형식을 확인한다. 입력 파일과 출력 파일이 같거나 출력 파일끼리 겹치면 거부한다. 각 출력은 임시 파일 작성 후 원자적으로 교체한다.
@@ -64,7 +105,9 @@ python -m etl.cli `
 
 ## 제한사항
 
-- 샘플 패션 공급사 프로필 1종만 지원한다.
-- 웹 수집, 이미지 다운로드, PostgreSQL 직접 적재와 비동기 실행은 지원하지 않는다.
-- 대용량 streaming·증분 처리·자동 공급사 감지는 지원하지 않는다.
+- 합성 패션 공급사 프로필 2종을 지원한다.
+- 실제 외부 공급사 운영 데이터 연동은 지원하지 않는다.
+- 자동 공급사 감지는 지원하지 않으며, 공급사별 프로필은 수동 선택한다.
+- 웹 수집, 외부 API, PostgreSQL 직접 적재는 지원하지 않는다.
+- streaming·증분 ETL은 지원하지 않는다.
 - `sale_price`는 단일 할인 가격만 지원하며 할인율, 기간, 쿠폰·회원 가격, 최저가 추천은 제공하지 않는다.

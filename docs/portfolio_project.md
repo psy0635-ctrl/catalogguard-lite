@@ -33,7 +33,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 2. 검수 기준을 FastAPI 공통 서비스로 모으고 PostgreSQL에 실행 요약과 상세 결과를 저장했으며, API·저장 테스트로 응답과 이력 흐름을 검증했습니다.
 3. 같은 CSV의 재검수를 줄이기 위해 파일 해시와 규칙 버전으로 기존 결과를 조회하고 partial unique index로 경쟁 요청을 막았으며, 중복 결과 재사용 테스트로 확인했습니다.
 4. 긴 작업은 Redis·Celery로 상태를 분리하고 GitHub Actions에서 PostgreSQL·Redis·FastAPI·Worker를 연결한 비동기 E2E를 검증했습니다.
-5. 공급사마다 코드를 따로 만들지 않고 JSON 프로필로 `discount_price`를 선택 `sale_price`로 변환하고, 정상가보다 큰 할인가를 기존 검수 결과로 연결했으며, ETL·API 통합 테스트 89개와 샘플 3행 CLI 결과를 확인했습니다.
+5. 공급사마다 코드를 따로 만들지 않고 JSON 프로필로 서로 다른 컬럼 구조를 표준 스키마에 매핑하고, 정상가보다 큰 할인가를 기존 검수 결과로 연결했으며, 지정 ETL 테스트 `27 passed`와 ETL·검수 서비스·API 관련 테스트 `96 passed`, 두 번째 샘플 3행 CLI 결과를 확인했습니다.
 
 ## 6.2 문제 정의
 
@@ -132,8 +132,9 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 | 등록된 검수 규칙 함수 | 15개 |
 | 샘플 CSV 상품 수 | 5개 |
 | 샘플 CSV 검수 결과 | 오류 6건, 주의 0건 |
-| 최신 로컬 테스트 결과 | 831 passed, 26 skipped, 2 deselected |
-| ETL·API 통합 테스트 | 89 passed |
+| 최신 로컬 테스트 결과 | 832 passed, 26 skipped, 2 deselected |
+| 지정 ETL 테스트 | 27 passed |
+| ETL·검수 서비스·API 관련 테스트 | 96 passed |
 | 샘플 ETL CLI 결과 | 전체 3건, 정상 변환 2건, 오류 행 1건, 종료 코드 0 |
 | CI 결과 확인 기준 | 최신 `Test` workflow의 상태·결론·커밋 SHA를 Actions 실행에서 확인 |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
@@ -286,10 +287,10 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 통계 집계 함수와 서버 응답 적용 helper에는 정렬, 빈 값 처리, 필수 컬럼 검증, 입력 불변성, TOP 5 적용 위치, malformed 응답 차단을 확인하는 테스트를 추가했습니다. 로컬에서는 기본 pytest 설정으로 전체 테스트를 실행해 다음 결과를 확인했습니다.
 
 ```text
-831 passed, 26 skipped, 2 deselected
+832 passed, 26 skipped, 2 deselected
 ```
 
-위 수치는 현재 개발 PC의 로컬 결과입니다. 기본 설정에서 `e2e`·`performance` marker는 제외되며, PostgreSQL·Redis 등 별도 서비스가 필요한 일부 검증은 로컬 환경에 따라 skipped 처리됩니다. ETL 테스트와 `tests/test_api_inspections.py`를 함께 실행한 통합 검증은 `89 passed`였고, 샘플 공급사 CSV CLI는 전체 3건 중 정상 2건·오류 1건을 종료 코드 0으로 처리했습니다. GitHub Actions의 실제 실행 결과와 테스트 개수는 이 로컬 수치와 구분합니다.
+위 수치는 현재 개발 PC의 전체 로컬 회귀 테스트 결과입니다. 기본 설정에서 `e2e`·`performance` marker는 제외되며, PostgreSQL·Redis 등 별도 서비스가 필요한 일부 검증은 로컬 환경에 따라 skipped 처리됩니다. 지정 ETL 테스트 범위는 `27 passed`였고, ETL·검수 서비스·API 관련 테스트 범위는 `96 passed`였습니다. 두 번째 샘플 공급사 CSV CLI는 전체 3건 중 정상 2건·오류 1건을 종료 코드 0으로 처리했습니다. GitHub Actions의 실제 실행 결과와 테스트 개수는 이 로컬 수치와 구분하며, GitHub Actions Test #30은 기준 commit `0e14c77`의 결과이므로 현재 기능 commit `ecb2e56`의 CI 성공 결과로 간주하지 않습니다. 현재 기능 commit은 push 후 새 `Test` workflow 실행을 확인해야 합니다.
 
 GitHub Actions CI에서는 `main` 브랜치 push 또는 `main` 대상 pull request마다 일회성 PostgreSQL 18·Redis 7.4 서비스 컨테이너를 시작합니다. 두 서비스는 workflow 실행 중에만 사용할 테스트용 구성으로 Railway나 운영 DB·Redis와 분리됩니다. CI는 이 PostgreSQL에 `DATABASE_URL`과 `TEST_DATABASE_URL`을 설정하고 Alembic 마이그레이션을 적용한 뒤, E2E를 제외한 단위·PostgreSQL 통합 pytest를 실행합니다. 이어서 실제 Celery Worker와 FastAPI 프로세스를 시작해 `/health`·`/ready`, 비동기 CSV 제출, 상태 polling, PostgreSQL 결과 저장, 동일 CSV 재제출의 결과 재사용, 임시 CSV 정리를 E2E 스모크 테스트로 확인한 뒤 Streamlit 시작과 Health 응답을 확인합니다.
 
@@ -402,7 +403,7 @@ Streamlit: 업로드 검증·마스킹 미리보기
 
 로컬 개발 환경에서는 `TEST_DATABASE_URL`이 없으면 운영 DB 오연결을 막기 위해 PostgreSQL 통합 테스트 25개를 건너뜁니다. 이 보호 조건을 완화하지 않고도 전체 통합 테스트를 반복 실행할 수 있도록 GitHub Actions에 PostgreSQL 18 서비스 컨테이너를 구성하고, 두 DB 환경변수가 같은 일회성 CI 테스트 DB만 가리키도록 했습니다.
 
-CI는 테스트 전에 `20260703_0001`, `20260705_0002` Alembic 마이그레이션을 적용합니다. 이번 로컬 검증 결과는 `831 passed, 26 skipped, 2 deselected`이며, CI의 실제 테스트 개수는 각 GitHub Actions 실행 결과에서 별도로 확인합니다.
+CI는 테스트 전에 `20260703_0001`, `20260705_0002` Alembic 마이그레이션을 적용합니다. 이번 로컬 검증 결과는 `832 passed, 26 skipped, 2 deselected`이며, CI의 실제 테스트 개수는 각 GitHub Actions 실행 결과에서 별도로 확인합니다. GitHub Actions Test #30은 기준 commit `0e14c77`에서 실행된 결과이며, 현재 기능 commit `ecb2e56`의 CI 결과는 아니다.
 
 ### Streamlit 서버 시작 스모크 테스트
 
@@ -480,7 +481,7 @@ Python·FastAPI와 PostgreSQL을 기반으로 CSV 상품 데이터의 필수 값
 
 ### 포트폴리오용 설명
 
-CatalogGuard Lite는 상품 운영자가 CSV 업로드만으로 상품 데이터 품질을 확인할 수 있는 검수 앱입니다. 업로드 검증, 원본 보존형 개인정보 마스킹 미리보기, 중복 상품 탐지, 가격 이상치 탐지, 정상가·할인가 관계 검수, 상품명과 카테고리 불일치 탐지, 필터와 독립된 전체 결과 통계, 결과 필터링, CSV 다운로드까지 하나의 흐름으로 구성했습니다. 전체 검수는 FastAPI 서버에서 한 번 수행하고 PostgreSQL에 저장한 상세 응답을 Streamlit 화면과 이력 조회에서 재사용하도록 구현했습니다. 즉시 검수를 기본값으로 유지하면서 Redis·Celery 기반 백그라운드 검수와 수동 상태 갱신을 선택할 수 있습니다. JSON 프로필 기반 공급사 CSV ETL은 `discount_price`를 선택 `sale_price`로 변환하고 표준 CSV와 reject CSV, 요약 JSON을 생성하며 기존 업로드 검증·검수 흐름과 호환됩니다. 현재 로컬에서는 `831 passed, 26 skipped, 2 deselected`를 확인했고, ETL·API 통합 검증은 `89 passed`였습니다. GitHub Actions에는 PostgreSQL·Redis·FastAPI·Celery Worker를 연결하는 비동기 E2E 스모크 테스트 구성을 추가했으며, 실제 workflow 성공 여부는 각 Push의 `Test` 실행 결과로 확인합니다.
+CatalogGuard Lite는 상품 운영자가 CSV 업로드만으로 상품 데이터 품질을 확인할 수 있는 검수 앱입니다. 업로드 검증, 원본 보존형 개인정보 마스킹 미리보기, 중복 상품 탐지, 가격 이상치 탐지, 정상가·할인가 관계 검수, 상품명과 카테고리 불일치 탐지, 필터와 독립된 전체 결과 통계, 결과 필터링, CSV 다운로드까지 하나의 흐름으로 구성했습니다. 전체 검수는 FastAPI 서버에서 한 번 수행하고 PostgreSQL에 저장한 상세 응답을 Streamlit 화면과 이력 조회에서 재사용하도록 구현했습니다. 즉시 검수를 기본값으로 유지하면서 Redis·Celery 기반 백그라운드 검수와 수동 상태 갱신을 선택할 수 있습니다. JSON 프로필 기반 공급사 CSV ETL은 합성 공급사 프로필 2종으로 서로 다른 컬럼 구조를 표준 CSV에 매핑하고, 표준 CSV와 reject CSV, 요약 JSON을 생성하며 기존 업로드 검증·검수 흐름과 호환됩니다. 현재 개발 PC에서는 `832 passed, 26 skipped, 2 deselected`, 관련 지정 테스트 범위에서는 `96 passed`를 확인했습니다. GitHub Actions에는 PostgreSQL·Redis·FastAPI·Celery Worker를 연결하는 비동기 E2E 스모크 테스트 구성을 추가했으며, 실제 workflow 성공 여부는 각 Push의 `Test` 실행 결과로 확인합니다. 기준 commit 이전의 GitHub Actions Test #30 결과를 이번 기능의 CI 성공 결과로 사용하지 않습니다.
 
 ### 면접에서 강조할 포인트
 
@@ -498,7 +499,25 @@ CatalogGuard Lite는 상품 운영자가 CSV 업로드만으로 상품 데이터
 
 ## 6.17 공급사 상품 CSV ETL MVP
 
-서로 다른 공급사 컬럼명을 CatalogGuard 표준 스키마로 변환하는 설정 기반 ETL MVP를 구현했습니다. JSON 매핑 프로필로 `discount_price`를 `sale_price`에 연결하고 가격·재고 형식을 안전하게 변환했으며, 변환할 수 없는 행은 오류 코드와 사용자용 메시지를 포함한 별도 CSV로 분리했습니다. 정상가보다 큰 할인가처럼 변환은 가능한 상품 품질 문제는 reject하지 않고 `inspect_dataframe()`에서 검수합니다. 변환 결과를 실제 기존 업로드 검증과 `inspect_dataframe()`에 전달하는 통합 테스트로 호환성을 확인했습니다. 상세한 프로필 형식, reject 기준, CLI와 제한사항은 [ETL MVP 문서](etl_mvp.md)에 기록했습니다.
+서로 다른 공급사 컬럼명을 CatalogGuard 표준 스키마로 변환하는 설정 기반 ETL MVP를 구현했습니다. 합성 공급사 프로필 2종으로 `discount_price` 또는 `promo_price`를 `sale_price`에 연결하고, 상품 그룹 ID와 개별 SKU가 분리된 구조까지 공통 흐름에서 처리했습니다. 가격·재고 형식을 안전하게 변환했으며, 변환할 수 없는 행은 오류 코드와 사용자용 메시지를 포함한 별도 CSV로 분리했습니다. 정상가보다 큰 할인가처럼 변환은 가능한 상품 품질 문제는 reject하지 않고 `inspect_dataframe()`에서 검수합니다. 변환 결과를 실제 기존 업로드 검증과 `inspect_dataframe()`에 전달하는 통합 테스트로 호환성을 확인했습니다. 상세한 프로필 형식, reject 기준, CLI와 제한사항은 [ETL MVP 문서](etl_mvp.md)에 기록했습니다.
+
+### 두 번째 합성 공급사로 검증한 확장성
+
+#### 문제
+
+첫 번째 프로필만으로는 ETL이 `vendor_sku` 컬럼 구조에 묶여 있지 않은지 증명하기 어려웠다.
+
+#### 해결
+
+`style_id`와 `sku_code`가 분리된 두 번째 합성 공급사 프로필 `config/etl/sample_marketplace_vendor_v1.json`과 `tests/fixtures/etl/sample_marketplace_vendor_mixed.csv`를 추가했다.
+
+#### 결과
+
+`etl/profile_loader.py`, `etl/transformer.py`, `etl/pipeline.py`를 수정하지 않고 JSON 매핑 프로필과 fixture, Repository 통합 테스트만으로 3행 중 2행을 변환하고 1행을 reject했다. 같은 `STYLE-100` 그룹 아래 서로 다른 SKU를 유지했으며, 정상가보다 큰 할인가 관계는 기존 CatalogGuard 검수 결과로 연결했다.
+
+#### 의미
+
+공급사별 데이터 구조 차이를 공급사명 조건문이나 전용 transformer가 아니라 설정 데이터로 분리하는 설계를 검증했다. 상품 그룹 ID와 개별 SKU가 별도 컬럼인 구조도 동일한 공통 ETL 흐름으로 처리할 수 있음을 확인했다.
 
 ### ETL 설계 판단
 

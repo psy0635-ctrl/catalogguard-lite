@@ -346,6 +346,7 @@ catalogguard-lite/
     settings.py
     etl/
       sample_fashion_vendor_v1.json
+      sample_marketplace_vendor_v1.json
   core/
     __init__.py
     category_mismatch_detector.py
@@ -472,6 +473,7 @@ catalogguard-lite/
 | `etl/profile_loader.py`, `etl/transformer.py`, `etl/pipeline.py` | JSON 프로필 검증, 공급사 행 변환, reject 분리와 원자적 출력 저장 |
 | `etl/cli.py` | 공급사 CSV ETL CLI 진입점 |
 | `config/etl/sample_fashion_vendor_v1.json` | 샘플 공급사 컬럼과 CatalogGuard 표준 컬럼 매핑 프로필 |
+| `config/etl/sample_marketplace_vendor_v1.json` | 별도 상품 그룹 ID와 SKU를 사용하는 두 번째 합성 공급사 매핑 프로필 |
 | `compose.local.yaml` | PostgreSQL·Redis·FastAPI·Celery Worker 로컬 실행 구성 |
 | `alembic/versions/20260703_0001_create_inspection_tables.py` | 검수 이력 저장 테이블 생성 마이그레이션 |
 | `alembic/versions/20260705_0002_add_inspection_file_identity.py` | 파일 해시와 검수 버전 컬럼, CHECK constraint, partial unique index 추가 마이그레이션 |
@@ -1281,10 +1283,10 @@ python -m pytest -q
 현재 로컬 환경에서 확인된 테스트 결과는 다음과 같습니다.
 
 ```text
-831 passed, 26 skipped, 2 deselected
+832 passed, 26 skipped, 2 deselected
 ```
 
-이 수치는 현재 개발 PC에서 기본 pytest 설정으로 실행한 로컬 결과입니다. `e2e`·`performance` marker는 기본 실행에서 제외되고, PostgreSQL·Redis 등 별도 서비스가 필요한 일부 검증은 로컬 환경에 따라 skipped 처리됩니다. ETL 테스트와 `tests/test_api_inspections.py`를 함께 실행한 통합 검증은 `89 passed`였고, 샘플 공급사 CSV CLI는 전체 3건 중 정상 2건·오류 1건을 종료 코드 0으로 처리했습니다. GitHub Actions의 실행 결과와 테스트 개수는 별도로 확인해야 하며, 이 문서의 로컬 수치를 CI 수치로 해석하면 안 됩니다.
+이 수치는 현재 개발 PC에서 기본 pytest 설정으로 실행한 전체 로컬 회귀 테스트 결과입니다. `e2e`·`performance` marker는 기본 실행에서 제외되고, PostgreSQL·Redis 등 별도 서비스가 필요한 일부 검증은 로컬 환경에 따라 skipped 처리됩니다. 지정 ETL 테스트 범위는 `27 passed`였고, ETL·검수 서비스·API 관련 테스트 범위는 `96 passed`였습니다. 샘플 공급사 CSV CLI는 전체 3건 중 정상 2건·오류 1건을 종료 코드 0으로 처리했습니다. GitHub Actions의 실행 결과와 테스트 개수는 별도로 확인해야 하며, 이 문서의 로컬 수치를 이번 기능의 CI 결과로 해석하면 안 됩니다.
 
 ### 동기 검수 성능 측정
 
@@ -1456,7 +1458,7 @@ python -m pytest -m performance tests/performance/test_inspection_query_performa
 
 ## 공급사 CSV ETL MVP
 
-`etl.cli`는 샘플 패션 공급사 CSV를 CatalogGuard 표준 CSV로 변환합니다. JSON 프로필로 공급사 컬럼을 매핑하고, `discount_price`를 선택 표준 컬럼 `sale_price`로 변환합니다. 변환할 수 없는 행은 오류 코드와 함께 별도 CSV로 분리하며, 정상가보다 큰 할인가 같은 상품 품질 문제는 정상 행으로 남겨 기존 검수기가 처리하도록 합니다. 결과 CSV는 기존 업로드 검증과 검수 서비스에 그대로 전달할 수 있습니다.
+`etl.cli`는 JSON 프로필을 사용해 서로 다른 컬럼 구조의 합성 공급사 CSV 2종을 CatalogGuard 표준 CSV로 변환합니다. 상품 그룹 ID와 SKU가 분리된 구조도 지원하는 것을 확인했으며, 정상가보다 큰 할인가 같은 상품 품질 문제는 정상 행으로 남겨 기존 검수기가 처리하도록 합니다. 자세한 프로필 비교, CLI 예시와 제한사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.
 
 ```powershell
 python -m etl.cli `
