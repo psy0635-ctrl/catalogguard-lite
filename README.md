@@ -2,7 +2,7 @@
 
 # CatalogGuard Lite
 
-상품 카탈로그 CSV를 업로드해 누락, 형식 오류, 중복, 가격 이상치, 카테고리 불일치, 금지어와 개인정보 의심 정보를 검사하고, 검수 결과를 저장·검색·조회·다운로드하는 Python·FastAPI + PostgreSQL 기반 MVP입니다. Streamlit은 업로드 검증과 결과 화면을 담당하며, Redis·Celery 백그라운드 검수와 JSON 프로필 기반 공급사 CSV ETL도 제공합니다.
+상품 카탈로그 CSV를 업로드해 누락, 형식 오류, 중복, 가격 이상치, 카테고리 불일치, 금지어와 개인정보 의심 정보를 검사하고, 검수 결과를 저장·검색·조회·다운로드하는 Python·FastAPI + PostgreSQL 기반 MVP입니다. Streamlit은 업로드 검증과 결과 화면을 담당하며, Redis·Celery 백그라운드 검수와 JSON 프로필 기반 공급사 CSV ETL, ETL 결과의 PostgreSQL staging 배치 적재도 제공합니다.
 
 공개 Streamlit 앱은 아래 주소에서 확인할 수 있습니다.
 
@@ -28,6 +28,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - 금지어, 이메일, 전화번호, 주민등록번호 형식, 계좌번호 의심 정보를 찾습니다.
 - 검수 결과를 화면, CSV 다운로드, PostgreSQL 이력으로 확인할 수 있게 합니다.
 - 공급사별 JSON 매핑 프로필로 원본 CSV를 CatalogGuard 표준 CSV로 변환하고 오류 행을 별도 reject CSV로 분리합니다.
+- 표준 CSV와 summary JSON을 별도 CLI로 PostgreSQL staging에 배치 적재하고, 같은 원본·프로필 버전의 중복 적재를 막습니다.
 
 ## 3. 주요 기능
 
@@ -58,6 +59,9 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - 상세 결과 CSV 다운로드
 - 같은 Streamlit 세션 안에서 동일 CSV 중복 저장 방지
 - PostgreSQL DB 수준 동일 CSV 중복 저장 방지
+- ETL staging 배치와 정상 상품 행의 PostgreSQL 저장
+- ETL summary의 output SHA-256·행 수 검증과 배치 단위 rollback
+- staging 배치 삭제 시 상품 행 cascade 삭제와 음수 stock·price·sale_price 방지
 - 기본값인 `즉시 검수`와 Redis·Celery를 사용하는 `백그라운드 검수` 선택
 - 백그라운드 작업의 `queued`, `running`, `succeeded`, `failed` 상태와 수동 새로고침
 - 비동기 결과도 기존 검수 요약·통계·필터·다운로드 화면으로 표시
@@ -68,6 +72,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - Streamlit API 오류 화면에 검증된 요청 ID 표시
 - 요청 ID를 이용한 Railway 구조화 로그 추적
 - `etl.cli`를 통한 공급사 CSV 표준화, reject CSV·요약 JSON 생성
+- `etl.load_cli`를 통한 표준 CSV·summary JSON의 PostgreSQL staging 적재
 
 ## 4. 사용자 기능 흐름
 
@@ -389,6 +394,7 @@ catalogguard-lite/
     versions/
       20260703_0001_create_inspection_tables.py
       20260705_0002_add_inspection_file_identity.py
+      20260725_0003_create_etl_staging_tables.py
   data/
     dev/
       category_mismatch_test.csv
@@ -463,7 +469,7 @@ catalogguard-lite/
 | `core/result_exporter.py` | 검수 결과 CSV 다운로드 데이터와 파일명 생성 |
 | `core/product_template.py` | CSV 입력 템플릿 생성 |
 | `core/privacy.py` | 개인정보 정규식과 마스킹 처리 |
-| `db/models.py` | 파일 해시와 검수 버전 컬럼을 포함한 `inspection_runs`, `inspection_results` SQLAlchemy 모델 |
+| `db/models.py` | `inspection_runs`, `inspection_results`와 ETL staging 배치·상품 SQLAlchemy 모델 |
 | `db/repositories.py` | 검수 실행과 상세 결과 저장·조회, 파일 identity 조회 Repository |
 | `db/persistence_service.py` | 검수 결과 저장 트랜잭션, 중복 조회, 경쟁 상태 처리, 목록 조회, 상세 조회 Service |
 | `db/session.py` | SQLAlchemy 엔진, 세션 팩토리, DB 연결 확인, FastAPI 세션 의존성 |
@@ -472,11 +478,14 @@ catalogguard-lite/
 | `workers/celery_app.py`, `workers/inspection_tasks.py` | Celery Worker 실행과 비동기 CSV 검수·결과 저장 |
 | `etl/profile_loader.py`, `etl/transformer.py`, `etl/pipeline.py` | JSON 프로필 검증, 공급사 행 변환, reject 분리와 원자적 출력 저장 |
 | `etl/cli.py` | 공급사 CSV ETL CLI 진입점 |
+| `etl/db_loader.py` | 표준 CSV·summary JSON 검증, 중복 배치 조회와 staging 트랜잭션 적재 |
+| `etl/load_cli.py` | ETL 결과를 PostgreSQL staging에 적재하는 별도 CLI 진입점 |
 | `config/etl/sample_fashion_vendor_v1.json` | 샘플 공급사 컬럼과 CatalogGuard 표준 컬럼 매핑 프로필 |
 | `config/etl/sample_marketplace_vendor_v1.json` | 별도 상품 그룹 ID와 SKU를 사용하는 두 번째 합성 공급사 매핑 프로필 |
 | `compose.local.yaml` | PostgreSQL·Redis·FastAPI·Celery Worker 로컬 실행 구성 |
 | `alembic/versions/20260703_0001_create_inspection_tables.py` | 검수 이력 저장 테이블 생성 마이그레이션 |
 | `alembic/versions/20260705_0002_add_inspection_file_identity.py` | 파일 해시와 검수 버전 컬럼, CHECK constraint, partial unique index 추가 마이그레이션 |
+| `alembic/versions/20260725_0003_create_etl_staging_tables.py` | ETL 배치·상품 staging 테이블, unique index, FK와 CHECK constraint 추가 마이그레이션 |
 | `.github/workflows/test.yml` | PostgreSQL 18·Redis 7.4 테스트 서비스에서 마이그레이션, E2E 제외 pytest, FastAPI·Celery 비동기 E2E, Streamlit 시작 스모크 테스트를 실행하는 GitHub Actions workflow |
 | `.env.example` | 로컬 PostgreSQL 연결 환경변수 예시 |
 | `requirements.txt` | Streamlit 앱 기본 실행 패키지 |
@@ -694,7 +703,7 @@ python -m alembic upgrade head
 python -m alembic history
 ```
 
-현재 적용된 최신 Alembic revision은 `20260705_0002`입니다.
+현재 적용된 최신 Alembic revision은 `20260725_0003`입니다.
 
 `20260703_0001_create_inspection_tables.py`는 다음 테이블을 만듭니다.
 
@@ -702,6 +711,13 @@ python -m alembic history
 - `inspection_results`
 
 `20260705_0002_add_inspection_file_identity.py`는 동일 CSV 중복 저장을 DB 수준에서 막기 위해 `inspection_runs`에 파일 identity 정보를 추가합니다.
+
+`20260725_0003_create_etl_staging_tables.py`는 ETL 결과를 배치 단위로 적재하기 위한 다음 테이블을 추가합니다.
+
+- `etl_load_runs`: 원본 파일명, 프로필 이름·버전, 입력·출력 SHA-256, 적재 행 수를 저장
+- `catalog_products_staging`: 정상 표준 CSV 상품 행을 저장하고 `etl_load_runs`와 외래 키로 연결
+
+`etl_load_runs`에는 `(input_file_sha256, profile_name, profile_version)` unique index가 있습니다. 상품 테이블의 `etl_load_run_id`에는 조회용 index와 `ON DELETE CASCADE` 외래 키가 있고, `stock`, `price`, `sale_price`의 음수 방지 CHECK constraint가 있습니다. 이 migration은 운영 상품 테이블 upsert를 추가하지 않습니다.
 
 upgrade 동작은 다음 순서입니다.
 
@@ -720,7 +736,11 @@ upgrade 동작은 다음 순서입니다.
 psql "$env:DATABASE_URL" -c "\dt"
 psql "$env:DATABASE_URL" -c "\d inspection_runs"
 psql "$env:DATABASE_URL" -c "\d inspection_results"
+psql "$env:DATABASE_URL" -c "\d etl_load_runs"
+psql "$env:DATABASE_URL" -c "\d catalog_products_staging"
 ```
+
+staging migration은 테스트용 PostgreSQL 18.4 임시 클러스터에서 `upgrade head`로 두 테이블과 제약조건을 확인했다. `downgrade 20260705_0002` 후에는 staging 테이블만 제거되고 기존 inspection 테이블은 유지되었으며, 다시 `upgrade head`를 실행해 재upgrade를 확인했다.
 
 ## 16. FastAPI 실행 방법
 
@@ -1278,15 +1298,18 @@ python -m pytest tests/test_inspection_persistence.py -q
 python -m pytest -q
 ```
 
-### 로컬 테스트 결과
+### PostgreSQL staging 포함 검증 결과
 
-현재 로컬 환경에서 확인된 테스트 결과는 다음과 같습니다.
+최신 기능 commit에서 테스트용 PostgreSQL 18.4 임시 클러스터를 사용해 Alembic과 ETL staging 적재를 실제로 확인했습니다. 운영 DB나 Railway DB는 사용하지 않았습니다.
 
 ```text
-832 passed, 26 skipped, 2 deselected
+신규 ETL loader/migration 테스트: 16 passed
+DB persistence 테스트: 52 passed
+API inspection 테스트: 66 passed
+전체 pytest: 874 passed, 2 deselected
 ```
 
-이 수치는 현재 개발 PC에서 기본 pytest 설정으로 실행한 전체 로컬 회귀 테스트 결과입니다. `e2e`·`performance` marker는 기본 실행에서 제외되고, PostgreSQL·Redis 등 별도 서비스가 필요한 일부 검증은 로컬 환경에 따라 skipped 처리됩니다. 지정 ETL 테스트 범위는 `27 passed`였고, ETL·검수 서비스·API 관련 테스트 범위는 `96 passed`였습니다. 샘플 공급사 CSV CLI는 전체 3건 중 정상 2건·오류 1건을 종료 코드 0으로 처리했습니다. GitHub Actions의 실행 결과와 테스트 개수는 별도로 확인해야 하며, 이 문서의 로컬 수치를 이번 기능의 CI 결과로 해석하면 안 됩니다.
+표준 CSV 2행을 최초 실행했을 때 배치와 상품 2행이 저장되었고, 같은 파일을 재실행했을 때 `created=False`와 중복 상품 미생성을 확인했습니다. `output_file_sha256`·`loaded_rows` 불일치, 잘못된 표준 CSV, 상품 저장 중 예외에 대한 무변경·rollback 경로도 검증했습니다. 합성 공급사 CSV CLI는 입력 3건 중 정상 2건·reject 1건을 처리하며 종료 코드 0을 반환했습니다.
 
 ### 동기 검수 성능 측정
 
@@ -1351,11 +1374,11 @@ Streamlit 시작 스모크 테스트는 `python -m streamlit run app.py`로 실�
 
 AppTest는 실제 `app.py` 실행 경로의 CSV 업로드와 검수·필터 위젯을 검증하지만 실제 브라우저의 파일 선택 창이나 픽셀 렌더링까지 자동화하지는 않습니다. GitHub Actions 스모크 테스트도 Railway API 실제 통신, 운영 Secrets 설정, Streamlit Community Cloud 전용 장애나 모든 Segmentation fault를 검증하지 않습니다.
 
-GitHub Actions에서는 PostgreSQL 테스트 DB를 제공하므로 로컬에서 건너뛴 DB 통합 테스트까지 실행합니다. 실제 CI 통과 여부와 실행 시간은 해당 커밋의 `Test` workflow 결과에서 확인해야 하며, 위 로컬 테스트 수치와 구분합니다.
+GitHub Actions Test #32도 성공했으며, 기능 commit `de51b3878194af51e74b729aa9c9ba9c7f74a833`에서 PostgreSQL·Redis·FastAPI·Celery 검증 workflow가 완료되었다. Actions의 일회성 서비스 컨테이너는 운영 DB·Redis와 분리된다.
 
 ## 24. 데이터 저장 범위와 보안
 
-PostgreSQL에는 검수 실행 요약, 표시용 상세 결과, 파일 동일성 확인용 해시와 검수 규칙 버전을 저장합니다.
+PostgreSQL에는 검수 실행 요약·상세 결과와 ETL staging 배치·정상 상품 행을 저장합니다. ETL staging은 운영 상품 테이블이 아니라 적재 결과를 확인하기 위한 별도 영역입니다.
 
 저장하는 값은 다음과 같습니다.
 
@@ -1374,6 +1397,14 @@ PostgreSQL에는 검수 실행 요약, 표시용 상세 결과, 파일 동일성
 - 오류 이유
 - 수정 권장사항
 - 위험 수준
+
+ETL staging에는 다음 값을 저장합니다.
+
+- `etl_load_runs`의 원본 파일명, 프로필 이름·버전, 입력·출력 SHA-256, 적재 행 수, 생성 시각
+- `catalog_products_staging`의 표준 CSV 정상 행과 `etl_load_run_id`
+- 빈 `sale_price`는 `NULL`로 저장하며 `stock`, `price`, `sale_price` 음수는 DB CHECK constraint로 거부
+
+ETL 적재는 summary의 필수 필드, 실제 표준 CSV SHA-256, 실제 행 수를 확인한 뒤 배치와 상품 행을 하나의 트랜잭션으로 저장합니다. `(input_file_sha256, profile_name, profile_version)` unique index로 중복을 판단하며, 실패 시 전체 rollback합니다. reject 행은 staging에 저장하지 않습니다.
 
 저장하지 않는 값은 다음과 같습니다.
 
@@ -1415,6 +1446,11 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - 인증과 권한 관리는 구현되어 있지 않습니다.
 - 저장된 검수 이력 삭제 기능은 구현되어 있지 않습니다.
 - 전체 요약 CSV는 목록 API를 반복 조회하므로 다운로드 중 DB 내용이 바뀌는 상황의 완전한 스냅샷 보장은 별도 트랜잭션/내보내기 API가 필요합니다.
+- 실제 외부 공급사 운영 데이터와 연동하지 않았습니다.
+- ETL staging은 운영 상품 테이블 upsert, 기존 상품 갱신·덮어쓰기를 지원하지 않습니다.
+- reject 행은 DB에 저장하지 않으며, 자동 공급사 감지도 지원하지 않습니다.
+- 증분 ETL과 streaming을 지원하지 않습니다.
+- 운영 DB 적재는 검증하지 않았고, PostgreSQL 적재는 임시 테스트 환경에서만 검증했습니다.
 - `.env` 자동 로딩은 구현되어 있지 않으므로 로컬에서는 PowerShell 환경변수를 직접 설정해야 합니다.
 
 ## 26. 향후 개선 방향
@@ -1467,6 +1503,21 @@ python -m etl.cli `
   --output .\output\catalogguard_ready.csv `
   --rejects .\output\rejected_rows.csv `
   --summary .\output\etl_summary.json
+```
+
+생성된 표준 CSV와 summary JSON은 별도 CLI로 PostgreSQL staging에 적재합니다. 실제 표준 CSV의 SHA-256과 summary의 `output_file_sha256`, 실제 행 수와 `loaded_rows`를 비교하고, 동일한 입력 해시·프로필 이름·버전의 배치는 재사용합니다.
+
+```powershell
+python -m etl.load_cli `
+  --input .\output\catalogguard_ready.csv `
+  --summary .\output\etl_summary.json
+```
+
+```text
+DB 적재 완료
+적재 배치 ID: 1
+신규 적재: yes
+상품 행: 2
 ```
 
 프로필 구조, 변환·오류 기준, 생성 파일과 제한사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.

@@ -2,7 +2,7 @@
 
 ## 목적
 
-샘플 패션 공급사의 CSV를 CatalogGuard Lite 검수기가 읽을 수 있는 표준 CSV로 변환한다. 이 MVP는 웹 수집, 외부 API 연동, 데이터베이스 적재 없이 파일 변환 결과만 저장한다.
+샘플 패션 공급사의 CSV를 CatalogGuard Lite 검수기가 읽을 수 있는 표준 CSV로 변환하고, 변환 결과와 요약 JSON을 PostgreSQL staging에 배치 적재한다. 파일 변환과 DB 적재는 별도 CLI로 실행한다.
 
 ## 지원 프로필
 
@@ -103,11 +103,111 @@ python -m etl.cli `
 
 표준 CSV는 `product_group_id`부터 `seller`까지 기존 컬럼 순서를 지키며 `price` 다음에 선택 컬럼 `sale_price`를 출력하고 pandas index를 쓰지 않는다. `tests/etl/test_pipeline.py`는 생성된 파일을 실제 `validate_and_read_uploaded_csv()`와 `inspect_dataframe()`에 전달해 `discount_price` 변환과 할인가 관계 검수의 호환성을 확인한다.
 
+## PostgreSQL staging 적재
+
+파일 변환이 끝나면 `catalogguard_ready.csv`와 `etl_summary.json`을 별도 Load 단계에 전달할 수 있다.
+
+```text
+공급사 CSV + JSON 프로필
+-> etl.cli
+-> 표준 CSV + reject CSV + summary JSON
+-> etl.load_cli
+-> summary 필드·SHA-256·행 수·표준 CSV 검증
+-> 중복 배치 조회
+-> etl_load_runs + catalog_products_staging 저장
+```
+
+두 CLI의 책임은 분리되어 있다.
+
+| CLI | 책임 |
+|---|---|
+| `python -m etl.cli` | 공급사 CSV를 표준 CSV, reject CSV, summary JSON으로 변환 |
+| `python -m etl.load_cli` | 표준 CSV와 summary JSON을 검증한 뒤 PostgreSQL staging에 적재 |
+
+### 적재 검증과 중복 판단
+
+`etl.db_loader.load_standard_csv()`는 기존 `validate_and_read_uploaded_csv()`를 재사용해 표준 CSV를 읽는다. 이어서 summary JSON에 다음 필드가 있는지 확인한다.
+
+- `profile_name`
+- `profile_version`
+- `input_filename`
+- `input_file_sha256`
+- `output_file_sha256`
+- `loaded_rows`
+
+profile 이름·버전과 파일명을 정규화하고, SHA-256 형식과 `loaded_rows`의 음수가 아닌 정수 여부를 확인한다. 실제 표준 CSV bytes의 SHA-256이 summary의 `output_file_sha256`과 같은지, 실제 CSV 행 수가 `loaded_rows`와 같은지도 확인한다. 검증에 실패하면 DB를 변경하지 않는다.
+
+같은 원본을 같은 프로필 버전으로 다시 적재했는지는 다음 세 값으로 판단한다.
+
+```text
+(input_file_sha256, profile_name, profile_version)
+```
+
+이미 같은 조합의 `etl_load_runs`가 있으면 상품 행을 추가하지 않고 기존 배치 ID와 `created=False`를 반환한다. 프로필 버전이 다르면 별도 배치로 저장한다.
+
+### Staging 테이블 구조
+
+`etl_load_runs`는 한 번의 ETL 적재를 나타내며 원본 파일명, 프로필, 입력·출력 해시, 적재 행 수와 생성 시각을 저장한다. `catalog_products_staging`은 배치에 속한 정상 표준 CSV 행을 저장한다.
+
+```text
+etl_load_runs (1)
+        |
+        | etl_load_run_id, ON DELETE CASCADE
+        v
+catalog_products_staging (N)
+```
+
+`etl_load_runs`에는 `(input_file_sha256, profile_name, profile_version)` unique index가 있고, 상품 테이블의 `etl_load_run_id`에는 조회용 index와 외래 키가 있다. `stock`, `price`, `sale_price`는 음수가 될 수 없으며 빈 `sale_price`는 DB `NULL`로 저장한다. 부모 배치를 삭제하면 연결된 상품 행도 cascade로 삭제된다.
+
+### 트랜잭션과 CLI
+
+신규 배치와 모든 상품 행은 하나의 SQLAlchemy 트랜잭션 안에서 저장한다. 상품 행 저장 중 오류가 발생하면 배치와 상품 행을 함께 rollback하며, upsert나 기존 운영 상품 덮어쓰기는 수행하지 않는다. reject CSV 행도 staging에 저장하지 않는다.
+
+```powershell
+python -m etl.load_cli `
+  --input .\output\catalogguard_ready.csv `
+  --summary .\output\etl_summary.json
+```
+
+신규 적재 예시는 다음과 같다. 배치 ID는 DB의 현재 sequence 상태에 따라 달라진다.
+
+```text
+DB 적재 완료
+적재 배치 ID: 1
+신규 적재: yes
+상품 행: 2
+```
+
+같은 파일을 다시 실행하면 다음과 같이 기존 배치를 재사용한다.
+
+```text
+DB 적재 완료
+적재 배치 ID: 1
+신규 적재: no
+상품 행: 2
+```
+
+### Migration 검증
+
+다음 순서로 staging migration의 upgrade, downgrade, 재upgrade를 확인했다.
+
+```powershell
+python -m alembic upgrade head
+python -m alembic downgrade 20260705_0002
+python -m alembic upgrade head
+```
+
+`20260725_0003` upgrade 후 `etl_load_runs`, `catalog_products_staging`과 unique index, FK 조회 index, 음수 방지 CHECK constraint, `ON DELETE CASCADE`가 생성된다. downgrade 후에는 두 staging 테이블만 제거되고 기존 `inspection_runs`, `inspection_results`는 유지되며, 재upgrade로 staging 구조를 다시 만들 수 있다.
+
+실제 PostgreSQL 18.4 임시 클러스터에서 2행 표준 CSV를 최초 적재하고, 같은 파일을 재실행해 `created=False`와 중복 상품 미생성을 확인했다. 운영 DB가 아닌 테스트용 환경에서만 수행한 검증이다. 신규 ETL loader/migration 테스트는 `16 passed`, DB persistence는 `52 passed`, API inspection은 `66 passed`, 전체 pytest는 `874 passed, 2 deselected`였고 GitHub Actions Test #32도 성공했다. 이 기능은 `de51b3878194af51e74b729aa9c9ba9c7f74a833`에 반영되어 있다.
+
 ## 제한사항
 
 - 합성 패션 공급사 프로필 2종을 지원한다.
 - 실제 외부 공급사 운영 데이터 연동은 지원하지 않는다.
 - 자동 공급사 감지는 지원하지 않으며, 공급사별 프로필은 수동 선택한다.
-- 웹 수집, 외부 API, PostgreSQL 직접 적재는 지원하지 않는다.
-- streaming·증분 ETL은 지원하지 않는다.
+- 웹 수집과 외부 API 연동은 지원하지 않는다.
+- 운영 상품 테이블 upsert, 기존 상품 갱신·덮어쓰기와 reject 행 DB 저장은 지원하지 않는다.
+- 증분 ETL과 streaming은 지원하지 않는다.
+- 운영 DB 적재는 검증하지 않았으며, PostgreSQL staging 적재는 임시 테스트 PostgreSQL 환경에서만 검증했다.
 - `sale_price`는 단일 할인 가격만 지원하며 할인율, 기간, 쿠폰·회원 가격, 최저가 추천은 제공하지 않는다.

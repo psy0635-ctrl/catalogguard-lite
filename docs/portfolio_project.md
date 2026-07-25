@@ -33,7 +33,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 2. 검수 기준을 FastAPI 공통 서비스로 모으고 PostgreSQL에 실행 요약과 상세 결과를 저장했으며, API·저장 테스트로 응답과 이력 흐름을 검증했습니다.
 3. 같은 CSV의 재검수를 줄이기 위해 파일 해시와 규칙 버전으로 기존 결과를 조회하고 partial unique index로 경쟁 요청을 막았으며, 중복 결과 재사용 테스트로 확인했습니다.
 4. 긴 작업은 Redis·Celery로 상태를 분리하고 GitHub Actions에서 PostgreSQL·Redis·FastAPI·Worker를 연결한 비동기 E2E를 검증했습니다.
-5. 공급사마다 코드를 따로 만들지 않고 JSON 프로필로 서로 다른 컬럼 구조를 표준 스키마에 매핑하고, 정상가보다 큰 할인가를 기존 검수 결과로 연결했으며, 지정 ETL 테스트 `27 passed`와 ETL·검수 서비스·API 관련 테스트 `96 passed`, 두 번째 샘플 3행 CLI 결과를 확인했습니다.
+5. 공급사마다 코드를 따로 만들지 않고 JSON 프로필로 서로 다른 컬럼 구조를 표준 스키마에 매핑한 뒤, 표준 CSV와 summary JSON을 PostgreSQL staging에 배치 적재했습니다. 입력·프로필 identity 중복 방지와 transaction rollback을 구현하고 실제 PostgreSQL 18.4 임시 클러스터에서 검증했습니다.
 
 ## 6.2 문제 정의
 
@@ -111,6 +111,16 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 -> 기존 validate_and_read_uploaded_csv()·inspect_dataframe()
 ```
 
+표준 CSV를 DB에 적재하는 흐름은 파일 변환과 분리합니다.
+
+```text
+catalogguard_ready.csv + etl_summary.json
+-> etl.load_cli
+-> summary 필수 필드·output SHA-256·loaded_rows 검증
+-> (input SHA-256, profile name, profile version) 중복 조회
+-> etl_load_runs + catalog_products_staging 한 트랜잭션 저장
+```
+
 ## 6.5 기술 스택과 검증 버전
 
 | 항목 | 버전 또는 값 |
@@ -132,9 +142,10 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 | 등록된 검수 규칙 함수 | 15개 |
 | 샘플 CSV 상품 수 | 5개 |
 | 샘플 CSV 검수 결과 | 오류 6건, 주의 0건 |
-| 최신 로컬 테스트 결과 | 832 passed, 26 skipped, 2 deselected |
-| 지정 ETL 테스트 | 27 passed |
-| ETL·검수 서비스·API 관련 테스트 | 96 passed |
+| 신규 ETL loader/migration 테스트 | 16 passed |
+| DB persistence 테스트 | 52 passed |
+| API inspection 테스트 | 66 passed |
+| 실제 PostgreSQL 18.4 임시 클러스터 전체 pytest | 874 passed, 2 deselected |
 | 샘플 ETL CLI 결과 | 전체 3건, 정상 변환 2건, 오류 행 1건, 종료 코드 0 |
 | CI 결과 확인 기준 | 최신 `Test` workflow의 상태·결론·커밋 SHA를 Actions 실행에서 확인 |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
@@ -158,10 +169,10 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 | `core/duplicate_detector.py` | 상품 ID와 상품명 중복 탐지 |
 | `core/price_anomaly_detector.py` | 카테고리별 가격 이상치 탐지 |
 | `core/category_mismatch_detector.py` | 상품명 키워드 기반 카테고리 불일치 탐지 |
-| `db/` | 검수 실행·상세 결과의 PostgreSQL 모델, Repository, 저장 Service |
+| `db/` | 검수 실행·상세 결과와 ETL staging 배치·상품의 PostgreSQL 모델, Repository, 저장 Service |
 | `services/` | Redis 작업 상태 저장, 비동기 작업 파일 관리와 제출 Service |
 | `workers/` | Celery 앱과 CSV 검수 Worker 작업 |
-| `etl/` | JSON 프로필 로딩, 공급사 행 변환, reject 분리와 CLI 파이프라인 |
+| `etl/` | JSON 프로필 로딩, 공급사 행 변환, reject 분리, 파일 변환 CLI와 PostgreSQL staging loader |
 
 ## 6.7 데이터 보호 설계
 
@@ -284,15 +295,18 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 | `tests/test_api_inspections.py` | ETL 출력과 연동되는 FastAPI CSV 검수·중복 결과 재사용·응답 계약 |
 | `tests/test_api_inspection_jobs.py`, `tests/test_inspection_tasks.py` | 비동기 작업 API, Celery task 상태 전이와 임시 파일 정리 |
 
-통계 집계 함수와 서버 응답 적용 helper에는 정렬, 빈 값 처리, 필수 컬럼 검증, 입력 불변성, TOP 5 적용 위치, malformed 응답 차단을 확인하는 테스트를 추가했습니다. 로컬에서는 기본 pytest 설정으로 전체 테스트를 실행해 다음 결과를 확인했습니다.
+통계 집계 함수와 서버 응답 적용 helper에는 정렬, 빈 값 처리, 필수 컬럼 검증, 입력 불변성, TOP 5 적용 위치, malformed 응답 차단을 확인하는 테스트를 추가했습니다. 최신 기능은 테스트용 PostgreSQL 18.4 임시 클러스터에서 migration과 ETL staging 적재까지 실행해 다음 결과를 확인했습니다.
 
 ```text
-832 passed, 26 skipped, 2 deselected
+신규 ETL loader/migration 테스트: 16 passed
+DB persistence 테스트: 52 passed
+API inspection 테스트: 66 passed
+전체 pytest: 874 passed, 2 deselected
 ```
 
-위 수치는 현재 개발 PC의 전체 로컬 회귀 테스트 결과입니다. 기본 설정에서 `e2e`·`performance` marker는 제외되며, PostgreSQL·Redis 등 별도 서비스가 필요한 일부 검증은 로컬 환경에 따라 skipped 처리됩니다. 지정 ETL 테스트 범위는 `27 passed`였고, ETL·검수 서비스·API 관련 테스트 범위는 `96 passed`였습니다. 두 번째 샘플 공급사 CSV CLI는 전체 3건 중 정상 2건·오류 1건을 종료 코드 0으로 처리했습니다. GitHub Actions의 실제 실행 결과와 테스트 개수는 이 로컬 수치와 구분하며, GitHub Actions Test #30은 기준 commit `0e14c77`의 결과이므로 현재 기능 commit `ecb2e56`의 CI 성공 결과로 간주하지 않습니다. 현재 기능 commit은 push 후 새 `Test` workflow 실행을 확인해야 합니다.
+표준 CSV 2행을 최초 적재하고, 같은 파일을 재실행해 `created=False`와 중복 상품 미생성을 확인했습니다. `output_file_sha256`·`loaded_rows` 불일치, 잘못된 표준 CSV, 상품 저장 중 예외에 대한 무변경·rollback도 확인했습니다. 합성 공급사 CSV CLI는 3건 중 정상 2건·reject 1건을 처리했습니다. 운영 DB가 아닌 임시 테스트 환경에서 수행한 결과입니다.
 
-GitHub Actions CI에서는 `main` 브랜치 push 또는 `main` 대상 pull request마다 일회성 PostgreSQL 18·Redis 7.4 서비스 컨테이너를 시작합니다. 두 서비스는 workflow 실행 중에만 사용할 테스트용 구성으로 Railway나 운영 DB·Redis와 분리됩니다. CI는 이 PostgreSQL에 `DATABASE_URL`과 `TEST_DATABASE_URL`을 설정하고 Alembic 마이그레이션을 적용한 뒤, E2E를 제외한 단위·PostgreSQL 통합 pytest를 실행합니다. 이어서 실제 Celery Worker와 FastAPI 프로세스를 시작해 `/health`·`/ready`, 비동기 CSV 제출, 상태 polling, PostgreSQL 결과 저장, 동일 CSV 재제출의 결과 재사용, 임시 CSV 정리를 E2E 스모크 테스트로 확인한 뒤 Streamlit 시작과 Health 응답을 확인합니다.
+GitHub Actions CI에서는 `main` 브랜치 push 또는 `main` 대상 pull request마다 일회성 PostgreSQL 18·Redis 7.4 서비스 컨테이너를 시작합니다. 두 서비스는 workflow 실행 중에만 사용할 테스트용 구성으로 Railway나 운영 DB·Redis와 분리됩니다. 최신 기능 commit `de51b3878194af51e74b729aa9c9ba9c7f74a833`의 GitHub Actions Test #32는 성공했으며, Alembic upgrade head, E2E 제외 pytest, FastAPI·Celery 비동기 E2E, Streamlit 시작과 Health 응답을 확인했습니다.
 
 ```text
 main push 또는 main 대상 pull request
@@ -361,7 +375,7 @@ main push 또는 main 대상 pull request
 -> 상세 결과 표와 현재 필터 결과 CSV에 사용
 ```
 
-TOP 5 제한은 집계 함수가 아닌 UI에서 적용하였습니다. 통계 합계와 저장된 요약의 전체 문제 수가 다르면 표시를 중단하고, 통계 생성 예외 원문이나 API 응답 원문, DB 정보는 사용자 화면에 노출하지 않습니다. 그 결과 필터를 변경해도 전체 통계 수치는 유지되고 상세 표만 바뀝니다. 또한 DB, API, Alembic migration 구조를 변경하지 않고 동일한 기능을 두 화면에서 재사용하였습니다.
+TOP 5 제한은 집계 함수가 아닌 UI에서 적용하였습니다. 통계 합계와 저장된 요약의 전체 문제 수가 다르면 표시를 중단하고, 통계 생성 예외 원문이나 API 응답 원문, DB 정보는 사용자 화면에 노출하지 않습니다. 그 결과 필터를 변경해도 전체 통계 수치는 유지되고 상세 표만 바뀝니다. 이 통계 기능 자체는 기존 검수 DB·API·Alembic 구조를 변경하지 않고 두 화면에서 재사용하였습니다.
 
 ### 동기 검수 성능 측정과 의사결정
 
@@ -401,9 +415,9 @@ Streamlit: 업로드 검증·마스킹 미리보기
 
 ### PostgreSQL 통합 테스트의 CI 자동화
 
-로컬 개발 환경에서는 `TEST_DATABASE_URL`이 없으면 운영 DB 오연결을 막기 위해 PostgreSQL 통합 테스트 25개를 건너뜁니다. 이 보호 조건을 완화하지 않고도 전체 통합 테스트를 반복 실행할 수 있도록 GitHub Actions에 PostgreSQL 18 서비스 컨테이너를 구성하고, 두 DB 환경변수가 같은 일회성 CI 테스트 DB만 가리키도록 했습니다.
+로컬 개발 환경에서는 `TEST_DATABASE_URL`이 없으면 운영 DB 오연결을 막기 위해 PostgreSQL 통합 테스트를 건너뜁니다. 이 보호 조건을 완화하지 않고도 전체 통합 테스트를 반복 실행할 수 있도록 GitHub Actions와 별도 로컬 검증에서 PostgreSQL 테스트 환경만 사용했습니다.
 
-CI는 테스트 전에 `20260703_0001`, `20260705_0002` Alembic 마이그레이션을 적용합니다. 이번 로컬 검증 결과는 `832 passed, 26 skipped, 2 deselected`이며, CI의 실제 테스트 개수는 각 GitHub Actions 실행 결과에서 별도로 확인합니다. GitHub Actions Test #30은 기준 commit `0e14c77`에서 실행된 결과이며, 현재 기능 commit `ecb2e56`의 CI 결과는 아니다.
+CI와 로컬 검증은 `20260703_0001`, `20260705_0002`, `20260725_0003` Alembic 마이그레이션을 적용합니다. Test #32는 기능 commit `de51b38`에서 성공했습니다. 별도 PostgreSQL 18.4 임시 클러스터에서는 staging migration의 upgrade·downgrade·재upgrade와 2행 적재·중복 재실행을 확인했으며, 운영 DB 적재는 검증하지 않았습니다.
 
 ### Streamlit 서버 시작 스모크 테스트
 
@@ -481,7 +495,7 @@ Python·FastAPI와 PostgreSQL을 기반으로 CSV 상품 데이터의 필수 값
 
 ### 포트폴리오용 설명
 
-CatalogGuard Lite는 상품 운영자가 CSV 업로드만으로 상품 데이터 품질을 확인할 수 있는 검수 앱입니다. 업로드 검증, 원본 보존형 개인정보 마스킹 미리보기, 중복 상품 탐지, 가격 이상치 탐지, 정상가·할인가 관계 검수, 상품명과 카테고리 불일치 탐지, 필터와 독립된 전체 결과 통계, 결과 필터링, CSV 다운로드까지 하나의 흐름으로 구성했습니다. 전체 검수는 FastAPI 서버에서 한 번 수행하고 PostgreSQL에 저장한 상세 응답을 Streamlit 화면과 이력 조회에서 재사용하도록 구현했습니다. 즉시 검수를 기본값으로 유지하면서 Redis·Celery 기반 백그라운드 검수와 수동 상태 갱신을 선택할 수 있습니다. JSON 프로필 기반 공급사 CSV ETL은 합성 공급사 프로필 2종으로 서로 다른 컬럼 구조를 표준 CSV에 매핑하고, 표준 CSV와 reject CSV, 요약 JSON을 생성하며 기존 업로드 검증·검수 흐름과 호환됩니다. 현재 개발 PC에서는 `832 passed, 26 skipped, 2 deselected`, 관련 지정 테스트 범위에서는 `96 passed`를 확인했습니다. GitHub Actions에는 PostgreSQL·Redis·FastAPI·Celery Worker를 연결하는 비동기 E2E 스모크 테스트 구성을 추가했으며, 실제 workflow 성공 여부는 각 Push의 `Test` 실행 결과로 확인합니다. 기준 commit 이전의 GitHub Actions Test #30 결과를 이번 기능의 CI 성공 결과로 사용하지 않습니다.
+CatalogGuard Lite는 상품 운영자가 CSV 업로드만으로 상품 데이터 품질을 확인할 수 있는 검수 앱입니다. 업로드 검증, 원본 보존형 개인정보 마스킹 미리보기, 중복 상품 탐지, 가격 이상치 탐지, 정상가·할인가 관계 검수, 상품명과 카테고리 불일치 탐지, 필터와 독립된 전체 결과 통계, 결과 필터링, CSV 다운로드까지 하나의 흐름으로 구성했습니다. 전체 검수는 FastAPI 서버에서 한 번 수행하고 PostgreSQL에 저장한 상세 응답을 Streamlit 화면과 이력 조회에서 재사용하도록 구현했습니다. 즉시 검수를 기본값으로 유지하면서 Redis·Celery 기반 백그라운드 검수와 수동 상태 갱신을 선택할 수 있습니다. JSON 프로필 기반 공급사 CSV ETL은 합성 공급사 프로필 2종으로 서로 다른 컬럼 구조를 표준 CSV에 매핑하고, 표준 CSV와 reject CSV, 요약 JSON을 생성하며 별도 CLI로 정상 행을 PostgreSQL staging에 배치 적재합니다. 실제 PostgreSQL 18.4 임시 클러스터에서 신규 loader/migration 테스트 `16 passed`, DB persistence `52 passed`, API inspection `66 passed`, 전체 `874 passed, 2 deselected`를 확인했으며, GitHub Actions Test #32도 성공했습니다. 이 검증은 운영 DB가 아닌 테스트용 PostgreSQL 환경에서 수행했습니다.
 
 ### 면접에서 강조할 포인트
 
@@ -500,6 +514,45 @@ CatalogGuard Lite는 상품 운영자가 CSV 업로드만으로 상품 데이터
 ## 6.17 공급사 상품 CSV ETL MVP
 
 서로 다른 공급사 컬럼명을 CatalogGuard 표준 스키마로 변환하는 설정 기반 ETL MVP를 구현했습니다. 합성 공급사 프로필 2종으로 `discount_price` 또는 `promo_price`를 `sale_price`에 연결하고, 상품 그룹 ID와 개별 SKU가 분리된 구조까지 공통 흐름에서 처리했습니다. 가격·재고 형식을 안전하게 변환했으며, 변환할 수 없는 행은 오류 코드와 사용자용 메시지를 포함한 별도 CSV로 분리했습니다. 정상가보다 큰 할인가처럼 변환은 가능한 상품 품질 문제는 reject하지 않고 `inspect_dataframe()`에서 검수합니다. 변환 결과를 실제 기존 업로드 검증과 `inspect_dataframe()`에 전달하는 통합 테스트로 호환성을 확인했습니다. 상세한 프로필 형식, reject 기준, CLI와 제한사항은 [ETL MVP 문서](etl_mvp.md)에 기록했습니다.
+
+### PostgreSQL staging 적재 설계
+
+#### 문제
+
+기존 ETL은 표준 CSV, reject CSV, summary JSON을 파일로 생성했지만, 정상 상품 행을 DB에서 배치 단위로 확인하는 Load 단계는 없었습니다. 파일 변환과 DB 적재를 한 CLI에 섞으면 변환 실패와 적재 실패의 책임 경계가 흐려지므로 별도 loader를 두었습니다.
+
+#### 구현
+
+`etl.load_cli`는 표준 CSV bytes와 summary JSON을 읽고 기존 `validate_and_read_uploaded_csv()`를 재사용합니다. summary의 `profile_name`, `profile_version`, `input_filename`, 입력·출력 SHA-256, `loaded_rows`를 확인한 뒤 실제 출력 SHA-256과 행 수를 비교합니다. 정상 상품 행만 `catalog_products_staging`에 저장하며 빈 `sale_price`는 `NULL`로 변환합니다.
+
+`etl_load_runs`는 ETL 배치 메타데이터를, `catalog_products_staging`은 해당 배치의 상품 행을 저장합니다. 배치와 상품을 분리한 이유는 한 파일 적재의 추적 정보와 여러 상품 행의 관계를 명확히 하고, 배치 단위 삭제·재조회·cascade를 가능하게 하기 위해서입니다. 상품 테이블은 운영 상품 테이블이 아니며 upsert를 수행하지 않습니다.
+
+#### 중복과 rollback 판단
+
+`(input_file_sha256, profile_name, profile_version)`을 원본·프로필 identity로 사용했습니다. 이 조합의 배치가 있으면 기존 배치 ID와 `created=False`를 반환하고 상품 행을 추가하지 않습니다. 프로필 버전이 다르면 별도 배치로 저장합니다. 신규 배치와 상품 행은 한 트랜잭션에 넣어 상품 저장 중 예외가 나면 배치까지 rollback합니다. 부모 배치 삭제 시 `ON DELETE CASCADE`로 상품 행도 삭제되며, `stock`, `price`, `sale_price` 음수는 DB CHECK constraint로 거부됩니다.
+
+#### 실행과 검증
+
+```powershell
+python -m etl.load_cli `
+  --input .\output\catalogguard_ready.csv `
+  --summary .\output\etl_summary.json
+```
+
+실행 예시는 다음과 같습니다.
+
+```text
+DB 적재 완료
+적재 배치 ID: 1
+신규 적재: yes
+상품 행: 2
+```
+
+같은 파일의 두 번째 실행은 같은 배치 ID, `신규 적재: no`, 상품 행 2건을 반환하고 중복 상품을 만들지 않습니다. PostgreSQL 18.4 임시 클러스터에서 `upgrade head` 후 staging 두 테이블, unique index, FK index, CHECK constraint, cascade를 확인했고, `downgrade` 후 기존 inspection 테이블 유지와 재upgrade도 확인했습니다. 신규 loader/migration 테스트는 `16 passed`, DB persistence는 `52 passed`, API inspection은 `66 passed`, 전체 pytest는 `874 passed, 2 deselected`였고 GitHub Actions Test #32는 성공했습니다.
+
+#### 범위와 한계
+
+실제 외부 공급사 운영 데이터, 운영 DB 적재, 증분 ETL과 streaming은 검증하지 않았습니다. 운영 상품 테이블 upsert, 기존 상품 갱신·덮어쓰기, reject 행 DB 저장, 자동 공급사 감지는 지원하지 않습니다. 위 PostgreSQL 결과는 임시 테스트 환경에서의 검증입니다.
 
 ### 두 번째 합성 공급사로 검증한 확장성
 
