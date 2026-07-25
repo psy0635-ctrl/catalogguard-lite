@@ -129,3 +129,96 @@ class InspectionResult(Base):
     )
 
     inspection_run: Mapped[InspectionRun] = relationship(back_populates="results")
+
+
+class ETLLoadRun(Base):
+    """A batch of standard ETL rows loaded into the staging tables."""
+
+    __tablename__ = "etl_load_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "loaded_rows >= 0",
+            name="ck_etl_load_runs_loaded_rows_non_negative",
+        ),
+        Index(
+            "ux_etl_load_runs_input_profile_version",
+            "input_file_sha256",
+            "profile_name",
+            "profile_version",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+    )
+    source_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    profile_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    profile_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    input_file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    loaded_rows: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    products: Mapped[list[CatalogProductStaging]] = relationship(
+        back_populates="etl_load_run",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class CatalogProductStaging(Base):
+    """A validated product row waiting for downstream catalog processing."""
+
+    __tablename__ = "catalog_products_staging"
+    __table_args__ = (
+        CheckConstraint(
+            "stock >= 0",
+            name="ck_catalog_products_staging_stock_non_negative",
+        ),
+        CheckConstraint(
+            "price >= 0",
+            name="ck_catalog_products_staging_price_non_negative",
+        ),
+        CheckConstraint(
+            "sale_price IS NULL OR sale_price >= 0",
+            name="ck_catalog_products_staging_sale_price_non_negative",
+        ),
+        Index("ix_catalog_products_staging_etl_load_run_id", "etl_load_run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+    )
+    etl_load_run_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("etl_load_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    product_group_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    product_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    product_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    category: Mapped[str] = mapped_column(String(100), nullable=False)
+    color: Mapped[str] = mapped_column(String(100), nullable=False)
+    size: Mapped[str] = mapped_column(String(100), nullable=False)
+    stock: Mapped[int] = mapped_column(Integer, nullable=False)
+    price: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sale_price: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    image_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    seller: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    etl_load_run: Mapped[ETLLoadRun] = relationship(back_populates="products")
