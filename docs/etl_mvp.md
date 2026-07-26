@@ -67,9 +67,9 @@
 
 ## 변환과 reject 기준
 
-정상 행은 표준 CSV에 저장한다. 상품 ID·필수 원본값 누락, `price` 또는 입력된 `discount_price`의 가격 변환 실패·음수, 재고 정수 변환 실패·음수는 reject CSV에 저장한다. `discount_price`가 비어 있으면 reject하지 않고 `sale_price`를 빈 값으로 출력한다. 한 행에 여러 오류가 있으면 `error_code`, `error_message`에 JSON 배열로 함께 기록한다. 중복 상품 ID, 비표준 색상·사이즈, 가격 이상치, `sale_price`가 `price`보다 큰 상품 품질 문제는 정상 행으로 남겨 기존 CatalogGuard 검수기가 처리한다.
+정상 행은 표준 CSV에 저장한다. 상품 ID·필수 원본값 누락, `price` 또는 `sale_price`로 매핑된 `discount_price`·`promo_price`의 가격 변환 실패·음수, 재고 정수 변환 실패·음수는 reject CSV에 저장한다. 할인 가격 원본이 비어 있으면 reject하지 않고 `sale_price`를 빈 값으로 출력한다. 한 행에 여러 오류가 있으면 `error_code`, `error_message`에 JSON 배열로 함께 기록한다. 중복 상품 ID, 비표준 색상·사이즈, 가격 이상치, `sale_price`가 `price`보다 큰 상품 품질 문제는 정상 행으로 남겨 기존 CatalogGuard 검수기가 처리한다.
 
-`rejected_rows.csv`는 오류가 없어도 헤더를 포함해 생성한다. `etl_summary.json`에는 입력·출력 SHA-256, 처리 건수, 오류 코드별 건수와 UTC 시각만 기록하며 절대 경로나 비밀값을 기록하지 않는다.
+`rejected_rows.csv`는 오류가 없어도 헤더를 포함해 생성한다. `etl_summary.json`에는 프로필 이름·버전, 입력 파일명, 입력·출력 SHA-256, 처리 건수, 오류 코드별 건수와 UTC 시각을 기록하며 절대 경로나 비밀값을 기록하지 않는다.
 
 ## CLI
 
@@ -115,6 +115,7 @@ python -m etl.cli `
 -> summary 필드·SHA-256·행 수·표준 CSV 검증
 -> 중복 배치 조회
 -> etl_load_runs + catalog_products_staging 저장
+-> FastAPI 배치 목록·상세 조회
 ```
 
 두 CLI의 책임은 분리되어 있다.
@@ -187,6 +188,70 @@ DB 적재 완료
 상품 행: 2
 ```
 
+## 적재 배치 조회 API
+
+ETL 실행과 PostgreSQL 적재는 CLI의 책임으로 유지하고, FastAPI는 저장된 배치와 상품을 읽기 전용으로 조회한다.
+
+### 적재 배치 목록
+
+```http
+GET /api/v1/etl-loads
+```
+
+| Query | 기본값 | 조건과 의미 |
+|---|---:|---|
+| `limit` | `20` | 한 페이지의 배치 수, `1` 이상 `100` 이하 |
+| `offset` | `0` | 앞에서 건너뛸 배치 수, `0` 이상 |
+| `filename` | 없음 | 별도 길이 제한 없는 원본 파일명 부분 검색 |
+| `profile_name` | 없음 | 별도 길이 제한 없는 프로필 이름 부분 검색 |
+
+`filename`과 `profile_name`은 앞뒤 공백을 제거하며, 공백만 남는 값은 필터로 사용하지 않는다. 검색은 대소문자를 구분하지 않는 부분 일치이고 두 필터를 함께 보내면 AND 조건으로 적용한다. `%`, `_`, `\`는 SQL LIKE의 wildcard나 escape 문법이 아니라 실제 문자로 검색하도록 escape한다.
+
+목록은 `created_at DESC`, `id DESC` 순으로 최신 배치를 먼저 반환한다. 페이지의 `items`와 전체 건수 `total`은 같은 필터 함수를 사용하므로 검색 조건이 서로 달라지지 않는다. 목록 응답에는 배치 ID, 원본 파일명, 프로필 이름·버전, 적재 행 수와 생성 시각만 포함하며 SHA-256과 상품 목록은 제외한다.
+
+### 적재 배치 상세
+
+```http
+GET /api/v1/etl-loads/{etl_load_run_id}
+```
+
+| Query | 기본값 | 조건과 의미 |
+|---|---:|---|
+| `product_limit` | `50` | 한 페이지의 상품 수, `1` 이상 `100` 이하 |
+| `product_offset` | `0` | 앞에서 건너뛸 상품 수, `0` 이상 |
+
+상세 응답에는 배치 기본 정보, 원본·출력 파일 SHA-256, 적재 행 수와 해당 배치의 staging 상품 목록이 포함된다. 상품은 staging 상품 `id ASC`로 정렬하며 SQL `LIMIT`·`OFFSET`에서 페이지를 나눈다. 모든 상품 조회와 count에는 요청한 `etl_load_run_id` 조건을 적용해 다른 배치의 상품이 섞이지 않게 한다. 배치가 없으면 HTTP `404`를 반환한다.
+
+Path의 `etl_load_run_id`는 `1` 이상의 정수만 허용한다. `0`, 음수와 숫자가 아닌 값은 요청 검증 단계에서 HTTP `422`가 된다. nullable 컬럼인 `sale_price`, `description`, `seller`는 값이 없을 때 JSON `null`로 유지한다.
+
+### 구현 구조
+
+| 파일 | 역할 |
+|---|---|
+| `api/routes/etl_loads.py` | HTTP 요청과 Query·Path 범위 검증, 404 처리, 응답 모델 변환 |
+| `api/schemas.py` | 배치 목록·상세와 staging 상품의 Pydantic 응답 구조 |
+| `db/etl_query_service.py` | SQLAlchemy 기반 읽기 전용 필터·정렬·count·페이지 조회 |
+| `tests/test_api_etl_loads.py` | HTTP 상태, 파라미터 전달, 응답 필드와 nullable 값 계약 |
+| `tests/test_etl_query_service.py` | 실제 PostgreSQL의 검색·정렬·페이지네이션·NULL·배치 격리 |
+
+라우터는 ORM 객체를 API 응답으로 직접 내보내지 않고 query service의 dataclass 결과를 Pydantic 모델로 변환한다. 따라서 DB 모델 변경이 HTTP 응답 계약을 암묵적으로 바꾸지 않는다.
+
+### 전체 상품 로딩과 N+1 방지
+
+배치 상세를 조회할 때 SQLAlchemy relationship의 상품 전체를 자동으로 읽지 않는다. 배치 정보와 현재 상품 페이지를 별도 SELECT로 조회하고, 전체 상품 수는 별도 count 쿼리로 계산한다. 상품 페이지네이션은 전체 행을 Python 메모리에 올린 뒤 자르는 방식이 아니라 DB 쿼리의 `LIMIT`·`OFFSET`에서 처리한다.
+
+N+1 문제는 배치 한 번을 조회한 뒤 상품마다 DB에 다시 질문하여 DB 요청 횟수가 지나치게 늘어나는 문제다. 현재 상세 조회는 상품마다 추가 SELECT를 실행하지 않으며, 조회 함수 안에서 `commit`이나 `rollback`도 실행하지 않는다. 트랜잭션 수명은 세션을 제공한 상위 계층이 관리한다.
+
+### 특수문자 검색 검증
+
+실제 PostgreSQL 18.4 테스트에서 SQL LIKE 특수문자를 다음과 같이 일반 문자로 처리하는지 확인했다.
+
+- `%` 검색은 여러 글자 wildcard가 아니라 실제 `%`가 포함된 파일만 반환한다.
+- `_` 검색은 한 글자 wildcard가 아니라 실제 `_`가 포함된 파일만 반환한다.
+- `\` 검색은 escape 처리 중 사라지거나 패턴을 바꾸지 않고 실제 `\`가 포함된 파일만 반환한다.
+
+각 테스트는 해당 문자를 실제로 포함한 fixture와 포함하지 않은 fixture를 함께 사용해, wildcard로 처리하는 잘못된 구현이 통과하지 않도록 배치 ID 목록과 `total`을 확인한다.
+
 ### Migration 검증
 
 다음 순서로 staging migration의 upgrade, downgrade, 재upgrade를 확인했다.
@@ -199,7 +264,7 @@ python -m alembic upgrade head
 
 `20260725_0003` upgrade 후 `etl_load_runs`, `catalog_products_staging`과 unique index, FK 조회 index, 음수 방지 CHECK constraint, `ON DELETE CASCADE`가 생성된다. downgrade 후에는 두 staging 테이블만 제거되고 기존 `inspection_runs`, `inspection_results`는 유지되며, 재upgrade로 staging 구조를 다시 만들 수 있다.
 
-실제 PostgreSQL 18.4 임시 클러스터에서 2행 표준 CSV를 최초 적재하고, 같은 파일을 재실행해 `created=False`와 중복 상품 미생성을 확인했다. 운영 DB가 아닌 테스트용 환경에서만 수행한 검증이다. 신규 ETL loader/migration 테스트는 `16 passed`, DB persistence는 `52 passed`, API inspection은 `66 passed`, 전체 pytest는 `874 passed, 2 deselected`였고 GitHub Actions Test #32도 성공했다. 이 기능은 `de51b3878194af51e74b729aa9c9ba9c7f74a833`에 반영되어 있다.
+실제 PostgreSQL 18.4 임시 클러스터에서 2행 표준 CSV를 최초 적재하고, 같은 파일을 재실행해 `created=False`와 중복 상품 미생성을 확인했다. 같은 격리 환경에서 신규 적재 배치 조회 테스트까지 포함한 전체 pytest는 `894 passed, 2 deselected, 3 warnings`였고 skipped, failed, errors는 0이었다. 2026-07-26 기능 검증 기준 commit `362ba99ae963f561418114db01fc9cf6bf497d10`의 GitHub Actions Test #34(run ID `30189130331`)도 E2E 제외 전체 pytest와 별도 비동기 E2E smoke test `1 passed`로 성공했다. 운영 DB나 Railway DB는 사용하지 않았다.
 
 ## 제한사항
 
@@ -207,6 +272,8 @@ python -m alembic upgrade head
 - 실제 외부 공급사 운영 데이터 연동은 지원하지 않는다.
 - 자동 공급사 감지는 지원하지 않으며, 공급사별 프로필은 수동 선택한다.
 - 웹 수집과 외부 API 연동은 지원하지 않는다.
+- ETL 적재 실행용 웹 API와 Streamlit 적재 이력 화면은 지원하지 않는다.
+- staging 상품 수정·삭제와 상품 변경 이력은 지원하지 않는다.
 - 운영 상품 테이블 upsert, 기존 상품 갱신·덮어쓰기와 reject 행 DB 저장은 지원하지 않는다.
 - 증분 ETL과 streaming은 지원하지 않는다.
 - 운영 DB 적재는 검증하지 않았으며, PostgreSQL staging 적재는 임시 테스트 PostgreSQL 환경에서만 검증했다.
