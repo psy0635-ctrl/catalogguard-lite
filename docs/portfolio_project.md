@@ -4,7 +4,7 @@
 
 ## 6.1 프로젝트 한 줄 소개
 
-CatalogGuard Lite는 Python·FastAPI 백엔드와 PostgreSQL 저장 계층을 중심으로 상품 CSV의 데이터 품질을 검수하고, 검수 결과와 ETL staging 적재 이력을 API로 조회할 수 있게 만든 품질 검사 도구입니다. 공개 Streamlit 앱에는 ETL 적재 이력 화면이 없으며 해당 조회는 FastAPI 환경에서 제공합니다.
+CatalogGuard Lite는 Python·FastAPI 백엔드와 PostgreSQL 저장 계층을 중심으로 상품 CSV의 데이터 품질을 검수하고, 검수 결과와 ETL staging 적재 이력을 Streamlit 화면과 API로 조회할 수 있게 만든 품질 검사 도구입니다. ETL 화면은 저장된 배치와 상품을 조회하는 읽기 전용 기능이며, 적재 실행은 CLI가 담당합니다.
 
 - 배포 URL: https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
 - 개발 언어: Python
@@ -35,6 +35,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 4. 긴 작업은 Redis·Celery로 상태를 분리하고 GitHub Actions에서 PostgreSQL·Redis·FastAPI·Worker를 연결한 비동기 E2E를 검증했습니다.
 5. 공급사마다 코드를 따로 만들지 않고 JSON 프로필로 서로 다른 컬럼 구조를 표준 스키마에 매핑한 뒤, 표준 CSV와 summary JSON을 PostgreSQL staging에 배치 적재했습니다. 입력·프로필 identity 중복 방지와 transaction rollback을 구현하고 실제 PostgreSQL 18.4 임시 클러스터에서 검증했습니다.
 6. PostgreSQL staging 적재 결과를 파일명·프로필명으로 검색하고 배치별 상품을 페이지 단위로 확인하는 FastAPI 조회 API를 구현했습니다. 목록 응답과 상세 응답의 범위를 분리하고 실제 PostgreSQL에서 필터·정렬·배치 격리를 검증했습니다.
+7. Streamlit에 ETL 적재 이력 탭을 추가해 파일명·프로필명 AND 검색, 배치·상품 페이지네이션, 상세 SHA-256, nullable 필드와 request ID를 표시하고, AppTest로 stale 상태 초기화와 상세 오류 중복 호출 방지를 검증했습니다.
 
 ## 6.2 문제 정의
 
@@ -122,6 +123,7 @@ catalogguard_ready.csv + etl_summary.json
 -> etl_load_runs + catalog_products_staging 한 트랜잭션 저장
 -> GET /api/v1/etl-loads로 배치 검색
 -> GET /api/v1/etl-loads/{etl_load_run_id}로 배치별 상품 조회
+-> Streamlit ETL 적재 이력 탭에서 목록·상세·페이지네이션 표시
 ```
 
 ## 6.5 기술 스택과 검증 버전
@@ -145,20 +147,21 @@ catalogguard_ready.csv + etl_summary.json
 | 등록된 검수 규칙 함수 | 15개 |
 | 샘플 CSV 상품 수 | 5개 |
 | 샘플 CSV 검수 결과 | 오류 6건, 주의 0건 |
-| 신규 ETL loader/migration 테스트 | 16 passed |
-| DB persistence 테스트 | 52 passed |
-| API inspection 테스트 | 66 passed |
-| 실제 PostgreSQL 18.4 임시 클러스터 전체 pytest | 894 passed, 2 deselected, 3 warnings |
+| ETL API client 신규 테스트 | 14 cases (7 test functions, parameterized 포함) |
+| ETL UI 순수 함수 테스트 | 7 passed |
+| ETL Streamlit AppTest | 5 passed |
+| GitHub Actions PostgreSQL 18 전체 pytest | 920 passed, 0 skipped, 2 deselected, 3 warnings |
 | 샘플 ETL CLI 결과 | 전체 3건, 정상 변환 2건, 오류 행 1건, 종료 코드 0 |
-| ETL 조회 기능 검증 CI | 2026-07-26 GitHub Actions Test #34, run ID 30189130331, success, 비동기 E2E smoke test 1 passed |
+| ETL 조회·UI 기능 검증 CI | 2026-07-26 GitHub Actions Test #37, run ID 30196012940, success, 비동기 E2E smoke test 1 passed |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
 
 ## 6.6 핵심 구현 구조
 
 | 파일 | 역할 |
 |---|---|
-| `app.py` | 업로드 검증·마스킹 미리보기, FastAPI 검수 요청·상세 응답 표시, 공통 통계 UI |
-| `clients/catalogguard_api.py` | FastAPI 검수 실행·상세 조회와 오류 요청 ID 전달 |
+| `app.py` | 업로드 검증·마스킹 미리보기, 검수 화면, 검수 이력과 ETL 적재 이력 탭 연결 |
+| `clients/catalogguard_api.py` | FastAPI 검수·ETL 목록·상세 조회와 오류 요청 ID 전달 |
+| `ui/etl_load_history.py` | ETL 목록·검색·페이지네이션·상세·상품 조회와 ETL session state 관리 |
 | `api/main.py`, `api/routes/` | FastAPI 앱, Health·readiness, 동기 검수·이력·비동기 작업 및 ETL 배치 조회 API |
 | `api/routes/etl_loads.py`, `api/schemas.py` | ETL 조회 파라미터·404 처리와 목록·상세 Pydantic 응답 계약 |
 | `config/settings.py` | 컬럼, 허용 카테고리, 업로드 제한, 금지어 설정 |
@@ -298,23 +301,24 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 | `tests/test_inspection_persistence.py` | 검수 이력 저장·조회 통합 흐름 |
 | `tests/test_api_etl_loads.py` | ETL 배치 목록·상세 HTTP 응답과 파라미터·404 계약 |
 | `tests/test_etl_query_service.py` | 실제 PostgreSQL의 ETL 검색·정렬·페이지네이션·NULL·배치 격리 |
+| `tests/test_catalogguard_api_client.py` | ETL client 파라미터·응답 shape·SHA-256·nullable·404/request ID 검증 |
+| `tests/test_etl_load_history_ui.py` | ETL 순수 helper와 Streamlit AppTest 검증 |
 | `tests/etl/` | 공급사 프로필 검증, 행 변환, 파일 교체, CLI와 기존 검수 흐름 호환성 |
 | `tests/test_api_inspections.py` | ETL 출력과 연동되는 FastAPI CSV 검수·중복 결과 재사용·응답 계약 |
 | `tests/test_api_inspection_jobs.py`, `tests/test_inspection_tasks.py` | 비동기 작업 API, Celery task 상태 전이와 임시 파일 정리 |
 
-통계 집계 함수와 서버 응답 적용 helper에는 정렬, 빈 값 처리, 필수 컬럼 검증, 입력 불변성, TOP 5 적용 위치, malformed 응답 차단을 확인하는 테스트를 추가했습니다. 최신 기능은 테스트용 PostgreSQL 18.4 임시 클러스터에서 migration과 ETL staging 적재까지 실행해 다음 결과를 확인했습니다.
+통계 집계 함수와 서버 응답 적용 helper에는 정렬, 빈 값 처리, 필수 컬럼 검증, 입력 불변성, TOP 5 적용 위치, malformed 응답 차단을 확인하는 테스트를 추가했습니다. 최신 기능은 GitHub Actions의 PostgreSQL 18 서비스에서 migration과 ETL staging 적재까지 실행해 다음 결과를 확인했습니다.
 
 ```text
-신규 ETL loader/migration 테스트: 16 passed
-DB persistence 테스트: 52 passed
-API inspection 테스트: 66 passed
-전체 pytest: 894 passed, 2 deselected, 3 warnings
+GitHub Actions 전체 pytest: 920 passed, 0 skipped, 2 deselected, 3 warnings
+신규 ETL API client·UI 테스트: skip 0
 비동기 E2E smoke test: 1 passed
+Streamlit startup smoke: /_stcore/health HTTP 200
 ```
 
 표준 CSV 2행을 최초 적재하고, 같은 파일을 재실행해 `created=False`와 중복 상품 미생성을 확인했습니다. `output_file_sha256`·`loaded_rows` 불일치, 잘못된 표준 CSV, 상품 저장 중 예외에 대한 무변경·rollback도 확인했습니다. 합성 공급사 CSV CLI는 3건 중 정상 2건·reject 1건을 처리했습니다. 운영 DB가 아닌 임시 테스트 환경에서 수행한 결과입니다.
 
-GitHub Actions CI에서는 `main` 브랜치 push 또는 `main` 대상 pull request마다 일회성 PostgreSQL 18·Redis 7.4 서비스 컨테이너를 시작합니다. 두 서비스는 workflow 실행 중에만 사용할 테스트용 구성으로 Railway나 운영 DB·Redis와 분리됩니다. ETL 조회 API 기능 commit `362ba99ae963f561418114db01fc9cf6bf497d10`의 GitHub Actions Test #34는 성공했으며, Alembic upgrade head, `894 passed, 2 deselected, 3 warnings`, FastAPI·Celery 비동기 E2E `1 passed`, Streamlit 시작과 Health 응답을 확인했습니다.
+GitHub Actions CI에서는 `main` 브랜치 push 또는 `main` 대상 pull request마다 일회성 PostgreSQL 18·Redis 7.4 서비스 컨테이너를 시작합니다. 두 서비스는 workflow 실행 중에만 사용할 테스트용 구성으로 Railway나 운영 DB·Redis와 분리됩니다. 기능 commit `0cf1d99cc1f884fd56bd610840d89ea40c5a0449`의 GitHub Actions Test #37은 성공했으며, Alembic upgrade head, `920 passed, 0 skipped, 2 deselected, 3 warnings`, FastAPI·Celery 비동기 E2E `1 passed`, Streamlit 시작과 Health 응답을 확인했습니다.
 
 ```text
 main push 또는 main 대상 pull request
@@ -331,7 +335,7 @@ main push 또는 main 대상 pull request
 -> Streamlit 프로세스 종료
 ```
 
-Test #34의 run ID는 `30189130331`이며 기능 commit SHA와 workflow 결론을 함께 확인했습니다. 테스트 warning 3건은 실패로 처리되지 않았고 해결한 것으로 표현하지 않습니다.
+Test #37의 run ID는 `30196012940`이며 기능 commit SHA와 workflow 결론을 함께 확인했습니다. 테스트 warning 3건은 Alembic `path_separator` DeprecationWarning이며 실패로 처리되지 않았고 해결한 것으로 표현하지 않습니다.
 
 ## 6.12 샘플 데이터 기준 결과
 
@@ -425,7 +429,7 @@ Streamlit: 업로드 검증·마스킹 미리보기
 
 로컬 개발 환경에서는 `TEST_DATABASE_URL`이 없으면 운영 DB 오연결을 막기 위해 PostgreSQL 통합 테스트를 건너뜁니다. 이 보호 조건을 완화하지 않고도 전체 통합 테스트를 반복 실행할 수 있도록 GitHub Actions와 별도 로컬 검증에서 PostgreSQL 테스트 환경만 사용했습니다.
 
-CI와 로컬 검증은 `20260703_0001`, `20260705_0002`, `20260725_0003` Alembic 마이그레이션을 적용합니다. Test #34는 기능 commit `362ba99`에서 성공했습니다. 별도 PostgreSQL 18.4 임시 클러스터에서는 staging migration의 upgrade·downgrade·재upgrade, 2행 적재·중복 재실행과 ETL 배치 조회 필터·정렬·페이지네이션을 확인했으며, 운영 DB 적재는 검증하지 않았습니다.
+CI와 로컬 검증은 `20260703_0001`, `20260705_0002`, `20260725_0003` Alembic 마이그레이션을 적용합니다. 최신 Test #37은 기능 commit `0cf1d99`에서 성공했습니다. CI PostgreSQL 18 서비스에서는 migration, ETL 적재·조회와 전체 테스트를 실행하며, 운영 DB 적재는 검증하지 않습니다.
 
 ### Streamlit 서버 시작 스모크 테스트
 
@@ -503,7 +507,7 @@ Python·FastAPI와 PostgreSQL을 기반으로 CSV 상품 데이터의 필수 값
 
 ### 포트폴리오용 설명
 
-CatalogGuard Lite는 상품 운영자가 CSV 업로드만으로 상품 데이터 품질을 확인할 수 있는 검수 앱입니다. 업로드 검증, 원본 보존형 개인정보 마스킹 미리보기, 중복 상품 탐지, 가격 이상치 탐지, 정상가·할인가 관계 검수, 상품명과 카테고리 불일치 탐지, 필터와 독립된 전체 결과 통계, 결과 필터링, CSV 다운로드까지 하나의 흐름으로 구성했습니다. 전체 검수는 FastAPI 서버에서 한 번 수행하고 PostgreSQL에 저장한 상세 응답을 Streamlit 화면과 이력 조회에서 재사용하도록 구현했습니다. 즉시 검수를 기본값으로 유지하면서 Redis·Celery 기반 백그라운드 검수와 수동 상태 갱신을 선택할 수 있습니다. 합성 공급사 CSV를 표준화하고 PostgreSQL staging에 배치 단위로 저장한 뒤, 적재 이력과 상품 데이터를 FastAPI 조회 API로 제공하는 MVP를 구현하였습니다. 실제 PostgreSQL 18.4 임시 클러스터에서 전체 `894 passed, 2 deselected, 3 warnings`를 확인했고, 기능 commit `362ba99`의 GitHub Actions Test #34와 비동기 E2E smoke test `1 passed`도 성공했습니다. 이 검증은 운영 DB가 아닌 테스트용 PostgreSQL 환경에서 수행했습니다.
+CatalogGuard Lite는 상품 운영자가 CSV 업로드만으로 상품 데이터 품질을 확인할 수 있는 검수 앱입니다. 업로드 검증, 원본 보존형 개인정보 마스킹 미리보기, 중복 상품 탐지, 가격 이상치 탐지, 정상가·할인가 관계 검수, 상품명과 카테고리 불일치 탐지, 필터와 독립된 전체 결과 통계, 결과 필터링, CSV 다운로드까지 하나의 흐름으로 구성했습니다. 전체 검수는 FastAPI 서버에서 한 번 수행하고 PostgreSQL에 저장한 상세 응답을 Streamlit 화면과 이력 조회에서 재사용하도록 구현했습니다. 즉시 검수를 기본값으로 유지하면서 Redis·Celery 기반 백그라운드 검수와 수동 상태 갱신을 선택할 수 있습니다. 합성 공급사 CSV를 표준화하고 PostgreSQL staging에 배치 단위로 저장한 뒤, 적재 이력과 상품 데이터를 FastAPI 조회 API와 Streamlit ETL 적재 이력 탭으로 제공하는 MVP를 구현하였습니다. GitHub Actions Test #37에서 `920 passed, 0 skipped, 2 deselected, 3 warnings`, 비동기 E2E `1 passed`, Streamlit startup smoke 성공을 확인했습니다. 이 검증은 운영 DB가 아닌 테스트용 PostgreSQL 환경에서 수행했습니다.
 
 ### 면접에서 강조할 포인트
 
@@ -557,11 +561,11 @@ DB 적재 완료
 상품 행: 2
 ```
 
-같은 파일의 두 번째 실행은 같은 배치 ID, `신규 적재: no`, 상품 행 2건을 반환하고 중복 상품을 만들지 않습니다. PostgreSQL 18.4 임시 클러스터에서 `upgrade head` 후 staging 두 테이블, unique index, FK index, CHECK constraint, cascade를 확인했고, `downgrade` 후 기존 inspection 테이블 유지와 재upgrade도 확인했습니다. 적재 배치 조회 API까지 포함한 전체 pytest는 `894 passed, 2 deselected, 3 warnings`였고 기능 commit `362ba99`의 GitHub Actions Test #34도 성공했습니다.
+같은 파일의 두 번째 실행은 같은 배치 ID, `신규 적재: no`, 상품 행 2건을 반환하고 중복 상품을 만들지 않습니다. GitHub Actions Test #37의 PostgreSQL 18 서비스에서 `upgrade head`, staging 적재·조회와 전체 pytest `920 passed, 0 skipped, 2 deselected, 3 warnings`를 확인했습니다.
 
 #### 범위와 한계
 
-실제 외부 공급사 운영 데이터, 운영 DB 적재, 증분 ETL과 streaming은 검증하지 않았습니다. ETL 적재 실행용 웹 API와 Streamlit 적재 이력 화면, staging 상품 수정·삭제, 운영 상품 테이블 upsert, 기존 상품 갱신·덮어쓰기, 상품 변경 이력, reject 행 DB 저장과 자동 공급사 감지는 지원하지 않습니다. 위 PostgreSQL 결과는 임시 테스트 환경에서의 검증입니다.
+실제 외부 공급사 운영 데이터, 운영 DB 적재, 증분 ETL과 streaming은 검증하지 않았습니다. ETL 적재 실행용 웹 API, staging 상품 수정·삭제, 운영 상품 테이블 upsert, 기존 상품 갱신·덮어쓰기, 상품 변경 이력, reject 행 DB 저장과 자동 공급사 감지는 지원하지 않습니다. Streamlit 적재 이력 화면은 저장된 배치·상품 조회만 제공하며, 위 PostgreSQL 결과는 테스트 환경에서의 검증입니다.
 
 ### ETL 적재 배치 조회 API
 
@@ -584,7 +588,23 @@ PostgreSQL staging에 상품을 저장할 수 있었지만, 어떤 공급사 파
 
 #### 검증
 
-운영 DB나 Railway DB가 아닌 임시 PostgreSQL 18.4 환경에서 정렬, 파일명·프로필명 검색과 AND 조건, 대소문자 무시, LIKE 특수문자, 목록·count 일치, 상품 페이지네이션과 배치 격리, nullable 값, 없는 배치를 확인했습니다. 신규 API와 PostgreSQL 조회 테스트를 포함한 전체 결과는 `894 passed, 2 deselected, 3 warnings`이며 skipped, failed, errors는 0입니다. 기능 commit `362ba99ae963f561418114db01fc9cf6bf497d10`의 GitHub Actions Test #34와 비동기 E2E smoke test `1 passed`도 성공했습니다.
+운영 DB나 Railway DB가 아닌 테스트 PostgreSQL 환경에서 정렬, 파일명·프로필명 검색과 AND 조건, 대소문자 무시, LIKE 특수문자, 목록·count 일치, 상품 페이지네이션과 배치 격리, nullable 값, 없는 배치를 확인했습니다. 신규 API와 PostgreSQL 조회 테스트를 포함한 GitHub Actions 전체 결과는 `920 passed, 0 skipped, 2 deselected, 3 warnings`입니다.
+
+### Streamlit ETL 적재 이력 화면
+
+Streamlit의 `ETL 적재 이력` 탭은 `CatalogGuardApiClient`를 통해 목록·상세 API를 호출하는 읽기 전용 화면입니다. ETL 실행, staging 수정·삭제, 운영 상품 반영은 이 화면에서 수행하지 않습니다.
+
+| 기능 | 구현 범위 |
+|---|---|
+| 목록 | 10건 단위 페이지네이션, 전체 건수, 빈 목록 안내 |
+| 검색 | filename·profile_name 부분 검색과 두 조건 AND |
+| 상세 | 배치 메타데이터, input/output SHA-256 전체 값, 적재 시각 |
+| 상품 | 선택한 배치의 staging 상품 20건 단위 페이지네이션 |
+| nullable | `sale_price`, `description`, `seller`의 `null` 안전 표시 |
+| 오류 | 404와 유효한 request ID 표시 |
+| 상태 | 검색·배치 변경 시 stale 상세·상품 제거, 실패 상세 요청 중복 호출 방지 |
+
+순수 helper 테스트 7개와 Streamlit AppTest 5개로 목록·검색·빈 결과·페이지 이동·상세·SHA-256·nullable·404·request ID·상태 초기화를 검증했습니다. 실제 브라우저 전체 상호작용은 별도 E2E 범위가 아니며, GitHub Actions의 Streamlit 검사는 서버 startup과 `/_stcore/health` HTTP 200을 확인합니다.
 
 ### 두 번째 합성 공급사로 검증한 확장성
 

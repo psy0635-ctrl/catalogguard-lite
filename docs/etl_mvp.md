@@ -236,6 +236,34 @@ Path의 `etl_load_run_id`는 `1` 이상의 정수만 허용한다. `0`, 음수�
 
 라우터는 ORM 객체를 API 응답으로 직접 내보내지 않고 query service의 dataclass 결과를 Pydantic 모델로 변환한다. 따라서 DB 모델 변경이 HTTP 응답 계약을 암묵적으로 바꾸지 않는다.
 
+## Streamlit ETL 적재 이력 화면
+
+Streamlit에는 저장된 ETL 배치와 staging 상품을 확인하는 `ETL 적재 이력` 탭을 제공한다. 이 화면은 적재를 실행하거나 데이터를 변경하지 않고, `CatalogGuardApiClient`를 통해 FastAPI의 읽기 전용 조회 API만 호출한다.
+
+| 화면 기능 | 동작 |
+|---|---|
+| 배치 목록 | 최신 적재부터 10건씩 표시하고 전체 건수를 표시 |
+| 검색 | 파일명과 프로필명 검색을 함께 적용하는 AND 조건 |
+| 배치 페이지 | 이전·다음 버튼으로 목록 offset 이동 |
+| 배치 상세 | 배치 ID, 파일명, 프로필, 버전, 적재 행 수, 적재 시각과 input/output SHA-256 전체 표시 |
+| 상품 목록 | 선택한 배치의 staging 상품을 20건씩 표시 |
+| nullable | `sale_price`, `description`, `seller`의 `null`을 빈 값으로 표시 |
+| 빈 결과·404 | 빈 목록 안내와 존재하지 않는 배치의 오류 안내 표시 |
+| 요청 추적 | 유효한 `X-Request-ID`를 오류 화면에 표시 |
+
+```text
+ETL 적재 이력 탭
+-> GET /api/v1/etl-loads (limit=10)
+-> 파일명·프로필명 검색(AND)
+-> 배치 이전·다음
+-> 배치 상세 선택
+-> GET /api/v1/etl-loads/{etl_load_run_id} (product_limit=20)
+-> SHA-256·배치 상품·nullable 필드 표시
+-> 상품 이전·다음
+```
+
+Streamlit rerun에 대비해 목록·상세 응답과 선택 상태를 ETL 전용 `session_state`에 보관한다. 검색 조건이나 배치가 바뀌면 이전 상세·상품 상태를 초기화해 stale 상품이 남거나 다른 배치의 상품이 섞이지 않게 한다. 상세 API가 실패하면 동일 클릭에서 API를 중복 호출하지 않으며, 정상 응답만 상태에 저장한다. 순수 helper 테스트와 Streamlit AppTest로 목록·검색·페이지 이동·상세·SHA-256·nullable·404·request ID·stale 상태 초기화를 검증한다.
+
 ### 전체 상품 로딩과 N+1 방지
 
 배치 상세를 조회할 때 SQLAlchemy relationship의 상품 전체를 자동으로 읽지 않는다. 배치 정보와 현재 상품 페이지를 별도 SELECT로 조회하고, 전체 상품 수는 별도 count 쿼리로 계산한다. 상품 페이지네이션은 전체 행을 Python 메모리에 올린 뒤 자르는 방식이 아니라 DB 쿼리의 `LIMIT`·`OFFSET`에서 처리한다.
@@ -264,7 +292,7 @@ python -m alembic upgrade head
 
 `20260725_0003` upgrade 후 `etl_load_runs`, `catalog_products_staging`과 unique index, FK 조회 index, 음수 방지 CHECK constraint, `ON DELETE CASCADE`가 생성된다. downgrade 후에는 두 staging 테이블만 제거되고 기존 `inspection_runs`, `inspection_results`는 유지되며, 재upgrade로 staging 구조를 다시 만들 수 있다.
 
-실제 PostgreSQL 18.4 임시 클러스터에서 2행 표준 CSV를 최초 적재하고, 같은 파일을 재실행해 `created=False`와 중복 상품 미생성을 확인했다. 같은 격리 환경에서 신규 적재 배치 조회 테스트까지 포함한 전체 pytest는 `894 passed, 2 deselected, 3 warnings`였고 skipped, failed, errors는 0이었다. 2026-07-26 기능 검증 기준 commit `362ba99ae963f561418114db01fc9cf6bf497d10`의 GitHub Actions Test #34(run ID `30189130331`)도 E2E 제외 전체 pytest와 별도 비동기 E2E smoke test `1 passed`로 성공했다. 운영 DB나 Railway DB는 사용하지 않았다.
+GitHub Actions Test #37(run ID `30196012940`)는 PostgreSQL 18·Redis 7.4 서비스 컨테이너에서 Alembic upgrade head, E2E 제외 전체 pytest `920 passed, 0 skipped, 2 deselected, 3 warnings`, 비동기 E2E `1 passed`, Streamlit startup smoke `/_stcore/health` HTTP 200을 확인했다. Streamlit ETL 화면의 주요 상호작용은 AppTest로 검증했으며, 운영 DB나 Railway DB는 사용하지 않았다.
 
 ## 제한사항
 
@@ -272,7 +300,7 @@ python -m alembic upgrade head
 - 실제 외부 공급사 운영 데이터 연동은 지원하지 않는다.
 - 자동 공급사 감지는 지원하지 않으며, 공급사별 프로필은 수동 선택한다.
 - 웹 수집과 외부 API 연동은 지원하지 않는다.
-- ETL 적재 실행용 웹 API와 Streamlit 적재 이력 화면은 지원하지 않는다.
+- ETL 적재 실행용 웹 API는 지원하지 않으며, Streamlit 적재 이력 화면은 저장된 배치와 상품을 조회하는 읽기 전용 기능만 제공한다.
 - staging 상품 수정·삭제와 상품 변경 이력은 지원하지 않는다.
 - 운영 상품 테이블 upsert, 기존 상품 갱신·덮어쓰기와 reject 행 DB 저장은 지원하지 않는다.
 - 증분 ETL과 streaming은 지원하지 않는다.

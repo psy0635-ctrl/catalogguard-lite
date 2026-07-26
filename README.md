@@ -2,13 +2,13 @@
 
 # CatalogGuard Lite
 
-상품 카탈로그 CSV를 업로드해 누락, 형식 오류, 중복, 가격 이상치, 카테고리 불일치, 금지어와 개인정보 의심 정보를 검사하고, 검수 결과를 저장·검색·조회·다운로드하는 Python·FastAPI + PostgreSQL 기반 MVP입니다. Streamlit은 CSV 업로드 검증과 검수 결과 화면을 담당합니다. 별도 CLI는 JSON 프로필 기반 공급사 CSV ETL과 PostgreSQL staging 적재를 실행하고, FastAPI는 저장된 ETL 배치와 상품의 읽기 전용 조회 API를 제공합니다.
+상품 카탈로그 CSV를 업로드해 누락, 형식 오류, 중복, 가격 이상치, 카테고리 불일치, 금지어와 개인정보 의심 정보를 검사하고, 검수 결과를 저장·검색·조회·다운로드하는 Python·FastAPI + PostgreSQL 기반 MVP입니다. Streamlit은 CSV 업로드 검증·검수 결과 화면과 저장된 ETL 적재 이력 조회 화면을 담당합니다. 별도 CLI는 JSON 프로필 기반 공급사 CSV ETL과 PostgreSQL staging 적재를 실행하고, FastAPI는 저장된 ETL 배치와 상품의 읽기 전용 조회 API를 제공합니다.
 
 공개 Streamlit 앱은 아래 주소에서 확인할 수 있습니다.
 
 https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
 
-> 공개 Streamlit 앱과 로컬 전체 시스템의 기능 범위는 다를 수 있습니다. PostgreSQL 저장, 검수 이력 검색, 검수 이력 상세 조회 기능은 로컬 또는 별도 배포 환경에서 FastAPI 서버와 PostgreSQL이 함께 실행되어야 사용할 수 있습니다.
+> 공개 Streamlit 앱과 로컬 전체 시스템의 기능 범위는 다를 수 있습니다. 검수 이력과 ETL 적재 이력의 검색·상세 조회는 로컬 또는 별도 배포 환경에서 FastAPI 서버와 PostgreSQL이 함께 실행되어야 사용할 수 있습니다.
 
 프로젝트의 설계·검증 과정은 [포트폴리오 상세 문서](docs/portfolio_project.md), 공급사 변환 흐름은 [ETL MVP 문서](docs/etl_mvp.md), PostgreSQL 쿼리 검증은 [SQL 성능 분석 문서](docs/sql_performance_analysis.md)에서 확인할 수 있습니다.
 
@@ -65,6 +65,9 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - DB에서 staging 부모 배치를 삭제할 때의 상품 행 cascade와 음수 stock·price·sale_price 방지 제약
 - ETL 적재 배치 목록의 파일명·프로필명 검색과 페이지네이션
 - ETL 적재 상세의 input/output SHA-256 및 배치별 staging 상품 페이지네이션
+- Streamlit `ETL 적재 이력` 탭에서 목록·검색·배치 상세·SHA-256·staging 상품 조회
+- ETL 목록의 빈 결과 안내, 404와 검증된 `X-Request-ID` 표시
+- 배치 변경 시 이전 상세·상품 상태 초기화와 실패 상세 요청의 중복 API 호출 방지
 - 기본값인 `즉시 검수`와 Redis·Celery를 사용하는 `백그라운드 검수` 선택
 - 백그라운드 작업의 `queued`, `running`, `succeeded`, `failed` 상태와 수동 새로고침
 - 비동기 결과도 기존 검수 요약·통계·필터·다운로드 화면으로 표시
@@ -253,6 +256,21 @@ FastAPI GET /api/v1/etl-loads/{etl_load_run_id}
 -> 배치 정보와 해당 배치의 staging 상품 페이지
 -> PostgreSQL
 ```
+
+Streamlit의 `ETL 적재 이력` 탭은 이 읽기 전용 API를 사용한다. 목록은 화면에서 10건씩 표시하고 파일명·프로필명 검색을 함께 적용할 수 있으며, 선택한 배치의 상세 화면에서는 input/output SHA-256 전체 값과 staging 상품을 20건씩 표시한다. `sale_price`, `description`, `seller`가 `null`인 상품도 빈 값으로 안전하게 표시한다.
+
+```text
+ETL 적재 이력 탭
+-> GET /api/v1/etl-loads (limit=10)
+-> 파일명·프로필명 검색(AND)
+-> 배치 이전·다음 페이지
+-> 배치 상세 선택
+-> GET /api/v1/etl-loads/{etl_load_run_id} (product_limit=20)
+-> SHA-256·nullable 필드·staging 상품 표시
+-> 상품 이전·다음 페이지
+```
+
+화면은 `CatalogGuardApiClient`를 통해서만 API를 호출하며 DB에 직접 연결하거나 ETL 적재를 실행하지 않는다. Streamlit rerun 사이에는 정상 응답과 선택 상태를 session state로 유지하고, 검색·배치·상품 페이지가 바뀌면 관련 상태를 초기화한다. 상세 API가 실패한 뒤 같은 화면 rerun에서 동일 요청을 반복하지 않으며, 존재하지 않는 배치는 404와 request ID를 함께 안내한다.
 
 검수 이력 탭의 전체 요약 CSV 다운로드는 같은 목록 API를 재사용합니다. 화면에 보이는 현재 페이지 10건만 쓰지 않고, 사용자가 `CSV 다운로드 준비` 버튼을 누르면 검색 버튼으로 확정된 파일명·날짜·상태 조건을 유지한 채 `limit=100`, `offset=0`부터 반복 조회해 전체 결과를 모은 뒤 CSV로 변환합니다.
 
@@ -1369,15 +1387,15 @@ python -m pytest -q
 
 ### PostgreSQL staging 및 ETL 조회 API 포함 검증 결과
 
-기능 commit `362ba99ae963f561418114db01fc9cf6bf497d10`에서 테스트용 PostgreSQL 18.4 임시 클러스터를 사용해 Alembic, ETL staging 적재와 적재 배치 조회 API를 실제로 확인했습니다. 운영 DB나 Railway DB는 사용하지 않았습니다.
+기능 commit `0cf1d99cc1f884fd56bd610840d89ea40c5a0449`에서 테스트용 PostgreSQL 18.4 서비스 컨테이너를 사용하는 GitHub Actions와 로컬 테스트로 Alembic, ETL staging 적재, 적재 배치 조회 API와 Streamlit ETL 화면의 AppTest를 확인했습니다. 운영 DB나 Railway DB는 사용하지 않았습니다.
 
 ```text
-신규 ETL loader/migration 테스트: 16 passed
-DB persistence 테스트: 52 passed
-API inspection 테스트: 66 passed
-전체 pytest: 894 passed, 2 deselected, 3 warnings
-GitHub Actions Test #34: success (run ID 30189130331)
+전체 pytest: 920 passed, 0 skipped, 2 deselected, 3 warnings
+PostgreSQL 통합 테스트: skip 0
+신규 ETL API client·UI 테스트: skip 0
+GitHub Actions Test #37: success (run ID 30196012940)
 비동기 E2E smoke test: 1 passed
+Streamlit startup smoke: success (`/_stcore/health` HTTP 200, body `ok`)
 ```
 
 표준 CSV 2행을 최초 실행했을 때 배치와 상품 2행이 저장되었고, 같은 파일을 재실행했을 때 `created=False`와 중복 상품 미생성을 확인했습니다. `output_file_sha256`·`loaded_rows` 불일치, 잘못된 표준 CSV, 상품 저장 중 예외에 대한 무변경·rollback 경로도 검증했습니다. ETL 조회 테스트는 배치 정렬, 파일명·프로필명 검색, SQL LIKE 특수문자, 목록·count 조건 일치, 배치별 상품 격리와 페이지네이션, NULL, 404를 확인했습니다. 합성 공급사 CSV CLI는 입력 3건 중 정상 2건·reject 1건을 처리하며 종료 코드 0을 반환했습니다.
@@ -1445,7 +1463,7 @@ Streamlit 시작 스모크 테스트는 `python -m streamlit run app.py`로 실�
 
 AppTest는 실제 `app.py` 실행 경로의 CSV 업로드와 검수·필터 위젯을 검증하지만 실제 브라우저의 파일 선택 창이나 픽셀 렌더링까지 자동화하지는 않습니다. GitHub Actions 스모크 테스트도 Railway API 실제 통신, 운영 Secrets 설정, Streamlit Community Cloud 전용 장애나 모든 Segmentation fault를 검증하지 않습니다.
 
-2026-07-26 기능 검증 기준 GitHub Actions Test #34(run ID `30189130331`)는 commit `362ba99ae963f561418114db01fc9cf6bf497d10`에서 성공했습니다. E2E 제외 전체 pytest는 `894 passed, 2 deselected, 3 warnings`, 별도 비동기 E2E smoke test는 `1 passed`였으며, Actions의 일회성 서비스 컨테이너는 운영 DB·Redis와 분리됩니다.
+2026-07-26 기능 검증 기준 GitHub Actions Test #37(run ID `30196012940`)는 push event의 commit `0cf1d99cc1f884fd56bd610840d89ea40c5a0449`에서 성공했습니다. E2E 제외 전체 pytest는 `920 passed, 0 skipped, 2 deselected, 3 warnings`, 별도 비동기 E2E smoke test는 `1 passed`였으며, Actions의 일회성 서비스 컨테이너는 운영 DB·Redis와 분리됩니다. Streamlit ETL 화면의 주요 상호작용은 AppTest로 검증했고, CI의 실제 서버 검사는 startup smoke와 Health endpoint 범위입니다.
 
 ## 24. 데이터 저장 범위와 보안
 
@@ -1519,7 +1537,7 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - 전체 요약 CSV는 목록 API를 반복 조회하므로 다운로드 중 DB 내용이 바뀌는 상황의 완전한 스냅샷 보장은 별도 트랜잭션/내보내기 API가 필요합니다.
 - 실제 외부 공급사 운영 데이터와 연동하지 않았습니다.
 - ETL 적재를 시작하는 웹 API는 없으며 파일 변환과 staging 적재는 CLI로 실행합니다.
-- Streamlit에는 ETL 적재 이력 목록·상세 화면이 없습니다.
+- Streamlit ETL 적재 이력 화면은 저장된 배치와 staging 상품을 조회하는 읽기 전용 기능이며, ETL 적재 실행·수정·삭제는 지원하지 않습니다.
 - staging 상품을 수정·삭제하는 API와 상품 변경 이력은 구현되어 있지 않습니다.
 - ETL staging은 운영 상품 테이블 upsert, 기존 상품 갱신·덮어쓰기를 지원하지 않습니다.
 - reject 행은 DB에 저장하지 않으며, 자동 공급사 감지도 지원하지 않습니다.
@@ -1543,7 +1561,7 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - 브랜드 표준화
 - `gender` 선택 컬럼과 표준화
 - ETL 적재 실행용 웹 API와 권한·실행 상태 관리
-- Streamlit ETL 적재 이력 목록·상세 화면
+- 실제 브라우저 기반 Streamlit ETL 전체 상호작용 E2E
 - staging 검토 후 운영 상품 반영, upsert와 상품 변경 이력 정책
 - reject 행 저장, 증분 ETL과 대용량 streaming 처리
 
