@@ -57,6 +57,58 @@ class InspectionListResponse(BaseModel):
     offset: int
 
 
+class ETLLoadListItemResponse(BaseModel):
+    etl_load_run_id: int
+    source_filename: str
+    profile_name: str
+    profile_version: str
+    loaded_rows: int
+    created_at: datetime
+
+
+class ETLLoadListResponse(BaseModel):
+    items: list[ETLLoadListItemResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class ETLStagingProductResponse(BaseModel):
+    staging_product_id: int
+    product_group_id: str
+    product_id: str
+    product_name: str
+    category: str
+    color: str
+    size: str
+    stock: int
+    price: int
+    sale_price: int | None
+    image_path: str
+    description: str | None
+    seller: str | None
+    created_at: datetime
+
+
+class ETLStagingProductListResponse(BaseModel):
+    items: list[ETLStagingProductResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class ETLLoadDetailResponse(BaseModel):
+    etl_load_run_id: int
+    source_filename: str
+    profile_name: str
+    profile_version: str
+    input_file_sha256: str
+    output_file_sha256: str
+    loaded_rows: int
+    created_at: datetime
+    products: ETLStagingProductListResponse
+
+
 InspectionJobStatus = Literal["queued", "running", "succeeded", "failed"]
 
 
