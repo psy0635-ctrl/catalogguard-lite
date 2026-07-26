@@ -32,6 +32,7 @@ from core.upload_validator import (
     CsvUploadValidationError,
     validate_and_read_uploaded_csv,
 )
+from ui.etl_load_history import render_etl_load_history
 
 
 HISTORY_LIMIT_DEFAULT = 10
@@ -1627,11 +1628,15 @@ def main() -> None:
     st.title("CatalogGuard Lite")
     st.write("상품 카탈로그 CSV 파일의 누락 값과 데이터 오류를 검사합니다.")
 
-    inspection_tab, history_tab = st.tabs(["CSV 검수", "검수 이력"])
+    inspection_tab, history_tab, etl_load_history_tab = st.tabs(
+        ["CSV 검수", "검수 이력", "ETL 적재 이력"]
+    )
     with inspection_tab:
         render_csv_inspection_tab()
     with history_tab:
         render_inspection_history_tab()
+    with etl_load_history_tab:
+        render_etl_load_history()
 
 
 if __name__ == "__main__":

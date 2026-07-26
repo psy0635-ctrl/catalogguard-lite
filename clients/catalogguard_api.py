@@ -33,6 +33,44 @@ DETAIL_RESPONSE_KEYS = (
 JOB_SUBMISSION_RESPONSE_KEYS = ("job_id", "status", "status_url")
 JOB_STATUS_RESPONSE_KEYS = ("job_id", "status")
 VALID_JOB_STATUSES = {"queued", "running", "succeeded", "failed"}
+ETL_LOAD_LIST_RESPONSE_KEYS = ("items", "total", "limit", "offset")
+ETL_LOAD_ITEM_KEYS = (
+    "etl_load_run_id",
+    "source_filename",
+    "profile_name",
+    "profile_version",
+    "loaded_rows",
+    "created_at",
+)
+ETL_LOAD_DETAIL_RESPONSE_KEYS = (
+    "etl_load_run_id",
+    "source_filename",
+    "profile_name",
+    "profile_version",
+    "input_file_sha256",
+    "output_file_sha256",
+    "loaded_rows",
+    "created_at",
+    "products",
+)
+ETL_PRODUCT_LIST_KEYS = ("items", "total", "limit", "offset")
+ETL_PRODUCT_KEYS = (
+    "staging_product_id",
+    "product_group_id",
+    "product_id",
+    "product_name",
+    "category",
+    "color",
+    "size",
+    "stock",
+    "price",
+    "sale_price",
+    "image_path",
+    "description",
+    "seller",
+    "created_at",
+)
+ETL_SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def _normalize_request_id(value: object) -> str | None:
@@ -51,6 +89,121 @@ def _get_response_request_id(response: object | None) -> str | None:
     if not callable(get_header):
         return None
     return _normalize_request_id(get_header("X-Request-ID"))
+
+
+def _normalize_optional_etl_filter(value: str | None) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def _validate_etl_pagination(limit: int, offset: int) -> None:
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    if type(offset) is not int or offset < 0:
+        raise ValueError("offset must be greater than or equal to 0")
+
+
+def _validate_positive_etl_int(value: object, name: str) -> None:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+
+
+def _invalid_etl_response() -> "CatalogGuardApiResponseError":
+    return CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+
+
+def _validate_etl_list_metadata(
+    value: object,
+    *,
+    allow_limit_zero: bool = False,
+) -> bool:
+    if type(value) is not int:
+        return False
+    if value < 0:
+        return False
+    return allow_limit_zero or value > 0
+
+
+def _validate_etl_load_item(item: object) -> bool:
+    if not isinstance(item, dict) or any(key not in item for key in ETL_LOAD_ITEM_KEYS):
+        return False
+    return (
+        type(item["etl_load_run_id"]) is int
+        and item["etl_load_run_id"] >= 1
+        and isinstance(item["source_filename"], str)
+        and isinstance(item["profile_name"], str)
+        and isinstance(item["profile_version"], str)
+        and type(item["loaded_rows"]) is int
+        and item["loaded_rows"] >= 0
+        and isinstance(item["created_at"], str)
+    )
+
+
+def _validate_etl_load_list_response(data: dict[str, Any]) -> None:
+    if (
+        any(key not in data for key in ETL_LOAD_LIST_RESPONSE_KEYS)
+        or not isinstance(data["items"], list)
+        or not _validate_etl_list_metadata(data["total"], allow_limit_zero=True)
+        or not _validate_etl_list_metadata(data["limit"])
+        or not _validate_etl_list_metadata(data["offset"], allow_limit_zero=True)
+        or any(not _validate_etl_load_item(item) for item in data["items"])
+    ):
+        raise _invalid_etl_response()
+
+
+def _validate_etl_product_item(item: object) -> bool:
+    if not isinstance(item, dict) or any(key not in item for key in ETL_PRODUCT_KEYS):
+        return False
+    nullable_text_fields = ("description", "seller")
+    return (
+        type(item["staging_product_id"]) is int
+        and item["staging_product_id"] >= 1
+        and all(isinstance(item[field], str) for field in (
+            "product_group_id",
+            "product_id",
+            "product_name",
+            "category",
+            "color",
+            "size",
+            "image_path",
+            "created_at",
+        ))
+        and type(item["stock"]) is int
+        and type(item["price"]) is int
+        and (item["sale_price"] is None or type(item["sale_price"]) is int)
+        and all(item[field] is None or isinstance(item[field], str) for field in nullable_text_fields)
+    )
+
+
+def _validate_etl_product_list(data: object) -> bool:
+    if not isinstance(data, dict) or any(key not in data for key in ETL_PRODUCT_LIST_KEYS):
+        return False
+    return (
+        isinstance(data["items"], list)
+        and _validate_etl_list_metadata(data["total"], allow_limit_zero=True)
+        and _validate_etl_list_metadata(data["limit"])
+        and _validate_etl_list_metadata(data["offset"], allow_limit_zero=True)
+        and all(_validate_etl_product_item(item) for item in data["items"])
+    )
+
+
+def _validate_etl_load_detail_response(data: dict[str, Any]) -> None:
+    if (
+        any(key not in data for key in ETL_LOAD_DETAIL_RESPONSE_KEYS)
+        or type(data["etl_load_run_id"]) is not int
+        or data["etl_load_run_id"] < 1
+        or not isinstance(data["source_filename"], str)
+        or not isinstance(data["profile_name"], str)
+        or not isinstance(data["profile_version"], str)
+        or not isinstance(data["input_file_sha256"], str)
+        or ETL_SHA256_PATTERN.fullmatch(data["input_file_sha256"]) is None
+        or not isinstance(data["output_file_sha256"], str)
+        or ETL_SHA256_PATTERN.fullmatch(data["output_file_sha256"]) is None
+        or type(data["loaded_rows"]) is not int
+        or data["loaded_rows"] < 0
+        or not isinstance(data["created_at"], str)
+        or not _validate_etl_product_list(data["products"])
+    ):
+        raise _invalid_etl_response()
 
 
 class CatalogGuardApiError(Exception):
@@ -77,6 +230,10 @@ class CatalogGuardApiTimeoutError(CatalogGuardApiError):
 
 
 class InspectionNotFoundError(CatalogGuardApiError):
+    pass
+
+
+class ETLLoadNotFoundError(CatalogGuardApiError):
     pass
 
 
@@ -244,17 +401,65 @@ class CatalogGuardApiClient:
         self._validate_response_keys(data, DETAIL_RESPONSE_KEYS)
         return data
 
+    def list_etl_loads(
+        self,
+        *,
+        limit: int = 10,
+        offset: int = 0,
+        filename: str | None = None,
+        profile_name: str | None = None,
+    ) -> dict[str, Any]:
+        _validate_etl_pagination(limit, offset)
+        params: dict[str, int | str] = {"limit": limit, "offset": offset}
+        normalized_filename = _normalize_optional_etl_filter(filename)
+        normalized_profile_name = _normalize_optional_etl_filter(profile_name)
+        if normalized_filename:
+            params["filename"] = normalized_filename
+        if normalized_profile_name:
+            params["profile_name"] = normalized_profile_name
+
+        data = self._get_json("/api/v1/etl-loads", params=params)
+        _validate_etl_load_list_response(data)
+        return data
+
+    def get_etl_load_detail(
+        self,
+        etl_load_run_id: int,
+        *,
+        product_limit: int = 20,
+        product_offset: int = 0,
+    ) -> dict[str, Any]:
+        _validate_positive_etl_int(etl_load_run_id, "etl_load_run_id")
+        _validate_etl_pagination(product_limit, product_offset)
+
+        data = self._get_json(
+            f"/api/v1/etl-loads/{etl_load_run_id}",
+            params={
+                "product_limit": product_limit,
+                "product_offset": product_offset,
+            },
+            raise_not_found=True,
+            not_found_error=ETLLoadNotFoundError,
+            not_found_message="ETL 적재 배치를 찾을 수 없습니다.",
+        )
+        _validate_etl_load_detail_response(data)
+        return data
+
     def _get_json(
         self,
         path: str,
         *,
         params: dict[str, int | str] | None = None,
         raise_not_found: bool = False,
+        not_found_error: type[CatalogGuardApiError] = InspectionNotFoundError,
+        not_found_message: str = NOT_FOUND_ERROR_MESSAGE,
     ) -> dict[str, Any]:
         response = self._get_response(
             path,
             params=params,
             raise_not_found=raise_not_found,
+            not_found_error=not_found_error,
+            not_found_message=not_found_message,
         )
 
         try:
@@ -301,6 +506,8 @@ class CatalogGuardApiClient:
         *,
         params: dict[str, int | str] | None,
         raise_not_found: bool,
+        not_found_error: type[CatalogGuardApiError] = InspectionNotFoundError,
+        not_found_message: str = NOT_FOUND_ERROR_MESSAGE,
     ):
         url = f"{self._base_url}{path}"
 
@@ -320,8 +527,8 @@ class CatalogGuardApiClient:
             request_id = _get_response_request_id(error_response)
             status_code = getattr(error_response, "status_code", None)
             if status_code == 404 and raise_not_found:
-                raise InspectionNotFoundError(
-                    NOT_FOUND_ERROR_MESSAGE,
+                raise not_found_error(
+                    not_found_message,
                     request_id=request_id,
                 ) from error
             raise CatalogGuardApiResponseError(

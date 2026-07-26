@@ -1005,6 +1005,177 @@ def test_list_inspections_rejects_too_long_filename_without_request():
     assert session.calls == []
 
 
+ETL_LOAD_LIST_RESPONSE = {
+    "items": [
+        {
+            "etl_load_run_id": 12,
+            "source_filename": "vendor_products.csv",
+            "profile_name": "sample_fashion_vendor_v2",
+            "profile_version": "1",
+            "loaded_rows": 25,
+            "created_at": "2026-07-25T12:00:00Z",
+        }
+    ],
+    "total": 1,
+    "limit": 10,
+    "offset": 0,
+}
+
+ETL_LOAD_DETAIL_RESPONSE = {
+    "etl_load_run_id": 12,
+    "source_filename": "vendor_products.csv",
+    "profile_name": "sample_fashion_vendor_v2",
+    "profile_version": "1",
+    "input_file_sha256": "a" * 64,
+    "output_file_sha256": "b" * 64,
+    "loaded_rows": 25,
+    "created_at": "2026-07-25T12:00:00Z",
+    "products": {
+        "items": [
+            {
+                "staging_product_id": 101,
+                "product_group_id": "GROUP-001",
+                "product_id": "SKU-001",
+                "product_name": "Basic T-shirt",
+                "category": "TOP",
+                "color": "BLACK",
+                "size": "M",
+                "stock": 10,
+                "price": 19900,
+                "sale_price": None,
+                "image_path": "image.jpg",
+                "description": None,
+                "seller": None,
+                "created_at": "2026-07-25T12:00:00Z",
+            }
+        ],
+        "total": 25,
+        "limit": 20,
+        "offset": 0,
+    },
+}
+
+
+def test_list_etl_loads_calls_etl_endpoint_and_trims_filters():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_LOAD_LIST_RESPONSE),
+        timeout_seconds=7.5,
+    )
+
+    data = client.list_etl_loads(
+        limit=10,
+        offset=20,
+        filename="  vendor_products.csv  ",
+        profile_name="  fashion  ",
+    )
+
+    assert data == ETL_LOAD_LIST_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/etl-loads",
+            "params": {
+                "limit": 10,
+                "offset": 20,
+                "filename": "vendor_products.csv",
+                "profile_name": "fashion",
+            },
+            "timeout": 7.5,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("limit", "offset"),
+    [(0, 0), (101, 0), (10, -1), (True, 0), (10, False)],
+)
+def test_list_etl_loads_rejects_invalid_pagination_without_request(limit, offset):
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_LOAD_LIST_RESPONSE)
+    )
+
+    with pytest.raises(ValueError):
+        client.list_etl_loads(limit=limit, offset=offset)
+
+    assert session.calls == []
+
+
+def test_list_etl_loads_validates_item_shape():
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={**ETL_LOAD_LIST_RESPONSE, "items": [{"etl_load_run_id": 12}]}
+        )
+    )
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.list_etl_loads()
+
+
+def test_get_etl_load_detail_calls_detail_endpoint_and_preserves_nullable_fields():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_LOAD_DETAIL_RESPONSE),
+        timeout_seconds=3.0,
+    )
+
+    data = client.get_etl_load_detail(
+        12,
+        product_limit=20,
+        product_offset=40,
+    )
+
+    assert data == ETL_LOAD_DETAIL_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/etl-loads/12",
+            "params": {"product_limit": 20, "product_offset": 40},
+            "timeout": 3.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    [0, -1, True, "12"],
+)
+def test_get_etl_load_detail_rejects_invalid_run_id_without_request(run_id):
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_LOAD_DETAIL_RESPONSE)
+    )
+
+    with pytest.raises(ValueError):
+        client.get_etl_load_detail(run_id)
+
+    assert session.calls == []
+
+
+def test_get_etl_load_detail_maps_404_to_etl_load_not_found_and_keeps_request_id():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=404,
+            headers={"X-Request-ID": VALID_REQUEST_ID},
+        )
+    )
+
+    with pytest.raises(client_module.ETLLoadNotFoundError) as error:
+        client.get_etl_load_detail(12)
+
+    assert error.value.request_id == VALID_REQUEST_ID
+
+
+def test_get_etl_load_detail_rejects_invalid_hash_and_product_shape():
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={
+                **ETL_LOAD_DETAIL_RESPONSE,
+                "input_file_sha256": "not-a-sha",
+            }
+        )
+    )
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_load_detail(12)
+
+
 def test_get_inspection_detail_rejects_invalid_id_without_request():
     client, session = make_client(response=FakeResponse(payload=DETAIL_RESPONSE))
 
