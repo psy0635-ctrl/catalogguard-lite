@@ -3,8 +3,9 @@ import importlib
 import sys
 
 from sqlalchemy import BigInteger, CheckConstraint, DateTime, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 
-from db.models import InspectionResult, InspectionRun
+from db.models import ETLLoadRun, InspectionResult, InspectionRun
 
 
 def get_constraint_names(table) -> set[str]:
@@ -25,6 +26,27 @@ def test_database_table_names_are_expected():
     # Alembic 마이그레이션과 ORM 모델이 같은 테이블 이름을 쓰는지 확인합니다.
     assert InspectionRun.__tablename__ == "inspection_runs"
     assert InspectionResult.__tablename__ == "inspection_results"
+    assert ETLLoadRun.__tablename__ == "etl_load_runs"
+
+
+def test_etl_quality_summary_columns_are_nullable_and_jsonb():
+    columns = ETLLoadRun.__table__.c
+
+    assert isinstance(columns.total_rows.type, Integer)
+    assert columns.total_rows.nullable is True
+    assert isinstance(columns.rejected_rows.type, Integer)
+    assert columns.rejected_rows.nullable is True
+    assert isinstance(columns.error_counts.type, JSONB)
+    assert columns.error_counts.nullable is True
+
+    constraint_names = get_constraint_names(ETLLoadRun.__table__)
+    assert {
+        "ck_etl_load_runs_total_rows_non_negative",
+        "ck_etl_load_runs_rejected_rows_non_negative",
+        "ck_etl_load_runs_quality_summary_all_or_none",
+        "ck_etl_load_runs_total_rows_matches_loaded_and_rejected",
+        "ck_etl_load_runs_error_counts_object",
+    }.issubset(constraint_names)
 
 
 def test_inspection_runs_columns_and_types():

@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from config.database import get_optional_database_url
 from db.models import CatalogProductStaging, ETLLoadRun
 from db.session import create_database_engine, create_session_factory
-from etl.db_loader import ETLLoadError, load_standard_csv
+from etl.db_loader import ETLLoadError, _normalize_summary, load_standard_csv
 
 
 CSV_COLUMNS = [
@@ -50,10 +50,27 @@ def make_summary(csv_bytes: bytes, *, version: str = "1", **changes) -> bytes:
         "input_filename": "supplier.csv",
         "input_file_sha256": hashlib.sha256(b"supplier bytes").hexdigest(),
         "output_file_sha256": hashlib.sha256(csv_bytes).hexdigest(),
+        "total_rows": 2,
         "loaded_rows": 2,
+        "rejected_rows": 0,
+        "error_counts": {},
     }
     summary.update(changes)
     return json.dumps(summary).encode("utf-8")
+
+
+def test_normalize_summary_returns_a_new_trimmed_error_counts_dict_without_mutating_input():
+    summary = json.loads(make_summary(b"output"))
+    summary["output_file_sha256"] = hashlib.sha256(b"output").hexdigest()
+    summary["total_rows"] = 3
+    summary["loaded_rows"] = 2
+    summary["rejected_rows"] = 1
+    summary["error_counts"] = {" INVALID_PRICE ": 1, "NEGATIVE_STOCK": 1}
+
+    normalized = _normalize_summary(summary)
+
+    assert normalized["error_counts"] == {"INVALID_PRICE": 1, "NEGATIVE_STOCK": 1}
+    assert summary["error_counts"] == {" INVALID_PRICE ": 1, "NEGATIVE_STOCK": 1}
 
 
 ROWS = [
@@ -144,6 +161,9 @@ def test_load_standard_csv_persists_batch_and_products(postgres_session):
     run = session.get(ETLLoadRun, outcome.etl_load_run_id)
     assert run is not None
     assert run.profile_name == profile_name
+    assert run.total_rows == 2
+    assert run.rejected_rows == 0
+    assert run.error_counts == {}
     assert len(run.products) == 2
     assert run.products[1].sale_price is None
 
@@ -246,6 +266,57 @@ def test_product_storage_failure_rolls_back_batch(postgres_session, monkeypatch)
     assert session.scalar(
         select(ETLLoadRun.id).where(ETLLoadRun.profile_name == profile_name)
     ) is None
+
+
+@pytest.mark.parametrize(
+    "summary_change",
+    [
+        {"total_rows": True},
+        {"loaded_rows": "2"},
+        {"rejected_rows": -1},
+        {"total_rows": 3, "rejected_rows": 2},
+        {"error_counts": []},
+        {"error_counts": {" ": 1}},
+        {"error_counts": {"INVALID_PRICE": True}},
+        {"error_counts": {"INVALID_PRICE": 0}},
+        {"rejected_rows": 0, "error_counts": {"INVALID_PRICE": 1}},
+        {"rejected_rows": 1, "error_counts": {}},
+    ],
+)
+def test_invalid_quality_summary_is_rejected_before_database_write(
+    postgres_session, summary_change
+):
+    session, profile_name = postgres_session
+    csv_bytes = make_standard_csv(ROWS)
+    summary_data = json.loads(make_summary(csv_bytes))
+    summary_data["profile_name"] = profile_name
+    summary_data.update(summary_change)
+
+    with pytest.raises(ETLLoadError):
+        load_standard_csv(session, csv_bytes, json.dumps(summary_data).encode())
+
+    assert session.scalar(
+        select(ETLLoadRun.id).where(ETLLoadRun.profile_name == profile_name)
+    ) is None
+
+
+def test_quality_summary_allows_multiple_error_codes_for_one_rejected_row(
+    postgres_session,
+):
+    session, profile_name = postgres_session
+    csv_bytes = make_standard_csv(ROWS)
+    summary_data = json.loads(make_summary(csv_bytes))
+    summary_data.update(
+        profile_name=profile_name,
+        total_rows=3,
+        rejected_rows=1,
+        error_counts={" NEGATIVE_STOCK ": 1, "INVALID_PRICE": 1},
+    )
+
+    outcome = load_standard_csv(session, csv_bytes, json.dumps(summary_data).encode())
+
+    run = session.get(ETLLoadRun, outcome.etl_load_run_id)
+    assert run.error_counts == {"NEGATIVE_STOCK": 1, "INVALID_PRICE": 1}
 
 
 @pytest.mark.parametrize("field", ["stock", "price", "sale_price"])

@@ -39,7 +39,9 @@ ETL_LOAD_ITEM_KEYS = (
     "source_filename",
     "profile_name",
     "profile_version",
+    "total_rows",
     "loaded_rows",
+    "rejected_rows",
     "created_at",
 )
 ETL_LOAD_DETAIL_RESPONSE_KEYS = (
@@ -49,7 +51,10 @@ ETL_LOAD_DETAIL_RESPONSE_KEYS = (
     "profile_version",
     "input_file_sha256",
     "output_file_sha256",
+    "total_rows",
     "loaded_rows",
+    "rejected_rows",
+    "error_counts",
     "created_at",
     "products",
 )
@@ -126,7 +131,7 @@ def _validate_etl_list_metadata(
 def _validate_etl_load_item(item: object) -> bool:
     if not isinstance(item, dict) or any(key not in item for key in ETL_LOAD_ITEM_KEYS):
         return False
-    return (
+    if not (
         type(item["etl_load_run_id"]) is int
         and item["etl_load_run_id"] >= 1
         and isinstance(item["source_filename"], str)
@@ -135,7 +140,45 @@ def _validate_etl_load_item(item: object) -> bool:
         and type(item["loaded_rows"]) is int
         and item["loaded_rows"] >= 0
         and isinstance(item["created_at"], str)
+    ):
+        return False
+    return _validate_etl_quality_counts(
+        total_rows=item["total_rows"],
+        loaded_rows=item["loaded_rows"],
+        rejected_rows=item["rejected_rows"],
+        error_counts=None,
     )
+
+
+def _validate_etl_quality_counts(
+    *,
+    total_rows: object,
+    loaded_rows: object,
+    rejected_rows: object,
+    error_counts: object,
+    require_error_counts: bool = False,
+) -> bool:
+    if type(loaded_rows) is not int or loaded_rows < 0:
+        return False
+    quality_values = (total_rows, rejected_rows)
+    if all(value is None for value in quality_values):
+        return error_counts is None
+    if any(value is None for value in quality_values):
+        return False
+    if any(type(value) is not int or value < 0 for value in quality_values):
+        return False
+    if total_rows != loaded_rows + rejected_rows:
+        return False
+    if error_counts is None:
+        return not require_error_counts
+    if not isinstance(error_counts, dict):
+        return False
+    for key, value in error_counts.items():
+        if not isinstance(key, str) or not key.strip():
+            return False
+        if type(value) is not int or value < 1:
+            return False
+    return True
 
 
 def _validate_etl_load_list_response(data: dict[str, Any]) -> None:
@@ -201,6 +244,13 @@ def _validate_etl_load_detail_response(data: dict[str, Any]) -> None:
         or type(data["loaded_rows"]) is not int
         or data["loaded_rows"] < 0
         or not isinstance(data["created_at"], str)
+        or not _validate_etl_quality_counts(
+            total_rows=data["total_rows"],
+            loaded_rows=data["loaded_rows"],
+            rejected_rows=data["rejected_rows"],
+            error_counts=data["error_counts"],
+            require_error_counts=True,
+        )
         or not _validate_etl_product_list(data["products"])
     ):
         raise _invalid_etl_response()

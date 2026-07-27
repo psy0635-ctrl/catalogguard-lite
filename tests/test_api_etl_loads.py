@@ -41,6 +41,8 @@ def _load(**overrides):
         "profile_name": "sample_fashion_vendor_v2",
         "profile_version": "1",
         "loaded_rows": 25,
+        "total_rows": 30,
+        "rejected_rows": 5,
         "created_at": datetime(2026, 7, 25, 12, tzinfo=timezone.utc),
     }
     values.update(overrides)
@@ -61,6 +63,9 @@ def fake_etl_query_service(monkeypatch):
         input_file_sha256="a" * 64,
         output_file_sha256="b" * 64,
         loaded_rows=25,
+        total_rows=30,
+        rejected_rows=5,
+        error_counts={"INVALID_PRICE": 5},
         created_at=load.created_at,
         products=SimpleNamespace(
             items=[_product(description=None, seller=None, sale_price=None)],
@@ -131,6 +136,8 @@ def test_list_etl_loads_returns_default_page_and_excludes_hashes(
                 "profile_name": "sample_fashion_vendor_v2",
                 "profile_version": "1",
                 "loaded_rows": 25,
+                "total_rows": 30,
+                "rejected_rows": 5,
                 "created_at": "2026-07-25T12:00:00Z",
             }
         ],
@@ -208,6 +215,9 @@ def test_detail_returns_nullable_fields_and_hashes(fake_etl_query_service):
     data = response.json()
     assert data["input_file_sha256"] == "a" * 64
     assert data["output_file_sha256"] == "b" * 64
+    assert data["total_rows"] == 30
+    assert data["rejected_rows"] == 5
+    assert data["error_counts"] == {"INVALID_PRICE": 5}
     assert data["products"]["items"][0]["sale_price"] is None
     assert data["products"]["items"][0]["description"] is None
     assert data["products"]["items"][0]["seller"] is None

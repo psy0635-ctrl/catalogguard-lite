@@ -40,6 +40,9 @@ def _add_run(
     created_at,
     suffix,
     product_count=0,
+    total_rows=None,
+    rejected_rows=None,
+    error_counts=None,
 ):
     run = ETLLoadRun(
         source_filename=source_filename,
@@ -48,6 +51,9 @@ def _add_run(
         input_file_sha256=(suffix * 64)[:64],
         output_file_sha256=(chr(ord(suffix) + 1) * 64)[:64],
         loaded_rows=product_count,
+        total_rows=total_rows,
+        rejected_rows=rejected_rows,
+        error_counts=error_counts,
         created_at=created_at,
     )
     session.add(run)
@@ -85,6 +91,9 @@ def seeded_runs(postgres_session):
         created_at=base_time + timedelta(minutes=1),
         suffix="a",
         product_count=3,
+        total_rows=4,
+        rejected_rows=1,
+        error_counts={"INVALID_PRICE": 1},
     )
     tied = _add_run(
         session,
@@ -119,6 +128,8 @@ def test_list_etl_loads_sorts_newest_then_id_and_applies_pagination(seeded_runs)
     )
 
     assert [item.etl_load_run_id for item in result.items] == [tied.id, newest.id]
+    assert result.items[1].total_rows == 4
+    assert result.items[1].rejected_rows == 1
     assert result.total == 3
     assert result.limit == 2
     assert result.offset == 0
@@ -233,6 +244,9 @@ def test_get_etl_load_detail_paginates_products_without_mixing_batches(seeded_ru
 
     assert detail is not None
     assert detail.etl_load_run_id == newest.id
+    assert detail.total_rows == 4
+    assert detail.rejected_rows == 1
+    assert detail.error_counts == {"INVALID_PRICE": 1}
     assert detail.products.total == 3
     assert detail.products.limit == 2
     assert detail.products.offset == 1

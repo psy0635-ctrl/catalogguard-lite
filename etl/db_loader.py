@@ -22,7 +22,10 @@ class ETLLoadError(ValueError):
 class ETLLoadOutcome:
     etl_load_run_id: int
     created: bool
+    total_rows: int | None
     loaded_rows: int
+    rejected_rows: int | None
+    error_counts: dict[str, int] | None
 
 
 ETLLoadResult = ETLLoadOutcome
@@ -33,7 +36,10 @@ _SUMMARY_FIELDS = (
     "input_filename",
     "input_file_sha256",
     "output_file_sha256",
+    "total_rows",
     "loaded_rows",
+    "rejected_rows",
+    "error_counts",
 )
 
 
@@ -82,9 +88,34 @@ def _read_summary(summary_json_bytes: bytes) -> dict[str, object]:
 
 
 def _normalize_summary(summary: dict[str, object]) -> dict[str, object]:
-    loaded_rows = summary["loaded_rows"]
-    if not isinstance(loaded_rows, int) or isinstance(loaded_rows, bool) or loaded_rows < 0:
-        raise ETLLoadError("요약 JSON의 loaded_rows 값이 올바르지 않습니다")
+    row_counts: dict[str, int] = {}
+    for field_name in ("total_rows", "loaded_rows", "rejected_rows"):
+        value = summary[field_name]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ETLLoadError(f"요약 JSON의 {field_name} 값이 올바르지 않습니다")
+        row_counts[field_name] = value
+    if row_counts["total_rows"] != row_counts["loaded_rows"] + row_counts["rejected_rows"]:
+        raise ETLLoadError("요약 JSON의 행 수 합계가 올바르지 않습니다")
+
+    raw_error_counts = summary["error_counts"]
+    if not isinstance(raw_error_counts, dict):
+        raise ETLLoadError("요약 JSON의 error_counts 값이 올바르지 않습니다")
+    error_counts: dict[str, int] = {}
+    for raw_key, value in raw_error_counts.items():
+        if not isinstance(raw_key, str):
+            raise ETLLoadError("요약 JSON의 error_counts 값이 올바르지 않습니다")
+        key = raw_key.strip()
+        if not key or key in error_counts:
+            raise ETLLoadError("요약 JSON의 error_counts 값이 올바르지 않습니다")
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ETLLoadError("요약 JSON의 error_counts 값이 올바르지 않습니다")
+        error_counts[key] = value
+    if row_counts["rejected_rows"] == 0 and error_counts:
+        raise ETLLoadError("요약 JSON의 error_counts 값이 올바르지 않습니다")
+    if row_counts["rejected_rows"] > 0 and (
+        not error_counts or sum(error_counts.values()) < row_counts["rejected_rows"]
+    ):
+        raise ETLLoadError("요약 JSON의 error_counts 값이 올바르지 않습니다")
 
     profile_name = _required_text(summary, "profile_name")
     profile_version = _required_text(summary, "profile_version")
@@ -107,7 +138,8 @@ def _normalize_summary(summary: dict[str, object]) -> dict[str, object]:
             _required_text(summary, "output_file_sha256"),
             "output_file_sha256",
         ),
-        "loaded_rows": loaded_rows,
+        **row_counts,
+        "error_counts": error_counts,
     }
 
 
@@ -209,7 +241,14 @@ def load_standard_csv(
                 )
             )
             if existing is not None:
-                return ETLLoadOutcome(existing.id, False, existing.loaded_rows)
+                return ETLLoadOutcome(
+                    existing.id,
+                    False,
+                    existing.total_rows,
+                    existing.loaded_rows,
+                    existing.rejected_rows,
+                    existing.error_counts,
+                )
 
             load_run = ETLLoadRun(
                 source_filename=summary["input_filename"],
@@ -218,6 +257,9 @@ def load_standard_csv(
                 input_file_sha256=summary["input_file_sha256"],
                 output_file_sha256=summary["output_file_sha256"],
                 loaded_rows=summary["loaded_rows"],
+                total_rows=summary["total_rows"],
+                rejected_rows=summary["rejected_rows"],
+                error_counts=summary["error_counts"],
             )
             session.add(load_run)
             session.flush()
@@ -226,7 +268,14 @@ def load_standard_csv(
                 etl_load_run_id=load_run.id,
                 rows=staging_rows,
             )
-            return ETLLoadOutcome(load_run.id, True, load_run.loaded_rows)
+            return ETLLoadOutcome(
+                load_run.id,
+                True,
+                load_run.total_rows,
+                load_run.loaded_rows,
+                load_run.rejected_rows,
+                load_run.error_counts,
+            )
     except IntegrityError:
         # A concurrent caller may have won the unique identity race.
         session.rollback()
@@ -238,7 +287,14 @@ def load_standard_csv(
             )
         )
         if existing is not None:
-            return ETLLoadOutcome(existing.id, False, existing.loaded_rows)
+            return ETLLoadOutcome(
+                existing.id,
+                False,
+                existing.total_rows,
+                existing.loaded_rows,
+                existing.rejected_rows,
+                existing.error_counts,
+            )
         raise
 
 

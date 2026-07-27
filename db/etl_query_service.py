@@ -18,7 +18,9 @@ class ETLLoadListItem:
     source_filename: str
     profile_name: str
     profile_version: str
+    total_rows: int | None
     loaded_rows: int
+    rejected_rows: int | None
     created_at: datetime
 
 
@@ -64,7 +66,10 @@ class ETLLoadDetail:
     profile_version: str
     input_file_sha256: str
     output_file_sha256: str
+    total_rows: int | None
     loaded_rows: int
+    rejected_rows: int | None
+    error_counts: dict[str, int] | None
     created_at: datetime
     products: ETLStagingProductList
 
@@ -107,7 +112,9 @@ def _to_load_list_item(load_run: ETLLoadRun) -> ETLLoadListItem:
         source_filename=load_run.source_filename,
         profile_name=load_run.profile_name,
         profile_version=load_run.profile_version,
+        total_rows=load_run.total_rows,
         loaded_rows=load_run.loaded_rows,
+        rejected_rows=load_run.rejected_rows,
         created_at=load_run.created_at,
     )
 
@@ -190,7 +197,10 @@ def get_etl_load_detail(
         profile_version=load_run.profile_version,
         input_file_sha256=load_run.input_file_sha256,
         output_file_sha256=load_run.output_file_sha256,
+        total_rows=load_run.total_rows,
         loaded_rows=load_run.loaded_rows,
+        rejected_rows=load_run.rejected_rows,
+        error_counts=load_run.error_counts,
         created_at=load_run.created_at,
         products=ETLStagingProductList(
             items=[_to_product(product) for product in products],

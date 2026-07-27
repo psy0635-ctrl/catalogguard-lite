@@ -15,6 +15,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db.base import Base
@@ -140,6 +141,38 @@ class ETLLoadRun(Base):
             "loaded_rows >= 0",
             name="ck_etl_load_runs_loaded_rows_non_negative",
         ),
+        CheckConstraint(
+            "total_rows IS NULL OR total_rows >= 0",
+            name="ck_etl_load_runs_total_rows_non_negative",
+        ),
+        CheckConstraint(
+            "rejected_rows IS NULL OR rejected_rows >= 0",
+            name="ck_etl_load_runs_rejected_rows_non_negative",
+        ),
+        CheckConstraint(
+            """
+            (
+                total_rows IS NULL
+                AND rejected_rows IS NULL
+                AND error_counts IS NULL
+            )
+            OR
+            (
+                total_rows IS NOT NULL
+                AND rejected_rows IS NOT NULL
+                AND error_counts IS NOT NULL
+            )
+            """,
+            name="ck_etl_load_runs_quality_summary_all_or_none",
+        ),
+        CheckConstraint(
+            "total_rows IS NULL OR total_rows = loaded_rows + rejected_rows",
+            name="ck_etl_load_runs_total_rows_matches_loaded_and_rejected",
+        ),
+        CheckConstraint(
+            "error_counts IS NULL OR jsonb_typeof(error_counts) = 'object'",
+            name="ck_etl_load_runs_error_counts_object",
+        ),
         Index(
             "ux_etl_load_runs_input_profile_version",
             "input_file_sha256",
@@ -160,6 +193,12 @@ class ETLLoadRun(Base):
     input_file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     output_file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     loaded_rows: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_rows: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rejected_rows: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_counts: Mapped[dict[str, int] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

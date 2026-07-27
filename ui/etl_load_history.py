@@ -23,8 +23,11 @@ ETL_LOAD_DISPLAY_COLUMNS = [
     "공급사 프로필",
     "프로필 버전",
     "적재 상품 수",
+    "전체 행",
+    "변환 거부",
     "적재 시간",
 ]
+ETL_ERROR_DISPLAY_COLUMNS = ["오류 코드", "발생 건수"]
 ETL_PRODUCT_DISPLAY_COLUMNS = [
     "staging 상품 ID",
     "상품 그룹 ID",
@@ -84,6 +87,8 @@ def build_etl_load_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
             "공급사 프로필": item.get("profile_name"),
             "프로필 버전": item.get("profile_version"),
             "적재 상품 수": item.get("loaded_rows"),
+            "전체 행": _display_nullable(item.get("total_rows")),
+            "변환 거부": _display_nullable(item.get("rejected_rows")),
             "적재 시간": format_etl_datetime(item.get("created_at")),
         }
         for item in items
@@ -93,6 +98,31 @@ def build_etl_load_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
 
 def _display_nullable(value: object) -> object:
     return "" if value is None else value
+
+
+def format_etl_quality_rate(
+    total_rows: int | None,
+    loaded_rows: int | None,
+) -> str:
+    if total_rows is None or loaded_rows is None or total_rows <= 0:
+        return "—"
+    return f"{loaded_rows / total_rows * 100:.1f}%"
+
+
+def build_etl_error_counts_dataframe(error_counts: dict[str, int] | None) -> pd.DataFrame:
+    if not error_counts:
+        return pd.DataFrame(columns=ETL_ERROR_DISPLAY_COLUMNS)
+    rows = sorted(
+        error_counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return pd.DataFrame(
+        [
+            {"오류 코드": code, "발생 건수": count}
+            for code, count in rows
+        ],
+        columns=ETL_ERROR_DISPLAY_COLUMNS,
+    )
 
 
 def build_etl_product_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
@@ -354,6 +384,33 @@ def _render_etl_load_detail(api_client) -> None:
     st.write(f"프로필 버전: {detail_response.get('profile_version', '')}")
     st.write(f"적재 상품 수: {detail_response.get('loaded_rows', 0)}")
     st.write(f"적재 시간: {format_etl_datetime(detail_response.get('created_at'))}")
+    total_rows = detail_response.get("total_rows")
+    rejected_rows = detail_response.get("rejected_rows")
+    if total_rows is not None and rejected_rows is not None:
+        quality_columns = st.columns(4)
+        quality_columns[0].metric("전체 입력", f"{total_rows}행")
+        quality_columns[1].metric("정상 적재", f"{detail_response.get('loaded_rows', 0)}행")
+        quality_columns[2].metric("변환 거부", f"{rejected_rows}행")
+        quality_columns[3].metric(
+            "정상 처리율",
+            format_etl_quality_rate(total_rows, detail_response.get("loaded_rows")),
+        )
+    else:
+        st.info(
+            "이 배치는 ETL 품질 요약 저장 기능이 추가되기 전에 생성되어 "
+            "상세 품질 정보가 없습니다."
+        )
+    error_counts = detail_response.get("error_counts")
+    if isinstance(error_counts, dict):
+        if error_counts:
+            st.subheader("오류 코드별 발생 건수")
+            st.dataframe(
+                build_etl_error_counts_dataframe(error_counts),
+                width="stretch",
+                hide_index=True,
+            )
+        else:
+            st.info("변환 과정에서 거부된 행이 없습니다.")
     with st.expander("파일 SHA-256"):
         st.code(f"원본 파일 SHA-256: {detail_response.get('input_file_sha256', '')}")
         st.code(f"적재 파일 SHA-256: {detail_response.get('output_file_sha256', '')}")

@@ -1013,6 +1013,8 @@ ETL_LOAD_LIST_RESPONSE = {
             "profile_name": "sample_fashion_vendor_v2",
             "profile_version": "1",
             "loaded_rows": 25,
+            "total_rows": 30,
+            "rejected_rows": 5,
             "created_at": "2026-07-25T12:00:00Z",
         }
     ],
@@ -1029,6 +1031,9 @@ ETL_LOAD_DETAIL_RESPONSE = {
     "input_file_sha256": "a" * 64,
     "output_file_sha256": "b" * 64,
     "loaded_rows": 25,
+    "total_rows": 30,
+    "rejected_rows": 5,
+    "error_counts": {"INVALID_PRICE": 5},
     "created_at": "2026-07-25T12:00:00Z",
     "products": {
         "items": [
@@ -1174,6 +1179,45 @@ def test_get_etl_load_detail_rejects_invalid_hash_and_product_shape():
 
     with pytest.raises(import_client_module().CatalogGuardApiResponseError):
         client.get_etl_load_detail(12)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"total_rows": True},
+        {"total_rows": 31},
+        {"rejected_rows": -1},
+        {"error_counts": []},
+        {"error_counts": {"": 1}},
+        {"error_counts": {"INVALID_PRICE": True}},
+        {"error_counts": {"INVALID_PRICE": 0}},
+        {"error_counts": None, "total_rows": 30, "rejected_rows": 5},
+    ],
+)
+def test_get_etl_load_detail_rejects_invalid_quality_summary(changes):
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={**ETL_LOAD_DETAIL_RESPONSE, **changes}
+        )
+    )
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_load_detail(12)
+
+
+def test_get_etl_load_detail_accepts_nullable_quality_summary_for_legacy_batch():
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={
+                **ETL_LOAD_DETAIL_RESPONSE,
+                "total_rows": None,
+                "rejected_rows": None,
+                "error_counts": None,
+            }
+        )
+    )
+
+    assert client.get_etl_load_detail(12)["error_counts"] is None
 
 
 def test_get_inspection_detail_rejects_invalid_id_without_request():

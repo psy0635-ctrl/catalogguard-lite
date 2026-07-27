@@ -30,7 +30,9 @@ def _build_list_response(result: ETLLoadList) -> ETLLoadListResponse:
                 source_filename=item.source_filename,
                 profile_name=item.profile_name,
                 profile_version=item.profile_version,
+                total_rows=item.total_rows,
                 loaded_rows=item.loaded_rows,
+                rejected_rows=item.rejected_rows,
                 created_at=item.created_at,
             )
             for item in result.items
@@ -49,7 +51,10 @@ def _build_detail_response(result: ETLLoadDetail) -> ETLLoadDetailResponse:
         profile_version=result.profile_version,
         input_file_sha256=result.input_file_sha256,
         output_file_sha256=result.output_file_sha256,
+        total_rows=result.total_rows,
         loaded_rows=result.loaded_rows,
+        rejected_rows=result.rejected_rows,
+        error_counts=result.error_counts,
         created_at=result.created_at,
         products=ETLStagingProductListResponse(
             items=[

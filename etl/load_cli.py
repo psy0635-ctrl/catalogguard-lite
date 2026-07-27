@@ -39,7 +39,13 @@ def main(argv: list[str] | None = None) -> int:
     print("DB 적재 완료")
     print(f"적재 배치 ID: {outcome.etl_load_run_id}")
     print(f"신규 적재: {'yes' if outcome.created else 'no'}")
-    print(f"상품 행: {outcome.loaded_rows}")
+    print(
+        f"전체 행: {outcome.total_rows if outcome.total_rows is not None else '기록 없음'}"
+    )
+    print(f"정상 상품 행: {outcome.loaded_rows}")
+    print(
+        f"거부 행: {outcome.rejected_rows if outcome.rejected_rows is not None else '기록 없음'}"
+    )
     return 0
 
 

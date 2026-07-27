@@ -62,7 +62,9 @@ class ETLLoadListItemResponse(BaseModel):
     source_filename: str
     profile_name: str
     profile_version: str
+    total_rows: int | None
     loaded_rows: int
+    rejected_rows: int | None
     created_at: datetime
 
 
@@ -104,7 +106,10 @@ class ETLLoadDetailResponse(BaseModel):
     profile_version: str
     input_file_sha256: str
     output_file_sha256: str
+    total_rows: int | None
     loaded_rows: int
+    rejected_rows: int | None
+    error_counts: dict[str, int] | None
     created_at: datetime
     products: ETLStagingProductListResponse
 

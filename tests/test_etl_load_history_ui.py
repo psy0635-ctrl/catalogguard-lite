@@ -16,6 +16,8 @@ from ui.etl_load_history import (
     calculate_etl_pagination,
     format_etl_datetime,
     build_etl_api_error_display_message,
+    build_etl_error_counts_dataframe,
+    format_etl_quality_rate,
 )
 
 
@@ -26,6 +28,8 @@ def make_load(run_id=12):
         "profile_name": "sample_fashion_vendor_v2",
         "profile_version": "1",
         "loaded_rows": 25,
+        "total_rows": 30,
+        "rejected_rows": 5,
         "created_at": "2026-07-25T12:00:00Z",
     }
 
@@ -60,6 +64,8 @@ def test_build_etl_load_dataframe_maps_contract_to_display_columns():
         "공급사 프로필": "sample_fashion_vendor_v2",
         "프로필 버전": "1",
         "적재 상품 수": 25,
+        "전체 행": 30,
+        "변환 거부": 5,
         "적재 시간": "2026-07-25 12:00:00",
     }
 
@@ -102,6 +108,29 @@ def test_etl_datetime_preserves_unparseable_value_and_formats_iso_value():
     assert format_etl_datetime("not-a-date") == "not-a-date"
     assert format_etl_datetime(None) == ""
     assert format_etl_datetime(datetime(2026, 7, 25, 12)) == "2026-07-25 12:00:00"
+
+
+def test_etl_quality_rate_formats_percent_and_handles_zero_or_missing_total():
+    assert format_etl_quality_rate(3, 2) == "66.7%"
+    assert format_etl_quality_rate(3, 3) == "100.0%"
+    assert format_etl_quality_rate(0, 0) == "—"
+    assert format_etl_quality_rate(None, 2) == "—"
+
+
+def test_etl_error_counts_dataframe_sorts_by_count_then_code():
+    dataframe = build_etl_error_counts_dataframe(
+        {"Z_ERROR": 1, "A_ERROR": 2, "B_ERROR": 2}
+    )
+
+    assert dataframe.to_dict(orient="records") == [
+        {"오류 코드": "A_ERROR", "발생 건수": 2},
+        {"오류 코드": "B_ERROR", "발생 건수": 2},
+        {"오류 코드": "Z_ERROR", "발생 건수": 1},
+    ]
+    assert list(build_etl_error_counts_dataframe({}).columns) == [
+        "오류 코드",
+        "발생 건수",
+    ]
 
 
 def test_build_etl_load_option_label_contains_identity_fields():
@@ -170,6 +199,7 @@ class FakeEtlApiClient:
             **make_load(run_id),
             "input_file_sha256": "a" * 64,
             "output_file_sha256": "b" * 64,
+            "error_counts": {"INVALID_PRICE": 3, "NEGATIVE_STOCK": 2},
             "products": {
                 "items": [product],
                 "total": self.product_total,
