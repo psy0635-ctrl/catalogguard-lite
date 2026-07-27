@@ -2,7 +2,7 @@
 
 # CatalogGuard Lite
 
-상품 카탈로그 CSV를 업로드해 누락, 형식 오류, 중복, 가격 이상치, 카테고리 불일치, 금지어와 개인정보 의심 정보를 검사하고, 검수 결과를 저장·검색·조회·다운로드하는 Python·FastAPI + PostgreSQL 기반 MVP입니다. Streamlit은 CSV 업로드 검증·검수 결과 화면과 저장된 ETL 적재 이력 조회 화면을 담당합니다. 별도 CLI는 JSON 프로필 기반 공급사 CSV ETL과 PostgreSQL staging 적재를 실행하고, FastAPI는 저장된 ETL 배치와 상품의 읽기 전용 조회 API를 제공합니다.
+상품 카탈로그 CSV를 업로드해 누락, 형식 오류, 중복, 가격 이상치, 카테고리 불일치, 금지어와 개인정보 의심 정보를 검사하고, 검수 결과를 저장·검색·조회·다운로드하는 Python·FastAPI + PostgreSQL 기반 MVP입니다. Streamlit은 CSV 업로드 검증·검수 결과 화면과 저장된 ETL 적재 이력 조회 화면을 담당합니다. 별도 CLI는 JSON 프로필 기반 공급사 CSV ETL과 PostgreSQL staging 적재를 실행하고, FastAPI는 저장된 ETL 배치와 상품의 읽기 전용 조회 API를 제공합니다. Playwright Chromium으로 ETL 변환부터 브라우저의 reject 상세·마스킹 검증까지 연결하는 실제 브라우저 E2E도 제공합니다.
 
 공개 Streamlit 앱은 아래 주소에서 확인할 수 있습니다.
 
@@ -70,6 +70,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - ETL 적재 목록·상세의 전체 행·정상 적재·변환 거부 수와 상세 오류 코드 통계
 - ETL 적재 상세의 input/output SHA-256 및 배치별 staging 상품 페이지네이션
 - Streamlit `ETL 적재 이력` 탭에서 목록·검색·배치 상세·품질 지표·오류 코드·SHA-256·staging 상품·reject 상세 조회
+- Playwright Chromium 실제 브라우저에서 ETL 검색·상세·상품·reject 마스킹과 raw 민감정보 미노출 검증
 - ETL 목록의 빈 결과 안내, 404와 검증된 `X-Request-ID` 표시
 - 배치 변경 시 이전 상세·상품 상태 초기화와 실패 상세 요청의 중복 API 호출 방지
 - 기본값인 `즉시 검수`와 Redis·Celery를 사용하는 `백그라운드 검수` 선택
@@ -382,9 +383,14 @@ ETL 적재 이력 탭
 | CI | GitHub Actions |
 | CI 테스트 서비스 | PostgreSQL `18`·Redis `7.4` 서비스 컨테이너 |
 
-`requirements.txt`에는 Streamlit 앱 실행에 필요한 기본 패키지가 있고, `requirements-api.txt`에는 FastAPI와 PostgreSQL 저장 계층에 필요한 패키지가 있습니다. FastAPI도 pandas 기반 검수 로직을 사용하므로 로컬 전체 시스템을 실행할 때는 두 파일을 모두 설치하는 것이 안전합니다.
+`requirements.txt`에는 Streamlit 앱 실행에 필요한 기본 패키지가 있고, `requirements-api.txt`에는 FastAPI와 PostgreSQL 저장 계층에 필요한 패키지가 있습니다. FastAPI도 pandas 기반 검수 로직을 사용하므로 로컬 전체 시스템을 실행할 때는 두 파일을 모두 설치하는 것이 안전합니다. 실제 브라우저 E2E는 `requirements-e2e.txt`로 별도 설치하며, Playwright와 호환되는 pytest 8 환경을 사용합니다.
 
-GitHub Actions는 PostgreSQL·Redis 테스트 서비스, Alembic 마이그레이션, E2E를 제외한 전체 pytest, 실제 FastAPI·Celery Worker 비동기 CSV 검수 E2E 스모크 테스트, Streamlit 서버 시작과 Health 응답 확인에 사용하며 배포는 수행하지 않습니다.
+```powershell
+python -m pip install -r requirements-e2e.txt
+python -m playwright install chromium
+```
+
+GitHub Actions는 일반 `test` job에서 PostgreSQL·Redis 서비스, Alembic 마이그레이션, E2E를 제외한 전체 pytest와 비동기 검수 smoke를 실행하고, 별도 `browser-e2e` job에서 PostgreSQL 서비스와 Chromium을 사용해 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증합니다. 배포는 수행하지 않습니다.
 
 ## 8. 프로젝트 폴더 구조
 
@@ -548,16 +554,20 @@ catalogguard-lite/
 | `etl/cli.py` | 공급사 CSV ETL CLI 진입점 |
 | `etl/db_loader.py` | 표준 CSV·summary JSON 검증, 중복 배치 조회와 staging 트랜잭션 적재 |
 | `etl/load_cli.py` | ETL 결과를 PostgreSQL staging에 적재하는 별도 CLI 진입점 |
+| `scripts/run_etl_browser_e2e.py` | 테스트 DB migration, ETL CLI·Loader, FastAPI·Streamlit readiness, Playwright 실행과 cleanup을 담당하는 E2E runner |
+| `tests/e2e/test_etl_browser_e2e.py` | 실제 Chromium의 ETL 탭·검색·상세·상품·reject 마스킹·raw 미노출 검증 |
+| `tests/fixtures/e2e/etl_browser_vendor.csv` | 정상 2행·복수 오류 reject 1행과 합성 민감정보를 담은 브라우저 E2E fixture |
 | `config/etl/sample_fashion_vendor_v1.json` | 샘플 공급사 컬럼과 CatalogGuard 표준 컬럼 매핑 프로필 |
 | `config/etl/sample_marketplace_vendor_v1.json` | 별도 상품 그룹 ID와 SKU를 사용하는 두 번째 합성 공급사 매핑 프로필 |
 | `compose.local.yaml` | PostgreSQL·Redis·FastAPI·Celery Worker 로컬 실행 구성 |
 | `alembic/versions/20260703_0001_create_inspection_tables.py` | 검수 이력 저장 테이블 생성 마이그레이션 |
 | `alembic/versions/20260705_0002_add_inspection_file_identity.py` | 파일 해시와 검수 버전 컬럼, CHECK constraint, partial unique index 추가 마이그레이션 |
 | `alembic/versions/20260725_0003_create_etl_staging_tables.py` | ETL 배치·상품 staging 테이블, unique index, FK와 CHECK constraint 추가 마이그레이션 |
-| `.github/workflows/test.yml` | PostgreSQL 18·Redis 7.4 테스트 서비스에서 마이그레이션, E2E 제외 pytest, FastAPI·Celery 비동기 E2E, Streamlit 시작 스모크 테스트를 실행하는 GitHub Actions workflow |
+| `.github/workflows/test.yml` | 일반 테스트와 분리된 `browser-e2e` job을 포함해 PostgreSQL·Chromium 실제 브라우저 흐름까지 실행하는 GitHub Actions workflow |
 | `.env.example` | 로컬 PostgreSQL 연결 환경변수 예시 |
 | `requirements.txt` | Streamlit 앱 기본 실행 패키지 |
 | `requirements-api.txt` | FastAPI, PostgreSQL, Alembic 관련 패키지 |
+| `requirements-e2e.txt` | Playwright Chromium과 pytest-playwright 선택적 E2E 패키지 |
 
 ## 10. CSV 입력 컬럼
 
@@ -1398,13 +1408,25 @@ python -m pytest -q
 이전 기능 commit `0cf1d99cc1f884fd56bd610840d89ea40c5a0449`의 PostgreSQL 18.4 CI 결과와 별도로, 이번 ETL 품질 요약 변경은 운영 DB나 Railway DB에 연결하지 않고 저장소 내부 가상환경에서 검증했습니다.
 
 ```text
-전체 pytest: 974 passed, 0 skipped, 2 deselected, 3 warnings
+전체 pytest: 978 passed, 0 skipped, 3 deselected, 3 warnings
 PostgreSQL 통합 테스트: skip 0
 Alembic history/heads: `20260728_0005` head 확인
 Alembic upgrade·downgrade·재upgrade: 성공 (격리된 PostgreSQL 18.4 테스트 클러스터)
+로컬 Chromium ETL 브라우저 E2E: 1 passed, console error 0, page error 0, raw 민감정보 미노출
 ```
 
 품질 summary의 행 수 합계·타입·`error_counts` 구조, 한 reject 행의 복수 오류 코드, 기존 배치의 NULL 호환, API Client의 malformed 응답 거부, Streamlit 처리율·오류 코드 정렬 helper를 테스트했습니다. 격리된 PostgreSQL 18.4 테스트 클러스터에서 migration, 적재·중복 재사용, API 응답, Streamlit AppTest까지 확인했습니다.
+
+### 실제 브라우저 ETL E2E
+
+실제 Chromium 브라우저 E2E는 `tests/fixtures/e2e/etl_browser_vendor.csv`를 `etl.cli`로 변환하고 `etl.load_cli`로 테스트 PostgreSQL에 적재한 뒤, runner가 FastAPI와 Streamlit을 직접 시작합니다. 브라우저는 `ETL 적재 이력` 탭에서 파일명·프로필명 검색, 배치 상세, 전체 3행·정상 2행·reject 1행·정상 처리율 66.7%, staging 상품 2개, `INVALID_PRICE`·`NEGATIVE_STOCK`, 마스킹된 이메일·전화·계좌·주민번호 형태를 확인합니다. 원문 민감정보는 body text와 HTML에 없어야 하며 console error·page error도 0건이어야 합니다.
+
+```powershell
+$env:DATABASE_URL = "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/catalogguard_lite_test"
+python .\scripts\run_etl_browser_e2e.py
+```
+
+runner는 로컬 loopback 테스트 DB만 허용하고, 실패 시 `artifacts/browser-e2e/`에 screenshot·HTML·FastAPI/Streamlit/Playwright 로그를 남긴 뒤 시작한 프로세스만 종료합니다. GitHub Actions의 `browser-e2e` job은 별도 PostgreSQL service와 Chromium을 사용하며 실패 artifact를 업로드합니다.
 
 ### 동기 검수 성능 측정
 
@@ -1433,7 +1455,7 @@ python scripts/benchmark_inspection.py --rows 100 1000 5000 10000 --repeat 3 --w
 
 ### GitHub Actions 자동 테스트
 
-`.github/workflows/test.yml`의 `Test` workflow는 `main` 브랜치 push와 `main` 브랜치를 대상으로 한 pull request에서 실행됩니다. `ubuntu-latest` 환경에 Python 3.11을 준비하고 PostgreSQL 18·Redis 7.4 서비스 컨테이너를 시작한 뒤, 의존성을 설치하고 Alembic 마이그레이션을 적용합니다. 이어서 E2E를 제외한 전체 pytest, 실제 Celery Worker와 FastAPI 프로세스, 비동기 CSV 검수 E2E 스모크 테스트, Streamlit 시작 스모크 테스트를 실행합니다.
+`.github/workflows/test.yml`의 `Test` workflow는 `main` 브랜치 push와 `main` 브랜치를 대상으로 한 pull request에서 실행됩니다. 일반 `test` job은 Python 3.11, PostgreSQL 18·Redis 7.4, Alembic, E2E 제외 pytest, 실제 Celery Worker·FastAPI·비동기 CSV 검수 E2E와 Streamlit startup smoke를 실행합니다. 별도 `browser-e2e` job은 PostgreSQL 18 service와 Playwright Chromium을 준비하고 `scripts/run_etl_browser_e2e.py`로 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증하며, 실패 시에만 browser artifact를 업로드합니다.
 
 ```text
 main push 또는 main 대상 pull request

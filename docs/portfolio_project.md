@@ -36,6 +36,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 5. 공급사마다 코드를 따로 만들지 않고 JSON 프로필로 서로 다른 컬럼 구조를 표준 스키마에 매핑한 뒤, 표준 CSV와 summary JSON을 PostgreSQL staging에 배치 적재했습니다. 입력·프로필 identity 중복 방지와 transaction rollback을 구현하고 실제 PostgreSQL 18.4 임시 클러스터에서 검증했습니다.
 6. PostgreSQL staging 적재 결과를 파일명·프로필명으로 검색하고 배치별 상품을 페이지 단위로 확인하는 FastAPI 조회 API를 구현했습니다. 목록 응답과 상세 응답의 범위를 분리하고 실제 PostgreSQL에서 필터·정렬·배치 격리를 검증했습니다.
 7. Streamlit에 ETL 적재 이력 탭을 추가해 파일명·프로필명 AND 검색, 배치·상품 페이지네이션, 상세 SHA-256, nullable 필드와 request ID를 표시하고, AppTest로 stale 상태 초기화와 상세 오류 중복 호출 방지를 검증했습니다.
+8. Playwright Chromium 실제 브라우저 E2E를 추가해 합성 공급사 CSV 변환·PostgreSQL 적재·FastAPI·Streamlit 실행부터 ETL 검색·상세·staging 상품·reject 마스킹·raw 원문 미노출까지 한 흐름으로 검증했습니다.
 
 ## 6.2 문제 정의
 
@@ -141,7 +142,7 @@ catalogguard_ready.csv + etl_summary.json
 | pytest | 9.1.1 |
 | CI | GitHub Actions `Test` workflow |
 | CI 테스트 서비스 | PostgreSQL 18·Redis 7.4 서비스 컨테이너 |
-| CI 검증 범위 | Alembic 마이그레이션, E2E 제외 전체 pytest, FastAPI·Celery 비동기 CSV E2E, Streamlit 서버 시작과 Health 응답 |
+| CI 검증 범위 | 일반 `test` job의 Alembic·전체 pytest·비동기 E2E와 별도 `browser-e2e` job의 PostgreSQL·Chromium 실제 브라우저 ETL E2E |
 | 필수 컬럼 | 9개 |
 | 선택 컬럼 | 3개 (`sale_price` 포함) |
 | 등록된 검수 규칙 함수 | 15개 |
@@ -151,7 +152,8 @@ catalogguard_ready.csv + etl_summary.json
 | ETL UI 순수 함수 테스트 | 7 passed |
 | ETL Streamlit AppTest | 5 passed |
 | 이전 GitHub Actions PostgreSQL 18 전체 pytest | 920 passed, 0 skipped, 2 deselected, 3 warnings |
-| 이번 ETL reject 상세 저장 PostgreSQL 전체 pytest | 974 passed, 0 skipped, 2 deselected, 3 warnings |
+| 이번 ETL reject 상세 저장·브라우저 runner PostgreSQL 전체 pytest | 978 passed, 0 skipped, 3 deselected, 3 warnings |
+| 로컬 Chromium ETL 브라우저 E2E | 1 passed, 전체 3·정상 2·reject 1, 66.7%, console/page error 0, raw 민감정보 미노출 |
 | 샘플 ETL CLI 결과 | 전체 3건, 정상 변환 2건, 오류 행 1건, 종료 코드 0 |
 | ETL 조회·UI 기능 검증 CI | 2026-07-26 GitHub Actions Test #37, run ID 30196012940, success, 비동기 E2E smoke test 1 passed |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
@@ -304,6 +306,8 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 | `tests/test_etl_query_service.py` | 실제 PostgreSQL의 ETL 검색·정렬·페이지네이션·NULL·배치 격리 |
 | `tests/test_catalogguard_api_client.py` | ETL client 파라미터·응답 shape·SHA-256·nullable·404/request ID 검증 |
 | `tests/test_etl_load_history_ui.py` | ETL 순수 helper와 Streamlit AppTest 검증 |
+| `tests/e2e/test_etl_browser_e2e.py` | 실제 Chromium의 ETL 탭·검색·상세·상품·reject 오류·마스킹·raw 미노출·브라우저 오류 검증 |
+| `scripts/run_etl_browser_e2e.py` | 테스트 DB migration, ETL CLI·Loader, FastAPI·Streamlit readiness, Playwright 실행과 cleanup |
 | `tests/etl/` | 공급사 프로필 검증, 행 변환, 파일 교체, CLI와 기존 검수 흐름 호환성 |
 | `tests/test_api_inspections.py` | ETL 출력과 연동되는 FastAPI CSV 검수·중복 결과 재사용·응답 계약 |
 | `tests/test_api_inspection_jobs.py`, `tests/test_inspection_tasks.py` | 비동기 작업 API, Celery task 상태 전이와 임시 파일 정리 |
@@ -592,7 +596,7 @@ PostgreSQL staging에 상품을 저장할 수 있었지만, 어떤 공급사 파
 
 #### 검증
 
-PostgreSQL 테스트 클러스터에서 정렬, 파일명·프로필명 검색과 AND 조건, 대소문자 무시, LIKE 특수문자, 목록·count 일치, 상품 페이지네이션과 배치 격리, nullable 값, reject 상세 페이지네이션, 마스킹 원본, 없는 배치를 확인했습니다. 이번 전체 pytest는 `974 passed, 0 skipped, 2 deselected, 3 warnings`였습니다.
+PostgreSQL 테스트 클러스터에서 정렬, 파일명·프로필명 검색과 AND 조건, 대소문자 무시, LIKE 특수문자, 목록·count 일치, 상품 페이지네이션과 배치 격리, nullable 값, reject 상세 페이지네이션, 마스킹 원본, 없는 배치를 확인했습니다. 이번 전체 pytest는 `978 passed, 0 skipped, 3 deselected, 3 warnings`였고, 별도 로컬 Chromium E2E는 1 passed였습니다.
 
 ### Streamlit ETL 적재 이력 화면
 
@@ -608,7 +612,15 @@ Streamlit의 `ETL 적재 이력` 탭은 `CatalogGuardApiClient`를 통해 목록
 | 오류 | 404와 유효한 request ID 표시 |
 | 상태 | 검색·배치 변경 시 stale 상세·상품·reject 제거, 실패 상세 요청 중복 호출 방지 |
 
-순수 helper 테스트와 Streamlit AppTest로 목록·검색·빈 결과·페이지 이동·상세·SHA-256·reject 상세·마스킹 원본·nullable·404·request ID·상태 초기화를 검증했습니다. 실제 브라우저 전체 상호작용은 별도 E2E 범위가 아니며, GitHub Actions의 Streamlit 검사는 서버 startup과 `/_stcore/health` HTTP 200을 확인합니다.
+순수 helper 테스트와 Streamlit AppTest로 목록·검색·빈 결과·페이지 이동·상세·SHA-256·reject 상세·마스킹 원본·nullable·404·request ID·상태 초기화를 검증했습니다. 실제 브라우저 전체 상호작용은 아래 별도 Chromium E2E에서 검증하며, GitHub Actions의 Streamlit startup smoke는 서버 startup과 `/_stcore/health` HTTP 200을 확인합니다.
+
+### 실제 Chromium ETL 브라우저 E2E
+
+계층별 pytest와 Streamlit AppTest만으로는 실제 접근성 이름, rerun 이후 상태, 동적 표·expander 렌더링과 HTML 내부 raw 민감정보 노출을 확인할 수 없었습니다. 전용 `requirements-e2e.txt`와 `tests/fixtures/e2e/etl_browser_vendor.csv`를 추가하고, `scripts/run_etl_browser_e2e.py`가 테스트 PostgreSQL migration, `etl.cli`, `etl.load_cli`, FastAPI, Streamlit, readiness 대기와 Playwright pytest를 한 번에 관리하도록 구성했습니다.
+
+브라우저 시나리오는 `ETL 적재 이력` 탭에서 합성 fixture 파일명·프로필명을 검색하고 배치 상세를 연다. 실제 화면에서 전체 3행, 정상 2행, reject 1행, 정상 처리율 66.7%, staging 상품 2개, `INVALID_PRICE`·`NEGATIVE_STOCK`의 오류 코드·필드·메시지를 확인한다. reject 원본 expander를 연 뒤 이메일·전화번호·계좌번호·주민등록번호 형태가 마스킹되어 보이고, 네 가지 원문은 body text와 HTML에 없음을 검증한다. console error와 page error도 수집해 0건을 요구한다.
+
+로컬 Chromium 실행은 `python scripts/run_etl_browser_e2e.py`로 수행하며 `DATABASE_URL`은 loopback 테스트 PostgreSQL만 허용한다. 실패 시 screenshot·HTML·FastAPI·Streamlit·Playwright 로그를 `artifacts/browser-e2e/`에 보존하고 runner가 시작한 프로세스와 임시 파일을 정리한다. GitHub Actions에는 기존 Redis 기반 일반 테스트와 분리된 PostgreSQL·Chromium `browser-e2e` job을 추가했으며, 실패 artifact만 업로드하도록 구성했다. 운영 DB·실제 공급사·모바일 브라우저는 범위에서 제외했다.
 
 ### 두 번째 합성 공급사로 검증한 확장성
 

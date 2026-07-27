@@ -284,6 +284,26 @@ ETL 적재 이력 탭
 
 Streamlit rerun에 대비해 목록·상세·reject 응답과 선택 상태를 ETL 전용 `session_state`에 보관한다. 검색 조건이나 배치가 바뀌면 이전 상세·상품·reject 상태를 초기화해 stale 데이터가 남거나 다른 배치의 행이 섞이지 않게 한다. 상세 API가 실패하면 동일 클릭에서 API를 중복 호출하지 않으며, 정상 응답만 상태에 저장한다. 품질 요약이 없는 기존 배치는 `null`을 기록 없음으로 표시하고, reject 상세가 없는 기존 배치는 별도 안내를 표시한다. 있는 배치는 화면 helper에서 정상 처리율과 마스킹된 reject 원본을 표시한다. 순수 helper 테스트와 Streamlit AppTest로 목록·검색·페이지 이동·상세·품질 지표·오류 코드·SHA-256·reject 상세·nullable·404·request ID·stale 상태 초기화를 검증한다.
 
+## 실제 Chromium 브라우저 E2E
+
+계층별 테스트만으로는 Streamlit rerun, 실제 접근성 이름, 동적 표·expander 렌더링과 브라우저의 raw 개인정보 노출을 확인할 수 없으므로 별도 Playwright E2E를 둔다. `scripts/run_etl_browser_e2e.py`가 테스트 PostgreSQL에 migration을 적용하고 전용 합성 fixture를 ETL CLI·Load CLI로 처리한 뒤 FastAPI와 Streamlit을 시작한다. readiness가 확인되면 `tests/e2e/test_etl_browser_e2e.py`가 Chromium에서 다음 흐름을 실행한다.
+
+```text
+ETL fixture 3행
+-> 표준 CSV·reject CSV·summary JSON
+-> PostgreSQL 배치·상품·reject 적재
+-> FastAPI /health·/ready
+-> Streamlit /_stcore/health
+-> ETL 적재 이력 탭·검색·상세 조회
+-> 품질 3행/2행/1행/66.7%
+-> staging 상품 2개
+-> reject 오류 배열과 마스킹 원본
+```
+
+브라우저 테스트는 `test@example.com`, `010-1234-5678`, `123-456-789012`, `900101-1234567`이 body text와 HTML에 존재하지 않는지 확인하고, 마스킹된 값·오류 코드·필드·메시지·console error 0·page error 0을 확인한다. 실패 시 `artifacts/browser-e2e/failure.png`, `page.html`, FastAPI·Streamlit·Playwright 로그를 보존하며 runner가 시작한 프로세스와 임시 디렉터리는 성공·실패 모두 정리한다.
+
+로컬 실행에는 `requirements-e2e.txt` 설치와 Chromium 설치가 필요하다. GitHub Actions에서는 일반 테스트와 분리된 `browser-e2e` job이 PostgreSQL 18 service, Playwright Chromium과 실패 artifact 업로드를 담당한다.
+
 ### 전체 상품 로딩과 N+1 방지
 
 배치 상세를 조회할 때 SQLAlchemy relationship의 상품 전체를 자동으로 읽지 않는다. 배치 정보와 현재 상품 페이지를 별도 SELECT로 조회하고, 전체 상품 수는 별도 count 쿼리로 계산한다. 상품 페이지네이션은 전체 행을 Python 메모리에 올린 뒤 자르는 방식이 아니라 DB 쿼리의 `LIMIT`·`OFFSET`에서 처리한다.
@@ -312,7 +332,7 @@ python -m alembic upgrade head
 
 `20260727_0004`에 이어 `20260728_0005` upgrade는 `etl_load_runs`에 reject 상세 저장 여부·reject CSV SHA-256과 all-or-none CHECK constraint를 추가하고, 오류 배열·마스킹된 원본 JSONB를 저장하는 `etl_rejected_rows`와 unique/index/FK를 만든다. downgrade는 새 컬럼·constraint·테이블·index만 제거하며 기존 배치·상품·inspection 데이터는 삭제하지 않는다. 격리된 PostgreSQL 18.4 테스트 클러스터에서 upgrade → downgrade `20260727_0004` → 재upgrade와 `current`가 `20260728_0005`임을 확인했다.
 
-이번 변경의 PostgreSQL 연결 상태 전체 pytest는 `974 passed, 0 skipped, 2 deselected, 3 warnings`였다. DB 관련 테스트 skip은 0건이며, 기존 기능의 GitHub Actions Test #37 결과는 이전 검증 기록으로 유지한다.
+이번 변경의 PostgreSQL 연결 상태 전체 pytest는 `978 passed, 0 skipped, 3 deselected, 3 warnings`였다. DB 관련 테스트 skip은 0건이며, 로컬 Chromium ETL 브라우저 E2E도 `1 passed`, console error 0, page error 0, raw 민감정보 미노출로 확인했다. 기존 기능의 GitHub Actions Test #37 결과는 이전 검증 기록으로 유지한다.
 
 ## 제한사항
 
@@ -325,4 +345,5 @@ python -m alembic upgrade head
 - 운영 상품 테이블 upsert와 기존 상품 갱신·덮어쓰기는 지원하지 않는다. reject 행은 별도 `etl_rejected_rows`에 오류 배열과 마스킹된 동적 원본 컬럼으로 저장한다.
 - 증분 ETL과 streaming은 지원하지 않는다.
 - 운영 DB 적재는 검증하지 않았으며, PostgreSQL staging 적재는 임시 테스트 PostgreSQL 환경에서만 검증했다.
+- 실제 브라우저 E2E는 Chromium 한 종류와 합성 fixture만 검증하며, 운영 환경·모바일 브라우저·외부 공급사는 검증하지 않는다.
 - `sale_price`는 단일 할인 가격만 지원하며 할인율, 기간, 쿠폰·회원 가격, 최저가 추천은 제공하지 않는다.
