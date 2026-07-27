@@ -1,0 +1,4 @@
+style_id,sku_code,title,category_code,label,regular_price,promo_price,tone,fit_size,available_qty,details,photo
+E2E-100,E2E-100-BLK-M,Playwright Tee,TOP,E2E Vendor,59000,49000,BLACK,M,7,Cotton tee,https://example.test/e2e-black.jpg
+E2E-100,E2E-100-WHT-L,Playwright Tee,TOP,E2E Vendor,69000,,WHITE,L,,Cotton tee,https://example.test/e2e-white.jpg
+E2E-100,E2E-100-RED-S,Playwright Tee,TOP,E2E Vendor,가격문의,49000,RED,S,-1,"문의 test@example.com 전화 010-1234-5678 계좌 123-456-789012 주민번호 형태 900101-1234567",https://example.test/e2e-red.jpg

@@ -106,6 +106,7 @@ jobs:
           echo "Celery worker did not become ready within 30 seconds."
           cat "${log_file}" || true
           exit 1
+
       - name: Start FastAPI server
         shell: bash
         run: |
@@ -344,3 +345,47 @@ jobs:
           cat "${log_file}" || true
 
           exit 1
+
+  browser-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DATABASE_URL: "postgresql+psycopg://postgres:postgres@localhost:5432/catalogguard_lite_test"
+      TEST_DATABASE_URL: "postgresql+psycopg://postgres:postgres@localhost:5432/catalogguard_lite_test"
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: catalogguard_lite_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d catalogguard_lite_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-e2e.txt
+      - name: Install browser E2E dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-e2e.txt
+          python -m playwright install --with-deps chromium
+      - name: Run ETL Chromium browser E2E
+        run: python scripts/run_etl_browser_e2e.py
+      - name: Upload browser E2E failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-e2e-failure-artifacts
+          path: artifacts/browser-e2e
+          if-no-files-found: ignore

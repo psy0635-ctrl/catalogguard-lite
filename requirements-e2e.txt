@@ -1,0 +1,5 @@
+-r requirements.txt
+-r requirements-api.txt
+pytest==8.4.1
+playwright==1.55.0
+pytest-playwright==0.7.0
