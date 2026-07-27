@@ -10,6 +10,7 @@ from ui import etl_load_history
 from ui.etl_load_history import (
     ETL_LOAD_DISPLAY_COLUMNS,
     ETL_PRODUCT_DISPLAY_COLUMNS,
+    ETL_REJECT_DISPLAY_COLUMNS,
     build_etl_load_dataframe,
     build_etl_product_dataframe,
     build_etl_load_option_label,
@@ -17,6 +18,7 @@ from ui.etl_load_history import (
     format_etl_datetime,
     build_etl_api_error_display_message,
     build_etl_error_counts_dataframe,
+    build_etl_rejection_dataframe,
     format_etl_quality_rate,
 )
 
@@ -133,6 +135,31 @@ def test_etl_error_counts_dataframe_sorts_by_count_then_code():
     ]
 
 
+def test_build_etl_rejection_dataframe_flattens_errors_and_keeps_masked_source_values():
+    dataframe = build_etl_rejection_dataframe(
+        [
+            {
+                "rejected_row_id": 301,
+                "source_row_number": 4,
+                "errors": [
+                    {"code": "INVALID_PRICE", "field": "price", "message": "bad price"},
+                    {"code": "NEGATIVE_STOCK", "field": "stock", "message": "negative"},
+                ],
+                "masked_source_data": {"description": "010-****-5678"},
+                "created_at": "2026-07-25T12:00:00Z",
+            }
+        ]
+    )
+
+    assert list(dataframe.columns) == ETL_REJECT_DISPLAY_COLUMNS
+    assert dataframe.iloc[0].to_dict() == {
+        "원본 행": 4,
+        "오류 코드": "INVALID_PRICE, NEGATIVE_STOCK",
+        "오류 필드": "price, stock",
+        "오류 메시지": "bad price, negative",
+    }
+
+
 def test_build_etl_load_option_label_contains_identity_fields():
     label = build_etl_load_option_label(make_load())
 
@@ -163,15 +190,24 @@ class FakeEtlApiClient:
         list_items=None,
         list_total=None,
         product_total=1,
+        rejection_items=None,
+        rejection_total=None,
+        reject_details_stored=False,
     ):
         self.list_calls = []
         self.detail_calls = []
+        self.rejection_calls = []
         self.detail_error = detail_error
         self.list_items = [make_load()] if list_items is None else list_items
         self.list_total = (
             len(self.list_items) if list_total is None else list_total
         )
         self.product_total = product_total
+        self.rejection_items = rejection_items or []
+        self.rejection_total = (
+            len(self.rejection_items) if rejection_total is None else rejection_total
+        )
+        self.reject_details_stored = reject_details_stored
 
     def list_etl_loads(self, **params):
         self.list_calls.append(params)
@@ -200,6 +236,7 @@ class FakeEtlApiClient:
             "input_file_sha256": "a" * 64,
             "output_file_sha256": "b" * 64,
             "error_counts": {"INVALID_PRICE": 3, "NEGATIVE_STOCK": 2},
+            "reject_details_stored": self.reject_details_stored,
             "products": {
                 "items": [product],
                 "total": self.product_total,
@@ -207,6 +244,57 @@ class FakeEtlApiClient:
                 "offset": params["product_offset"],
             },
         }
+
+    def list_etl_rejections(self, run_id, **params):
+        self.rejection_calls.append((run_id, params))
+        return {
+            "available": bool(self.rejection_items),
+            "items": self.rejection_items,
+            "total": self.rejection_total,
+            "limit": params["limit"],
+            "offset": params["offset"],
+        }
+
+
+def test_etl_load_history_shows_rejection_rows_and_paginates(monkeypatch):
+    rejection_items = [
+        {
+            "rejected_row_id": 301,
+            "source_row_number": 4,
+            "errors": [
+                {
+                    "code": "INVALID_PRICE",
+                    "field": "price",
+                    "message": "bad price",
+                }
+            ],
+            "masked_source_data": {"description": "010-****-5678"},
+            "created_at": "2026-07-25T12:00:00Z",
+        }
+    ]
+    api_client = FakeEtlApiClient(
+        rejection_items=rejection_items,
+        rejection_total=25,
+        reject_details_stored=True,
+    )
+    monkeypatch.setattr(etl_load_history, "create_catalogguard_api_client", lambda: api_client)
+    monkeypatch.setattr(catalogguard_api, "create_catalogguard_api_client", lambda: api_client)
+
+    app = AppTest.from_file("app.py").run(timeout=10)
+    next(widget for widget in app.button if widget.label == "상세 조회").click().run(
+        timeout=10
+    )
+
+    assert len(app.exception) == 0
+    assert api_client.rejection_calls == [(12, {"limit": 20, "offset": 0})]
+    assert any(
+        set(dataframe.value.columns) == set(ETL_REJECT_DISPLAY_COLUMNS)
+        for dataframe in app.dataframe
+    )
+    next(widget for widget in app.button if widget.key == "etl_reject_next").click().run(
+        timeout=10
+    )
+    assert api_client.rejection_calls[-1] == (12, {"limit": 20, "offset": 20})
 
 
 def test_etl_load_history_apptest_queries_once_and_shows_detail(monkeypatch):

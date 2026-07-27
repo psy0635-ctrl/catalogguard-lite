@@ -14,7 +14,7 @@ from sqlalchemy import delete, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
 from config.database import get_optional_database_url
-from db.models import CatalogProductStaging, ETLLoadRun
+from db.models import CatalogProductStaging, ETLLoadRun, ETLRejectedRow
 from db.session import create_database_engine, create_session_factory
 from etl.db_loader import ETLLoadError, _normalize_summary, load_standard_csv
 
@@ -57,6 +57,38 @@ def make_summary(csv_bytes: bytes, *, version: str = "1", **changes) -> bytes:
     }
     summary.update(changes)
     return json.dumps(summary).encode("utf-8")
+
+
+def make_rejects_csv(
+    *,
+    source_row_number: int = 4,
+    description: str = "문의 010-1234-5678 seller@example.com",
+) -> bytes:
+    output = StringIO(newline="")
+    writer = csv.DictWriter(
+        output,
+        fieldnames=[
+            "source_row_number",
+            "error_code",
+            "error_field",
+            "error_message",
+            "sku_code",
+            "description",
+        ],
+        lineterminator="\n",
+    )
+    writer.writeheader()
+    writer.writerow(
+        {
+            "source_row_number": source_row_number,
+            "error_code": '["INVALID_PRICE", "NEGATIVE_STOCK"]',
+            "error_field": '["price", "stock"]',
+            "error_message": '["bad price", "negative stock"]',
+            "sku_code": "SKU-REJECT-1",
+            "description": description,
+        }
+    )
+    return output.getvalue().encode("utf-8")
 
 
 def test_normalize_summary_returns_a_new_trimmed_error_counts_dict_without_mutating_input():
@@ -166,6 +198,144 @@ def test_load_standard_csv_persists_batch_and_products(postgres_session):
     assert run.error_counts == {}
     assert len(run.products) == 2
     assert run.products[1].sale_price is None
+
+
+def test_load_standard_csv_persists_reject_rows_as_structured_masked_json(
+    postgres_session,
+):
+    session, profile_name = postgres_session
+    csv_bytes = make_standard_csv(ROWS)
+    rejects_bytes = make_rejects_csv()
+    summary_data = json.loads(
+        make_summary(
+            csv_bytes,
+            profile_name=profile_name,
+            total_rows=3,
+            loaded_rows=2,
+            rejected_rows=1,
+            error_counts={"INVALID_PRICE": 1, "NEGATIVE_STOCK": 1},
+            rejects_file_sha256=hashlib.sha256(rejects_bytes).hexdigest(),
+        )
+    )
+
+    outcome = load_standard_csv(
+        session,
+        csv_bytes,
+        json.dumps(summary_data).encode(),
+        rejects_csv_bytes=rejects_bytes,
+        rejects_csv_filename="rejected_rows.csv",
+    )
+
+    run = session.get(ETLLoadRun, outcome.etl_load_run_id)
+    assert run is not None
+    assert run.reject_details_stored is True
+    assert run.rejects_file_sha256 == hashlib.sha256(rejects_bytes).hexdigest()
+    assert len(run.reject_items) == 1
+    rejected = run.reject_items[0]
+    assert rejected.source_row_number == 4
+    assert rejected.errors == [
+        {"code": "INVALID_PRICE", "field": "price", "message": "bad price"},
+        {
+            "code": "NEGATIVE_STOCK",
+            "field": "stock",
+            "message": "negative stock",
+        },
+    ]
+    assert rejected.masked_source_data["description"] == (
+        "문의 010-****-5678 se****@example.com"
+    )
+    assert "010-1234-5678" not in json.dumps(rejected.masked_source_data)
+    assert "seller@example.com" not in json.dumps(rejected.masked_source_data)
+
+
+def test_reject_summary_requires_reject_file_when_hash_is_present(postgres_session):
+    session, profile_name = postgres_session
+    csv_bytes = make_standard_csv(ROWS)
+    summary_data = json.loads(
+        make_summary(
+            csv_bytes,
+            profile_name=profile_name,
+            total_rows=3,
+            loaded_rows=2,
+            rejected_rows=1,
+            error_counts={"INVALID_PRICE": 1},
+            rejects_file_sha256="a" * 64,
+        )
+    )
+
+    with pytest.raises(ETLLoadError):
+        load_standard_csv(session, csv_bytes, json.dumps(summary_data).encode())
+
+
+def test_zero_reject_summary_stores_validated_empty_reject_file(postgres_session):
+    session, profile_name = postgres_session
+    csv_bytes = make_standard_csv(ROWS)
+    output = StringIO(newline="")
+    csv.writer(output, lineterminator="\n").writerow(
+        [
+            "source_row_number",
+            "error_code",
+            "error_field",
+            "error_message",
+            "sku_code",
+        ]
+    )
+    rejects_bytes = output.getvalue().encode("utf-8")
+    summary_data = json.loads(
+        make_summary(
+            csv_bytes,
+            profile_name=profile_name,
+            rejects_file_sha256=hashlib.sha256(rejects_bytes).hexdigest(),
+        )
+    )
+
+    outcome = load_standard_csv(
+        session,
+        csv_bytes,
+        json.dumps(summary_data).encode(),
+        rejects_csv_bytes=rejects_bytes,
+        rejects_csv_filename="rejected_rows.csv",
+    )
+
+    run = session.get(ETLLoadRun, outcome.etl_load_run_id)
+    assert run.reject_details_stored is True
+    assert run.reject_items == []
+
+
+def test_reject_storage_failure_rolls_back_batch_and_products(postgres_session, monkeypatch):
+    session, profile_name = postgres_session
+    csv_bytes = make_standard_csv(ROWS)
+    rejects_bytes = make_rejects_csv()
+    summary_data = json.loads(
+        make_summary(
+            csv_bytes,
+            profile_name=profile_name,
+            total_rows=3,
+            loaded_rows=2,
+            rejected_rows=1,
+            error_counts={"INVALID_PRICE": 1},
+            rejects_file_sha256=hashlib.sha256(rejects_bytes).hexdigest(),
+        )
+    )
+
+    from etl import db_loader
+
+    def fail_reject_insert(*args, **kwargs):
+        raise RuntimeError("simulated reject insert failure")
+
+    monkeypatch.setattr(db_loader, "_add_rejected_rows", fail_reject_insert)
+    with pytest.raises(RuntimeError):
+        load_standard_csv(
+            session,
+            csv_bytes,
+            json.dumps(summary_data).encode(),
+            rejects_csv_bytes=rejects_bytes,
+        )
+    session.rollback()
+
+    assert session.scalar(
+        select(ETLLoadRun.id).where(ETLLoadRun.profile_name == profile_name)
+    ) is None
 
 
 def test_repeated_identity_returns_existing_batch_without_duplicate_products(postgres_session):
@@ -415,6 +585,68 @@ def test_cli_reports_success_and_hides_database_url(tmp_path):
                     ETLLoadRun.profile_name == summary_data["profile_name"]
                 )
             )
+            cleanup.commit()
+    finally:
+        engine.dispose()
+
+
+def test_cli_accepts_rejects_file_and_persists_reject_details(tmp_path):
+    database_url = get_optional_database_url()
+    if database_url is None:
+        pytest.skip("TEST_DATABASE_URL???ㅼ젙?섏? ?딆븘 PostgreSQL CLI ?뚯뒪?몃? 嫄대꼫?곷땲??")
+    csv_bytes = make_standard_csv(ROWS)
+    rejects_bytes = make_rejects_csv()
+    input_path = tmp_path / "ready.csv"
+    rejects_path = tmp_path / "rejected_rows.csv"
+    summary_path = tmp_path / "summary.json"
+    input_path.write_bytes(csv_bytes)
+    rejects_path.write_bytes(rejects_bytes)
+    summary_data = json.loads(
+        make_summary(
+            csv_bytes,
+            profile_name=f"cli_reject_profile_{uuid4().hex}",
+            total_rows=3,
+            loaded_rows=2,
+            rejected_rows=1,
+            error_counts={"INVALID_PRICE": 1, "NEGATIVE_STOCK": 1},
+            rejects_file_sha256=hashlib.sha256(rejects_bytes).hexdigest(),
+        )
+    )
+    summary_path.write_text(json.dumps(summary_data), encoding="utf-8")
+    env = {**os.environ, "DATABASE_URL": database_url}
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "etl.load_cli",
+            "--input",
+            str(input_path),
+            "--rejects",
+            str(rejects_path),
+            "--summary",
+            str(summary_path),
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "거부 행: 1" in result.stdout
+    engine = create_database_engine(database_url)
+    try:
+        with create_session_factory(engine)() as cleanup:
+            run = cleanup.scalar(
+                select(ETLLoadRun).where(
+                    ETLLoadRun.profile_name == summary_data["profile_name"]
+                )
+            )
+            assert run is not None
+            assert run.reject_details_stored is True
+            assert len(run.reject_items) == 1
+            cleanup.delete(run)
             cleanup.commit()
     finally:
         engine.dispose()

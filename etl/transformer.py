@@ -2,7 +2,7 @@ import json
 from dataclasses import dataclass
 
 from config.settings import CSV_TEMPLATE_COLUMNS
-from etl.models import ETLProfile
+from etl.models import ETLProfile, ETLRowError
 
 
 @dataclass(frozen=True)
@@ -57,8 +57,13 @@ def _parse_stock(value: str) -> tuple[str | None, str | None]:
     return str(parsed), None
 
 
-def _build_standard_row(source_row: dict[str, object], profile: ETLProfile) -> dict[str, str]:
-    row = {column: _clean_text(profile.defaults.get(column, "")) for column in CSV_TEMPLATE_COLUMNS}
+def _build_standard_row(
+    source_row: dict[str, object], profile: ETLProfile
+) -> dict[str, str]:
+    row = {
+        column: _clean_text(profile.defaults.get(column, ""))
+        for column in CSV_TEMPLATE_COLUMNS
+    }
     for source_column, target_columns in profile.source_columns.items():
         value = _clean_text(source_row.get(source_column, ""))
         if isinstance(target_columns, str):
@@ -72,12 +77,19 @@ def _build_standard_row(source_row: dict[str, object], profile: ETLProfile) -> d
 def _build_rejection(
     source_row_number: int,
     source_row: dict[str, object],
-    errors: list[tuple[str, str]],
+    errors: list[ETLRowError],
 ) -> dict[str, str]:
     return {
         "source_row_number": str(source_row_number),
-        "error_code": json.dumps([code for code, _ in errors], ensure_ascii=False),
-        "error_message": json.dumps([message for _, message in errors], ensure_ascii=False),
+        "error_code": json.dumps(
+            [error.code for error in errors], ensure_ascii=False
+        ),
+        "error_field": json.dumps(
+            [error.field for error in errors], ensure_ascii=False
+        ),
+        "error_message": json.dumps(
+            [error.message for error in errors], ensure_ascii=False
+        ),
         **{column: _clean_text(value) for column, value in source_row.items()},
     }
 
@@ -93,9 +105,10 @@ def transform_rows(
     row_numbers = source_row_numbers or list(range(2, len(source_rows) + 2))
     for source_row_number, source_row in zip(row_numbers, source_rows, strict=True):
         errors = [
-            (
-                "MISSING_SOURCE_VALUE",
-                f"필수 공급사 값이 비어 있습니다: {column}",
+            ETLRowError(
+                code="MISSING_SOURCE_VALUE",
+                field=column,
+                message=f"필수 공급사 값이 비어 있습니다: {column}",
             )
             for column in profile.required_source_columns
             if not _clean_text(source_row.get(column, ""))
@@ -103,23 +116,47 @@ def transform_rows(
         row = _build_standard_row(source_row, profile)
 
         if not row["product_id"]:
-            errors.append(("MISSING_PRODUCT_ID", ERROR_MESSAGES["MISSING_PRODUCT_ID"]))
+            errors.append(
+                ETLRowError(
+                    code="MISSING_PRODUCT_ID",
+                    field="product_id",
+                    message=ERROR_MESSAGES["MISSING_PRODUCT_ID"],
+                )
+            )
 
         parsed_price, price_error = _parse_price(row["price"])
         if price_error:
-            errors.append((price_error, ERROR_MESSAGES[price_error]))
+            errors.append(
+                ETLRowError(
+                    code=price_error,
+                    field="price",
+                    message=ERROR_MESSAGES[price_error],
+                )
+            )
         else:
             row["price"] = parsed_price
 
         parsed_sale_price, sale_price_error = _parse_optional_price(row["sale_price"])
         if sale_price_error:
-            errors.append((sale_price_error, ERROR_MESSAGES[sale_price_error]))
+            errors.append(
+                ETLRowError(
+                    code=sale_price_error,
+                    field="sale_price",
+                    message=ERROR_MESSAGES[sale_price_error],
+                )
+            )
         else:
             row["sale_price"] = parsed_sale_price
 
         parsed_stock, stock_error = _parse_stock(row["stock"])
         if stock_error:
-            errors.append((stock_error, ERROR_MESSAGES[stock_error]))
+            errors.append(
+                ETLRowError(
+                    code=stock_error,
+                    field="stock",
+                    message=ERROR_MESSAGES[stock_error],
+                )
+            )
         else:
             row["stock"] = parsed_stock
 

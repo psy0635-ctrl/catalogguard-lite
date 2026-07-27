@@ -66,6 +66,7 @@ def fake_etl_query_service(monkeypatch):
         total_rows=30,
         rejected_rows=5,
         error_counts={"INVALID_PRICE": 5},
+        reject_details_stored=True,
         created_at=load.created_at,
         products=SimpleNamespace(
             items=[_product(description=None, seller=None, sale_price=None)],
@@ -73,6 +74,28 @@ def fake_etl_query_service(monkeypatch):
             limit=50,
             offset=0,
         ),
+    )
+
+    rejections = SimpleNamespace(
+        available=True,
+        items=[
+            SimpleNamespace(
+                rejected_row_id=301,
+                source_row_number=4,
+                errors=[
+                    SimpleNamespace(
+                        code="INVALID_PRICE",
+                        field="price",
+                        message="bad price",
+                    )
+                ],
+                masked_source_data={"description": "010-****-5678"},
+                created_at=load.created_at,
+            )
+        ],
+        total=1,
+        limit=20,
+        offset=0,
     )
 
     def override_session():
@@ -115,9 +138,32 @@ def fake_etl_query_service(monkeypatch):
         detail.products.offset = product_offset
         return detail
 
+    def fake_list_etl_rejections(
+        session,
+        *,
+        etl_load_run_id,
+        limit,
+        offset,
+    ):
+        calls.append(
+            {
+                "operation": "rejections",
+                "session": session,
+                "etl_load_run_id": etl_load_run_id,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
+        if not state.load_exists:
+            return None
+        rejections.limit = limit
+        rejections.offset = offset
+        return rejections
+
     app.dependency_overrides[get_session] = override_session
     monkeypatch.setattr(etl_loads_route, "list_etl_loads", fake_list_etl_loads)
     monkeypatch.setattr(etl_loads_route, "get_etl_load_detail", fake_get_etl_load_detail)
+    monkeypatch.setattr(etl_loads_route, "list_etl_rejections", fake_list_etl_rejections)
     yield SimpleNamespace(calls=calls, state=state)
     app.dependency_overrides.clear()
 
@@ -218,6 +264,7 @@ def test_detail_returns_nullable_fields_and_hashes(fake_etl_query_service):
     assert data["total_rows"] == 30
     assert data["rejected_rows"] == 5
     assert data["error_counts"] == {"INVALID_PRICE": 5}
+    assert data["reject_details_stored"] is True
     assert data["products"]["items"][0]["sale_price"] is None
     assert data["products"]["items"][0]["description"] is None
     assert data["products"]["items"][0]["seller"] is None
@@ -261,6 +308,50 @@ def test_detail_rejects_invalid_product_pagination(params):
 def test_non_positive_path_id_is_rejected(fake_etl_query_service):
     assert client.get(f"{ENDPOINT}/0").status_code == 422
     assert client.get(f"{ENDPOINT}/-1").status_code == 422
+
+
+def test_rejections_endpoint_returns_structured_masked_rows(fake_etl_query_service):
+    response = client.get(f"{ENDPOINT}/12/rejections")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "available": True,
+        "items": [
+            {
+                "rejected_row_id": 301,
+                "source_row_number": 4,
+                "errors": [
+                    {
+                        "code": "INVALID_PRICE",
+                        "field": "price",
+                        "message": "bad price",
+                    }
+                ],
+                "masked_source_data": {"description": "010-****-5678"},
+                "created_at": "2026-07-25T12:00:00Z",
+            }
+        ],
+        "total": 1,
+        "limit": 20,
+        "offset": 0,
+    }
+    assert fake_etl_query_service.calls[-1]["operation"] == "rejections"
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"limit": 0}, {"limit": 101}, {"offset": -1}],
+)
+def test_rejections_endpoint_rejects_invalid_pagination(params):
+    assert client.get(f"{ENDPOINT}/12/rejections", params=params).status_code == 422
+
+
+def test_rejections_endpoint_returns_404_for_missing_batch(fake_etl_query_service):
+    fake_etl_query_service.state.load_exists = False
+
+    response = client.get(f"{ENDPOINT}/999999/rejections")
+
+    assert response.status_code == 404
 
 
 def test_etl_load_routes_are_registered():

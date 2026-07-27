@@ -130,6 +130,7 @@ def test_run_pipeline_writes_standard_reject_and_summary_files(tmp_path):
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["input_file_sha256"] == hashlib.sha256(input_path.read_bytes()).hexdigest()
     assert summary["output_file_sha256"] == hashlib.sha256(standard_bytes).hexdigest()
+    assert summary["rejects_file_sha256"] == hashlib.sha256(rejects_path.read_bytes()).hexdigest()
     assert summary["loaded_rows"] + summary["rejected_rows"] == summary["total_rows"]
     assert "C:\\" not in summary_path.read_text(encoding="utf-8")
 
@@ -143,6 +144,12 @@ def test_run_pipeline_writes_standard_reject_and_summary_files(tmp_path):
     assert output_rows[1]["sale_price"] == "15000"
     assert rejected_rows[0]["source_row_number"] == "3"
     assert "INVALID_PRICE" in rejected_rows[0]["error_code"]
+    assert json.loads(rejected_rows[0]["error_field"]) == [
+        "vendor_sku",
+        "product_id",
+        "price",
+        "stock",
+    ]
 
 
 def test_pipeline_output_is_accepted_by_real_catalogguard_validator_and_inspector(tmp_path):

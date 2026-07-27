@@ -6,7 +6,7 @@ from datetime import datetime
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from db.models import CatalogProductStaging, ETLLoadRun
+from db.models import CatalogProductStaging, ETLLoadRun, ETLRejectedRow
 
 
 LIKE_ESCAPE_CHARACTER = "\\"
@@ -70,8 +70,34 @@ class ETLLoadDetail:
     loaded_rows: int
     rejected_rows: int | None
     error_counts: dict[str, int] | None
+    reject_details_stored: bool
     created_at: datetime
     products: ETLStagingProductList
+
+
+@dataclass(frozen=True)
+class ETLRejectError:
+    code: str
+    field: str
+    message: str
+
+
+@dataclass(frozen=True)
+class ETLRejectedRowItem:
+    rejected_row_id: int
+    source_row_number: int
+    errors: list[ETLRejectError]
+    masked_source_data: dict[str, str]
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class ETLRejectedRowList:
+    available: bool
+    items: list[ETLRejectedRowItem]
+    total: int
+    limit: int
+    offset: int
 
 
 def normalize_etl_filter(value: str | None) -> str | None:
@@ -201,6 +227,7 @@ def get_etl_load_detail(
         loaded_rows=load_run.loaded_rows,
         rejected_rows=load_run.rejected_rows,
         error_counts=load_run.error_counts,
+        reject_details_stored=load_run.reject_details_stored,
         created_at=load_run.created_at,
         products=ETLStagingProductList(
             items=[_to_product(product) for product in products],
@@ -208,4 +235,54 @@ def get_etl_load_detail(
             limit=product_limit,
             offset=product_offset,
         ),
+    )
+
+
+def _to_rejected_row(row: ETLRejectedRow) -> ETLRejectedRowItem:
+    return ETLRejectedRowItem(
+        rejected_row_id=row.id,
+        source_row_number=row.source_row_number,
+        errors=[ETLRejectError(**error) for error in row.errors],
+        masked_source_data=dict(row.masked_source_data),
+        created_at=row.created_at,
+    )
+
+
+def list_etl_rejections(
+    session: Session,
+    *,
+    etl_load_run_id: int,
+    limit: int,
+    offset: int,
+) -> ETLRejectedRowList | None:
+    load_run = session.get(ETLLoadRun, etl_load_run_id)
+    if load_run is None:
+        return None
+    if not load_run.reject_details_stored:
+        return ETLRejectedRowList(
+            available=False,
+            items=[],
+            total=0,
+            limit=limit,
+            offset=offset,
+        )
+
+    rows_statement = (
+        select(ETLRejectedRow)
+        .where(ETLRejectedRow.etl_load_run_id == etl_load_run_id)
+        .order_by(ETLRejectedRow.source_row_number.asc(), ETLRejectedRow.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    rows = list(session.scalars(rows_statement).all())
+    total_statement = select(func.count()).select_from(ETLRejectedRow).where(
+        ETLRejectedRow.etl_load_run_id == etl_load_run_id
+    )
+    total = int(session.scalar(total_statement) or 0)
+    return ETLRejectedRowList(
+        available=True,
+        items=[_to_rejected_row(row) for row in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
     )

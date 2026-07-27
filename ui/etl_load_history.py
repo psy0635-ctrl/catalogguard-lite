@@ -17,6 +17,7 @@ from clients.catalogguard_api import (
 
 ETL_LOAD_LIMIT = 10
 ETL_PRODUCT_LIMIT = 20
+ETL_REJECT_LIMIT = 20
 ETL_LOAD_DISPLAY_COLUMNS = [
     "적재 배치 ID",
     "원본 파일명",
@@ -28,6 +29,7 @@ ETL_LOAD_DISPLAY_COLUMNS = [
     "적재 시간",
 ]
 ETL_ERROR_DISPLAY_COLUMNS = ["오류 코드", "발생 건수"]
+ETL_REJECT_DISPLAY_COLUMNS = ["원본 행", "오류 코드", "오류 필드", "오류 메시지"]
 ETL_PRODUCT_DISPLAY_COLUMNS = [
     "staging 상품 ID",
     "상품 그룹 ID",
@@ -59,6 +61,9 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_load_detail_response": None,
     "etl_load_detail_error": None,
     "etl_load_product_offset": 0,
+    "etl_reject_offset": 0,
+    "etl_reject_response": None,
+    "etl_reject_error": None,
 }
 
 
@@ -123,6 +128,23 @@ def build_etl_error_counts_dataframe(error_counts: dict[str, int] | None) -> pd.
         ],
         columns=ETL_ERROR_DISPLAY_COLUMNS,
     )
+
+
+def build_etl_rejection_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
+    rows = []
+    for item in items:
+        errors = item.get("errors") or []
+        rows.append(
+            {
+                "원본 행": item.get("source_row_number"),
+                "오류 코드": ", ".join(str(error.get("code", "")) for error in errors),
+                "오류 필드": ", ".join(str(error.get("field", "")) for error in errors),
+                "오류 메시지": ", ".join(
+                    str(error.get("message", "")) for error in errors
+                ),
+            }
+        )
+    return pd.DataFrame(rows, columns=ETL_REJECT_DISPLAY_COLUMNS)
 
 
 def build_etl_product_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
@@ -196,6 +218,9 @@ def reset_etl_load_detail_state(session_state) -> None:
     session_state["etl_load_detail_response"] = None
     session_state["etl_load_detail_error"] = None
     session_state["etl_load_product_offset"] = 0
+    session_state["etl_reject_offset"] = 0
+    session_state["etl_reject_response"] = None
+    session_state["etl_reject_error"] = None
 
 
 def apply_etl_load_search(session_state) -> None:
@@ -293,6 +318,34 @@ def _fetch_etl_load_detail(api_client, session_state) -> dict[str, Any] | None:
         return None
 
 
+def _fetch_etl_rejections(api_client, session_state) -> dict[str, Any] | None:
+    if session_state.get("etl_reject_response") is not None:
+        return session_state["etl_reject_response"]
+    if session_state.get("etl_reject_error") is not None:
+        return None
+    selected_run_id = session_state.get("etl_load_selected_run_id")
+    if selected_run_id is None:
+        return None
+    try:
+        response = api_client.list_etl_rejections(
+            int(selected_run_id),
+            limit=ETL_REJECT_LIMIT,
+            offset=session_state["etl_reject_offset"],
+        )
+        session_state["etl_reject_response"] = response
+        session_state["etl_reject_error"] = None
+        return response
+    except (
+        ETLLoadNotFoundError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        session_state["etl_reject_error"] = error
+        return None
+
+
 def _render_etl_error(error: Exception, *, detail: bool = False) -> None:
     if isinstance(error, CatalogGuardApiConfigurationError):
         message = "ETL 적재 이력 API 주소가 설정되지 않았습니다."
@@ -309,6 +362,66 @@ def _render_etl_error(error: Exception, *, detail: bool = False) -> None:
             else "ETL 적재 이력을 불러오는 중 오류가 발생했습니다."
         )
     st.error(build_etl_api_error_display_message(message, error))
+
+
+def _render_etl_rejections(api_client, detail_response: dict[str, Any]) -> None:
+    if not detail_response.get("reject_details_stored", False):
+        st.info(
+            "이 배치는 reject 상세 저장 기능 도입 전에 생성되어 거부 행 상세가 없습니다."
+        )
+        return
+
+    response = _fetch_etl_rejections(api_client, st.session_state)
+    if response is None:
+        error = st.session_state.get("etl_reject_error")
+        if error is not None:
+            _render_etl_error(error, detail=True)
+        return
+    if not response.get("available", False):
+        st.info("이 배치에는 거부 행 상세가 없습니다.")
+        return
+
+    items = response.get("items") or []
+    if not items:
+        st.info("거부 행이 없습니다.")
+        return
+
+    st.subheader("거부 행 상세")
+    st.dataframe(
+        build_etl_rejection_dataframe(items),
+        width="stretch",
+        hide_index=True,
+    )
+    for item in items:
+        with st.expander(f"원본 행 {item.get('source_row_number')} - 마스킹 원본"):
+            st.json(item.get("masked_source_data") or {})
+
+    total = max(0, int(response.get("total", 0)))
+    current_page, total_pages, has_previous, has_next = calculate_etl_pagination(
+        total=total,
+        limit=ETL_REJECT_LIMIT,
+        offset=st.session_state["etl_reject_offset"],
+    )
+    st.caption(f"거부 행 {current_page} / {total_pages} 페이지 · 전체 {total}개")
+    previous_col, next_col = st.columns(2)
+    with previous_col:
+        if st.button(
+            "거부 행 이전",
+            disabled=not has_previous,
+            key="etl_reject_previous",
+        ):
+            st.session_state["etl_reject_offset"] -= ETL_REJECT_LIMIT
+            st.session_state["etl_reject_response"] = None
+            st.rerun()
+    with next_col:
+        if st.button(
+            "거부 행 다음",
+            disabled=not has_next,
+            key="etl_reject_next",
+        ):
+            st.session_state["etl_reject_offset"] += ETL_REJECT_LIMIT
+            st.session_state["etl_reject_response"] = None
+            st.rerun()
 
 
 def _render_etl_search_controls() -> None:
@@ -411,6 +524,8 @@ def _render_etl_load_detail(api_client) -> None:
             )
         else:
             st.info("변환 과정에서 거부된 행이 없습니다.")
+    _render_etl_rejections(api_client, detail_response)
+
     with st.expander("파일 SHA-256"):
         st.code(f"원본 파일 SHA-256: {detail_response.get('input_file_sha256', '')}")
         st.code(f"적재 파일 SHA-256: {detail_response.get('output_file_sha256', '')}")

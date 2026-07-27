@@ -2,6 +2,13 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class ETLRowError:
+    code: str
+    field: str
+    message: str
+
+
+@dataclass(frozen=True)
 class ETLProfile:
     name: str
     version: str

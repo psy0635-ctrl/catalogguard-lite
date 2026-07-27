@@ -34,6 +34,7 @@ class ETLPipelineResult:
     rejected_rows: int
     input_file_sha256: str
     output_file_sha256: str
+    rejects_file_sha256: str
 
 
 def _sha256_bytes(content: bytes) -> str:
@@ -225,6 +226,7 @@ def run_pipeline(
         reject_fieldnames = [
             "source_row_number",
             "error_code",
+            "error_field",
             "error_message",
             *source_columns,
         ]
@@ -234,6 +236,7 @@ def run_pipeline(
             transformed.rejected_rows,
         )
         temporary_paths.append(rejects_temp_path)
+        rejects_bytes = rejects_temp_path.read_bytes()
         error_counts = Counter(
             error_code
             for rejected_row in transformed.rejected_rows
@@ -248,6 +251,7 @@ def run_pipeline(
                 "output_filename": output_path.name,
                 "input_file_sha256": _sha256_bytes(input_bytes),
                 "output_file_sha256": _sha256_bytes(output_bytes),
+                "rejects_file_sha256": _sha256_bytes(rejects_bytes),
                 "total_rows": len(source_rows),
                 "loaded_rows": len(transformed.loaded_rows),
                 "rejected_rows": len(transformed.rejected_rows),
@@ -273,4 +277,5 @@ def run_pipeline(
         rejected_rows=len(transformed.rejected_rows),
         input_file_sha256=_sha256_bytes(input_bytes),
         output_file_sha256=_sha256_bytes(output_bytes),
+        rejects_file_sha256=_sha256_bytes(rejects_bytes),
     )

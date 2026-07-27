@@ -173,6 +173,21 @@ class ETLLoadRun(Base):
             "error_counts IS NULL OR jsonb_typeof(error_counts) = 'object'",
             name="ck_etl_load_runs_error_counts_object",
         ),
+        CheckConstraint(
+            """
+            (
+                reject_details_stored = false
+                AND rejects_file_sha256 IS NULL
+            )
+            OR
+            (
+                reject_details_stored = true
+                AND rejects_file_sha256 IS NOT NULL
+                AND length(rejects_file_sha256) = 64
+            )
+            """,
+            name="ck_etl_load_runs_reject_details_state",
+        ),
         Index(
             "ux_etl_load_runs_input_profile_version",
             "input_file_sha256",
@@ -199,6 +214,14 @@ class ETLLoadRun(Base):
         JSONB(none_as_null=True),
         nullable=True,
     )
+    reject_details_stored: Mapped[bool] = mapped_column(
+        nullable=False,
+        server_default=text("false"),
+    )
+    rejects_file_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -209,6 +232,68 @@ class ETLLoadRun(Base):
         back_populates="etl_load_run",
         cascade="all, delete-orphan",
         passive_deletes=True,
+    )
+    reject_items: Mapped[list[ETLRejectedRow]] = relationship(
+        back_populates="etl_load_run",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class ETLRejectedRow(Base):
+    """A validated, privacy-masked reject row belonging to one ETL batch."""
+
+    __tablename__ = "etl_rejected_rows"
+    __table_args__ = (
+        CheckConstraint(
+            "source_row_number >= 2",
+            name="ck_etl_rejected_rows_source_row_number_min",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(errors) = 'array'",
+            name="ck_etl_rejected_rows_errors_array",
+        ),
+        CheckConstraint(
+            "jsonb_array_length(errors) > 0",
+            name="ck_etl_rejected_rows_errors_non_empty",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(masked_source_data) = 'object'",
+            name="ck_etl_rejected_rows_masked_source_data_object",
+        ),
+        Index("ix_etl_rejected_rows_etl_load_run_id", "etl_load_run_id"),
+        Index(
+            "ux_etl_rejected_rows_load_run_source_row",
+            "etl_load_run_id",
+            "source_row_number",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+    )
+    etl_load_run_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("etl_load_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    errors: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
+    masked_source_data: Mapped[dict[str, str]] = mapped_column(
+        JSONB,
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    etl_load_run: Mapped[ETLLoadRun] = relationship(
+        back_populates="reject_items"
     )
 
 

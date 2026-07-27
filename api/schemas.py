@@ -110,8 +110,31 @@ class ETLLoadDetailResponse(BaseModel):
     loaded_rows: int
     rejected_rows: int | None
     error_counts: dict[str, int] | None
+    reject_details_stored: bool
     created_at: datetime
     products: ETLStagingProductListResponse
+
+
+class ETLRejectErrorResponse(BaseModel):
+    code: str
+    field: str
+    message: str
+
+
+class ETLRejectedRowResponse(BaseModel):
+    rejected_row_id: int
+    source_row_number: int
+    errors: list[ETLRejectErrorResponse]
+    masked_source_data: dict[str, str]
+    created_at: datetime
+
+
+class ETLRejectedRowListResponse(BaseModel):
+    available: bool
+    items: list[ETLRejectedRowResponse]
+    total: int
+    limit: int
+    offset: int
 
 
 InspectionJobStatus = Literal["queued", "running", "succeeded", "failed"]

@@ -5,7 +5,7 @@ import sys
 from sqlalchemy import BigInteger, CheckConstraint, DateTime, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 
-from db.models import ETLLoadRun, InspectionResult, InspectionRun
+from db.models import ETLLoadRun, ETLRejectedRow, InspectionResult, InspectionRun
 
 
 def get_constraint_names(table) -> set[str]:
@@ -27,6 +27,7 @@ def test_database_table_names_are_expected():
     assert InspectionRun.__tablename__ == "inspection_runs"
     assert InspectionResult.__tablename__ == "inspection_results"
     assert ETLLoadRun.__tablename__ == "etl_load_runs"
+    assert ETLRejectedRow.__tablename__ == "etl_rejected_rows"
 
 
 def test_etl_quality_summary_columns_are_nullable_and_jsonb():
@@ -47,6 +48,37 @@ def test_etl_quality_summary_columns_are_nullable_and_jsonb():
         "ck_etl_load_runs_total_rows_matches_loaded_and_rejected",
         "ck_etl_load_runs_error_counts_object",
     }.issubset(constraint_names)
+
+
+def test_etl_rejected_row_columns_constraints_and_relationships():
+    columns = ETLRejectedRow.__table__.c
+
+    assert isinstance(columns.id.type, BigInteger)
+    assert isinstance(columns.etl_load_run_id.type, BigInteger)
+    assert isinstance(columns.source_row_number.type, Integer)
+    assert isinstance(columns.errors.type, JSONB)
+    assert isinstance(columns.masked_source_data.type, JSONB)
+    assert columns.errors.nullable is False
+    assert columns.masked_source_data.nullable is False
+    assert {
+        "ck_etl_rejected_rows_source_row_number_min",
+        "ck_etl_rejected_rows_errors_array",
+        "ck_etl_rejected_rows_errors_non_empty",
+        "ck_etl_rejected_rows_masked_source_data_object",
+    }.issubset(get_constraint_names(ETLRejectedRow.__table__))
+    assert "ux_etl_rejected_rows_load_run_source_row" in get_index_names(
+        ETLRejectedRow.__table__
+    )
+    foreign_keys = list(columns.etl_load_run_id.foreign_keys)
+    assert len(foreign_keys) == 1
+    assert foreign_keys[0].ondelete == "CASCADE"
+
+    run_relationship = ETLLoadRun.reject_items.property
+    row_relationship = ETLRejectedRow.etl_load_run.property
+    assert run_relationship.back_populates == "etl_load_run"
+    assert "delete-orphan" in run_relationship.cascade
+    assert run_relationship.passive_deletes is True
+    assert row_relationship.back_populates == "reject_items"
 
 
 def test_inspection_runs_columns_and_types():

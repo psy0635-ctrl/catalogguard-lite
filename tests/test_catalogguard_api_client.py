@@ -1034,6 +1034,7 @@ ETL_LOAD_DETAIL_RESPONSE = {
     "total_rows": 30,
     "rejected_rows": 5,
     "error_counts": {"INVALID_PRICE": 5},
+    "reject_details_stored": True,
     "created_at": "2026-07-25T12:00:00Z",
     "products": {
         "items": [
@@ -1058,6 +1059,28 @@ ETL_LOAD_DETAIL_RESPONSE = {
         "limit": 20,
         "offset": 0,
     },
+}
+
+ETL_REJECTIONS_RESPONSE = {
+    "available": True,
+    "items": [
+        {
+            "rejected_row_id": 301,
+            "source_row_number": 4,
+            "errors": [
+                {
+                    "code": "INVALID_PRICE",
+                    "field": "price",
+                    "message": "bad price",
+                }
+            ],
+            "masked_source_data": {"description": "010-****-5678"},
+            "created_at": "2026-07-25T12:00:00Z",
+        }
+    ],
+    "total": 1,
+    "limit": 20,
+    "offset": 0,
 }
 
 
@@ -1218,6 +1241,66 @@ def test_get_etl_load_detail_accepts_nullable_quality_summary_for_legacy_batch()
     )
 
     assert client.get_etl_load_detail(12)["error_counts"] is None
+
+
+def test_list_etl_rejections_calls_endpoint_and_validates_contract():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_REJECTIONS_RESPONSE),
+        timeout_seconds=3.0,
+    )
+
+    data = client.list_etl_rejections(12, limit=20, offset=40)
+
+    assert data == ETL_REJECTIONS_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/etl-loads/12/rejections",
+            "params": {"limit": 20, "offset": 40},
+            "timeout": 3.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("limit", "offset"),
+    [(0, 0), (101, 0), (20, -1), (True, 0), (20, False)],
+)
+def test_list_etl_rejections_rejects_invalid_pagination_without_request(limit, offset):
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_REJECTIONS_RESPONSE)
+    )
+
+    with pytest.raises(ValueError):
+        client.list_etl_rejections(12, limit=limit, offset=offset)
+
+    assert session.calls == []
+
+
+def test_list_etl_rejections_maps_404_to_etl_load_not_found():
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(status_code=404))
+
+    with pytest.raises(client_module.ETLLoadNotFoundError):
+        client.list_etl_rejections(12)
+
+
+def test_list_etl_rejections_rejects_raw_source_values_and_invalid_error_shape():
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={
+                **ETL_REJECTIONS_RESPONSE,
+                "items": [
+                    {
+                        **ETL_REJECTIONS_RESPONSE["items"][0],
+                        "errors": [],
+                    }
+                ],
+            }
+        )
+    )
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.list_etl_rejections(12)
 
 
 def test_get_inspection_detail_rejects_invalid_id_without_request():

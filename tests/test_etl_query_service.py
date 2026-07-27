@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import delete, select
 
 from config.database import get_optional_database_url
-from db.models import CatalogProductStaging, ETLLoadRun
+from db.models import CatalogProductStaging, ETLLoadRun, ETLRejectedRow
 from db.session import create_database_engine, create_session_factory
 
 
@@ -43,6 +43,7 @@ def _add_run(
     total_rows=None,
     rejected_rows=None,
     error_counts=None,
+    reject_details_stored=False,
 ):
     run = ETLLoadRun(
         source_filename=source_filename,
@@ -54,6 +55,8 @@ def _add_run(
         total_rows=total_rows,
         rejected_rows=rejected_rows,
         error_counts=error_counts,
+        reject_details_stored=reject_details_stored,
+        rejects_file_sha256="a" * 64 if reject_details_stored else None,
         created_at=created_at,
     )
     session.add(run)
@@ -77,6 +80,22 @@ def _add_run(
             )
         )
     session.flush()
+    if reject_details_stored:
+        session.add(
+            ETLRejectedRow(
+                etl_load_run_id=run.id,
+                source_row_number=4,
+                errors=[
+                    {
+                        "code": "INVALID_PRICE",
+                        "field": "price",
+                        "message": "bad price",
+                    }
+                ],
+                masked_source_data={"sku_code": "SKU-REJECT"},
+            )
+        )
+        session.flush()
     return run
 
 
@@ -94,6 +113,7 @@ def seeded_runs(postgres_session):
         total_rows=4,
         rejected_rows=1,
         error_counts={"INVALID_PRICE": 1},
+        reject_details_stored=True,
     )
     tied = _add_run(
         session,
@@ -247,6 +267,7 @@ def test_get_etl_load_detail_paginates_products_without_mixing_batches(seeded_ru
     assert detail.total_rows == 4
     assert detail.rejected_rows == 1
     assert detail.error_counts == {"INVALID_PRICE": 1}
+    assert detail.reject_details_stored is True
     assert detail.products.total == 3
     assert detail.products.limit == 2
     assert detail.products.offset == 1
@@ -266,6 +287,45 @@ def test_get_etl_load_detail_paginates_products_without_mixing_batches(seeded_ru
         etl_load_run_id=999999,
         product_limit=20,
         product_offset=0,
+    ) is None
+
+
+def test_list_etl_rejections_paginates_and_returns_masked_structured_rows(seeded_runs):
+    from db.etl_query_service import list_etl_rejections
+
+    session, _profile_prefix, newest, tied, _older = seeded_runs
+
+    result = list_etl_rejections(
+        session,
+        etl_load_run_id=newest.id,
+        limit=20,
+        offset=0,
+    )
+
+    assert result is not None
+    assert result.available is True
+    assert result.total == 1
+    assert result.limit == 20
+    assert result.offset == 0
+    assert result.items[0].source_row_number == 4
+    assert result.items[0].errors[0].code == "INVALID_PRICE"
+    assert result.items[0].masked_source_data == {"sku_code": "SKU-REJECT"}
+
+    unavailable = list_etl_rejections(
+        session,
+        etl_load_run_id=tied.id,
+        limit=20,
+        offset=0,
+    )
+    assert unavailable is not None
+    assert unavailable.available is False
+    assert unavailable.items == []
+    assert unavailable.total == 0
+    assert list_etl_rejections(
+        session,
+        etl_load_run_id=999999,
+        limit=20,
+        offset=0,
     ) is None
 
 

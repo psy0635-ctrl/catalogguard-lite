@@ -11,6 +11,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="CatalogGuard 표준 CSV PostgreSQL staging 적재")
     parser.add_argument("--input", required=True, type=Path, help="표준 CSV 파일")
     parser.add_argument("--summary", required=True, type=Path, help="ETL 요약 JSON 파일")
+    parser.add_argument("--rejects", type=Path, help="reject CSV file")
     return parser
 
 
@@ -18,6 +19,9 @@ def main(argv: list[str] | None = None) -> int:
     arguments = _build_parser().parse_args(argv)
     try:
         standard_csv_bytes = arguments.input.read_bytes()
+        rejects_csv_bytes = (
+            arguments.rejects.read_bytes() if arguments.rejects is not None else None
+        )
         summary_json_bytes = arguments.summary.read_bytes()
         with get_session_factory()() as session:
             outcome = load_standard_csv(
@@ -25,6 +29,12 @@ def main(argv: list[str] | None = None) -> int:
                 standard_csv_bytes,
                 summary_json_bytes,
                 standard_csv_filename=arguments.input.name,
+                rejects_csv_bytes=rejects_csv_bytes,
+                rejects_csv_filename=(
+                    arguments.rejects.name
+                    if arguments.rejects is not None
+                    else "rejected_rows.csv"
+                ),
             )
     except ETLLoadError as error:
         print(f"DB 적재 실패: {error}", file=sys.stderr)

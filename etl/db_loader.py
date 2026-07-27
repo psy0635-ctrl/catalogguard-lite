@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 
 from config.settings import REQUIRED_FIELDS
 from core.upload_validator import CsvUploadValidationError, validate_and_read_uploaded_csv
-from db.models import CatalogProductStaging, ETLLoadRun
+from db.models import CatalogProductStaging, ETLLoadRun, ETLRejectedRow
+from etl.reject_parser import ParsedRejectedRow, parse_reject_csv
 
 
 class ETLLoadError(ValueError):
@@ -26,6 +27,8 @@ class ETLLoadOutcome:
     loaded_rows: int
     rejected_rows: int | None
     error_counts: dict[str, int] | None
+    reject_details_stored: bool
+    rejects_file_sha256: str | None
 
 
 ETLLoadResult = ETLLoadOutcome
@@ -124,7 +127,7 @@ def _normalize_summary(summary: dict[str, object]) -> dict[str, object]:
     if len(profile_version) > 20:
         raise ETLLoadError("profile_version이 너무 깁니다")
 
-    return {
+    normalized_summary: dict[str, object] = {
         "profile_name": profile_name,
         "profile_version": profile_version,
         "input_filename": _normalize_source_filename(
@@ -141,6 +144,12 @@ def _normalize_summary(summary: dict[str, object]) -> dict[str, object]:
         **row_counts,
         "error_counts": error_counts,
     }
+    if "rejects_file_sha256" in summary:
+        normalized_summary["rejects_file_sha256"] = _normalize_hash(
+            _required_text(summary, "rejects_file_sha256"),
+            "rejects_file_sha256",
+        )
+    return normalized_summary
 
 
 def _clean_cell(value: object) -> str:
@@ -206,11 +215,40 @@ def _add_staging_products(
     session.flush()
 
 
+def _add_rejected_rows(
+    session: Session,
+    *,
+    etl_load_run_id: int,
+    rows: list[ParsedRejectedRow],
+) -> None:
+    session.add_all(
+        [
+            ETLRejectedRow(
+                etl_load_run_id=etl_load_run_id,
+                source_row_number=row.source_row_number,
+                errors=[
+                    {
+                        "code": error.code,
+                        "field": error.field,
+                        "message": error.message,
+                    }
+                    for error in row.errors
+                ],
+                masked_source_data=row.masked_source_data,
+            )
+            for row in rows
+        ]
+    )
+    session.flush()
+
+
 def load_standard_csv(
     session: Session,
     standard_csv_bytes: bytes,
     summary_json_bytes: bytes,
     standard_csv_filename: str = "catalogguard_ready.csv",
+    rejects_csv_bytes: bytes | None = None,
+    rejects_csv_filename: str = "rejected_rows.csv",
 ) -> ETLLoadOutcome:
     """Validate ETL output and atomically add one idempotent staging batch."""
     summary = _normalize_summary(_read_summary(summary_json_bytes))
@@ -225,6 +263,31 @@ def load_standard_csv(
     staging_rows = _build_staging_rows(dataframe)
     if len(staging_rows) != summary["loaded_rows"]:
         raise ETLLoadError("표준 CSV 행 수와 요약 JSON의 loaded_rows가 일치하지 않습니다")
+
+    rejects_file_sha256 = summary.get("rejects_file_sha256")
+    parsed_rejects: list[ParsedRejectedRow] = []
+    if rejects_file_sha256 is None:
+        if rejects_csv_bytes is not None:
+            raise ETLLoadError(
+                "rejects_file_sha256가 없으면 reject CSV를 받을 수 없습니다"
+            )
+    else:
+        if rejects_csv_bytes is None:
+            raise ETLLoadError(
+                "rejects_file_sha256가 있으면 reject CSV가 필요합니다"
+            )
+        if _sha256_bytes(rejects_csv_bytes) != rejects_file_sha256:
+            raise ETLLoadError(
+                "reject CSV와 summary의 rejects_file_sha256가 일치하지 않습니다"
+            )
+        try:
+            parsed_rejects = parse_reject_csv(
+                rejects_csv_bytes,
+                filename=rejects_csv_filename,
+                expected_row_count=summary["rejected_rows"],
+            )
+        except (ValueError, TypeError) as error:
+            raise ETLLoadError("reject CSV가 올바르지 않습니다") from error
 
     identity = {
         "input_file_sha256": summary["input_file_sha256"],
@@ -248,6 +311,8 @@ def load_standard_csv(
                     existing.loaded_rows,
                     existing.rejected_rows,
                     existing.error_counts,
+                    existing.reject_details_stored,
+                    existing.rejects_file_sha256,
                 )
 
             load_run = ETLLoadRun(
@@ -260,6 +325,8 @@ def load_standard_csv(
                 total_rows=summary["total_rows"],
                 rejected_rows=summary["rejected_rows"],
                 error_counts=summary["error_counts"],
+                reject_details_stored=rejects_file_sha256 is not None,
+                rejects_file_sha256=rejects_file_sha256,
             )
             session.add(load_run)
             session.flush()
@@ -268,6 +335,11 @@ def load_standard_csv(
                 etl_load_run_id=load_run.id,
                 rows=staging_rows,
             )
+            _add_rejected_rows(
+                session,
+                etl_load_run_id=load_run.id,
+                rows=parsed_rejects,
+            )
             return ETLLoadOutcome(
                 load_run.id,
                 True,
@@ -275,6 +347,8 @@ def load_standard_csv(
                 load_run.loaded_rows,
                 load_run.rejected_rows,
                 load_run.error_counts,
+                load_run.reject_details_stored,
+                load_run.rejects_file_sha256,
             )
     except IntegrityError:
         # A concurrent caller may have won the unique identity race.
@@ -294,6 +368,8 @@ def load_standard_csv(
                 existing.loaded_rows,
                 existing.rejected_rows,
                 existing.error_counts,
+                existing.reject_details_stored,
+                existing.rejects_file_sha256,
             )
         raise
 

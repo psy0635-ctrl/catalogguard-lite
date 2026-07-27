@@ -75,6 +75,15 @@ ETL_PRODUCT_KEYS = (
     "seller",
     "created_at",
 )
+ETL_REJECTION_LIST_KEYS = ("available", "items", "total", "limit", "offset")
+ETL_REJECTION_ITEM_KEYS = (
+    "rejected_row_id",
+    "source_row_number",
+    "errors",
+    "masked_source_data",
+    "created_at",
+)
+ETL_REJECTION_ERROR_KEYS = ("code", "field", "message")
 ETL_SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
@@ -227,6 +236,55 @@ def _validate_etl_product_list(data: object) -> bool:
         and _validate_etl_list_metadata(data["offset"], allow_limit_zero=True)
         and all(_validate_etl_product_item(item) for item in data["items"])
     )
+
+
+def _validate_etl_rejection_item(item: object) -> bool:
+    if not isinstance(item, dict) or any(
+        key not in item for key in ETL_REJECTION_ITEM_KEYS
+    ):
+        return False
+    if (
+        type(item["rejected_row_id"]) is not int
+        or item["rejected_row_id"] < 1
+        or type(item["source_row_number"]) is not int
+        or item["source_row_number"] < 2
+        or not isinstance(item["errors"], list)
+        or not item["errors"]
+        or not isinstance(item["masked_source_data"], dict)
+        or not isinstance(item["created_at"], str)
+    ):
+        return False
+    if any(
+        not isinstance(error, dict)
+        or any(key not in error for key in ETL_REJECTION_ERROR_KEYS)
+        or any(
+            not isinstance(error[key], str) or not error[key].strip()
+            for key in ETL_REJECTION_ERROR_KEYS
+        )
+        for error in item["errors"]
+    ):
+        return False
+    return all(
+        isinstance(key, str)
+        and key.strip()
+        and isinstance(value, str)
+        for key, value in item["masked_source_data"].items()
+    )
+
+
+def _validate_etl_rejection_list_response(data: dict[str, Any]) -> None:
+    if (
+        any(key not in data for key in ETL_REJECTION_LIST_KEYS)
+        or type(data["available"]) is not bool
+        or not isinstance(data["items"], list)
+        or not _validate_etl_list_metadata(data["total"], allow_limit_zero=True)
+        or not _validate_etl_list_metadata(data["limit"])
+        or not _validate_etl_list_metadata(data["offset"], allow_limit_zero=True)
+        or any(not _validate_etl_rejection_item(item) for item in data["items"])
+    ):
+        raise _invalid_etl_response()
+    if not data["available"] and (data["items"] or data["total"] != 0):
+        raise _invalid_etl_response()
 
 
 def _validate_etl_load_detail_response(data: dict[str, Any]) -> None:
@@ -493,6 +551,26 @@ class CatalogGuardApiClient:
             not_found_message="ETL 적재 배치를 찾을 수 없습니다.",
         )
         _validate_etl_load_detail_response(data)
+        return data
+
+    def list_etl_rejections(
+        self,
+        etl_load_run_id: int,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        _validate_positive_etl_int(etl_load_run_id, "etl_load_run_id")
+        _validate_etl_pagination(limit, offset)
+
+        data = self._get_json(
+            f"/api/v1/etl-loads/{etl_load_run_id}/rejections",
+            params={"limit": limit, "offset": offset},
+            raise_not_found=True,
+            not_found_error=ETLLoadNotFoundError,
+            not_found_message="ETL ?곸옱 諛곗튂瑜?李얠쓣 ???놁뒿?덈떎.",
+        )
+        _validate_etl_rejection_list_response(data)
         return data
 
     def _get_json(

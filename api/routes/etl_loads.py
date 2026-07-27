@@ -5,6 +5,9 @@ from api.schemas import (
     ETLLoadDetailResponse,
     ETLLoadListItemResponse,
     ETLLoadListResponse,
+    ETLRejectErrorResponse,
+    ETLRejectedRowListResponse,
+    ETLRejectedRowResponse,
     ETLStagingProductListResponse,
     ETLStagingProductResponse,
 )
@@ -12,6 +15,7 @@ from db.etl_query_service import (
     ETLLoadDetail,
     ETLLoadList,
     get_etl_load_detail,
+    list_etl_rejections,
     list_etl_loads,
     normalize_etl_filter,
 )
@@ -55,6 +59,7 @@ def _build_detail_response(result: ETLLoadDetail) -> ETLLoadDetailResponse:
         loaded_rows=result.loaded_rows,
         rejected_rows=result.rejected_rows,
         error_counts=result.error_counts,
+        reject_details_stored=result.reject_details_stored,
         created_at=result.created_at,
         products=ETLStagingProductListResponse(
             items=[
@@ -123,3 +128,49 @@ def get_etl_load_run(
             detail=ETL_LOAD_NOT_FOUND_MESSAGE,
         )
     return _build_detail_response(result)
+
+
+@router.get(
+    "/api/v1/etl-loads/{etl_load_run_id}/rejections",
+    response_model=ETLRejectedRowListResponse,
+)
+def list_etl_rejected_rows(
+    etl_load_run_id: int = Path(..., ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: Session = Depends(get_session),
+) -> ETLRejectedRowListResponse:
+    result = list_etl_rejections(
+        session,
+        etl_load_run_id=etl_load_run_id,
+        limit=limit,
+        offset=offset,
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ETL_LOAD_NOT_FOUND_MESSAGE,
+        )
+    return ETLRejectedRowListResponse(
+        available=result.available,
+        items=[
+            ETLRejectedRowResponse(
+                rejected_row_id=item.rejected_row_id,
+                source_row_number=item.source_row_number,
+                errors=[
+                    ETLRejectErrorResponse(
+                        code=error.code,
+                        field=error.field,
+                        message=error.message,
+                    )
+                    for error in item.errors
+                ],
+                masked_source_data=item.masked_source_data,
+                created_at=item.created_at,
+            )
+            for item in result.items
+        ],
+        total=result.total,
+        limit=result.limit,
+        offset=result.offset,
+    )
