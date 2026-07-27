@@ -63,11 +63,13 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - ETL staging 배치와 정상 상품 행의 PostgreSQL 저장
 - ETL summary의 output SHA-256·행 수·품질 요약 검증과 배치 단위 rollback
 - `total_rows`, `loaded_rows`, `rejected_rows`, `error_counts`의 PostgreSQL JSONB 저장과 기존 배치 NULL 호환
+- reject CSV의 SHA-256·행 수·구조화된 오류 배열 검증과 `etl_rejected_rows` JSONB 저장
+- reject 원본 값의 개인정보·계좌번호 마스킹과 API·Streamlit reject 상세 조회
 - DB에서 staging 부모 배치를 삭제할 때의 상품 행 cascade와 음수 stock·price·sale_price 방지 제약
 - ETL 적재 배치 목록의 파일명·프로필명 검색과 페이지네이션
 - ETL 적재 목록·상세의 전체 행·정상 적재·변환 거부 수와 상세 오류 코드 통계
 - ETL 적재 상세의 input/output SHA-256 및 배치별 staging 상품 페이지네이션
-- Streamlit `ETL 적재 이력` 탭에서 목록·검색·배치 상세·품질 지표·오류 코드·SHA-256·staging 상품 조회
+- Streamlit `ETL 적재 이력` 탭에서 목록·검색·배치 상세·품질 지표·오류 코드·SHA-256·staging 상품·reject 상세 조회
 - ETL 목록의 빈 결과 안내, 404와 검증된 `X-Request-ID` 표시
 - 배치 변경 시 이전 상세·상품 상태 초기화와 실패 상세 요청의 중복 API 호출 방지
 - 기본값인 `즉시 검수`와 Redis·Celery를 사용하는 `백그라운드 검수` 선택
@@ -137,6 +139,7 @@ API 오류 발생
 -> 표준 CSV·reject CSV·summary JSON 생성
 -> 파일 해시와 행 수 검증
 -> PostgreSQL staging 적재
+-> 오류 배열·마스킹된 reject 원본 저장
 -> 중복 적재 방지
 -> ETL 적재 배치 목록·상세 API 조회
 -> CatalogGuard 검수
@@ -455,6 +458,7 @@ catalogguard-lite/
       20260705_0002_add_inspection_file_identity.py
       20260725_0003_create_etl_staging_tables.py
       20260727_0004_add_etl_quality_summary.py
+      20260728_0005_add_etl_rejected_rows.py
   data/
     dev/
       category_mismatch_test.csv
@@ -778,8 +782,9 @@ python -m alembic history
 
 `20260725_0003_create_etl_staging_tables.py`는 ETL 결과를 배치 단위로 적재하기 위한 다음 테이블을 추가합니다.
 
-- `etl_load_runs`: 원본 파일명, 프로필 이름·버전, 입력·출력 SHA-256, 적재 행 수와 nullable 품질 요약(`total_rows`, `rejected_rows`, `error_counts` JSONB)을 저장
+- `etl_load_runs`: 원본 파일명, 프로필 이름·버전, 입력·출력·reject CSV SHA-256, 적재 행 수, 품질 요약과 reject 상세 저장 여부를 저장
 - `catalog_products_staging`: 정상 표준 CSV 상품 행을 저장하고 `etl_load_runs`와 외래 키로 연결
+- `etl_rejected_rows`: 원본 행 번호, `{code, field, message}` 오류 JSONB 배열과 개인정보가 마스킹된 동적 원본 컬럼 JSONB를 저장
 
 `etl_load_runs`에는 `(input_file_sha256, profile_name, profile_version)` unique index가 있습니다. 상품 테이블의 `etl_load_run_id`에는 조회용 index와 `ON DELETE CASCADE` 외래 키가 있고, `stock`, `price`, `sale_price`의 음수 방지 CHECK constraint가 있습니다. 이 migration은 운영 상품 테이블 upsert를 추가하지 않습니다.
 
@@ -1393,9 +1398,9 @@ python -m pytest -q
 이전 기능 commit `0cf1d99cc1f884fd56bd610840d89ea40c5a0449`의 PostgreSQL 18.4 CI 결과와 별도로, 이번 ETL 품질 요약 변경은 운영 DB나 Railway DB에 연결하지 않고 저장소 내부 가상환경에서 검증했습니다.
 
 ```text
-전체 pytest: 944 passed, 0 skipped, 2 deselected, 3 warnings
+전체 pytest: 974 passed, 0 skipped, 2 deselected, 3 warnings
 PostgreSQL 통합 테스트: skip 0
-Alembic history/heads: `20260727_0004` head 확인
+Alembic history/heads: `20260728_0005` head 확인
 Alembic upgrade·downgrade·재upgrade: 성공 (격리된 PostgreSQL 18.4 테스트 클러스터)
 ```
 
@@ -1494,7 +1499,7 @@ ETL staging에는 다음 값을 저장합니다.
 - `catalog_products_staging`의 표준 CSV 정상 행과 `etl_load_run_id`
 - 빈 `sale_price`는 `NULL`로 저장하며 `stock`, `price`, `sale_price` 음수는 DB CHECK constraint로 거부
 
-ETL 적재는 summary의 필수 필드, 실제 표준 CSV SHA-256, 실제 행 수를 확인한 뒤 배치와 상품 행을 하나의 트랜잭션으로 저장합니다. `(input_file_sha256, profile_name, profile_version)` unique index로 중복을 판단하며, 실패 시 전체 rollback합니다. reject 행은 staging에 저장하지 않습니다.
+ETL 적재는 summary의 필수 필드, 실제 표준 CSV·reject CSV SHA-256, 실제 행 수와 reject CSV의 구조를 확인한 뒤 배치·정상 상품·reject 행을 하나의 트랜잭션으로 저장합니다. `(input_file_sha256, profile_name, profile_version)` unique index로 중복을 판단하며, 실패 시 전체 rollback합니다. reject 원본 값은 마스킹된 문자열만 `etl_rejected_rows`에 저장하고 raw CSV와 개인정보 원문은 저장하지 않습니다.
 
 저장하지 않는 값은 다음과 같습니다.
 
@@ -1541,7 +1546,7 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - Streamlit ETL 적재 이력 화면은 저장된 배치와 staging 상품을 조회하는 읽기 전용 기능이며, ETL 적재 실행·수정·삭제는 지원하지 않습니다.
 - staging 상품을 수정·삭제하는 API와 상품 변경 이력은 구현되어 있지 않습니다.
 - ETL staging은 운영 상품 테이블 upsert, 기존 상품 갱신·덮어쓰기를 지원하지 않습니다.
-- reject 행은 DB에 저장하지 않으며, 자동 공급사 감지도 지원하지 않습니다.
+- reject 행은 `etl_rejected_rows`에 구조화된 오류와 마스킹된 원본으로 저장하며, 자동 공급사 감지는 지원하지 않습니다.
 - 증분 ETL과 streaming을 지원하지 않습니다.
 - 운영 DB 적재는 검증하지 않았고, PostgreSQL 적재는 임시 테스트 환경에서만 검증했습니다.
 - `.env` 자동 로딩은 구현되어 있지 않으므로 로컬에서는 PowerShell 환경변수를 직접 설정해야 합니다.
@@ -1564,7 +1569,7 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - ETL 적재 실행용 웹 API와 권한·실행 상태 관리
 - 실제 브라우저 기반 Streamlit ETL 전체 상호작용 E2E
 - staging 검토 후 운영 상품 반영, upsert와 상품 변경 이력 정책
-- reject 행 저장, 증분 ETL과 대용량 streaming 처리
+- 증분 ETL과 대용량 streaming 처리
 
 ## 27. 개발 시 주의사항
 
@@ -1607,6 +1612,7 @@ python -m etl.cli `
 ```powershell
 python -m etl.load_cli `
   --input .\output\catalogguard_ready.csv `
+  --rejects .\output\rejected_rows.csv `
   --summary .\output\etl_summary.json
 ```
 
@@ -1619,4 +1625,4 @@ DB 적재 완료
 거부 행: 0
 ```
 
-적재 후에는 `GET /api/v1/etl-loads`로 배치 목록을, `GET /api/v1/etl-loads/{etl_load_run_id}`로 파일 해시와 해당 배치의 staging 상품을 페이지 단위로 조회할 수 있습니다. 프로필 구조, 변환·오류 기준, 조회 규칙과 제한사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.
+적재 후에는 `GET /api/v1/etl-loads`로 배치 목록을, `GET /api/v1/etl-loads/{etl_load_run_id}`로 파일 해시와 해당 배치의 staging 상품을, `GET /api/v1/etl-loads/{etl_load_run_id}/rejections`로 구조화된 오류와 마스킹된 원본을 페이지 단위로 조회할 수 있습니다. 프로필 구조, 변환·오류 기준, 조회 규칙과 제한사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.

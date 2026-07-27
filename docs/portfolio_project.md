@@ -151,7 +151,7 @@ catalogguard_ready.csv + etl_summary.json
 | ETL UI 순수 함수 테스트 | 7 passed |
 | ETL Streamlit AppTest | 5 passed |
 | 이전 GitHub Actions PostgreSQL 18 전체 pytest | 920 passed, 0 skipped, 2 deselected, 3 warnings |
-| 이번 ETL 품질 요약 PostgreSQL 전체 pytest | 944 passed, 0 skipped, 2 deselected, 3 warnings |
+| 이번 ETL reject 상세 저장 PostgreSQL 전체 pytest | 974 passed, 0 skipped, 2 deselected, 3 warnings |
 | 샘플 ETL CLI 결과 | 전체 3건, 정상 변환 2건, 오류 행 1건, 종료 코드 0 |
 | ETL 조회·UI 기능 검증 CI | 2026-07-26 GitHub Actions Test #37, run ID 30196012940, success, 비동기 E2E smoke test 1 passed |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
@@ -537,19 +537,20 @@ CatalogGuard Lite는 상품 운영자가 CSV 업로드만으로 상품 데이터
 
 #### 구현
 
-`etl.load_cli`는 표준 CSV bytes와 summary JSON을 읽고 기존 `validate_and_read_uploaded_csv()`를 재사용합니다. summary의 `profile_name`, `profile_version`, `input_filename`, 입력·출력 SHA-256, `total_rows`, `loaded_rows`, `rejected_rows`, `error_counts`를 확인한 뒤 실제 출력 SHA-256과 행 수를 비교합니다. 정상 상품 행만 `catalog_products_staging`에 저장하며 빈 `sale_price`는 `NULL`로 변환합니다. 행 수는 `total_rows = loaded_rows + rejected_rows`를 만족해야 하고, 한 행에 여러 오류 코드가 있을 수 있으므로 오류 건수 합계는 reject 행 수 이상이면 허용합니다.
+`etl.load_cli`는 표준 CSV bytes, 선택적 reject CSV bytes와 summary JSON을 읽고 기존 `validate_and_read_uploaded_csv()`를 재사용합니다. summary의 `profile_name`, `profile_version`, `input_filename`, 입력·출력·reject CSV SHA-256, `total_rows`, `loaded_rows`, `rejected_rows`, `error_counts`를 확인한 뒤 실제 파일 해시와 행 수를 비교하고 reject CSV의 오류 배열·동적 원본 컬럼·마스킹 결과를 검증합니다. 정상 상품 행은 `catalog_products_staging`에, reject 행은 구조화된 오류 배열과 개인정보가 마스킹된 동적 원본 JSONB로 `etl_rejected_rows`에 저장하며 빈 `sale_price`는 `NULL`로 변환합니다. 행 수는 `total_rows = loaded_rows + rejected_rows`를 만족해야 하고, 한 행에 여러 오류 코드가 있을 수 있으므로 오류 건수 합계는 reject 행 수 이상이면 허용합니다.
 
-`etl_load_runs`는 ETL 배치 메타데이터와 품질 요약을, `catalog_products_staging`은 해당 배치의 상품 행을 저장합니다. 품질 요약은 `total_rows`·`rejected_rows` INTEGER와 `error_counts` JSONB로 저장하며, 기능 도입 전 배치는 세 값을 `NULL`로 유지합니다. 배치와 상품을 분리한 이유는 한 파일 적재의 추적 정보와 여러 상품 행의 관계를 명확히 하고, DB 모델에서 부모 배치가 삭제될 때 상품 행도 함께 삭제되는 cascade 제약과 배치 단위 조회를 적용하기 위해서입니다. 사용자용 배치 삭제 API는 없으며 상품 테이블은 운영 상품 테이블이 아니고 upsert도 수행하지 않습니다.
+`etl_load_runs`는 ETL 배치 메타데이터와 품질 요약을, `catalog_products_staging`은 해당 배치의 정상 상품 행을, `etl_rejected_rows`는 reject 행의 오류·마스킹 원본을 저장합니다. 품질 요약은 `total_rows`·`rejected_rows` INTEGER와 `error_counts` JSONB로 저장하며, 기능 도입 전 배치는 세 값을 `NULL`로 유지하고 reject 상세도 자동 backfill하지 않습니다. 배치·정상 상품·reject 행은 하나의 트랜잭션으로 저장해 일부만 남지 않게 합니다. 사용자용 배치 삭제 API는 없으며 상품 테이블은 운영 상품 테이블이 아니고 upsert도 수행하지 않습니다.
 
 #### 중복과 rollback 판단
 
-`(input_file_sha256, profile_name, profile_version)`을 원본·프로필 identity로 사용했습니다. 이 조합의 배치가 있으면 기존 배치 ID와 `created=False`를 반환하고 상품 행을 추가하지 않습니다. 프로필 버전이 다르면 별도 배치로 저장합니다. 신규 배치와 상품 행은 한 트랜잭션에 넣어 상품 저장 중 예외가 나면 배치까지 rollback합니다. 부모 배치 삭제 시 `ON DELETE CASCADE`로 상품 행도 삭제되며, `stock`, `price`, `sale_price` 음수는 DB CHECK constraint로 거부됩니다.
+`(input_file_sha256, profile_name, profile_version)`을 원본·프로필 identity로 사용했습니다. 이 조합의 배치가 있으면 기존 배치 ID와 `created=False`를 반환하고 상품·reject 행을 추가하지 않습니다. 프로필 버전이 다르면 별도 배치로 저장합니다. 신규 배치·정상 상품 행·reject 행은 한 트랜잭션에 넣어 저장 중 예외가 나면 배치와 두 자식 테이블을 함께 rollback합니다. 부모 배치 삭제 시 `ON DELETE CASCADE`로 상품·reject 행도 삭제되며, `stock`, `price`, `sale_price` 음수는 DB CHECK constraint로 거부됩니다.
 
 #### 실행과 검증
 
 ```powershell
 python -m etl.load_cli `
   --input .\output\catalogguard_ready.csv `
+  --rejects .\output\rejected_rows.csv `
   --summary .\output\etl_summary.json
 ```
 
@@ -568,7 +569,7 @@ DB 적재 완료
 
 #### 범위와 한계
 
-실제 외부 공급사 운영 데이터, 운영 DB 적재, 증분 ETL과 streaming은 검증하지 않았습니다. ETL 적재 실행용 웹 API, staging 상품 수정·삭제, 운영 상품 테이블 upsert, 기존 상품 갱신·덮어쓰기, 상품 변경 이력, reject 행 DB 저장과 자동 공급사 감지는 지원하지 않습니다. Streamlit 적재 이력 화면은 저장된 배치·상품 조회만 제공하며, 위 PostgreSQL 결과는 테스트 환경에서의 검증입니다.
+실제 외부 공급사 운영 데이터, 운영 DB 적재, 증분 ETL과 streaming은 검증하지 않았습니다. ETL 적재 실행용 웹 API, staging 상품 수정·삭제, 운영 상품 테이블 upsert, 기존 상품 갱신·덮어쓰기, 상품 변경 이력과 자동 공급사 감지는 지원하지 않습니다. reject 행은 `etl_rejected_rows`에 마스킹된 원본과 구조화된 오류로 저장합니다. Streamlit 적재 이력 화면은 저장된 배치·상품·reject 상세 조회만 제공하며, 위 PostgreSQL 결과는 테스트 환경에서의 검증입니다.
 
 ### ETL 적재 배치 조회 API
 
@@ -578,7 +579,7 @@ PostgreSQL staging에 상품을 저장할 수 있었지만, 어떤 공급사 파
 
 #### 해결
 
-`GET /api/v1/etl-loads`는 파일명과 프로필명의 대소문자 구분 없는 부분 검색, `limit`·`offset` 페이지네이션, 최신 적재 우선 정렬과 전체·정상·거부 행 수를 제공합니다. 두 검색 조건은 AND로 적용하며 목록과 `total`이 같은 필터를 사용합니다. `GET /api/v1/etl-loads/{etl_load_run_id}`는 여기에 오류 코드별 건수, input/output SHA-256, 해당 배치의 staging 상품을 `product_limit`·`product_offset`으로 반환하고 없는 배치는 HTTP 404로 처리합니다. 기존 배치는 품질 필드를 `null`로 반환합니다.
+`GET /api/v1/etl-loads`는 파일명과 프로필명의 대소문자 구분 없는 부분 검색, `limit`·`offset` 페이지네이션, 최신 적재 우선 정렬과 전체·정상·거부 행 수를 제공합니다. 두 검색 조건은 AND로 적용하며 목록과 `total`이 같은 필터를 사용합니다. `GET /api/v1/etl-loads/{etl_load_run_id}`는 여기에 오류 코드별 건수, reject 상세 저장 여부, input/output SHA-256, 해당 배치의 staging 상품을 `product_limit`·`product_offset`으로 반환하고 없는 배치는 HTTP 404로 처리합니다. `GET /api/v1/etl-loads/{etl_load_run_id}/rejections`는 구조화된 오류와 마스킹된 원본을 페이지 단위로 반환하며, 과거 미저장 배치는 빈 목록으로 표시합니다.
 
 #### 기술적 판단
 
@@ -591,7 +592,7 @@ PostgreSQL staging에 상품을 저장할 수 있었지만, 어떤 공급사 파
 
 #### 검증
 
-PostgreSQL 테스트 클러스터에서 정렬, 파일명·프로필명 검색과 AND 조건, 대소문자 무시, LIKE 특수문자, 목록·count 일치, 상품 페이지네이션과 배치 격리, nullable 값, 없는 배치를 확인했습니다. 이번 전체 pytest는 `944 passed, 0 skipped, 2 deselected, 3 warnings`였습니다.
+PostgreSQL 테스트 클러스터에서 정렬, 파일명·프로필명 검색과 AND 조건, 대소문자 무시, LIKE 특수문자, 목록·count 일치, 상품 페이지네이션과 배치 격리, nullable 값, reject 상세 페이지네이션, 마스킹 원본, 없는 배치를 확인했습니다. 이번 전체 pytest는 `974 passed, 0 skipped, 2 deselected, 3 warnings`였습니다.
 
 ### Streamlit ETL 적재 이력 화면
 
@@ -601,13 +602,13 @@ Streamlit의 `ETL 적재 이력` 탭은 `CatalogGuardApiClient`를 통해 목록
 |---|---|
 | 목록 | 10건 단위 페이지네이션, 전체 건수, 빈 목록 안내 |
 | 검색 | filename·profile_name 부분 검색과 두 조건 AND |
-| 상세 | 배치 메타데이터, 전체·정상·거부 행, 정상 처리율, 오류 코드 통계, input/output SHA-256 전체 값, 적재 시각 |
+| 상세 | 배치 메타데이터, 전체·정상·거부 행, 정상 처리율, 오류 코드 통계, input/output SHA-256 전체 값, 적재 시각, reject 상세와 마스킹된 원본 |
 | 상품 | 선택한 배치의 staging 상품 20건 단위 페이지네이션 |
 | nullable | `sale_price`, `description`, `seller`의 `null` 안전 표시 |
 | 오류 | 404와 유효한 request ID 표시 |
-| 상태 | 검색·배치 변경 시 stale 상세·상품 제거, 실패 상세 요청 중복 호출 방지 |
+| 상태 | 검색·배치 변경 시 stale 상세·상품·reject 제거, 실패 상세 요청 중복 호출 방지 |
 
-순수 helper 테스트 7개와 Streamlit AppTest 5개로 목록·검색·빈 결과·페이지 이동·상세·SHA-256·nullable·404·request ID·상태 초기화를 검증했습니다. 실제 브라우저 전체 상호작용은 별도 E2E 범위가 아니며, GitHub Actions의 Streamlit 검사는 서버 startup과 `/_stcore/health` HTTP 200을 확인합니다.
+순수 helper 테스트와 Streamlit AppTest로 목록·검색·빈 결과·페이지 이동·상세·SHA-256·reject 상세·마스킹 원본·nullable·404·request ID·상태 초기화를 검증했습니다. 실제 브라우저 전체 상호작용은 별도 E2E 범위가 아니며, GitHub Actions의 Streamlit 검사는 서버 startup과 `/_stcore/health` HTTP 200을 확인합니다.
 
 ### 두 번째 합성 공급사로 검증한 확장성
 

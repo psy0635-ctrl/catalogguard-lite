@@ -67,9 +67,9 @@
 
 ## 변환과 reject 기준
 
-정상 행은 표준 CSV에 저장한다. 상품 ID·필수 원본값 누락, `price` 또는 `sale_price`로 매핑된 `discount_price`·`promo_price`의 가격 변환 실패·음수, 재고 정수 변환 실패·음수는 reject CSV에 저장한다. 할인 가격 원본이 비어 있으면 reject하지 않고 `sale_price`를 빈 값으로 출력한다. 한 행에 여러 오류가 있으면 `error_code`, `error_message`에 JSON 배열로 함께 기록한다. 중복 상품 ID, 비표준 색상·사이즈, 가격 이상치, `sale_price`가 `price`보다 큰 상품 품질 문제는 정상 행으로 남겨 기존 CatalogGuard 검수기가 처리한다.
+정상 행은 표준 CSV에 저장한다. 상품 ID·필수 원본값 누락, `price` 또는 `sale_price`로 매핑된 `discount_price`·`promo_price`의 가격 변환 실패·음수, 재고 정수 변환 실패·음수는 reject CSV에 저장한다. 할인 가격 원본이 비어 있으면 reject하지 않고 `sale_price`를 빈 값으로 출력한다. 한 행에 여러 오류가 있으면 `error_code`, `error_field`, `error_message`에 같은 순서의 JSON 배열로 함께 기록한다. 중복 상품 ID, 비표준 색상·사이즈, 가격 이상치, `sale_price`가 `price`보다 큰 상품 품질 문제는 정상 행으로 남겨 기존 CatalogGuard 검수기가 처리한다.
 
-`rejected_rows.csv`는 오류가 없어도 헤더를 포함해 생성한다. `etl_summary.json`에는 프로필 이름·버전, 입력 파일명, 입력·출력 SHA-256, 처리 건수, 오류 코드별 건수와 UTC 시각을 기록하며 절대 경로나 비밀값을 기록하지 않는다.
+`rejected_rows.csv`는 오류가 없어도 헤더를 포함해 생성한다. `etl_summary.json`에는 프로필 이름·버전, 입력 파일명, 입력·출력·reject CSV SHA-256, 처리 건수, 오류 코드별 건수와 UTC 시각을 기록하며 절대 경로나 비밀값을 기록하지 않는다.
 
 ## CLI
 
@@ -138,8 +138,9 @@ python -m etl.cli `
 - `loaded_rows`
 - `rejected_rows`
 - `error_counts`
+- `rejects_file_sha256` (신규 summary에서 필수)
 
-profile 이름·버전과 파일명을 정규화하고, SHA-256 형식과 세 행 수의 음수가 아닌 정수 여부를 확인한다. `total_rows = loaded_rows + rejected_rows`를 강제하며, `error_counts`의 key·값과 reject 행 수의 관계를 검증한다. 한 행에 여러 오류 코드가 있을 수 있으므로 오류 건수 합계는 reject 행 수 이상이면 허용한다. 실제 표준 CSV bytes의 SHA-256이 summary의 `output_file_sha256`과 같은지, 실제 CSV 행 수가 `loaded_rows`와 같은지도 확인한다. 검증에 실패하면 DB를 변경하지 않는다.
+profile 이름·버전과 파일명을 정규화하고, SHA-256 형식과 세 행 수의 음수가 아닌 정수 여부를 확인한다. `total_rows = loaded_rows + rejected_rows`를 강제하며, `error_counts`의 key·값과 reject 행 수의 관계를 검증한다. 신규 summary에 `rejects_file_sha256`가 있으면 `--rejects`가 반드시 필요하며, 실제 reject CSV의 hash·행 수·헤더·JSON 오류 배열·동적 원본 컬럼을 모두 검증한다. 한 행에 여러 오류 코드가 있을 수 있으므로 오류 건수 합계는 reject 행 수 이상이면 허용한다. 실제 표준 CSV bytes의 SHA-256이 summary의 `output_file_sha256`과 같은지, 실제 CSV 행 수가 `loaded_rows`와 같은지도 확인한다. 검증에 실패하면 DB를 변경하지 않는다. 과거 summary에 reject hash가 없으면 `--rejects` 없이 기존 방식으로 적재할 수 있고 자동 backfill은 수행하지 않는다.
 
 같은 원본을 같은 프로필 버전으로 다시 적재했는지는 다음 세 값으로 판단한다.
 
@@ -151,25 +152,27 @@ profile 이름·버전과 파일명을 정규화하고, SHA-256 형식과 세 �
 
 ### Staging 테이블 구조
 
-`etl_load_runs`는 한 번의 ETL 적재를 나타내며 원본 파일명, 프로필, 입력·출력 해시, 적재 행 수와 생성 시각을 저장한다. 신규 배치는 `total_rows`, `rejected_rows`, `error_counts`를 각각 INTEGER·INTEGER·PostgreSQL JSONB로 저장한다. 품질 요약 기능 도입 전 배치는 과거 값을 추정하지 않고 세 필드를 모두 `NULL`로 유지한다. `catalog_products_staging`은 배치에 속한 정상 표준 CSV 행을 저장한다.
+`etl_load_runs`는 한 번의 ETL 적재를 나타내며 원본 파일명, 프로필, 입력·출력·reject CSV 해시, 적재 행 수와 생성 시각을 저장한다. 신규 배치는 `total_rows`, `rejected_rows`, `error_counts`를 각각 INTEGER·INTEGER·PostgreSQL JSONB로 저장하고 `reject_details_stored`와 `rejects_file_sha256`로 reject 상세 저장 여부를 표시한다. 품질 요약 기능 도입 전 배치는 과거 값을 추정하지 않고 nullable 품질 필드를 유지하며, reject 상세도 자동 backfill하지 않는다. `catalog_products_staging`은 배치에 속한 정상 표준 CSV 행을, `etl_rejected_rows`는 검증된 오류 객체와 개인정보가 마스킹된 동적 원본 컬럼 JSONB를 저장한다.
 
 ```text
 etl_load_runs (1)
         |
         | etl_load_run_id, ON DELETE CASCADE
-        v
-catalog_products_staging (N)
+        +-----------------------> catalog_products_staging (N)
+        |
+        +-----------------------> etl_rejected_rows (N)
 ```
 
 `etl_load_runs`에는 `(input_file_sha256, profile_name, profile_version)` unique index가 있고, 상품 테이블의 `etl_load_run_id`에는 조회용 index와 외래 키가 있다. `stock`, `price`, `sale_price`는 음수가 될 수 없으며 빈 `sale_price`는 DB `NULL`로 저장한다. 부모 배치를 삭제하면 연결된 상품 행도 cascade로 삭제된다.
 
 ### 트랜잭션과 CLI
 
-신규 배치와 모든 상품 행은 하나의 SQLAlchemy 트랜잭션 안에서 저장한다. 상품 행 저장 중 오류가 발생하면 배치와 상품 행을 함께 rollback하며, upsert나 기존 운영 상품 덮어쓰기는 수행하지 않는다. reject CSV 행도 staging에 저장하지 않는다.
+신규 배치와 모든 상품 행·reject 행은 하나의 SQLAlchemy 트랜잭션 안에서 저장한다. 상품 또는 reject 행 저장 중 오류가 발생하면 배치와 두 자식 테이블의 데이터를 함께 rollback하며, upsert나 기존 운영 상품 덮어쓰기는 수행하지 않는다. reject CSV 자체는 파일 검증 후 원본 값을 저장하지 않고 마스킹된 JSONB만 저장한다.
 
 ```powershell
 python -m etl.load_cli `
   --input .\output\catalogguard_ready.csv `
+  --rejects .\output\rejected_rows.csv `
   --summary .\output\etl_summary.json
 ```
 
@@ -227,7 +230,13 @@ GET /api/v1/etl-loads/{etl_load_run_id}
 | `product_limit` | `50` | 한 페이지의 상품 수, `1` 이상 `100` 이하 |
 | `product_offset` | `0` | 앞에서 건너뛸 상품 수, `0` 이상 |
 
-상세 응답에는 배치 기본 정보, 전체·정상·거부 행 수, `error_counts`, 원본·출력 파일 SHA-256과 해당 배치의 staging 상품 목록이 포함된다. 기존 배치는 품질 필드를 `null`로 반환한다. 상품은 staging 상품 `id ASC`로 정렬하며 SQL `LIMIT`·`OFFSET`에서 페이지를 나눈다. 모든 상품 조회와 count에는 요청한 `etl_load_run_id` 조건을 적용해 다른 배치의 상품이 섞이지 않게 한다. 배치가 없으면 HTTP `404`를 반환한다.
+```http
+GET /api/v1/etl-loads/{etl_load_run_id}/rejections?limit=20&offset=0
+```
+
+reject 상세 응답은 저장 여부, 전체 reject 행 수, 페이지 단위의 원본 행 번호·구조화된 오류 배열·마스킹된 동적 원본 컬럼을 반환한다. reject 상세가 저장되지 않은 과거 배치는 `available=false`와 빈 목록을 반환하며, 배치가 없으면 HTTP `404`를 반환한다.
+
+상세 응답에는 배치 기본 정보, 전체·정상·거부 행 수, `error_counts`, reject 상세 저장 여부, 원본·출력 파일 SHA-256과 해당 배치의 staging 상품 목록이 포함된다. 기존 배치는 품질 필드를 `null`로 반환한다. 상품은 staging 상품 `id ASC`로 정렬하며 SQL `LIMIT`·`OFFSET`에서 페이지를 나눈다. 모든 상품 조회와 count에는 요청한 `etl_load_run_id` 조건을 적용해 다른 배치의 상품이 섞이지 않게 한다. 배치가 없으면 HTTP `404`를 반환한다.
 
 Path의 `etl_load_run_id`는 `1` 이상의 정수만 허용한다. `0`, 음수와 숫자가 아닌 값은 요청 검증 단계에서 HTTP `422`가 된다. nullable 컬럼인 `sale_price`, `description`, `seller`는 값이 없을 때 JSON `null`로 유지한다.
 
@@ -236,8 +245,8 @@ Path의 `etl_load_run_id`는 `1` 이상의 정수만 허용한다. `0`, 음수�
 | 파일 | 역할 |
 |---|---|
 | `api/routes/etl_loads.py` | HTTP 요청과 Query·Path 범위 검증, 404 처리, 응답 모델 변환 |
-| `api/schemas.py` | 배치 목록·상세와 staging 상품의 Pydantic 응답 구조 |
-| `db/etl_query_service.py` | SQLAlchemy 기반 읽기 전용 필터·정렬·count·페이지 조회 |
+| `api/schemas.py` | 배치 목록·상세·reject 상세와 staging 상품의 Pydantic 응답 구조 |
+| `db/etl_query_service.py` | SQLAlchemy 기반 읽기 전용 필터·정렬·count·페이지 조회와 reject 상세 조회 |
 | `tests/test_api_etl_loads.py` | HTTP 상태, 파라미터 전달, 응답 필드와 nullable 값 계약 |
 | `tests/test_etl_query_service.py` | 실제 PostgreSQL의 검색·정렬·페이지네이션·NULL·배치 격리 |
 
@@ -254,6 +263,7 @@ Streamlit에는 저장된 ETL 배치와 staging 상품을 확인하는 `ETL 적�
 | 배치 페이지 | 이전·다음 버튼으로 목록 offset 이동 |
 | 배치 상세 | 배치 ID, 파일명, 프로필, 버전, 전체 입력·정상 적재·변환 거부·정상 처리율, 적재 시각과 input/output SHA-256 전체 표시 |
 | 오류 통계 | 오류 코드별 발생 건수를 발생 건수 내림차순·코드 오름차순으로 표시하고 reject 0건은 안내 |
+| reject 상세 | reject 행 페이지네이션, 오류 코드·필드·메시지와 마스킹된 원본 값 표시; 과거 미저장 배치는 안내 |
 | 상품 목록 | 선택한 배치의 staging 상품을 20건씩 표시 |
 | nullable | `sale_price`, `description`, `seller`의 `null`을 빈 값으로 표시 |
 | 빈 결과·404 | 빈 목록 안내와 존재하지 않는 배치의 오류 안내 표시 |
@@ -267,10 +277,12 @@ ETL 적재 이력 탭
 -> 배치 상세 선택
 -> GET /api/v1/etl-loads/{etl_load_run_id} (product_limit=20)
 -> SHA-256·배치 상품·nullable 필드 표시
+-> GET /api/v1/etl-loads/{etl_load_run_id}/rejections (limit=20)
+-> reject 오류 배열·마스킹된 원본·페이지 표시
 -> 상품 이전·다음
 ```
 
-Streamlit rerun에 대비해 목록·상세 응답과 선택 상태를 ETL 전용 `session_state`에 보관한다. 검색 조건이나 배치가 바뀌면 이전 상세·상품 상태를 초기화해 stale 상품이 남거나 다른 배치의 상품이 섞이지 않게 한다. 상세 API가 실패하면 동일 클릭에서 API를 중복 호출하지 않으며, 정상 응답만 상태에 저장한다. 품질 요약이 없는 기존 배치는 `null`을 기록 없음으로 표시하고, 있는 배치는 화면 helper에서 정상 처리율을 계산한다. 순수 helper 테스트와 Streamlit AppTest로 목록·검색·페이지 이동·상세·품질 지표·오류 코드·SHA-256·nullable·404·request ID·stale 상태 초기화를 검증한다.
+Streamlit rerun에 대비해 목록·상세·reject 응답과 선택 상태를 ETL 전용 `session_state`에 보관한다. 검색 조건이나 배치가 바뀌면 이전 상세·상품·reject 상태를 초기화해 stale 데이터가 남거나 다른 배치의 행이 섞이지 않게 한다. 상세 API가 실패하면 동일 클릭에서 API를 중복 호출하지 않으며, 정상 응답만 상태에 저장한다. 품질 요약이 없는 기존 배치는 `null`을 기록 없음으로 표시하고, reject 상세가 없는 기존 배치는 별도 안내를 표시한다. 있는 배치는 화면 helper에서 정상 처리율과 마스킹된 reject 원본을 표시한다. 순수 helper 테스트와 Streamlit AppTest로 목록·검색·페이지 이동·상세·품질 지표·오류 코드·SHA-256·reject 상세·nullable·404·request ID·stale 상태 초기화를 검증한다.
 
 ### 전체 상품 로딩과 N+1 방지
 
@@ -298,9 +310,9 @@ python -m alembic downgrade 20260705_0002
 python -m alembic upgrade head
 ```
 
-`20260727_0004` upgrade는 기존 `etl_load_runs`에 nullable `total_rows`, `rejected_rows`, PostgreSQL JSONB `error_counts`와 음수·행 수 합계·all-or-none·JSON object CHECK constraint를 추가한다. downgrade는 이 컬럼과 constraint만 제거하며 `etl_load_runs`, `catalog_products_staging`, `inspection_runs`, `inspection_results`와 기존 데이터는 삭제하지 않는다. 격리된 PostgreSQL 18.4 테스트 클러스터에서 upgrade → downgrade `20260725_0003` → 재upgrade와 `current`가 `20260727_0004`임을 확인했다.
+`20260727_0004`에 이어 `20260728_0005` upgrade는 `etl_load_runs`에 reject 상세 저장 여부·reject CSV SHA-256과 all-or-none CHECK constraint를 추가하고, 오류 배열·마스킹된 원본 JSONB를 저장하는 `etl_rejected_rows`와 unique/index/FK를 만든다. downgrade는 새 컬럼·constraint·테이블·index만 제거하며 기존 배치·상품·inspection 데이터는 삭제하지 않는다. 격리된 PostgreSQL 18.4 테스트 클러스터에서 upgrade → downgrade `20260727_0004` → 재upgrade와 `current`가 `20260728_0005`임을 확인했다.
 
-이번 변경의 PostgreSQL 연결 상태 전체 pytest는 `944 passed, 0 skipped, 2 deselected, 3 warnings`였다. DB 관련 테스트 skip은 0건이며, 기존 기능의 GitHub Actions Test #37 결과는 이전 검증 기록으로 유지한다.
+이번 변경의 PostgreSQL 연결 상태 전체 pytest는 `974 passed, 0 skipped, 2 deselected, 3 warnings`였다. DB 관련 테스트 skip은 0건이며, 기존 기능의 GitHub Actions Test #37 결과는 이전 검증 기록으로 유지한다.
 
 ## 제한사항
 
@@ -310,7 +322,7 @@ python -m alembic upgrade head
 - 웹 수집과 외부 API 연동은 지원하지 않는다.
 - ETL 적재 실행용 웹 API는 지원하지 않으며, Streamlit 적재 이력 화면은 저장된 배치와 상품을 조회하는 읽기 전용 기능만 제공한다.
 - staging 상품 수정·삭제와 상품 변경 이력은 지원하지 않는다.
-- 운영 상품 테이블 upsert, 기존 상품 갱신·덮어쓰기와 reject 행 DB 저장은 지원하지 않는다.
+- 운영 상품 테이블 upsert와 기존 상품 갱신·덮어쓰기는 지원하지 않는다. reject 행은 별도 `etl_rejected_rows`에 오류 배열과 마스킹된 동적 원본 컬럼으로 저장한다.
 - 증분 ETL과 streaming은 지원하지 않는다.
 - 운영 DB 적재는 검증하지 않았으며, PostgreSQL staging 적재는 임시 테스트 PostgreSQL 환경에서만 검증했다.
 - `sale_price`는 단일 할인 가격만 지원하며 할인율, 기간, 쿠폰·회원 가격, 최저가 추천은 제공하지 않는다.
