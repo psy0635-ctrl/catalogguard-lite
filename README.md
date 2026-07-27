@@ -61,11 +61,13 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - 같은 Streamlit 세션 안에서 동일 CSV 중복 저장 방지
 - PostgreSQL DB 수준 동일 CSV 중복 저장 방지
 - ETL staging 배치와 정상 상품 행의 PostgreSQL 저장
-- ETL summary의 output SHA-256·행 수 검증과 배치 단위 rollback
+- ETL summary의 output SHA-256·행 수·품질 요약 검증과 배치 단위 rollback
+- `total_rows`, `loaded_rows`, `rejected_rows`, `error_counts`의 PostgreSQL JSONB 저장과 기존 배치 NULL 호환
 - DB에서 staging 부모 배치를 삭제할 때의 상품 행 cascade와 음수 stock·price·sale_price 방지 제약
 - ETL 적재 배치 목록의 파일명·프로필명 검색과 페이지네이션
+- ETL 적재 목록·상세의 전체 행·정상 적재·변환 거부 수와 상세 오류 코드 통계
 - ETL 적재 상세의 input/output SHA-256 및 배치별 staging 상품 페이지네이션
-- Streamlit `ETL 적재 이력` 탭에서 목록·검색·배치 상세·SHA-256·staging 상품 조회
+- Streamlit `ETL 적재 이력` 탭에서 목록·검색·배치 상세·품질 지표·오류 코드·SHA-256·staging 상품 조회
 - ETL 목록의 빈 결과 안내, 404와 검증된 `X-Request-ID` 표시
 - 배치 변경 시 이전 상세·상품 상태 초기화와 실패 상세 요청의 중복 API 호출 방지
 - 기본값인 `즉시 검수`와 Redis·Celery를 사용하는 `백그라운드 검수` 선택
@@ -452,6 +454,7 @@ catalogguard-lite/
       20260703_0001_create_inspection_tables.py
       20260705_0002_add_inspection_file_identity.py
       20260725_0003_create_etl_staging_tables.py
+      20260727_0004_add_etl_quality_summary.py
   data/
     dev/
       category_mismatch_test.csv
@@ -775,7 +778,7 @@ python -m alembic history
 
 `20260725_0003_create_etl_staging_tables.py`는 ETL 결과를 배치 단위로 적재하기 위한 다음 테이블을 추가합니다.
 
-- `etl_load_runs`: 원본 파일명, 프로필 이름·버전, 입력·출력 SHA-256, 적재 행 수를 저장
+- `etl_load_runs`: 원본 파일명, 프로필 이름·버전, 입력·출력 SHA-256, 적재 행 수와 nullable 품질 요약(`total_rows`, `rejected_rows`, `error_counts` JSONB)을 저장
 - `catalog_products_staging`: 정상 표준 CSV 상품 행을 저장하고 `etl_load_runs`와 외래 키로 연결
 
 `etl_load_runs`에는 `(input_file_sha256, profile_name, profile_version)` unique index가 있습니다. 상품 테이블의 `etl_load_run_id`에는 조회용 index와 `ON DELETE CASCADE` 외래 키가 있고, `stock`, `price`, `sale_price`의 음수 방지 CHECK constraint가 있습니다. 이 migration은 운영 상품 테이블 upsert를 추가하지 않습니다.
@@ -1164,7 +1167,7 @@ PostgreSQL staging에 저장된 ETL 적재 배치 목록을 조회합니다. 목
 
 ### `GET /api/v1/etl-loads/{etl_load_run_id}`
 
-적재 배치의 메타데이터와 해당 배치에 속한 staging 상품을 조회합니다. 상세 응답에는 원본·출력 파일 SHA-256과 적재 행 수가 포함됩니다.
+적재 배치의 메타데이터와 해당 배치에 속한 staging 상품을 조회합니다. 목록에는 전체 행·정상 적재 행·변환 거부 행을 포함하고, 상세에는 여기에 오류 코드별 발생 건수와 원본·출력 파일 SHA-256을 추가합니다. 품질 요약 기능 도입 전 배치는 품질 필드를 `null`로 반환합니다.
 
 | Query | 기본값 | 조건과 의미 |
 |---|---:|---|
@@ -1387,18 +1390,16 @@ python -m pytest -q
 
 ### PostgreSQL staging 및 ETL 조회 API 포함 검증 결과
 
-기능 commit `0cf1d99cc1f884fd56bd610840d89ea40c5a0449`에서 테스트용 PostgreSQL 18.4 서비스 컨테이너를 사용하는 GitHub Actions와 로컬 테스트로 Alembic, ETL staging 적재, 적재 배치 조회 API와 Streamlit ETL 화면의 AppTest를 확인했습니다. 운영 DB나 Railway DB는 사용하지 않았습니다.
+이전 기능 commit `0cf1d99cc1f884fd56bd610840d89ea40c5a0449`의 PostgreSQL 18.4 CI 결과와 별도로, 이번 ETL 품질 요약 변경은 운영 DB나 Railway DB에 연결하지 않고 저장소 내부 가상환경에서 검증했습니다.
 
 ```text
-전체 pytest: 920 passed, 0 skipped, 2 deselected, 3 warnings
+전체 pytest: 944 passed, 0 skipped, 2 deselected, 3 warnings
 PostgreSQL 통합 테스트: skip 0
-신규 ETL API client·UI 테스트: skip 0
-GitHub Actions Test #37: success (run ID 30196012940)
-비동기 E2E smoke test: 1 passed
-Streamlit startup smoke: success (`/_stcore/health` HTTP 200, body `ok`)
+Alembic history/heads: `20260727_0004` head 확인
+Alembic upgrade·downgrade·재upgrade: 성공 (격리된 PostgreSQL 18.4 테스트 클러스터)
 ```
 
-표준 CSV 2행을 최초 실행했을 때 배치와 상품 2행이 저장되었고, 같은 파일을 재실행했을 때 `created=False`와 중복 상품 미생성을 확인했습니다. `output_file_sha256`·`loaded_rows` 불일치, 잘못된 표준 CSV, 상품 저장 중 예외에 대한 무변경·rollback 경로도 검증했습니다. ETL 조회 테스트는 배치 정렬, 파일명·프로필명 검색, SQL LIKE 특수문자, 목록·count 조건 일치, 배치별 상품 격리와 페이지네이션, NULL, 404를 확인했습니다. 합성 공급사 CSV CLI는 입력 3건 중 정상 2건·reject 1건을 처리하며 종료 코드 0을 반환했습니다.
+품질 summary의 행 수 합계·타입·`error_counts` 구조, 한 reject 행의 복수 오류 코드, 기존 배치의 NULL 호환, API Client의 malformed 응답 거부, Streamlit 처리율·오류 코드 정렬 helper를 테스트했습니다. 격리된 PostgreSQL 18.4 테스트 클러스터에서 migration, 적재·중복 재사용, API 응답, Streamlit AppTest까지 확인했습니다.
 
 ### 동기 검수 성능 측정
 
@@ -1489,7 +1490,7 @@ PostgreSQL에는 검수 실행 요약·상세 결과와 ETL staging 배치·정�
 
 ETL staging에는 다음 값을 저장합니다.
 
-- `etl_load_runs`의 원본 파일명, 프로필 이름·버전, 입력·출력 SHA-256, 적재 행 수, 생성 시각
+- `etl_load_runs`의 원본 파일명, 프로필 이름·버전, 입력·출력 SHA-256, 적재 행 수·품질 요약, 생성 시각
 - `catalog_products_staging`의 표준 CSV 정상 행과 `etl_load_run_id`
 - 빈 `sale_price`는 `NULL`로 저장하며 `stock`, `price`, `sale_price` 음수는 DB CHECK constraint로 거부
 
@@ -1613,7 +1614,9 @@ python -m etl.load_cli `
 DB 적재 완료
 적재 배치 ID: 1
 신규 적재: yes
-상품 행: 2
+전체 행: 2
+정상 상품 행: 2
+거부 행: 0
 ```
 
 적재 후에는 `GET /api/v1/etl-loads`로 배치 목록을, `GET /api/v1/etl-loads/{etl_load_run_id}`로 파일 해시와 해당 배치의 staging 상품을 페이지 단위로 조회할 수 있습니다. 프로필 구조, 변환·오류 기준, 조회 규칙과 제한사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.

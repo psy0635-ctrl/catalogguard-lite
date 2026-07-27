@@ -150,7 +150,8 @@ catalogguard_ready.csv + etl_summary.json
 | ETL API client 신규 테스트 | 14 cases (7 test functions, parameterized 포함) |
 | ETL UI 순수 함수 테스트 | 7 passed |
 | ETL Streamlit AppTest | 5 passed |
-| GitHub Actions PostgreSQL 18 전체 pytest | 920 passed, 0 skipped, 2 deselected, 3 warnings |
+| 이전 GitHub Actions PostgreSQL 18 전체 pytest | 920 passed, 0 skipped, 2 deselected, 3 warnings |
+| 이번 ETL 품질 요약 PostgreSQL 전체 pytest | 944 passed, 0 skipped, 2 deselected, 3 warnings |
 | 샘플 ETL CLI 결과 | 전체 3건, 정상 변환 2건, 오류 행 1건, 종료 코드 0 |
 | ETL 조회·UI 기능 검증 CI | 2026-07-26 GitHub Actions Test #37, run ID 30196012940, success, 비동기 E2E smoke test 1 passed |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
@@ -310,13 +311,13 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 통계 집계 함수와 서버 응답 적용 helper에는 정렬, 빈 값 처리, 필수 컬럼 검증, 입력 불변성, TOP 5 적용 위치, malformed 응답 차단을 확인하는 테스트를 추가했습니다. 최신 기능은 GitHub Actions의 PostgreSQL 18 서비스에서 migration과 ETL staging 적재까지 실행해 다음 결과를 확인했습니다.
 
 ```text
-GitHub Actions 전체 pytest: 920 passed, 0 skipped, 2 deselected, 3 warnings
+이전 GitHub Actions 전체 pytest: 920 passed, 0 skipped, 2 deselected, 3 warnings
 신규 ETL API client·UI 테스트: skip 0
 비동기 E2E smoke test: 1 passed
 Streamlit startup smoke: /_stcore/health HTTP 200
 ```
 
-표준 CSV 2행을 최초 적재하고, 같은 파일을 재실행해 `created=False`와 중복 상품 미생성을 확인했습니다. `output_file_sha256`·`loaded_rows` 불일치, 잘못된 표준 CSV, 상품 저장 중 예외에 대한 무변경·rollback도 확인했습니다. 합성 공급사 CSV CLI는 3건 중 정상 2건·reject 1건을 처리했습니다. 운영 DB가 아닌 임시 테스트 환경에서 수행한 결과입니다.
+이전 검증에서는 표준 CSV 2행을 최초 적재하고, 같은 파일을 재실행해 `created=False`와 중복 상품 미생성을 확인했습니다. `output_file_sha256`·`loaded_rows` 불일치, 잘못된 표준 CSV, 상품 저장 중 예외에 대한 무변경·rollback도 확인했습니다. 이번 변경에서는 품질 summary validation, nullable 호환, API Client malformed 응답 거부와 Streamlit 처리율·오류 코드 정렬 helper를 추가 검증했습니다. 운영 DB가 아닌 임시 테스트 환경에서 수행한 결과입니다.
 
 GitHub Actions CI에서는 `main` 브랜치 push 또는 `main` 대상 pull request마다 일회성 PostgreSQL 18·Redis 7.4 서비스 컨테이너를 시작합니다. 두 서비스는 workflow 실행 중에만 사용할 테스트용 구성으로 Railway나 운영 DB·Redis와 분리됩니다. 기능 commit `0cf1d99cc1f884fd56bd610840d89ea40c5a0449`의 GitHub Actions Test #37은 성공했으며, Alembic upgrade head, `920 passed, 0 skipped, 2 deselected, 3 warnings`, FastAPI·Celery 비동기 E2E `1 passed`, Streamlit 시작과 Health 응답을 확인했습니다.
 
@@ -429,7 +430,7 @@ Streamlit: 업로드 검증·마스킹 미리보기
 
 로컬 개발 환경에서는 `TEST_DATABASE_URL`이 없으면 운영 DB 오연결을 막기 위해 PostgreSQL 통합 테스트를 건너뜁니다. 이 보호 조건을 완화하지 않고도 전체 통합 테스트를 반복 실행할 수 있도록 GitHub Actions와 별도 로컬 검증에서 PostgreSQL 테스트 환경만 사용했습니다.
 
-CI와 로컬 검증은 `20260703_0001`, `20260705_0002`, `20260725_0003` Alembic 마이그레이션을 적용합니다. 최신 Test #37은 기능 commit `0cf1d99`에서 성공했습니다. CI PostgreSQL 18 서비스에서는 migration, ETL 적재·조회와 전체 테스트를 실행하며, 운영 DB 적재는 검증하지 않습니다.
+기존 CI와 이번 작업의 migration chain은 `20260703_0001`, `20260705_0002`, `20260725_0003`, `20260727_0004`로 이어집니다. 격리된 PostgreSQL 18.4 테스트 클러스터에서 새 migration의 upgrade·downgrade·재upgrade, PostgreSQL 적재와 조회를 확인했습니다. 운영 DB 적재는 검증하지 않습니다.
 
 ### Streamlit 서버 시작 스모크 테스트
 
@@ -536,9 +537,9 @@ CatalogGuard Lite는 상품 운영자가 CSV 업로드만으로 상품 데이터
 
 #### 구현
 
-`etl.load_cli`는 표준 CSV bytes와 summary JSON을 읽고 기존 `validate_and_read_uploaded_csv()`를 재사용합니다. summary의 `profile_name`, `profile_version`, `input_filename`, 입력·출력 SHA-256, `loaded_rows`를 확인한 뒤 실제 출력 SHA-256과 행 수를 비교합니다. 정상 상품 행만 `catalog_products_staging`에 저장하며 빈 `sale_price`는 `NULL`로 변환합니다.
+`etl.load_cli`는 표준 CSV bytes와 summary JSON을 읽고 기존 `validate_and_read_uploaded_csv()`를 재사용합니다. summary의 `profile_name`, `profile_version`, `input_filename`, 입력·출력 SHA-256, `total_rows`, `loaded_rows`, `rejected_rows`, `error_counts`를 확인한 뒤 실제 출력 SHA-256과 행 수를 비교합니다. 정상 상품 행만 `catalog_products_staging`에 저장하며 빈 `sale_price`는 `NULL`로 변환합니다. 행 수는 `total_rows = loaded_rows + rejected_rows`를 만족해야 하고, 한 행에 여러 오류 코드가 있을 수 있으므로 오류 건수 합계는 reject 행 수 이상이면 허용합니다.
 
-`etl_load_runs`는 ETL 배치 메타데이터를, `catalog_products_staging`은 해당 배치의 상품 행을 저장합니다. 배치와 상품을 분리한 이유는 한 파일 적재의 추적 정보와 여러 상품 행의 관계를 명확히 하고, DB 모델에서 부모 배치가 삭제될 때 상품 행도 함께 삭제되는 cascade 제약과 배치 단위 조회를 적용하기 위해서입니다. 사용자용 배치 삭제 API는 없으며 상품 테이블은 운영 상품 테이블이 아니고 upsert도 수행하지 않습니다.
+`etl_load_runs`는 ETL 배치 메타데이터와 품질 요약을, `catalog_products_staging`은 해당 배치의 상품 행을 저장합니다. 품질 요약은 `total_rows`·`rejected_rows` INTEGER와 `error_counts` JSONB로 저장하며, 기능 도입 전 배치는 세 값을 `NULL`로 유지합니다. 배치와 상품을 분리한 이유는 한 파일 적재의 추적 정보와 여러 상품 행의 관계를 명확히 하고, DB 모델에서 부모 배치가 삭제될 때 상품 행도 함께 삭제되는 cascade 제약과 배치 단위 조회를 적용하기 위해서입니다. 사용자용 배치 삭제 API는 없으며 상품 테이블은 운영 상품 테이블이 아니고 upsert도 수행하지 않습니다.
 
 #### 중복과 rollback 판단
 
@@ -558,10 +559,12 @@ python -m etl.load_cli `
 DB 적재 완료
 적재 배치 ID: 1
 신규 적재: yes
-상품 행: 2
+전체 행: 2
+정상 상품 행: 2
+거부 행: 0
 ```
 
-같은 파일의 두 번째 실행은 같은 배치 ID, `신규 적재: no`, 상품 행 2건을 반환하고 중복 상품을 만들지 않습니다. GitHub Actions Test #37의 PostgreSQL 18 서비스에서 `upgrade head`, staging 적재·조회와 전체 pytest `920 passed, 0 skipped, 2 deselected, 3 warnings`를 확인했습니다.
+같은 파일의 두 번째 실행은 같은 배치 ID, `신규 적재: no`, 품질 요약과 상품 행을 중복 생성하지 않으며 저장된 품질 정보를 그대로 반환합니다. 격리된 PostgreSQL 18.4 테스트 클러스터에서 배치 품질 값과 staging 상품 2건을 확인했습니다.
 
 #### 범위와 한계
 
@@ -575,7 +578,7 @@ PostgreSQL staging에 상품을 저장할 수 있었지만, 어떤 공급사 파
 
 #### 해결
 
-`GET /api/v1/etl-loads`는 파일명과 프로필명의 대소문자 구분 없는 부분 검색, `limit`·`offset` 페이지네이션, 최신 적재 우선 정렬을 제공합니다. 두 검색 조건은 AND로 적용하며 목록과 `total`이 같은 필터를 사용합니다. `GET /api/v1/etl-loads/{etl_load_run_id}`는 배치 정보와 input/output SHA-256, 해당 배치의 staging 상품을 `product_limit`·`product_offset`으로 반환하고 없는 배치는 HTTP 404로 처리합니다.
+`GET /api/v1/etl-loads`는 파일명과 프로필명의 대소문자 구분 없는 부분 검색, `limit`·`offset` 페이지네이션, 최신 적재 우선 정렬과 전체·정상·거부 행 수를 제공합니다. 두 검색 조건은 AND로 적용하며 목록과 `total`이 같은 필터를 사용합니다. `GET /api/v1/etl-loads/{etl_load_run_id}`는 여기에 오류 코드별 건수, input/output SHA-256, 해당 배치의 staging 상품을 `product_limit`·`product_offset`으로 반환하고 없는 배치는 HTTP 404로 처리합니다. 기존 배치는 품질 필드를 `null`로 반환합니다.
 
 #### 기술적 판단
 
@@ -588,7 +591,7 @@ PostgreSQL staging에 상품을 저장할 수 있었지만, 어떤 공급사 파
 
 #### 검증
 
-운영 DB나 Railway DB가 아닌 테스트 PostgreSQL 환경에서 정렬, 파일명·프로필명 검색과 AND 조건, 대소문자 무시, LIKE 특수문자, 목록·count 일치, 상품 페이지네이션과 배치 격리, nullable 값, 없는 배치를 확인했습니다. 신규 API와 PostgreSQL 조회 테스트를 포함한 GitHub Actions 전체 결과는 `920 passed, 0 skipped, 2 deselected, 3 warnings`입니다.
+PostgreSQL 테스트 클러스터에서 정렬, 파일명·프로필명 검색과 AND 조건, 대소문자 무시, LIKE 특수문자, 목록·count 일치, 상품 페이지네이션과 배치 격리, nullable 값, 없는 배치를 확인했습니다. 이번 전체 pytest는 `944 passed, 0 skipped, 2 deselected, 3 warnings`였습니다.
 
 ### Streamlit ETL 적재 이력 화면
 
@@ -598,7 +601,7 @@ Streamlit의 `ETL 적재 이력` 탭은 `CatalogGuardApiClient`를 통해 목록
 |---|---|
 | 목록 | 10건 단위 페이지네이션, 전체 건수, 빈 목록 안내 |
 | 검색 | filename·profile_name 부분 검색과 두 조건 AND |
-| 상세 | 배치 메타데이터, input/output SHA-256 전체 값, 적재 시각 |
+| 상세 | 배치 메타데이터, 전체·정상·거부 행, 정상 처리율, 오류 코드 통계, input/output SHA-256 전체 값, 적재 시각 |
 | 상품 | 선택한 배치의 staging 상품 20건 단위 페이지네이션 |
 | nullable | `sale_price`, `description`, `seller`의 `null` 안전 표시 |
 | 오류 | 404와 유효한 request ID 표시 |

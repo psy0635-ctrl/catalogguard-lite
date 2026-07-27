@@ -112,7 +112,7 @@ python -m etl.cli `
 -> etl.cli
 -> 표준 CSV + reject CSV + summary JSON
 -> etl.load_cli
--> summary 필드·SHA-256·행 수·표준 CSV 검증
+-> summary 필드·SHA-256·품질 요약·표준 CSV 검증
 -> 중복 배치 조회
 -> etl_load_runs + catalog_products_staging 저장
 -> FastAPI 배치 목록·상세 조회
@@ -134,9 +134,12 @@ python -m etl.cli `
 - `input_filename`
 - `input_file_sha256`
 - `output_file_sha256`
+- `total_rows`
 - `loaded_rows`
+- `rejected_rows`
+- `error_counts`
 
-profile 이름·버전과 파일명을 정규화하고, SHA-256 형식과 `loaded_rows`의 음수가 아닌 정수 여부를 확인한다. 실제 표준 CSV bytes의 SHA-256이 summary의 `output_file_sha256`과 같은지, 실제 CSV 행 수가 `loaded_rows`와 같은지도 확인한다. 검증에 실패하면 DB를 변경하지 않는다.
+profile 이름·버전과 파일명을 정규화하고, SHA-256 형식과 세 행 수의 음수가 아닌 정수 여부를 확인한다. `total_rows = loaded_rows + rejected_rows`를 강제하며, `error_counts`의 key·값과 reject 행 수의 관계를 검증한다. 한 행에 여러 오류 코드가 있을 수 있으므로 오류 건수 합계는 reject 행 수 이상이면 허용한다. 실제 표준 CSV bytes의 SHA-256이 summary의 `output_file_sha256`과 같은지, 실제 CSV 행 수가 `loaded_rows`와 같은지도 확인한다. 검증에 실패하면 DB를 변경하지 않는다.
 
 같은 원본을 같은 프로필 버전으로 다시 적재했는지는 다음 세 값으로 판단한다.
 
@@ -148,7 +151,7 @@ profile 이름·버전과 파일명을 정규화하고, SHA-256 형식과 `loade
 
 ### Staging 테이블 구조
 
-`etl_load_runs`는 한 번의 ETL 적재를 나타내며 원본 파일명, 프로필, 입력·출력 해시, 적재 행 수와 생성 시각을 저장한다. `catalog_products_staging`은 배치에 속한 정상 표준 CSV 행을 저장한다.
+`etl_load_runs`는 한 번의 ETL 적재를 나타내며 원본 파일명, 프로필, 입력·출력 해시, 적재 행 수와 생성 시각을 저장한다. 신규 배치는 `total_rows`, `rejected_rows`, `error_counts`를 각각 INTEGER·INTEGER·PostgreSQL JSONB로 저장한다. 품질 요약 기능 도입 전 배치는 과거 값을 추정하지 않고 세 필드를 모두 `NULL`로 유지한다. `catalog_products_staging`은 배치에 속한 정상 표준 CSV 행을 저장한다.
 
 ```text
 etl_load_runs (1)
@@ -176,7 +179,9 @@ python -m etl.load_cli `
 DB 적재 완료
 적재 배치 ID: 1
 신규 적재: yes
-상품 행: 2
+전체 행: 2
+정상 상품 행: 2
+거부 행: 0
 ```
 
 같은 파일을 다시 실행하면 다음과 같이 기존 배치를 재사용한다.
@@ -185,7 +190,9 @@ DB 적재 완료
 DB 적재 완료
 적재 배치 ID: 1
 신규 적재: no
-상품 행: 2
+전체 행: 2
+정상 상품 행: 2
+거부 행: 0
 ```
 
 ## 적재 배치 조회 API
@@ -207,7 +214,7 @@ GET /api/v1/etl-loads
 
 `filename`과 `profile_name`은 앞뒤 공백을 제거하며, 공백만 남는 값은 필터로 사용하지 않는다. 검색은 대소문자를 구분하지 않는 부분 일치이고 두 필터를 함께 보내면 AND 조건으로 적용한다. `%`, `_`, `\`는 SQL LIKE의 wildcard나 escape 문법이 아니라 실제 문자로 검색하도록 escape한다.
 
-목록은 `created_at DESC`, `id DESC` 순으로 최신 배치를 먼저 반환한다. 페이지의 `items`와 전체 건수 `total`은 같은 필터 함수를 사용하므로 검색 조건이 서로 달라지지 않는다. 목록 응답에는 배치 ID, 원본 파일명, 프로필 이름·버전, 적재 행 수와 생성 시각만 포함하며 SHA-256과 상품 목록은 제외한다.
+목록은 `created_at DESC`, `id DESC` 순으로 최신 배치를 먼저 반환한다. 페이지의 `items`와 전체 건수 `total`은 같은 필터 함수를 사용하므로 검색 조건이 서로 달라지지 않는다. 목록 응답에는 배치 ID, 원본 파일명, 프로필 이름·버전, 전체·정상·거부 행 수와 생성 시각을 포함하며 SHA-256·오류 코드·상품 목록은 제외한다.
 
 ### 적재 배치 상세
 
@@ -220,7 +227,7 @@ GET /api/v1/etl-loads/{etl_load_run_id}
 | `product_limit` | `50` | 한 페이지의 상품 수, `1` 이상 `100` 이하 |
 | `product_offset` | `0` | 앞에서 건너뛸 상품 수, `0` 이상 |
 
-상세 응답에는 배치 기본 정보, 원본·출력 파일 SHA-256, 적재 행 수와 해당 배치의 staging 상품 목록이 포함된다. 상품은 staging 상품 `id ASC`로 정렬하며 SQL `LIMIT`·`OFFSET`에서 페이지를 나눈다. 모든 상품 조회와 count에는 요청한 `etl_load_run_id` 조건을 적용해 다른 배치의 상품이 섞이지 않게 한다. 배치가 없으면 HTTP `404`를 반환한다.
+상세 응답에는 배치 기본 정보, 전체·정상·거부 행 수, `error_counts`, 원본·출력 파일 SHA-256과 해당 배치의 staging 상품 목록이 포함된다. 기존 배치는 품질 필드를 `null`로 반환한다. 상품은 staging 상품 `id ASC`로 정렬하며 SQL `LIMIT`·`OFFSET`에서 페이지를 나눈다. 모든 상품 조회와 count에는 요청한 `etl_load_run_id` 조건을 적용해 다른 배치의 상품이 섞이지 않게 한다. 배치가 없으면 HTTP `404`를 반환한다.
 
 Path의 `etl_load_run_id`는 `1` 이상의 정수만 허용한다. `0`, 음수와 숫자가 아닌 값은 요청 검증 단계에서 HTTP `422`가 된다. nullable 컬럼인 `sale_price`, `description`, `seller`는 값이 없을 때 JSON `null`로 유지한다.
 
@@ -242,10 +249,11 @@ Streamlit에는 저장된 ETL 배치와 staging 상품을 확인하는 `ETL 적�
 
 | 화면 기능 | 동작 |
 |---|---|
-| 배치 목록 | 최신 적재부터 10건씩 표시하고 전체 건수를 표시 |
+| 배치 목록 | 최신 적재부터 10건씩 표시하고 전체 행·정상 적재·변환 거부 행과 전체 건수를 표시 |
 | 검색 | 파일명과 프로필명 검색을 함께 적용하는 AND 조건 |
 | 배치 페이지 | 이전·다음 버튼으로 목록 offset 이동 |
-| 배치 상세 | 배치 ID, 파일명, 프로필, 버전, 적재 행 수, 적재 시각과 input/output SHA-256 전체 표시 |
+| 배치 상세 | 배치 ID, 파일명, 프로필, 버전, 전체 입력·정상 적재·변환 거부·정상 처리율, 적재 시각과 input/output SHA-256 전체 표시 |
+| 오류 통계 | 오류 코드별 발생 건수를 발생 건수 내림차순·코드 오름차순으로 표시하고 reject 0건은 안내 |
 | 상품 목록 | 선택한 배치의 staging 상품을 20건씩 표시 |
 | nullable | `sale_price`, `description`, `seller`의 `null`을 빈 값으로 표시 |
 | 빈 결과·404 | 빈 목록 안내와 존재하지 않는 배치의 오류 안내 표시 |
@@ -262,7 +270,7 @@ ETL 적재 이력 탭
 -> 상품 이전·다음
 ```
 
-Streamlit rerun에 대비해 목록·상세 응답과 선택 상태를 ETL 전용 `session_state`에 보관한다. 검색 조건이나 배치가 바뀌면 이전 상세·상품 상태를 초기화해 stale 상품이 남거나 다른 배치의 상품이 섞이지 않게 한다. 상세 API가 실패하면 동일 클릭에서 API를 중복 호출하지 않으며, 정상 응답만 상태에 저장한다. 순수 helper 테스트와 Streamlit AppTest로 목록·검색·페이지 이동·상세·SHA-256·nullable·404·request ID·stale 상태 초기화를 검증한다.
+Streamlit rerun에 대비해 목록·상세 응답과 선택 상태를 ETL 전용 `session_state`에 보관한다. 검색 조건이나 배치가 바뀌면 이전 상세·상품 상태를 초기화해 stale 상품이 남거나 다른 배치의 상품이 섞이지 않게 한다. 상세 API가 실패하면 동일 클릭에서 API를 중복 호출하지 않으며, 정상 응답만 상태에 저장한다. 품질 요약이 없는 기존 배치는 `null`을 기록 없음으로 표시하고, 있는 배치는 화면 helper에서 정상 처리율을 계산한다. 순수 helper 테스트와 Streamlit AppTest로 목록·검색·페이지 이동·상세·품질 지표·오류 코드·SHA-256·nullable·404·request ID·stale 상태 초기화를 검증한다.
 
 ### 전체 상품 로딩과 N+1 방지
 
@@ -290,9 +298,9 @@ python -m alembic downgrade 20260705_0002
 python -m alembic upgrade head
 ```
 
-`20260725_0003` upgrade 후 `etl_load_runs`, `catalog_products_staging`과 unique index, FK 조회 index, 음수 방지 CHECK constraint, `ON DELETE CASCADE`가 생성된다. downgrade 후에는 두 staging 테이블만 제거되고 기존 `inspection_runs`, `inspection_results`는 유지되며, 재upgrade로 staging 구조를 다시 만들 수 있다.
+`20260727_0004` upgrade는 기존 `etl_load_runs`에 nullable `total_rows`, `rejected_rows`, PostgreSQL JSONB `error_counts`와 음수·행 수 합계·all-or-none·JSON object CHECK constraint를 추가한다. downgrade는 이 컬럼과 constraint만 제거하며 `etl_load_runs`, `catalog_products_staging`, `inspection_runs`, `inspection_results`와 기존 데이터는 삭제하지 않는다. 격리된 PostgreSQL 18.4 테스트 클러스터에서 upgrade → downgrade `20260725_0003` → 재upgrade와 `current`가 `20260727_0004`임을 확인했다.
 
-GitHub Actions Test #37(run ID `30196012940`)는 PostgreSQL 18·Redis 7.4 서비스 컨테이너에서 Alembic upgrade head, E2E 제외 전체 pytest `920 passed, 0 skipped, 2 deselected, 3 warnings`, 비동기 E2E `1 passed`, Streamlit startup smoke `/_stcore/health` HTTP 200을 확인했다. Streamlit ETL 화면의 주요 상호작용은 AppTest로 검증했으며, 운영 DB나 Railway DB는 사용하지 않았다.
+이번 변경의 PostgreSQL 연결 상태 전체 pytest는 `944 passed, 0 skipped, 2 deselected, 3 warnings`였다. DB 관련 테스트 skip은 0건이며, 기존 기능의 GitHub Actions Test #37 결과는 이전 검증 기록으로 유지한다.
 
 ## 제한사항
 
