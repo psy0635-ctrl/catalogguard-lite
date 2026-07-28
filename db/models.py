@@ -238,6 +238,14 @@ class ETLLoadRun(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    promoted_products: Mapped[list[CatalogProduct]] = relationship(
+        back_populates="source_etl_load_run",
+        passive_deletes=True,
+    )
+    promotion_runs: Mapped[list[CatalogPromotionRun]] = relationship(
+        back_populates="etl_load_run",
+        passive_deletes=True,
+    )
 
 
 class ETLRejectedRow(Base):
@@ -346,3 +354,287 @@ class CatalogProductStaging(Base):
     )
 
     etl_load_run: Mapped[ETLLoadRun] = relationship(back_populates="products")
+
+
+class CatalogProduct(Base):
+    """An operational catalog product promoted from an ETL staging batch."""
+
+    __tablename__ = "catalog_products"
+    __table_args__ = (
+        CheckConstraint(
+            "stock >= 0",
+            name="ck_catalog_products_stock_non_negative",
+        ),
+        CheckConstraint(
+            "price >= 0",
+            name="ck_catalog_products_price_non_negative",
+        ),
+        CheckConstraint(
+            "sale_price IS NULL OR sale_price >= 0",
+            name="ck_catalog_products_sale_price_non_negative",
+        ),
+        CheckConstraint(
+            "length(trim(supplier_key)) > 0",
+            name="ck_catalog_products_supplier_key_not_blank",
+        ),
+        CheckConstraint(
+            "length(trim(external_product_id)) > 0",
+            name="ck_catalog_products_external_product_id_not_blank",
+        ),
+        Index(
+            "ux_catalog_products_supplier_external_product",
+            "supplier_key",
+            "external_product_id",
+            unique=True,
+        ),
+        Index(
+            "ix_catalog_products_source_etl_load_run_id",
+            "source_etl_load_run_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+    )
+    supplier_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    external_product_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    product_group_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    product_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    category: Mapped[str] = mapped_column(String(100), nullable=False)
+    color: Mapped[str] = mapped_column(String(100), nullable=False)
+    size: Mapped[str] = mapped_column(String(100), nullable=False)
+    stock: Mapped[int] = mapped_column(Integer, nullable=False)
+    price: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sale_price: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    image_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    seller: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_etl_load_run_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("etl_load_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    source_etl_load_run: Mapped[ETLLoadRun] = relationship(
+        back_populates="promoted_products"
+    )
+    changes: Mapped[list[CatalogProductChange]] = relationship(
+        back_populates="catalog_product",
+        passive_deletes=True,
+    )
+
+
+class CatalogPromotionRun(Base):
+    """An attempted promotion of one ETL staging batch."""
+
+    __tablename__ = "catalog_promotion_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('applying', 'succeeded', 'failed', 'blocked')",
+            name="ck_catalog_promotion_runs_status",
+        ),
+        CheckConstraint(
+            "preview_hash IS NULL OR length(preview_hash) = 64",
+            name="ck_catalog_promotion_runs_preview_hash_length",
+        ),
+        CheckConstraint(
+            "inserted_count >= 0",
+            name="ck_catalog_promotion_runs_inserted_count_non_negative",
+        ),
+        CheckConstraint(
+            "updated_count >= 0",
+            name="ck_catalog_promotion_runs_updated_count_non_negative",
+        ),
+        CheckConstraint(
+            "unchanged_count >= 0",
+            name="ck_catalog_promotion_runs_unchanged_count_non_negative",
+        ),
+        CheckConstraint(
+            "blocked_count >= 0",
+            name="ck_catalog_promotion_runs_blocked_count_non_negative",
+        ),
+        CheckConstraint(
+            "error_count >= 0",
+            name="ck_catalog_promotion_runs_error_count_non_negative",
+        ),
+        CheckConstraint(
+            "warning_count >= 0",
+            name="ck_catalog_promotion_runs_warning_count_non_negative",
+        ),
+        CheckConstraint(
+            """
+            (status = 'applying' AND completed_at IS NULL)
+            OR
+            (status IN ('succeeded', 'failed', 'blocked') AND completed_at IS NOT NULL)
+            """,
+            name="ck_catalog_promotion_runs_completed_at_matches_status",
+        ),
+        Index(
+            "ix_catalog_promotion_runs_etl_load_run_id",
+            "etl_load_run_id",
+        ),
+        Index(
+            "ux_catalog_promotion_runs_succeeded_etl_load_run",
+            "etl_load_run_id",
+            unique=True,
+            postgresql_where=text("status = 'succeeded'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+    )
+    etl_load_run_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("etl_load_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    preview_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    preview_schema_version: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+    )
+    inspection_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    inserted_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
+    updated_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
+    unchanged_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
+    blocked_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
+    error_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
+    warning_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default=text("0"),
+    )
+    failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    safe_failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    etl_load_run: Mapped[ETLLoadRun] = relationship(back_populates="promotion_runs")
+    changes: Mapped[list[CatalogProductChange]] = relationship(
+        back_populates="promotion_run",
+        passive_deletes=True,
+    )
+
+
+class CatalogProductChange(Base):
+    """An append-only audit entry for one promoted catalog product change."""
+
+    __tablename__ = "catalog_product_changes"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('insert', 'update')",
+            name="ck_catalog_product_changes_action",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(changed_fields) = 'object'",
+            name="ck_catalog_product_changes_changed_fields_object",
+        ),
+        CheckConstraint(
+            "changed_fields <> '{}'::jsonb",
+            name="ck_catalog_product_changes_changed_fields_non_empty",
+        ),
+        CheckConstraint(
+            "before_data IS NULL OR jsonb_typeof(before_data) = 'object'",
+            name="ck_catalog_product_changes_before_data_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(after_data) = 'object'",
+            name="ck_catalog_product_changes_after_data_object",
+        ),
+        CheckConstraint(
+            """
+            (action = 'insert' AND before_data IS NULL)
+            OR
+            (action = 'update' AND before_data IS NOT NULL)
+            """,
+            name="ck_catalog_product_changes_before_data_matches_action",
+        ),
+        Index(
+            "ix_catalog_product_changes_promotion_run_id",
+            "promotion_run_id",
+        ),
+        Index(
+            "ix_catalog_product_changes_catalog_product_id",
+            "catalog_product_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+    )
+    promotion_run_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("catalog_promotion_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    catalog_product_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("catalog_products.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    changed_fields: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    before_data: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+    )
+    after_data: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    promotion_run: Mapped[CatalogPromotionRun] = relationship(
+        back_populates="changes"
+    )
+    catalog_product: Mapped[CatalogProduct] = relationship(back_populates="changes")
