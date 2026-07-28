@@ -37,6 +37,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 6. PostgreSQL staging 적재 결과를 파일명·프로필명으로 검색하고 배치별 상품을 페이지 단위로 확인하는 FastAPI 조회 API를 구현했습니다. 목록 응답과 상세 응답의 범위를 분리하고 실제 PostgreSQL에서 필터·정렬·배치 격리를 검증했습니다.
 7. Streamlit에 ETL 적재 이력 탭을 추가해 파일명·프로필명 AND 검색, 배치·상품 페이지네이션, 상세 SHA-256, nullable 필드와 request ID를 표시하고, AppTest로 stale 상태 초기화와 상세 오류 중복 호출 방지를 검증했습니다.
 8. Playwright Chromium 실제 브라우저 E2E를 추가해 합성 공급사 CSV 변환·PostgreSQL 적재·FastAPI·Streamlit 실행부터 ETL 검색·상세·staging 상품·reject 마스킹·raw 원문 미노출까지 한 흐름으로 검증했습니다.
+9. 운영 상품 persistence를 ETL staging과 분리하고, 공급사별 복합 identity·succeeded partial unique index·append-only JSONB audit·FK RESTRICT를 PostgreSQL 18에서 migration upgrade·downgrade·재-upgrade와 제약 테스트로 검증했습니다.
 
 ## 6.2 문제 정의
 
@@ -152,7 +153,8 @@ catalogguard_ready.csv + etl_summary.json
 | ETL UI 순수 함수 테스트 | 7 passed |
 | ETL Streamlit AppTest | 5 passed |
 | 이전 GitHub Actions PostgreSQL 18 전체 pytest | 920 passed, 0 skipped, 2 deselected, 3 warnings |
-| 이번 ETL reject 상세 저장·브라우저 runner PostgreSQL 전체 pytest | 978 passed, 0 skipped, 3 deselected, 3 warnings |
+| 이전 ETL reject 상세 저장·브라우저 runner PostgreSQL 전체 pytest 기록 | 978 passed, 0 skipped, 3 deselected, 3 warnings |
+| 현재 promotion persistence 포함 전체 pytest | 988 passed, 3 deselected, 4 warnings |
 | 로컬 Chromium ETL 브라우저 E2E | 1 passed, 전체 3·정상 2·reject 1, 66.7%, console/page error 0, raw 민감정보 미노출 |
 | 샘플 ETL CLI 결과 | 전체 3건, 정상 변환 2건, 오류 행 1건, 종료 코드 0 |
 | ETL 조회·UI 기능 검증 CI | 2026-07-26 GitHub Actions Test #37, run ID 30196012940, success, 비동기 E2E smoke test 1 passed |
@@ -573,7 +575,27 @@ DB 적재 완료
 
 #### 범위와 한계
 
-실제 외부 공급사 운영 데이터, 운영 DB 적재, 증분 ETL과 streaming은 검증하지 않았습니다. ETL 적재 실행용 웹 API, staging 상품 수정·삭제, 운영 상품 테이블 upsert, 기존 상품 갱신·덮어쓰기, 상품 변경 이력과 자동 공급사 감지는 지원하지 않습니다. reject 행은 `etl_rejected_rows`에 마스킹된 원본과 구조화된 오류로 저장합니다. Streamlit 적재 이력 화면은 저장된 배치·상품·reject 상세 조회만 제공하며, 위 PostgreSQL 결과는 테스트 환경에서의 검증입니다.
+실제 외부 공급사 운영 데이터, 운영 DB 적재, 증분 ETL과 streaming은 검증하지 않았습니다. ETL 적재 실행용 웹 API, staging 상품 수정·삭제, 실제 운영 상품 upsert·기존 상품 갱신, 상품 변경 이력 조회 API와 자동 공급사 감지는 지원하지 않습니다. 운영 상품·promotion 실행·변경 이력 persistence 모델과 migration은 구현되었지만 이를 사용하는 service는 아직 없습니다. reject 행은 `etl_rejected_rows`에 마스킹된 원본과 구조화된 오류로 저장합니다. Streamlit 적재 이력 화면은 저장된 배치·상품·reject 상세 조회만 제공하며, 위 PostgreSQL 결과는 테스트 환경에서의 검증입니다.
+
+### 운영 상품 promotion persistence
+
+#### 문제
+
+ETL staging 행은 변환·검증 결과를 보관하는 중간 데이터이므로 운영 카탈로그와 같은 identity나 삭제 정책을 사용할 수 없었습니다. 같은 외부 상품 ID가 공급사마다 충돌할 수 있고, 동일 ETL batch의 성공 반영은 한 번만 허용하면서 실패·차단 시도는 감사 목적으로 남겨야 했습니다.
+
+#### 해결
+
+`catalog_products`를 staging과 분리하고 `(supplier_key, external_product_id)`를 운영 상품 identity로 고정했습니다. `supplier_key`는 ETL batch의 `profile_name`, `external_product_id`는 staging의 `product_id`에 대응합니다. `product_id` 단독 unique나 `profile_version`을 identity에 포함하지 않았습니다.
+
+`catalog_promotion_runs`는 `applying`·`succeeded`·`failed`·`blocked` 상태와 insert/update/unchanged/blocked/error/warning count, preview 메타데이터와 안전한 실패 정보를 저장합니다. 같은 `etl_load_run_id`의 `succeeded` 행만 PostgreSQL partial unique index로 한 건을 허용해 성공 반영 중복을 막고, `failed`·`blocked` 재시도 기록은 허용합니다.
+
+`catalog_product_changes`는 `insert`·`update`만 기록하는 append-only JSONB audit 모델입니다. 비어 있지 않은 `changed_fields`, JSON object `after_data`, action별 `before_data` 규칙을 DB CHECK constraint로 강제했습니다. Python `None`이 JSONB `null`로 저장되어 insert audit 제약을 우회하던 문제는 `JSONB(none_as_null=True)`로 SQL `NULL`을 사용하도록 수정했습니다. ETL 출처와 audit 관계의 FK는 모두 `ON DELETE RESTRICT`로 두어 출처 보존을 우선했습니다.
+
+#### 검증과 범위
+
+Alembic revision `20260728_0006`에서 `catalog_products` → `catalog_promotion_runs` → `catalog_product_changes` 순서의 upgrade와 역순 downgrade를 구성했습니다. 격리된 PostgreSQL 18에서 빈 DB upgrade, `0005` downgrade, 재-upgrade, 단일 head를 확인하고 promotion PostgreSQL 테스트 10건으로 복합 unique·partial index·JSONB shape·action 규칙·FK RESTRICT를 검증했습니다.
+
+이 단계는 persistence 기반만 구현했습니다. promotion preview service/API, preview hash, 실제 transaction upsert, audit 조회 API, Streamlit 승인 UI, promotion Browser E2E와 Railway production migration 적용은 완료로 표현하지 않습니다.
 
 ### ETL 적재 배치 조회 API
 
@@ -596,7 +618,7 @@ PostgreSQL staging에 상품을 저장할 수 있었지만, 어떤 공급사 파
 
 #### 검증
 
-PostgreSQL 테스트 클러스터에서 정렬, 파일명·프로필명 검색과 AND 조건, 대소문자 무시, LIKE 특수문자, 목록·count 일치, 상품 페이지네이션과 배치 격리, nullable 값, reject 상세 페이지네이션, 마스킹 원본, 없는 배치를 확인했습니다. 이번 전체 pytest는 `978 passed, 0 skipped, 3 deselected, 3 warnings`였고, 별도 로컬 Chromium E2E는 1 passed였습니다.
+PostgreSQL 테스트 클러스터에서 정렬, 파일명·프로필명 검색과 AND 조건, 대소문자 무시, LIKE 특수문자, 목록·count 일치, 상품 페이지네이션과 배치 격리, nullable 값, reject 상세 페이지네이션, 마스킹 원본, 없는 배치를 확인했습니다. 현재 전체 pytest는 `988 passed, 3 deselected, 4 warnings`였고, 별도 로컬 Chromium E2E는 1 passed였습니다.
 
 ### Streamlit ETL 적재 이력 화면
 

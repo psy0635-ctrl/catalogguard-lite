@@ -2,9 +2,9 @@
 
 ## 1. 목적과 범위
 
-이 문서는 ETL staging 상품을 운영 상품으로 반영하는 후속 기능의 최종 설계다. 현재 저장소에는 `etl_load_runs`, `catalog_products_staging`, `etl_rejected_rows`, `inspection_runs`, `inspection_results`가 있으며 운영 상품, promotion 실행 이력, 변경 이력은 아직 구현되어 있지 않다.
+이 문서는 ETL staging 상품을 운영 상품으로 반영하는 기능의 설계와 현재 구현 경계를 설명한다. 저장소에는 `etl_load_runs`, `catalog_products_staging`, `etl_rejected_rows`, `inspection_runs`, `inspection_results`와 함께 운영 상품·promotion 실행·상품 변경 이력 persistence 모델이 구현되어 있다.
 
-이번 작업은 이 문서만 보완한다. 런타임 코드, SQLAlchemy 모델, Alembic migration, API, UI, 테스트는 구현하지 않는다. 아래 테이블·API는 후속 구현 계약이고 이미 존재하는 기능이 아니다.
+`catalog_products`, `catalog_promotion_runs`, `catalog_product_changes`의 SQLAlchemy 모델과 Alembic migration은 완료되었다. 그러나 promotion preview service/API, 실제 승인형 promotion transaction·upsert, preview hash 계산, 변경 이력 조회 API, Streamlit UI, Browser E2E는 아직 구현되어 있지 않다. 아래 API와 실행 흐름은 후속 구현 계약이다.
 
 ## 2. 현재 구조
 
@@ -14,7 +14,7 @@
 - `catalog_products_staging`은 정상 변환 상품을 `etl_load_run_id`에 연결한다.
 - `etl_rejected_rows`는 reject CSV가 제공된 경우 오류 구조와 마스킹된 원본만 저장한다.
 - `inspect_dataframe()`는 표준 컬럼 DataFrame을 현재 `INSPECTION_VERSION`으로 검사한다. inspection 이력은 ETL batch와 연결되지 않는다.
-- staging에는 batch 내부 상품 identity unique constraint가 없고, 운영 상품 upsert나 promotion API도 없다.
+- staging에는 batch 내부 상품 identity unique constraint가 없고, 운영 상품 upsert나 promotion API도 없다. 운영 상품 persistence 테이블은 존재하지만 현재 서비스가 이를 변경하지 않는다.
 
 현재 샘플 프로필은 `sample_fashion_vendor`와 `sample_marketplace_vendor`이며 version은 각각 `1`이다.
 
@@ -37,7 +37,7 @@ external_product_id = catalog_products_staging.product_id
 - `product_id` 단독 unique는 사용하지 않는다.
 - 동일 공급사가 여러 독립 입력 형식을 사용해야 하는 시점에는 supplier registry를 별도 도입한다. 이번 단계에서는 supplier 테이블과 staging의 `supplier_key` 컬럼을 만들지 않는다.
 
-## 4. 후속 데이터 모델
+## 4. 구현된 persistence 모델
 
 ### `catalog_products`
 
@@ -45,26 +45,34 @@ external_product_id = catalog_products_staging.product_id
 | --- | --- |
 | `id` | `BIGINT` primary key |
 | `supplier_key`, `external_product_id` | `NOT NULL`, `UNIQUE (supplier_key, external_product_id)` |
-| `product_group_id`, `product_name`, `category`, `color`, `size`, `image_path` | 표준 staging 필드, `NOT NULL`, 공백 금지 |
+| `product_group_id`, `product_name`, `category`, `color`, `size`, `image_path` | 표준 staging 필드, `NOT NULL` |
 | `stock`, `price` | `NOT NULL`, 0 이상 |
 | `sale_price` | nullable, 값이 있으면 0 이상 |
 | `description`, `seller` | nullable 표준 staging 필드 |
 | `source_etl_load_run_id` | 마지막 반영 batch FK, `ON DELETE RESTRICT` |
-| `created_at`, `updated_at` | DB 서버 시간; 실제 변경 때만 `updated_at` 갱신 |
+| `created_at`, `updated_at` | DB 서버 시간 |
 
 staging 모델을 그대로 복사하지 않는다. staging의 `id`, `etl_load_run_id`, `created_at`은 적재 이력이고 운영 모델에는 안정적인 identity와 마지막 source batch가 필요하다.
 
 ### `catalog_promotion_runs`
 
-한 ETL batch의 반영 수명 주기를 기록한다. `etl_load_run_id`는 `NOT NULL UNIQUE`로 두어 DB idempotency key로 사용한다. 상태는 `pending`, `applying`, `succeeded`, `failed`, `blocked`다.
+한 ETL batch의 반영 시도를 기록한다. 상태는 `applying`, `succeeded`, `failed`, `blocked`이며, `succeeded`인 동일 `etl_load_run_id`는 PostgreSQL partial unique index로 한 건만 허용한다. 따라서 `failed`·`blocked` 실행은 다시 기록할 수 있다.
 
-최소 필드는 `inserted_count`, `updated_count`, `unchanged_count`, `blocked_count`, `inspection_version`, `preview_hash`, `error_count`, `warning_count`, `started_at`, `completed_at`, `failure_code`, `safe_failure_message`, `created_at`이다. count는 0 이상이며 실패 정보에는 SQL, DB URL, 내부 파일 경로, traceback을 저장하지 않는다.
+`inserted_count`, `updated_count`, `unchanged_count`, `blocked_count`, `inspection_version`, `preview_hash`, `preview_schema_version`, `error_count`, `warning_count`, `started_at`, `completed_at`, `failure_code`, `safe_failure_message`, `created_at`을 저장한다. count는 0 이상이고 `applying`은 미완료, 나머지 상태는 완료 시각을 요구한다. 실패 정보에는 SQL, DB URL, 내부 파일 경로, traceback을 저장하지 않는다.
 
 ### `catalog_product_changes`
 
-append-only audit log다. `promotion_run_id`, `catalog_product_id`, `action`(`insert`/`update`), `changed_fields`, 변경 필드만 담은 `before_data`·`after_data`, `created_at`을 저장한다. `unchanged`는 변경 이력 행을 만들지 않고 promotion run count와 preview item으로 설명한다.
+append-only audit log다. `promotion_run_id`, `catalog_product_id`, `action`(`insert`/`update`), `changed_fields`, `before_data`, `after_data`, `created_at`을 저장한다. `changed_fields`는 비어 있지 않은 JSON object, `after_data`는 JSON object여야 한다. `insert`의 `before_data`는 SQL `NULL`, `update`의 `before_data`는 JSON object여야 하며, `JSONB(none_as_null=True)`로 Python `None`을 SQL `NULL`로 보존한다. `unchanged`는 변경 이력 행을 만들지 않는다.
 
-## 5. 품질 게이트와 reject 정책
+모든 새 FK는 `ON DELETE RESTRICT`다. 운영 상품·promotion 실행·감사 이력의 출처를 보존하고, 부모 행이 참조 중일 때 삭제되지 않게 한다.
+
+### Alembic migration과 검증
+
+`20260728_0006_create_catalog_promotion_tables.py`는 revision `20260728_0006`, down revision `20260728_0005`다. upgrade는 `catalog_products` → `catalog_promotion_runs` → `catalog_product_changes` 순서로, downgrade는 역순으로 실행한다. 기존 inspection·ETL staging 테이블은 downgrade 대상이 아니다.
+
+격리된 PostgreSQL 18 환경에서 빈 DB의 upgrade, `0006`에서 `0005` downgrade, 재-upgrade와 단일 Alembic head를 검증했다. promotion PostgreSQL 테스트 10건은 복합 unique, succeeded partial unique, JSONB object·빈 값·action 규칙, `ON DELETE RESTRICT`를 확인한다.
+
+## 5. 후속 구현 설계: 품질 게이트와 reject 정책
 
 preview와 실제 promotion은 같은 순서로 판단한다.
 
@@ -248,7 +256,7 @@ POST /api/v1/etl-loads/{etl_load_run_id}/promotions
 
 성공 반영은 하나의 PostgreSQL transaction으로 `catalog_products` insert/update, `catalog_product_changes` append, promotion run의 count·`succeeded` 상태 갱신을 함께 commit한다. 중간 실패 시 모두 rollback하고, 별도 짧은 transaction으로 run을 `failed`와 안전한 실패 정보로 갱신한다.
 
-같은 batch가 이미 `succeeded`면 기존 run 결과를 반환하고 다시 반영하지 않는다. 동일 batch 동시 요청은 `catalog_promotion_runs.etl_load_run_id UNIQUE`와 `SELECT ... FOR UPDATE`로 한 요청만 `applying`으로 전이시킨다. 서로 다른 batch의 같은 운영 상품 갱신은 identity 순서로 행을 잠그고 운영 상품 unique constraint를 최종 보호선으로 사용한다.
+같은 batch가 이미 `succeeded`면 기존 run 결과를 반환하고 다시 반영하지 않는다. 동일 batch 동시 요청의 service-level 제어는 `SELECT ... FOR UPDATE`로 설계하며, DB는 succeeded 상태에 대한 partial unique index를 최종 보호선으로 사용한다. 서로 다른 batch의 같은 운영 상품 갱신은 identity 순서로 행을 잠그고 운영 상품 unique constraint를 최종 보호선으로 사용한다.
 
 ## 11. upsert와 삭제 정책
 
@@ -262,11 +270,19 @@ POST /api/v1/etl-loads/{etl_load_run_id}/promotions
 
 새 batch에 없는 기존 운영 상품은 삭제·비활성화하지 않는다. hard delete, 자동 rollback, 선택 반영은 이번 MVP 범위 밖이다.
 
-## 12. TDD·migration 검증 계획
+## 12. 완료된 검증과 후속 TDD 범위
+
+다음 persistence 범위는 구현·검증을 완료했다.
+
+- migration의 upgrade/downgrade/재-upgrade와 단일 head
+- `catalog_products` 복합 unique, 값 CHECK constraint, ETL 출처 FK RESTRICT
+- `catalog_promotion_runs` 상태·count·완료 시각 CHECK constraint와 succeeded partial unique index
+- `catalog_product_changes` JSONB shape·insert/update `before_data` 규칙과 audit FK RESTRICT
+- Python `None`이 JSONB `null`이 아닌 SQL `NULL`로 저장되도록 한 `none_as_null=True` 회귀
 
 후속 구현 전에는 다음을 테스트로 고정한다.
 
-- migration의 upgrade/downgrade/재-upgrade, unique/FK/CHECK/index, promotion run의 ETL batch unique
+- migration의 upgrade/downgrade/재-upgrade, unique/FK/CHECK/index, promotion run의 succeeded partial unique
 - 품질 summary 누락, reject 존재, empty staging, batch 내부 identity 중복, inspection error의 전체 차단
 - warning만 있는 batch의 허용과 warning count 반환
 - preview의 insert/update/unchanged와 필드별 before/after, preview 호출의 DB 무변경
@@ -278,22 +294,20 @@ POST /api/v1/etl-loads/{etl_load_run_id}/promotions
 ## 13. 최종 구현 순서
 
 ```text
-1. catalog_products와 promotion 관련 DB 모델·migration
-2. promotion preview service
-3. promotion preview FastAPI endpoint
-4. 실제 승인형 promotion transaction
-5. catalog_product_changes audit 저장
-6. 중복 요청·동시성 PostgreSQL 통합 테스트
-7. Streamlit preview·승인 UI
-8. Playwright promotion E2E
+1. promotion preview service
+2. promotion preview FastAPI endpoint
+3. 실제 승인형 promotion transaction과 `catalog_product_changes` audit 저장
+4. 중복 요청·동시성 PostgreSQL 통합 테스트
+5. Streamlit preview·승인 UI
+6. Playwright promotion E2E
 ```
 
-다음 코딩 작업 1개는 **운영 상품 identity와 promotion 기록용 DB 모델·Alembic migration MVP**다. preview는 운영 상품 테이블과 비교해야 하므로 migration보다 먼저 구현하지 않는다.
+다음 코딩 작업은 **promotion preview dry-run service**다. persistence 모델과 migration이 완료되었으므로, preview는 운영 상품 테이블과의 비교를 시작할 수 있다.
 
 ## 14. 이번 단계와 후속 범위
 
-이번 문서 작업에서는 설계만 확정한다. 후속 MVP에서도 개별 상품 선택 반영, 자동 삭제·비활성화, hard delete, 취소·예약 반영, 권한·승인, Redis/Celery, streaming·증분 ETL, preview 영구 저장, 실제 Railway/운영 DB 연결은 제외한다.
+이번 단계에서 persistence 모델과 migration까지 완료했다. 후속 MVP에서도 개별 상품 선택 반영, 자동 삭제·비활성화, hard delete, 취소·예약 반영, 권한·승인, Redis/Celery, streaming·증분 ETL, preview 영구 저장, 실제 Railway/운영 DB 연결은 제외한다.
 
 ## 15. 최종 결정
 
-운영 상품 identity는 `(profile_name, product_id)`를 `(supplier_key, external_product_id)`라는 운영 모델 이름으로 표현한다. promotion은 품질 summary, reject, empty staging, batch 내부 중복, 재검수 오류를 모두 배치 전체 차단 사유로 사용한다. preview와 실제 반영은 동일 staging을 재검수하고 canonical preview hash로 stale 상태를 막는다. 구현은 DB 모델·migration부터 시작한다.
+운영 상품 identity는 `(profile_name, product_id)`를 `(supplier_key, external_product_id)`라는 운영 모델 이름으로 표현한다. 이를 보장하는 persistence 모델·migration과 PostgreSQL 제약 검증은 완료했다. promotion은 품질 summary, reject, empty staging, batch 내부 중복, 재검수 오류를 모두 배치 전체 차단 사유로 사용하도록 설계한다. 다음 구현은 preview dry-run service이며, preview와 실제 반영은 동일 staging을 재검수하고 canonical preview hash로 stale 상태를 막는다.

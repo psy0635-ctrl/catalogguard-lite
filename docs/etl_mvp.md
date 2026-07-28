@@ -326,13 +326,15 @@ N+1 문제는 배치 한 번을 조회한 뒤 상품마다 DB에 다시 질문�
 
 ```powershell
 python -m alembic upgrade head
-python -m alembic downgrade 20260705_0002
+python -m alembic downgrade 20260728_0005
 python -m alembic upgrade head
 ```
 
-`20260727_0004`에 이어 `20260728_0005` upgrade는 `etl_load_runs`에 reject 상세 저장 여부·reject CSV SHA-256과 all-or-none CHECK constraint를 추가하고, 오류 배열·마스킹된 원본 JSONB를 저장하는 `etl_rejected_rows`와 unique/index/FK를 만든다. downgrade는 새 컬럼·constraint·테이블·index만 제거하며 기존 배치·상품·inspection 데이터는 삭제하지 않는다. 격리된 PostgreSQL 18.4 테스트 클러스터에서 upgrade → downgrade `20260727_0004` → 재upgrade와 `current`가 `20260728_0005`임을 확인했다.
+`20260727_0004`에 이어 `20260728_0005` upgrade는 `etl_load_runs`에 reject 상세 저장 여부·reject CSV SHA-256과 all-or-none CHECK constraint를 추가하고, 오류 배열·마스킹된 원본 JSONB를 저장하는 `etl_rejected_rows`와 unique/index/FK를 만든다. downgrade는 새 컬럼·constraint·테이블·index만 제거하며 기존 배치·상품·inspection 데이터는 삭제하지 않는다.
 
-이번 변경의 PostgreSQL 연결 상태 전체 pytest는 `978 passed, 0 skipped, 3 deselected, 3 warnings`였다. DB 관련 테스트 skip은 0건이며, 로컬 Chromium ETL 브라우저 E2E도 `1 passed`, console error 0, page error 0, raw 민감정보 미노출로 확인했다. 기존 기능의 GitHub Actions Test #37 결과는 이전 검증 기록으로 유지한다.
+현재 Alembic head는 `20260728_0006`이다. 이 revision은 ETL staging을 변경하지 않고, 별도의 운영 상품·promotion persistence 테이블을 추가한다. 격리된 PostgreSQL 18 테스트 클러스터에서 빈 DB upgrade, `20260728_0006` → `20260728_0005` downgrade, 재-upgrade와 단일 head를 확인했다.
+
+현재 PostgreSQL 연결 상태 전체 pytest는 `988 passed, 3 deselected, 4 warnings`였다. promotion persistence PostgreSQL 테스트는 10 passed, skip 0이었으며, 기존 ETL 테스트와 로컬 Chromium ETL 브라우저 E2E도 `1 passed`, console error 0, page error 0, raw 민감정보 미노출로 확인했다. 기존 기능의 GitHub Actions Test #37 결과는 이전 검증 기록으로 유지한다.
 
 ## 제한사항
 
@@ -341,7 +343,7 @@ python -m alembic upgrade head
 - 자동 공급사 감지는 지원하지 않으며, 공급사별 프로필은 수동 선택한다.
 - 웹 수집과 외부 API 연동은 지원하지 않는다.
 - ETL 적재 실행용 웹 API는 지원하지 않으며, Streamlit 적재 이력 화면은 저장된 배치와 상품을 조회하는 읽기 전용 기능만 제공한다.
-- staging 상품 수정·삭제와 상품 변경 이력은 지원하지 않는다.
+- staging 상품 수정·삭제와 상품 변경 이력 조회 API는 지원하지 않는다.
 - 운영 상품 테이블 upsert와 기존 상품 갱신·덮어쓰기는 지원하지 않는다. reject 행은 별도 `etl_rejected_rows`에 오류 배열과 마스킹된 동적 원본 컬럼으로 저장한다.
 - 증분 ETL과 streaming은 지원하지 않는다.
 - 운영 DB 적재는 검증하지 않았으며, PostgreSQL staging 적재는 임시 테스트 PostgreSQL 환경에서만 검증했다.
