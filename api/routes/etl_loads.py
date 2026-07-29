@@ -1,7 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from sqlalchemy.orm import Session
 
 from api.schemas import (
+    CatalogPromotionBlockedReasonResponse,
+    CatalogPromotionChangedFieldResponse,
+    CatalogPromotionPreviewItemResponse,
+    CatalogPromotionPreviewResponse,
+    CatalogPromotionProductDataResponse,
     ETLLoadDetailResponse,
     ETLLoadListItemResponse,
     ETLLoadListResponse,
@@ -18,6 +23,12 @@ from db.etl_query_service import (
     list_etl_rejections,
     list_etl_loads,
     normalize_etl_filter,
+)
+from db.catalog_promotion_preview_service import (
+    CatalogPromotionPreview,
+    ETLLoadRunNotFoundError,
+    PromotionPreviewItem,
+    preview_catalog_promotion,
 )
 from db.session import get_session
 
@@ -85,6 +96,77 @@ def _build_detail_response(result: ETLLoadDetail) -> ETLLoadDetailResponse:
             limit=result.products.limit,
             offset=result.products.offset,
         ),
+    )
+
+
+def _build_promotion_product_data_response(
+    data: dict[str, str | int | None],
+) -> CatalogPromotionProductDataResponse:
+    return CatalogPromotionProductDataResponse(
+        external_product_id=data["external_product_id"],
+        product_group_id=data["product_group_id"],
+        product_name=data["product_name"],
+        category=data["category"],
+        color=data["color"],
+        size=data["size"],
+        stock=data["stock"],
+        price=data["price"],
+        sale_price=data["sale_price"],
+        image_path=data["image_path"],
+        description=data["description"],
+        seller=data["seller"],
+    )
+
+
+def _build_promotion_item_response(
+    item: PromotionPreviewItem,
+) -> CatalogPromotionPreviewItemResponse:
+    return CatalogPromotionPreviewItemResponse(
+        supplier_key=item.supplier_key,
+        external_product_id=item.external_product_id,
+        action=item.action,
+        changed_fields={
+            field_name: CatalogPromotionChangedFieldResponse(
+                before=change["before"],
+                after=change["after"],
+            )
+            for field_name, change in item.changed_fields.items()
+        },
+        before_data=(
+            None
+            if item.before_data is None
+            else _build_promotion_product_data_response(item.before_data)
+        ),
+        after_data=_build_promotion_product_data_response(item.after_data),
+    )
+
+
+def _build_promotion_preview_response(
+    result: CatalogPromotionPreview,
+) -> CatalogPromotionPreviewResponse:
+    return CatalogPromotionPreviewResponse(
+        etl_load_run_id=result.etl_load_run_id,
+        supplier_key=result.supplier_key,
+        inspection_version=result.inspection_version,
+        preview_schema_version=result.preview_schema_version,
+        preview_hash=result.preview_hash,
+        promotion_eligible=result.promotion_eligible,
+        blocked_reasons=[
+            CatalogPromotionBlockedReasonResponse(
+                code=reason.code,
+                message=reason.message,
+                supplier_key=reason.supplier_key,
+                external_product_id=reason.external_product_id,
+                staging_product_ids=list(reason.staging_product_ids),
+            )
+            for reason in result.blocked_reasons
+        ],
+        insert_count=result.insert_count,
+        update_count=result.update_count,
+        unchanged_count=result.unchanged_count,
+        error_count=result.error_count,
+        warning_count=result.warning_count,
+        items=[_build_promotion_item_response(item) for item in result.items],
     )
 
 
@@ -174,3 +256,28 @@ def list_etl_rejected_rows(
         limit=result.limit,
         offset=result.offset,
     )
+
+
+@router.post(
+    "/api/v1/etl-loads/{etl_load_run_id}/promotion-preview",
+    response_model=CatalogPromotionPreviewResponse,
+    status_code=status.HTTP_200_OK,
+)
+def create_catalog_promotion_preview(
+    response: Response,
+    etl_load_run_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+) -> CatalogPromotionPreviewResponse:
+    try:
+        result = preview_catalog_promotion(
+            session,
+            etl_load_run_id=etl_load_run_id,
+        )
+    except ETLLoadRunNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ETL_LOAD_NOT_FOUND_MESSAGE,
+        ) from None
+
+    response.headers["Cache-Control"] = "no-store"
+    return _build_promotion_preview_response(result)

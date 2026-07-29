@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # API가 밖으로 내보낼 JSON 응답 모양을 Pydantic 모델로 고정합니다.
@@ -135,6 +135,62 @@ class ETLRejectedRowListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+CatalogPromotionValue = str | int | None
+
+
+class CatalogPromotionChangedFieldResponse(BaseModel):
+    before: CatalogPromotionValue
+    after: CatalogPromotionValue
+
+
+class CatalogPromotionProductDataResponse(BaseModel):
+    external_product_id: str
+    product_group_id: str
+    product_name: str
+    category: str
+    color: str
+    size: str
+    stock: int
+    price: int
+    sale_price: int | None
+    image_path: str
+    description: str | None
+    seller: str | None
+
+
+class CatalogPromotionBlockedReasonResponse(BaseModel):
+    code: str
+    message: str
+    supplier_key: str | None = None
+    external_product_id: str | None = None
+    staging_product_ids: list[int] = Field(default_factory=list)
+
+
+class CatalogPromotionPreviewItemResponse(BaseModel):
+    supplier_key: str
+    external_product_id: str
+    action: Literal["insert", "update", "unchanged"]
+    changed_fields: dict[str, CatalogPromotionChangedFieldResponse]
+    before_data: CatalogPromotionProductDataResponse | None
+    after_data: CatalogPromotionProductDataResponse
+
+
+class CatalogPromotionPreviewResponse(BaseModel):
+    etl_load_run_id: int
+    supplier_key: str
+    inspection_version: str
+    preview_schema_version: int
+    preview_hash: str | None
+    promotion_eligible: bool
+    blocked_reasons: list[CatalogPromotionBlockedReasonResponse]
+    insert_count: int
+    update_count: int
+    unchanged_count: int
+    error_count: int
+    warning_count: int
+    items: list[CatalogPromotionPreviewItemResponse]
 
 
 InspectionJobStatus = Literal["queued", "running", "succeeded", "failed"]
