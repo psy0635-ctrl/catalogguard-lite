@@ -193,6 +193,33 @@ class CatalogPromotionPreviewResponse(BaseModel):
     items: list[CatalogPromotionPreviewItemResponse]
 
 
+class CatalogPromotionRequest(BaseModel):
+    confirmation: bool
+    expected_preview_hash: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+
+class CatalogPromotionResponse(BaseModel):
+    promotion_run_id: int
+    etl_load_run_id: int
+    status: Literal["succeeded"]
+    created: bool
+    preview_hash: str
+    preview_schema_version: int
+    inspection_version: str
+    inserted_count: int
+    updated_count: int
+    unchanged_count: int
+    blocked_count: int
+    error_count: int
+    warning_count: int
+    started_at: datetime
+    completed_at: datetime
+
+
 InspectionJobStatus = Literal["queued", "running", "succeeded", "failed"]
 
 

@@ -7,6 +7,8 @@ from api.schemas import (
     CatalogPromotionPreviewItemResponse,
     CatalogPromotionPreviewResponse,
     CatalogPromotionProductDataResponse,
+    CatalogPromotionRequest,
+    CatalogPromotionResponse,
     ETLLoadDetailResponse,
     ETLLoadListItemResponse,
     ETLLoadListResponse,
@@ -29,6 +31,13 @@ from db.catalog_promotion_preview_service import (
     ETLLoadRunNotFoundError,
     PromotionPreviewItem,
     preview_catalog_promotion,
+)
+from db.catalog_promotion_service import (
+    CatalogPromotionConfirmationRequiredError,
+    CatalogPromotionExecutionFailedError,
+    CatalogPromotionExecutionResult,
+    CatalogPromotionInvalidPreviewHashError,
+    execute_catalog_promotion,
 )
 from db.session import get_session
 
@@ -170,6 +179,28 @@ def _build_promotion_preview_response(
     )
 
 
+def _build_promotion_response(
+    result: CatalogPromotionExecutionResult,
+) -> CatalogPromotionResponse:
+    return CatalogPromotionResponse(
+        promotion_run_id=result.promotion_run_id,
+        etl_load_run_id=result.etl_load_run_id,
+        status="succeeded",
+        created=result.created,
+        preview_hash=result.preview_hash,
+        preview_schema_version=result.preview_schema_version,
+        inspection_version=result.inspection_version,
+        inserted_count=result.inserted_count,
+        updated_count=result.updated_count,
+        unchanged_count=result.unchanged_count,
+        blocked_count=result.blocked_count,
+        error_count=result.error_count,
+        warning_count=result.warning_count,
+        started_at=result.started_at,
+        completed_at=result.completed_at,
+    )
+
+
 @router.get("/api/v1/etl-loads", response_model=ETLLoadListResponse)
 def list_etl_load_runs(
     limit: int = Query(default=20, ge=1, le=100),
@@ -281,3 +312,85 @@ def create_catalog_promotion_preview(
 
     response.headers["Cache-Control"] = "no-store"
     return _build_promotion_preview_response(result)
+
+
+@router.post(
+    "/api/v1/etl-loads/{etl_load_run_id}/promotions",
+    response_model=CatalogPromotionResponse,
+    status_code=status.HTTP_200_OK,
+)
+def create_catalog_promotion(
+    request: CatalogPromotionRequest,
+    response: Response,
+    etl_load_run_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+) -> CatalogPromotionResponse:
+    try:
+        result = execute_catalog_promotion(
+            session,
+            etl_load_run_id=etl_load_run_id,
+            confirmation=request.confirmation,
+            expected_preview_hash=request.expected_preview_hash,
+        )
+    except CatalogPromotionConfirmationRequiredError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "confirmation_required",
+                "message": (
+                    "운영 상품 반영을 위해 명시적인 승인이 필요합니다."
+                ),
+            },
+        ) from None
+    except CatalogPromotionInvalidPreviewHashError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "invalid_preview_hash",
+                "message": "expected_preview_hash 형식이 올바르지 않습니다.",
+            },
+        ) from None
+    except ETLLoadRunNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "etl_load_not_found",
+                "message": ETL_LOAD_NOT_FOUND_MESSAGE,
+            },
+        ) from None
+    except CatalogPromotionExecutionFailedError as error:
+        detail = {
+            "code": "promotion_failed",
+            "message": "운영 상품 반영 중 오류가 발생했습니다.",
+        }
+        if error.promotion_run_id is not None:
+            detail["promotion_run_id"] = error.promotion_run_id
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=detail,
+        ) from None
+
+    if result.status == "blocked":
+        detail = {
+            "code": result.failure_code,
+            "message": result.safe_failure_message,
+            "promotion_run_id": result.promotion_run_id,
+        }
+        if result.failure_code == "promotion_blocked":
+            detail["blocked_reasons"] = [
+                CatalogPromotionBlockedReasonResponse(
+                    code=reason.code,
+                    message=reason.message,
+                    supplier_key=reason.supplier_key,
+                    external_product_id=reason.external_product_id,
+                    staging_product_ids=list(reason.staging_product_ids),
+                ).model_dump()
+                for reason in result.blocked_reasons
+            ]
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail,
+        )
+
+    response.headers["Cache-Control"] = "no-store"
+    return _build_promotion_response(result)
