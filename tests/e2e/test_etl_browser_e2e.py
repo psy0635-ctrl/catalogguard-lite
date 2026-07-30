@@ -183,7 +183,13 @@ def _run_catalog_promotion_success_scenario(page) -> None:
         "미리보기 내용을 확인했으며 운영 상품 반영에 동의합니다."
     )
     expect(confirmation).to_be_enabled()
-    confirmation.check()
+    approval_label = page.get_by_text(
+        "미리보기 내용을 확인했으며 운영 상품 반영에 동의합니다.",
+        exact=True,
+    )
+    expect(approval_label).to_be_visible()
+    approval_label.click()
+    expect(confirmation).to_be_checked()
     expect(promotion_button).to_be_enabled()
     promotion_button.click()
 
