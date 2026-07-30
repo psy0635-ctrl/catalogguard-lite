@@ -1,0 +1,3 @@
+style_id,sku_code,title,category_code,label,regular_price,promo_price,tone,fit_size,available_qty,details,photo
+CG-E2E-PROMO,CG-E2E-PROMO-BLK-M,CatalogGuard Promotion Tee,TOP,E2E Promotion Vendor,39000,29000,BLACK,M,5,Promotion browser E2E insert,https://example.test/catalogguard-promotion-black.jpg
+CG-E2E-PROMO,CG-E2E-PROMO-WHT-L,CatalogGuard Promotion Tee,TOP,E2E Promotion Vendor,42000,32000,WHITE,L,8,Promotion browser E2E insert,https://example.test/catalogguard-promotion-white.jpg

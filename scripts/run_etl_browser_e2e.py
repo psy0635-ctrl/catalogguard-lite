@@ -18,6 +18,9 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = ROOT / "tests" / "fixtures" / "e2e" / "etl_browser_vendor.csv"
+PROMOTION_FIXTURE_PATH = (
+    ROOT / "tests" / "fixtures" / "e2e" / "etl_browser_promotion_vendor.csv"
+)
 PROFILE_PATH = ROOT / "config" / "etl" / "sample_marketplace_vendor_v1.json"
 DEFAULT_ARTIFACT_DIR = ROOT / "artifacts" / "browser-e2e"
 
@@ -122,7 +125,11 @@ class ETLBrowserE2ERunner:
         _validate_database_url(args.database_url)
         if args.api_port == args.streamlit_port:
             raise BrowserE2EError("API and Streamlit ports must be different")
-        if not FIXTURE_PATH.is_file() or not PROFILE_PATH.is_file():
+        if (
+            not FIXTURE_PATH.is_file()
+            or not PROMOTION_FIXTURE_PATH.is_file()
+            or not PROFILE_PATH.is_file()
+        ):
             raise BrowserE2EError("Browser E2E fixture or profile is missing")
         self.args = args
         self.temp_dir = Path(tempfile.mkdtemp(prefix="catalogguard-etl-browser-e2e-"))
@@ -137,6 +144,7 @@ class ETLBrowserE2ERunner:
             ),
             "E2E_STREAMLIT_URL": f"http://127.0.0.1:{args.streamlit_port}",
             "E2E_SOURCE_FILENAME": FIXTURE_PATH.name,
+            "E2E_PROMOTION_SOURCE_FILENAME": PROMOTION_FIXTURE_PATH.name,
             "E2E_ARTIFACT_DIR": str(self.artifact_dir),
             "PYTHONIOENCODING": "utf-8",
         }
@@ -168,6 +176,56 @@ class ETLBrowserE2ERunner:
                 f"{name} failed with exit code {completed.returncode}; see {log_path}"
             )
         return completed
+
+    def _prepare_etl_batch(
+        self,
+        *,
+        fixture_path: Path,
+        output_path: Path,
+        rejects_path: Path,
+        summary_path: Path,
+        expected_counts: dict[str, int],
+        name_prefix: str,
+    ) -> None:
+        self._run_command(
+            f"{name_prefix} ETL transformation",
+            [
+                sys.executable,
+                "-m",
+                "etl.cli",
+                "--input",
+                str(fixture_path),
+                "--profile",
+                str(PROFILE_PATH),
+                "--output",
+                str(output_path),
+                "--rejects",
+                str(rejects_path),
+                "--summary",
+                str(summary_path),
+            ],
+            log_name=f"{name_prefix.lower().replace(' ', '-')}-etl.log",
+        )
+        summary = _read_json(summary_path)
+        if any(summary.get(key) != value for key, value in expected_counts.items()):
+            raise BrowserE2EError(
+                f"{name_prefix} fixture produced unexpected ETL counts"
+            )
+        self._run_command(
+            f"{name_prefix} PostgreSQL ETL load",
+            [
+                sys.executable,
+                "-m",
+                "etl.load_cli",
+                "--input",
+                str(output_path),
+                "--rejects",
+                str(rejects_path),
+                "--summary",
+                str(summary_path),
+            ],
+            log_name=f"{name_prefix.lower().replace(' ', '-')}-load.log",
+        )
 
     def _start_service(
         self,
@@ -209,47 +267,33 @@ class ETLBrowserE2ERunner:
                 [sys.executable, "-m", "alembic", "upgrade", "head"],
                 log_name="alembic.log",
             )
-            self._run_command(
-                "ETL transformation",
-                [
-                    sys.executable,
-                    "-m",
-                    "etl.cli",
-                    "--input",
-                    str(FIXTURE_PATH),
-                    "--profile",
-                    str(PROFILE_PATH),
-                    "--output",
-                    str(output_path),
-                    "--rejects",
-                    str(rejects_path),
-                    "--summary",
-                    str(summary_path),
-                ],
-                log_name="etl.log",
+            self._prepare_etl_batch(
+                fixture_path=FIXTURE_PATH,
+                output_path=output_path,
+                rejects_path=rejects_path,
+                summary_path=summary_path,
+                expected_counts={
+                    "total_rows": 3,
+                    "loaded_rows": 2,
+                    "rejected_rows": 1,
+                },
+                name_prefix="ETL reject-details",
             )
-            summary = _read_json(summary_path)
-            expected_counts = {
-                "total_rows": 3,
-                "loaded_rows": 2,
-                "rejected_rows": 1,
-            }
-            if any(summary.get(key) != value for key, value in expected_counts.items()):
-                raise BrowserE2EError("Browser E2E fixture produced unexpected ETL counts")
-            self._run_command(
-                "PostgreSQL ETL load",
-                [
-                    sys.executable,
-                    "-m",
-                    "etl.load_cli",
-                    "--input",
-                    str(output_path),
-                    "--rejects",
-                    str(rejects_path),
-                    "--summary",
-                    str(summary_path),
-                ],
-                log_name="load.log",
+
+            promotion_output_path = self.temp_dir / "catalogguard_promotion_ready.csv"
+            promotion_rejects_path = self.temp_dir / "promotion_rejected_rows.csv"
+            promotion_summary_path = self.temp_dir / "promotion_etl_summary.json"
+            self._prepare_etl_batch(
+                fixture_path=PROMOTION_FIXTURE_PATH,
+                output_path=promotion_output_path,
+                rejects_path=promotion_rejects_path,
+                summary_path=promotion_summary_path,
+                expected_counts={
+                    "total_rows": 2,
+                    "loaded_rows": 2,
+                    "rejected_rows": 0,
+                },
+                name_prefix="ETL promotion",
             )
 
             api_process, api_log = self._start_service(
