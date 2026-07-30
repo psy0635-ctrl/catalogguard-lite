@@ -51,7 +51,10 @@ def _run_etl_reject_details_scenario(page):
         "option",
         name=re.compile(re.escape(SOURCE_FILENAME)),
     ).click()
-    expect(batch_selector).to_contain_text(SOURCE_FILENAME)
+    expect(batch_selector).to_have_attribute(
+        "aria-label",
+        re.compile(re.escape(SOURCE_FILENAME)),
+    )
 
     page.get_by_role("button", name="상세 조회", exact=True).click()
     expect(page.locator("body")).to_contain_text("적재 배치 상세")
