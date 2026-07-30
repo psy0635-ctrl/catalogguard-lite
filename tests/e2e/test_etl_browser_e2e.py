@@ -45,6 +45,14 @@ def _run_etl_reject_details_scenario(page):
     expect(page.locator("body")).to_contain_text(SOURCE_FILENAME)
     expect(page.locator("body")).to_contain_text("sample_marketplace_vendor")
 
+    batch_selector = page.get_by_role("combobox", name="적재 배치 선택")
+    batch_selector.click()
+    page.get_by_role(
+        "option",
+        name=re.compile(re.escape(SOURCE_FILENAME)),
+    ).click()
+    expect(batch_selector).to_contain_text(SOURCE_FILENAME)
+
     page.get_by_role("button", name="상세 조회", exact=True).click()
     expect(page.locator("body")).to_contain_text("적재 배치 상세")
     expect(page.locator("body")).to_contain_text("전체 입력")
