@@ -152,14 +152,15 @@ class FakeSession:
             raise self.error
         return self.response
 
-    def post(self, url, *, files=None, timeout=None):
-        self.calls.append(
-            {
-                "url": url,
-                "files": files,
-                "timeout": timeout,
-            }
-        )
+    def post(self, url, *, files=None, json=None, timeout=None):
+        call = {
+            "url": url,
+            "files": files,
+            "timeout": timeout,
+        }
+        if json is not None:
+            call["json"] = json
+        self.calls.append(call)
         if self.error is not None:
             raise self.error
         return self.response
@@ -1334,3 +1335,351 @@ def test_create_inspection_rejects_empty_file_content_without_request():
         )
 
     assert session.calls == []
+
+
+CATALOG_PROMOTION_PREVIEW_RESPONSE = {
+    "etl_load_run_id": 12,
+    "supplier_key": "sample_fashion_vendor_v2",
+    "inspection_version": "2026.07",
+    "preview_schema_version": 1,
+    "preview_hash": "a" * 64,
+    "promotion_eligible": True,
+    "blocked_reasons": [],
+    "insert_count": 0,
+    "update_count": 1,
+    "unchanged_count": 0,
+    "error_count": 0,
+    "warning_count": 1,
+    "items": [
+        {
+            "supplier_key": "sample_fashion_vendor_v2",
+            "external_product_id": "SKU-001",
+            "action": "update",
+            "changed_fields": {
+                "price": {"before": 19900, "after": 20900},
+            },
+            "before_data": {
+                "external_product_id": "SKU-001",
+                "product_group_id": "GROUP-001",
+                "product_name": "Basic T-shirt",
+                "category": "TOP",
+                "color": "BLACK",
+                "size": "M",
+                "stock": 10,
+                "price": 19900,
+                "sale_price": None,
+                "image_path": "before.jpg",
+                "description": None,
+                "seller": "supplier-a",
+            },
+            "after_data": {
+                "external_product_id": "SKU-001",
+                "product_group_id": "GROUP-001",
+                "product_name": "Basic T-shirt",
+                "category": "TOP",
+                "color": "BLACK",
+                "size": "M",
+                "stock": 10,
+                "price": 20900,
+                "sale_price": None,
+                "image_path": "after.jpg",
+                "description": None,
+                "seller": "supplier-a",
+            },
+        }
+    ],
+}
+
+CATALOG_PROMOTION_RESPONSE = {
+    "promotion_run_id": 31,
+    "etl_load_run_id": 12,
+    "status": "succeeded",
+    "created": True,
+    "preview_hash": "a" * 64,
+    "preview_schema_version": 1,
+    "inspection_version": "2026.07",
+    "inserted_count": 1,
+    "updated_count": 1,
+    "unchanged_count": 1,
+    "blocked_count": 0,
+    "error_count": 0,
+    "warning_count": 1,
+    "started_at": "2026-07-30T10:00:00Z",
+    "completed_at": "2026-07-30T10:00:01Z",
+}
+
+
+def test_get_catalog_promotion_preview_posts_without_body_and_validates_response():
+    client, session = make_client(
+        response=FakeResponse(payload=CATALOG_PROMOTION_PREVIEW_RESPONSE),
+        timeout_seconds=7.5,
+    )
+
+    data = client.get_catalog_promotion_preview(12)
+
+    assert data == CATALOG_PROMOTION_PREVIEW_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/etl-loads/12/promotion-preview",
+            "files": None,
+            "timeout": 7.5,
+        }
+    ]
+
+
+def test_create_catalog_promotion_posts_confirmation_and_expected_preview_hash():
+    client, session = make_client(
+        response=FakeResponse(payload=CATALOG_PROMOTION_RESPONSE),
+        timeout_seconds=3.0,
+    )
+
+    data = client.create_catalog_promotion(
+        12,
+        confirmation=True,
+        expected_preview_hash="a" * 64,
+    )
+
+    assert data == CATALOG_PROMOTION_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/etl-loads/12/promotions",
+            "files": None,
+            "json": {
+                "confirmation": True,
+                "expected_preview_hash": "a" * 64,
+            },
+            "timeout": 3.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize("run_id", [0, -1, True, "12"])
+def test_catalog_promotion_methods_reject_invalid_run_id_without_request(run_id):
+    client, session = make_client(
+        response=FakeResponse(payload=CATALOG_PROMOTION_PREVIEW_RESPONSE)
+    )
+
+    with pytest.raises(ValueError):
+        client.get_catalog_promotion_preview(run_id)
+
+    with pytest.raises(ValueError):
+        client.create_catalog_promotion(
+            run_id,
+            confirmation=True,
+            expected_preview_hash="a" * 64,
+        )
+
+    assert session.calls == []
+
+
+def test_create_catalog_promotion_requires_explicit_confirmation_without_request():
+    client, session = make_client(
+        response=FakeResponse(payload=CATALOG_PROMOTION_RESPONSE)
+    )
+
+    with pytest.raises(ValueError):
+        client.create_catalog_promotion(
+            12,
+            confirmation=False,
+            expected_preview_hash="a" * 64,
+        )
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("preview_hash", ["", "A" * 64, "a" * 63, "z" * 64, None])
+def test_create_catalog_promotion_rejects_invalid_preview_hash_without_request(
+    preview_hash,
+):
+    client, session = make_client(
+        response=FakeResponse(payload=CATALOG_PROMOTION_RESPONSE)
+    )
+
+    with pytest.raises(ValueError):
+        client.create_catalog_promotion(
+            12,
+            confirmation=True,
+            expected_preview_hash=preview_hash,
+        )
+
+    assert session.calls == []
+
+
+def test_catalog_promotion_preview_maps_404_to_etl_load_not_found():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=404,
+            payload={"detail": "private database detail"},
+            headers={"X-Request-ID": VALID_REQUEST_ID},
+        )
+    )
+
+    with pytest.raises(client_module.ETLLoadNotFoundError) as error:
+        client.get_catalog_promotion_preview(12)
+
+    assert error.value.request_id == VALID_REQUEST_ID
+    assert "private database detail" not in str(error.value)
+
+
+def test_create_catalog_promotion_maps_preview_stale_conflict():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=409,
+            payload={
+                "detail": {
+                    "code": "preview_stale",
+                    "message": "미리보기 이후 상품 데이터가 변경되었습니다.",
+                    "promotion_run_id": 31,
+                }
+            },
+        )
+    )
+
+    with pytest.raises(client_module.CatalogPromotionPreviewStaleError) as error:
+        client.create_catalog_promotion(
+            12,
+            confirmation=True,
+            expected_preview_hash="a" * 64,
+        )
+
+    assert error.value.code == "preview_stale"
+    assert error.value.promotion_run_id == 31
+
+
+def test_create_catalog_promotion_maps_blocked_conflict_with_safe_reasons():
+    client_module = import_client_module()
+    blocked_reasons = [
+        {
+            "code": "inspection_errors_present",
+            "message": "상품 검사 오류가 있어 반영할 수 없습니다.",
+            "supplier_key": None,
+            "external_product_id": None,
+            "staging_product_ids": [],
+        }
+    ]
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=409,
+            payload={
+                "detail": {
+                    "code": "promotion_blocked",
+                    "message": "현재 ETL 적재 결과를 반영할 수 없습니다.",
+                    "promotion_run_id": 32,
+                    "blocked_reasons": blocked_reasons,
+                }
+            },
+        )
+    )
+
+    with pytest.raises(client_module.CatalogPromotionBlockedError) as error:
+        client.create_catalog_promotion(
+            12,
+            confirmation=True,
+            expected_preview_hash="a" * 64,
+        )
+
+    assert error.value.code == "promotion_blocked"
+    assert error.value.blocked_reasons == blocked_reasons
+
+
+def test_create_catalog_promotion_maps_known_apply_failure_without_leaking_body():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=500,
+            payload={
+                "detail": {
+                    "code": "promotion_failed",
+                    "message": "운영 상품 반영 중 오류가 발생했습니다.",
+                    "promotion_run_id": 33,
+                    "debug": "postgresql://private",
+                }
+            },
+            text="Traceback: postgresql://private",
+        )
+    )
+
+    with pytest.raises(client_module.CatalogPromotionFailedError) as error:
+        client.create_catalog_promotion(
+            12,
+            confirmation=True,
+            expected_preview_hash="a" * 64,
+        )
+
+    assert error.value.code == "promotion_failed"
+    assert error.value.promotion_run_id == 33
+    assert "postgresql" not in str(error.value)
+    assert "Traceback" not in str(error.value)
+
+
+@pytest.mark.parametrize("status_code", [400, 422, 503])
+def test_catalog_promotion_http_errors_use_safe_generic_message(status_code):
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=status_code,
+            payload={"detail": "postgresql://private"},
+            text="Traceback: private stack",
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.create_catalog_promotion(
+            12,
+            confirmation=True,
+            expected_preview_hash="a" * 64,
+        )
+
+    assert "postgresql" not in str(error.value)
+    assert "Traceback" not in str(error.value)
+
+
+def test_catalog_promotion_methods_convert_connection_and_timeout_errors():
+    client_module = import_client_module()
+    connection_client, _ = make_client(
+        error=requests.ConnectionError("http://private.internal")
+    )
+    timeout_client, _ = make_client(error=requests.Timeout("too slow"))
+
+    with pytest.raises(client_module.CatalogGuardApiConnectionError):
+        connection_client.get_catalog_promotion_preview(12)
+
+    with pytest.raises(client_module.CatalogGuardApiTimeoutError):
+        timeout_client.create_catalog_promotion(
+            12,
+            confirmation=True,
+            expected_preview_hash="a" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    ("method_name", "payload"),
+    [
+        (
+            "get_catalog_promotion_preview",
+            {**CATALOG_PROMOTION_PREVIEW_RESPONSE, "items": [{"action": "update"}]},
+        ),
+        (
+            "create_catalog_promotion",
+            {**CATALOG_PROMOTION_RESPONSE, "status": "blocked"},
+        ),
+    ],
+)
+def test_catalog_promotion_methods_reject_malformed_success_response(
+    method_name,
+    payload,
+):
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        if method_name == "get_catalog_promotion_preview":
+            client.get_catalog_promotion_preview(12)
+        else:
+            client.create_catalog_promotion(
+                12,
+                confirmation=True,
+                expected_preview_hash="a" * 64,
+            )

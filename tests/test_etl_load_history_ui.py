@@ -55,6 +55,242 @@ def make_product():
     }
 
 
+def make_promotion_preview(
+    *,
+    run_id=12,
+    eligible=True,
+    preview_hash=None,
+    blocked_reasons=None,
+):
+    return {
+        "etl_load_run_id": run_id,
+        "supplier_key": "sample_fashion_vendor_v2",
+        "inspection_version": "2026.07",
+        "preview_schema_version": 1,
+        "preview_hash": ("a" * 64 if preview_hash is None else preview_hash),
+        "promotion_eligible": eligible,
+        "blocked_reasons": blocked_reasons or [],
+        "insert_count": 1,
+        "update_count": 1,
+        "unchanged_count": 1,
+        "error_count": 0,
+        "warning_count": 1,
+        "items": [
+            {
+                "supplier_key": "sample_fashion_vendor_v2",
+                "external_product_id": "SKU-NEW",
+                "action": "insert",
+                "changed_fields": {},
+                "before_data": None,
+                "after_data": {
+                    "external_product_id": "SKU-NEW",
+                    "product_group_id": "GROUP-NEW",
+                    "product_name": "New shirt",
+                    "category": "TOP",
+                    "color": "WHITE",
+                    "size": "M",
+                    "stock": 5,
+                    "price": 15900,
+                    "sale_price": None,
+                    "image_path": "new.jpg",
+                    "description": None,
+                    "seller": "supplier-a",
+                },
+            },
+            {
+                "supplier_key": "sample_fashion_vendor_v2",
+                "external_product_id": "SKU-UPDATE",
+                "action": "update",
+                "changed_fields": {
+                    "price": {"before": 19900, "after": 20900},
+                    "stock": {"before": 10, "after": 8},
+                },
+                "before_data": {
+                    "external_product_id": "SKU-UPDATE",
+                    "product_group_id": "GROUP-UPDATE",
+                    "product_name": "Basic shirt",
+                    "category": "TOP",
+                    "color": "BLACK",
+                    "size": "M",
+                    "stock": 10,
+                    "price": 19900,
+                    "sale_price": None,
+                    "image_path": "before.jpg",
+                    "description": None,
+                    "seller": "supplier-a",
+                },
+                "after_data": {
+                    "external_product_id": "SKU-UPDATE",
+                    "product_group_id": "GROUP-UPDATE",
+                    "product_name": "Basic shirt",
+                    "category": "TOP",
+                    "color": "BLACK",
+                    "size": "M",
+                    "stock": 8,
+                    "price": 20900,
+                    "sale_price": None,
+                    "image_path": "before.jpg",
+                    "description": None,
+                    "seller": "supplier-a",
+                },
+            },
+            {
+                "supplier_key": "sample_fashion_vendor_v2",
+                "external_product_id": "SKU-SAME",
+                "action": "unchanged",
+                "changed_fields": {},
+                "before_data": {
+                    "external_product_id": "SKU-SAME",
+                    "product_group_id": "GROUP-SAME",
+                    "product_name": "Same shirt",
+                    "category": "TOP",
+                    "color": "NAVY",
+                    "size": "L",
+                    "stock": 4,
+                    "price": 25900,
+                    "sale_price": None,
+                    "image_path": "same.jpg",
+                    "description": None,
+                    "seller": "supplier-a",
+                },
+                "after_data": {
+                    "external_product_id": "SKU-SAME",
+                    "product_group_id": "GROUP-SAME",
+                    "product_name": "Same shirt",
+                    "category": "TOP",
+                    "color": "NAVY",
+                    "size": "L",
+                    "stock": 4,
+                    "price": 25900,
+                    "sale_price": None,
+                    "image_path": "same.jpg",
+                    "description": None,
+                    "seller": "supplier-a",
+                },
+            },
+        ],
+    }
+
+
+def test_initialize_catalog_promotion_state_is_safe_by_default():
+    state = {}
+
+    etl_load_history.initialize_etl_load_state(state)
+
+    assert state["etl_load_selected_run_id"] is None
+    assert state["catalog_promotion_preview_response"] is None
+    assert state["catalog_promotion_preview_hash"] is None
+    assert state["catalog_promotion_confirmation"] is False
+    assert state["catalog_promotion_in_flight"] is False
+    assert etl_load_history.can_submit_catalog_promotion(state) is False
+
+
+def test_catalog_promotion_preview_state_requires_matching_batch_hash_and_confirmation():
+    state = {"etl_load_selected_run_id": 12}
+    etl_load_history.initialize_etl_load_state(state)
+
+    etl_load_history.store_catalog_promotion_preview(
+        state,
+        make_promotion_preview(),
+    )
+
+    assert state["catalog_promotion_preview_hash"] == "a" * 64
+    assert etl_load_history.can_submit_catalog_promotion(state) is False
+    state["catalog_promotion_confirmation"] = True
+    assert etl_load_history.can_submit_catalog_promotion(state) is True
+    state["etl_load_selected_run_id"] = 13
+    assert etl_load_history.can_submit_catalog_promotion(state) is False
+
+
+def test_changing_batch_clears_previous_preview_confirmation_and_result():
+    state = {
+        "etl_load_selected_run_id": 12,
+        "catalog_promotion_preview_batch_id": 12,
+        "catalog_promotion_preview_response": make_promotion_preview(),
+        "catalog_promotion_preview_hash": "a" * 64,
+        "catalog_promotion_confirmation": True,
+        "catalog_promotion_result": {"status": "succeeded"},
+    }
+    etl_load_history.initialize_etl_load_state(state)
+
+    state["etl_load_selected_run_id"] = 13
+    etl_load_history.synchronize_catalog_promotion_batch(state)
+
+    assert state["catalog_promotion_preview_response"] is None
+    assert state["catalog_promotion_preview_hash"] is None
+    assert state["catalog_promotion_confirmation"] is False
+    assert state["catalog_promotion_result"] is None
+
+
+def test_new_preview_and_success_invalidate_previous_confirmation_and_hash():
+    state = {"etl_load_selected_run_id": 12}
+    etl_load_history.initialize_etl_load_state(state)
+    state["catalog_promotion_confirmation"] = True
+    state["catalog_promotion_result"] = {"status": "old"}
+
+    etl_load_history.store_catalog_promotion_preview(
+        state,
+        make_promotion_preview(preview_hash="b" * 64),
+    )
+
+    assert state["catalog_promotion_confirmation"] is False
+    assert state["catalog_promotion_result"] is None
+    state["catalog_promotion_confirmation"] = True
+    etl_load_history.store_catalog_promotion_success(
+        state,
+        {
+            "promotion_run_id": 31,
+            "etl_load_run_id": 12,
+            "status": "succeeded",
+            "created": True,
+        },
+    )
+    assert state["catalog_promotion_preview_response"] is None
+    assert state["catalog_promotion_preview_hash"] is None
+    assert state["catalog_promotion_confirmation"] is False
+    assert state["catalog_promotion_result"]["promotion_run_id"] == 31
+
+
+def test_stale_preview_clears_reusable_state_but_keeps_result_kind():
+    state = {"etl_load_selected_run_id": 12}
+    etl_load_history.initialize_etl_load_state(state)
+    etl_load_history.store_catalog_promotion_preview(
+        state,
+        make_promotion_preview(),
+    )
+    state["catalog_promotion_confirmation"] = True
+
+    etl_load_history.store_catalog_promotion_failure(
+        state,
+        kind="preview_stale",
+        message="미리보기를 다시 실행하세요.",
+    )
+
+    assert state["catalog_promotion_preview_response"] is None
+    assert state["catalog_promotion_preview_hash"] is None
+    assert state["catalog_promotion_confirmation"] is False
+    assert state["catalog_promotion_result"] == {
+        "kind": "preview_stale",
+        "message": "미리보기를 다시 실행하세요.",
+    }
+
+
+def test_build_catalog_promotion_changes_dataframe_flattens_update_fields():
+    dataframe = etl_load_history.build_catalog_promotion_changes_dataframe(
+        make_promotion_preview()["items"]
+    )
+
+    assert list(dataframe.columns) == etl_load_history.PROMOTION_CHANGE_DISPLAY_COLUMNS
+    assert set(dataframe["변경 유형"]) == {"신규 등록", "정보 수정", "변경 없음"}
+    update_rows = dataframe[dataframe["외부 상품 ID"] == "SKU-UPDATE"]
+    assert update_rows[["변경 필드", "변경 전 값", "변경 후 값"]].to_dict(
+        orient="records"
+    ) == [
+        {"변경 필드": "price", "변경 전 값": 19900, "변경 후 값": 20900},
+        {"변경 필드": "stock", "변경 전 값": 10, "변경 후 값": 8},
+    ]
+
+
 def test_build_etl_load_dataframe_maps_contract_to_display_columns():
     dataframe = build_etl_load_dataframe([make_load()])
 
@@ -193,12 +429,20 @@ class FakeEtlApiClient:
         rejection_items=None,
         rejection_total=None,
         reject_details_stored=False,
+        promotion_preview_response=None,
+        promotion_preview_error=None,
+        promotion_response=None,
+        promotion_error=None,
+        list_pages=None,
     ):
         self.list_calls = []
         self.detail_calls = []
         self.rejection_calls = []
+        self.promotion_preview_calls = []
+        self.promotion_calls = []
         self.detail_error = detail_error
         self.list_items = [make_load()] if list_items is None else list_items
+        self.list_pages = list_pages
         self.list_total = (
             len(self.list_items) if list_total is None else list_total
         )
@@ -208,11 +452,40 @@ class FakeEtlApiClient:
             len(self.rejection_items) if rejection_total is None else rejection_total
         )
         self.reject_details_stored = reject_details_stored
+        self.promotion_preview_response = (
+            make_promotion_preview()
+            if promotion_preview_response is None
+            else promotion_preview_response
+        )
+        self.promotion_preview_error = promotion_preview_error
+        self.promotion_response = promotion_response or {
+            "promotion_run_id": 31,
+            "etl_load_run_id": 12,
+            "status": "succeeded",
+            "created": True,
+            "preview_hash": "a" * 64,
+            "preview_schema_version": 1,
+            "inspection_version": "2026.07",
+            "inserted_count": 1,
+            "updated_count": 1,
+            "unchanged_count": 1,
+            "blocked_count": 0,
+            "error_count": 0,
+            "warning_count": 1,
+            "started_at": "2026-07-30T10:00:00Z",
+            "completed_at": "2026-07-30T10:00:01Z",
+        }
+        self.promotion_error = promotion_error
 
     def list_etl_loads(self, **params):
         self.list_calls.append(params)
+        items = (
+            self.list_pages.get(params["offset"], [])
+            if self.list_pages is not None
+            else self.list_items
+        )
         return {
-            "items": self.list_items,
+            "items": items,
             "total": self.list_total,
             "limit": params["limit"],
             "offset": params["offset"],
@@ -255,6 +528,45 @@ class FakeEtlApiClient:
             "offset": params["offset"],
         }
 
+    def get_catalog_promotion_preview(self, run_id):
+        self.promotion_preview_calls.append(run_id)
+        if self.promotion_preview_error is not None:
+            raise self.promotion_preview_error
+        return {
+            **self.promotion_preview_response,
+            "etl_load_run_id": run_id,
+        }
+
+    def create_catalog_promotion(
+        self,
+        run_id,
+        *,
+        confirmation,
+        expected_preview_hash,
+    ):
+        self.promotion_calls.append(
+            {
+                "etl_load_run_id": run_id,
+                "confirmation": confirmation,
+                "expected_preview_hash": expected_preview_hash,
+            }
+        )
+        if self.promotion_error is not None:
+            raise self.promotion_error
+        return {
+            **self.promotion_response,
+            "etl_load_run_id": run_id,
+            "preview_hash": expected_preview_hash,
+        }
+
+
+def select_etl_batch(app, run_id):
+    return next(
+        widget
+        for widget in app.selectbox
+        if widget.key == "etl_load_selected_run_id"
+    ).select(run_id).run(timeout=10)
+
 
 def test_etl_load_history_shows_rejection_rows_and_paginates(monkeypatch):
     rejection_items = [
@@ -281,6 +593,7 @@ def test_etl_load_history_shows_rejection_rows_and_paginates(monkeypatch):
     monkeypatch.setattr(catalogguard_api, "create_catalogguard_api_client", lambda: api_client)
 
     app = AppTest.from_file("app.py").run(timeout=10)
+    select_etl_batch(app, 12)
     next(widget for widget in app.button if widget.label == "상세 조회").click().run(
         timeout=10
     )
@@ -324,6 +637,7 @@ def test_etl_load_history_apptest_queries_once_and_shows_detail(monkeypatch):
         for dataframe in app.dataframe
     )
 
+    select_etl_batch(app, 12)
     next(widget for widget in app.button if widget.label == "상세 조회").click().run(
         timeout=10
     )
@@ -357,6 +671,7 @@ def test_etl_load_history_does_not_retry_failed_detail_within_one_click(
     )
 
     app = AppTest.from_file("app.py").run(timeout=10)
+    select_etl_batch(app, 12)
     next(widget for widget in app.button if widget.label == "상세 조회").click().run(
         timeout=10
     )
@@ -407,6 +722,7 @@ def test_etl_load_history_apptest_applies_filters_and_product_pagination(
     )
     assert api_client.list_calls[-1]["offset"] == 10
 
+    select_etl_batch(app, 12)
     next(widget for widget in app.button if widget.key == "etl_load_show_detail").click().run(
         timeout=10
     )
@@ -439,6 +755,7 @@ def test_etl_load_history_clears_previous_products_when_batch_changes(monkeypatc
     )
 
     app = AppTest.from_file("app.py").run(timeout=10)
+    select_etl_batch(app, 12)
     next(widget for widget in app.button if widget.key == "etl_load_show_detail").click().run(
         timeout=10
     )
@@ -485,3 +802,228 @@ def test_etl_load_history_shows_empty_result_message(monkeypatch):
     assert "조건에 맞는 ETL 적재 이력이 없습니다." in [
         info.value for info in app.info
     ]
+
+
+def _patch_etl_api_client(monkeypatch, api_client):
+    monkeypatch.setattr(
+        etl_load_history,
+        "create_catalogguard_api_client",
+        lambda: api_client,
+    )
+    monkeypatch.setattr(
+        catalogguard_api,
+        "create_catalogguard_api_client",
+        lambda: api_client,
+    )
+
+
+def test_catalog_promotion_apptest_requires_batch_selection(monkeypatch):
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = AppTest.from_file("app.py").run(timeout=10)
+
+    assert app.session_state["etl_load_selected_run_id"] is None
+    assert next(
+        button for button in app.button if button.key == "catalog_promotion_preview"
+    ).disabled
+    assert api_client.promotion_preview_calls == []
+    assert any(
+        "운영 상품 반영 결과를 확인할 ETL 적재 이력을 선택하세요."
+        in info.value
+        for info in app.info
+    )
+
+
+def test_catalog_promotion_apptest_preview_confirm_and_apply_once(monkeypatch):
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = AppTest.from_file("app.py").run(timeout=10)
+    next(
+        selectbox
+        for selectbox in app.selectbox
+        if selectbox.key == "etl_load_selected_run_id"
+    ).select(12).run(timeout=10)
+    next(
+        button for button in app.button if button.key == "catalog_promotion_preview"
+    ).click().run(timeout=10)
+
+    assert api_client.promotion_preview_calls == [12]
+    assert app.session_state["catalog_promotion_preview_hash"] == "a" * 64
+    assert any("반영 가능" in success.value for success in app.success)
+    assert any(
+        set(dataframe.value.columns)
+        == set(etl_load_history.PROMOTION_CHANGE_DISPLAY_COLUMNS)
+        for dataframe in app.dataframe
+    )
+    app.run(timeout=10)
+    assert api_client.promotion_preview_calls == [12]
+    assert api_client.promotion_calls == []
+
+    confirmation = next(
+        checkbox
+        for checkbox in app.checkbox
+        if checkbox.key == "catalog_promotion_confirmation_input"
+    )
+    confirmation.check().run(timeout=10)
+    assert api_client.promotion_calls == []
+    submit_button = next(
+        button for button in app.button if button.key == "catalog_promotion_submit"
+    )
+    assert submit_button.disabled is False
+    submit_button.click().run(timeout=10)
+
+    assert api_client.promotion_calls == [
+        {
+            "etl_load_run_id": 12,
+            "confirmation": True,
+            "expected_preview_hash": "a" * 64,
+        }
+    ]
+    assert any(
+        "운영 상품 반영이 완료되었습니다." in success.value
+        for success in app.success
+    )
+    assert app.session_state["catalog_promotion_preview_hash"] is None
+    assert app.session_state["catalog_promotion_confirmation"] is False
+    app.run(timeout=10)
+    assert len(api_client.promotion_calls) == 1
+
+
+def test_catalog_promotion_apptest_blocked_preview_shows_reasons(monkeypatch):
+    blocked_preview = make_promotion_preview(
+        eligible=False,
+        blocked_reasons=[
+            {
+                "code": "inspection_errors_present",
+                "message": "상품 검사 오류가 있어 운영 반영을 진행할 수 없습니다.",
+                "supplier_key": None,
+                "external_product_id": None,
+                "staging_product_ids": [],
+            }
+        ],
+    )
+    blocked_preview.update(
+        insert_count=0,
+        update_count=0,
+        unchanged_count=0,
+        items=[],
+    )
+    api_client = FakeEtlApiClient(
+        promotion_preview_response=blocked_preview,
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = AppTest.from_file("app.py").run(timeout=10)
+    next(
+        selectbox
+        for selectbox in app.selectbox
+        if selectbox.key == "etl_load_selected_run_id"
+    ).select(12).run(timeout=10)
+    next(
+        button for button in app.button if button.key == "catalog_promotion_preview"
+    ).click().run(timeout=10)
+
+    assert any("반영 불가" in error.value for error in app.error)
+    assert any(
+        "상품 검사 오류가 있어 운영 반영을 진행할 수 없습니다." in warning.value
+        for warning in app.warning
+    )
+    assert next(
+        button for button in app.button if button.key == "catalog_promotion_submit"
+    ).disabled
+    assert api_client.promotion_calls == []
+
+
+def test_catalog_promotion_apptest_batch_change_clears_preview(monkeypatch):
+    api_client = FakeEtlApiClient(list_items=[make_load(12), make_load(13)])
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = AppTest.from_file("app.py").run(timeout=10)
+    batch_select = next(
+        selectbox
+        for selectbox in app.selectbox
+        if selectbox.key == "etl_load_selected_run_id"
+    )
+    batch_select.select(12).run(timeout=10)
+    next(
+        button for button in app.button if button.key == "catalog_promotion_preview"
+    ).click().run(timeout=10)
+    assert app.session_state["catalog_promotion_preview_hash"] == "a" * 64
+
+    next(
+        selectbox
+        for selectbox in app.selectbox
+        if selectbox.key == "etl_load_selected_run_id"
+    ).select(13).run(timeout=10)
+
+    assert app.session_state["catalog_promotion_preview_hash"] is None
+    assert app.session_state["catalog_promotion_preview_response"] is None
+    assert app.session_state["catalog_promotion_confirmation"] is False
+
+
+def test_catalog_promotion_apptest_page_change_invalidates_missing_batch(
+    monkeypatch,
+):
+    api_client = FakeEtlApiClient(
+        list_items=[make_load(12)],
+        list_total=11,
+        list_pages={
+            0: [make_load(12)],
+            10: [make_load(13)],
+        },
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = AppTest.from_file("app.py").run(timeout=10)
+    select_etl_batch(app, 12)
+    next(
+        button for button in app.button if button.key == "catalog_promotion_preview"
+    ).click().run(timeout=10)
+    assert app.session_state["catalog_promotion_preview_hash"] == "a" * 64
+
+    next(
+        button for button in app.button if button.key == "etl_load_next"
+    ).click().run(timeout=10)
+
+    assert app.session_state["etl_load_selected_run_id"] is None
+    assert app.session_state["catalog_promotion_preview_hash"] is None
+    assert app.session_state["catalog_promotion_preview_response"] is None
+
+
+def test_catalog_promotion_apptest_stale_clears_preview_and_prompts_retry(
+    monkeypatch,
+):
+    from clients.catalogguard_api import CatalogPromotionPreviewStaleError
+
+    api_client = FakeEtlApiClient(
+        promotion_error=CatalogPromotionPreviewStaleError(
+            "미리보기 이후 상품 데이터가 변경되었습니다.",
+            code="preview_stale",
+        )
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = AppTest.from_file("app.py").run(timeout=10)
+    next(
+        selectbox
+        for selectbox in app.selectbox
+        if selectbox.key == "etl_load_selected_run_id"
+    ).select(12).run(timeout=10)
+    next(
+        button for button in app.button if button.key == "catalog_promotion_preview"
+    ).click().run(timeout=10)
+    next(
+        checkbox
+        for checkbox in app.checkbox
+        if checkbox.key == "catalog_promotion_confirmation_input"
+    ).check().run(timeout=10)
+    next(
+        button for button in app.button if button.key == "catalog_promotion_submit"
+    ).click().run(timeout=10)
+
+    assert len(api_client.promotion_calls) == 1
+    assert app.session_state["catalog_promotion_preview_hash"] is None
+    assert app.session_state["catalog_promotion_confirmation"] is False
+    assert any("미리보기를 다시 실행" in error.value for error in app.error)

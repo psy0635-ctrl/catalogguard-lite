@@ -10,6 +10,9 @@ from clients.catalogguard_api import (
     CatalogGuardApiConnectionError,
     CatalogGuardApiResponseError,
     CatalogGuardApiTimeoutError,
+    CatalogPromotionBlockedError,
+    CatalogPromotionFailedError,
+    CatalogPromotionPreviewStaleError,
     ETLLoadNotFoundError,
     create_catalogguard_api_client,
 )
@@ -46,6 +49,19 @@ ETL_PRODUCT_DISPLAY_COLUMNS = [
     "판매자",
     "등록 시간",
 ]
+PROMOTION_CHANGE_DISPLAY_COLUMNS = [
+    "공급사",
+    "외부 상품 ID",
+    "변경 유형",
+    "변경 필드",
+    "변경 전 값",
+    "변경 후 값",
+]
+PROMOTION_ACTION_LABELS = {
+    "insert": "신규 등록",
+    "update": "정보 수정",
+    "unchanged": "변경 없음",
+}
 
 ETL_LOAD_STATE_DEFAULTS = {
     "etl_load_initialized": False,
@@ -64,6 +80,14 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_reject_offset": 0,
     "etl_reject_response": None,
     "etl_reject_error": None,
+    "catalog_promotion_preview_batch_id": None,
+    "catalog_promotion_preview_response": None,
+    "catalog_promotion_preview_hash": None,
+    "catalog_promotion_preview_error": None,
+    "catalog_promotion_confirmation": False,
+    "catalog_promotion_confirmation_input": False,
+    "catalog_promotion_in_flight": False,
+    "catalog_promotion_result": None,
 }
 
 
@@ -213,6 +237,123 @@ def initialize_etl_load_state(session_state=None) -> None:
             state[key] = value
 
 
+def clear_catalog_promotion_preview_state(
+    session_state,
+    *,
+    clear_result: bool = True,
+) -> None:
+    session_state["catalog_promotion_preview_batch_id"] = None
+    session_state["catalog_promotion_preview_response"] = None
+    session_state["catalog_promotion_preview_hash"] = None
+    session_state["catalog_promotion_preview_error"] = None
+    session_state["catalog_promotion_confirmation"] = False
+    session_state["catalog_promotion_in_flight"] = False
+    if clear_result:
+        session_state["catalog_promotion_result"] = None
+
+
+def synchronize_catalog_promotion_batch(session_state) -> None:
+    selected_run_id = session_state.get("etl_load_selected_run_id")
+    preview_batch_id = session_state.get("catalog_promotion_preview_batch_id")
+    if preview_batch_id is None or preview_batch_id == selected_run_id:
+        return
+    clear_catalog_promotion_preview_state(session_state)
+
+
+def store_catalog_promotion_preview(session_state, response: dict[str, Any]) -> None:
+    selected_run_id = session_state.get("etl_load_selected_run_id")
+    response_run_id = response.get("etl_load_run_id")
+    if selected_run_id is None or response_run_id != selected_run_id:
+        raise ValueError("promotion preview batch does not match selected batch")
+
+    clear_catalog_promotion_preview_state(session_state)
+    session_state["catalog_promotion_preview_batch_id"] = response_run_id
+    session_state["catalog_promotion_preview_response"] = dict(response)
+    preview_hash = response.get("preview_hash")
+    session_state["catalog_promotion_preview_hash"] = (
+        preview_hash if isinstance(preview_hash, str) else None
+    )
+
+
+def can_submit_catalog_promotion(session_state) -> bool:
+    response = session_state.get("catalog_promotion_preview_response")
+    selected_run_id = session_state.get("etl_load_selected_run_id")
+    preview_batch_id = session_state.get("catalog_promotion_preview_batch_id")
+    preview_hash = session_state.get("catalog_promotion_preview_hash")
+    return (
+        isinstance(response, dict)
+        and selected_run_id is not None
+        and selected_run_id == preview_batch_id
+        and response.get("promotion_eligible") is True
+        and isinstance(preview_hash, str)
+        and len(preview_hash) == 64
+        and session_state.get("catalog_promotion_confirmation") is True
+        and session_state.get("catalog_promotion_in_flight") is not True
+    )
+
+
+def store_catalog_promotion_success(
+    session_state,
+    response: dict[str, Any],
+) -> None:
+    clear_catalog_promotion_preview_state(session_state, clear_result=False)
+    session_state["catalog_promotion_result"] = dict(response)
+
+
+def store_catalog_promotion_failure(
+    session_state,
+    *,
+    kind: str,
+    message: str,
+) -> None:
+    if kind == "preview_stale":
+        clear_catalog_promotion_preview_state(session_state, clear_result=False)
+    else:
+        session_state["catalog_promotion_in_flight"] = False
+    session_state["catalog_promotion_result"] = {
+        "kind": kind,
+        "message": message,
+    }
+
+
+def build_catalog_promotion_changes_dataframe(
+    items: list[dict[str, Any]],
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        supplier_key = item.get("supplier_key", "")
+        external_product_id = item.get("external_product_id", "")
+        action = str(item.get("action", ""))
+        action_label = PROMOTION_ACTION_LABELS.get(action, action)
+        changed_fields = item.get("changed_fields")
+        if action == "update" and isinstance(changed_fields, dict):
+            for field_name, change in changed_fields.items():
+                change_data = change if isinstance(change, dict) else {}
+                rows.append(
+                    {
+                        "공급사": supplier_key,
+                        "외부 상품 ID": external_product_id,
+                        "변경 유형": action_label,
+                        "변경 필드": field_name,
+                        "변경 전 값": _display_nullable(change_data.get("before")),
+                        "변경 후 값": _display_nullable(change_data.get("after")),
+                    }
+                )
+            continue
+
+        rows.append(
+            {
+                "공급사": supplier_key,
+                "외부 상품 ID": external_product_id,
+                "변경 유형": action_label,
+                "변경 필드": "상품 전체" if action == "insert" else "-",
+                "변경 전 값": "-" if action == "insert" else "변경 없음",
+                "변경 후 값": "신규 등록" if action == "insert" else "변경 없음",
+            }
+        )
+    return pd.DataFrame(rows, columns=PROMOTION_CHANGE_DISPLAY_COLUMNS)
+
+
 def reset_etl_load_detail_state(session_state) -> None:
     session_state["etl_load_detail_requested"] = False
     session_state["etl_load_detail_response"] = None
@@ -236,10 +377,224 @@ def apply_etl_load_search(session_state) -> None:
     session_state["etl_load_initialized"] = False
     session_state["etl_load_selected_run_id"] = None
     reset_etl_load_detail_state(session_state)
+    clear_catalog_promotion_preview_state(session_state)
 
 
 def _on_etl_load_selection_change(session_state) -> None:
     reset_etl_load_detail_state(session_state)
+    clear_catalog_promotion_preview_state(session_state)
+
+
+def _catalog_promotion_error_message(error: Exception) -> str:
+    if isinstance(error, CatalogGuardApiConnectionError):
+        return "CatalogGuard API 서버에 연결할 수 없습니다."
+    if isinstance(error, CatalogGuardApiTimeoutError):
+        return "CatalogGuard API 서버의 응답 시간이 초과되었습니다."
+    if isinstance(error, ETLLoadNotFoundError):
+        return "선택한 ETL 적재 이력을 찾을 수 없습니다."
+    if isinstance(error, CatalogGuardApiResponseError):
+        return "운영 상품 반영 요청을 처리하지 못했습니다."
+    return "운영 상품 반영 요청 중 오류가 발생했습니다."
+
+
+def _render_catalog_promotion_result() -> None:
+    result = st.session_state.get("catalog_promotion_result")
+    if not isinstance(result, dict):
+        return
+
+    if result.get("status") == "succeeded":
+        if result.get("created") is True:
+            st.success("운영 상품 반영이 완료되었습니다.")
+        else:
+            st.info(
+                "이미 처리된 ETL 적재 결과입니다. 기존 운영 상품 반영 결과를 표시합니다."
+            )
+        count_columns = st.columns(3)
+        count_columns[0].metric("신규 등록", result.get("inserted_count", 0))
+        count_columns[1].metric("정보 수정", result.get("updated_count", 0))
+        count_columns[2].metric("변경 없음", result.get("unchanged_count", 0))
+        st.caption("새로운 반영이 필요하면 미리보기를 다시 실행하세요.")
+        return
+
+    kind = result.get("kind")
+    message = str(result.get("message") or "")
+    if kind == "preview_stale":
+        st.error(
+            "미리보기 이후 상품 데이터가 변경되었습니다. "
+            "미리보기를 다시 실행하세요."
+        )
+    elif kind == "promotion_blocked":
+        st.error("현재 ETL 적재 결과는 운영 상품에 반영할 수 없습니다.")
+        if message:
+            st.warning(message)
+    elif kind == "promotion_failed":
+        st.error("운영 상품 반영 중 오류가 발생했습니다.")
+    elif message:
+        st.error(message)
+
+
+def _request_catalog_promotion_preview(api_client) -> None:
+    selected_run_id = st.session_state.get("etl_load_selected_run_id")
+    if selected_run_id is None:
+        return
+
+    clear_catalog_promotion_preview_state(st.session_state)
+    st.session_state["catalog_promotion_in_flight"] = True
+    try:
+        with st.spinner("운영 반영 미리보기를 계산하고 있습니다."):
+            response = api_client.get_catalog_promotion_preview(selected_run_id)
+        store_catalog_promotion_preview(st.session_state, response)
+    except (
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        ETLLoadNotFoundError,
+        CatalogGuardApiResponseError,
+    ) as error:
+        store_catalog_promotion_failure(
+            st.session_state,
+            kind="preview_failed",
+            message=build_etl_api_error_display_message(
+                _catalog_promotion_error_message(error),
+                error,
+            ),
+        )
+    finally:
+        st.session_state["catalog_promotion_in_flight"] = False
+
+
+def _submit_catalog_promotion(api_client) -> None:
+    if not can_submit_catalog_promotion(st.session_state):
+        return
+
+    selected_run_id = st.session_state["etl_load_selected_run_id"]
+    preview_hash = st.session_state["catalog_promotion_preview_hash"]
+    st.session_state["catalog_promotion_in_flight"] = True
+    try:
+        with st.spinner("운영 상품에 반영하고 있습니다."):
+            response = api_client.create_catalog_promotion(
+                selected_run_id,
+                confirmation=True,
+                expected_preview_hash=preview_hash,
+            )
+        store_catalog_promotion_success(st.session_state, response)
+    except CatalogPromotionPreviewStaleError as error:
+        store_catalog_promotion_failure(
+            st.session_state,
+            kind="preview_stale",
+            message=str(error),
+        )
+    except CatalogPromotionBlockedError as error:
+        store_catalog_promotion_failure(
+            st.session_state,
+            kind="promotion_blocked",
+            message=str(error),
+        )
+    except CatalogPromotionFailedError as error:
+        store_catalog_promotion_failure(
+            st.session_state,
+            kind="promotion_failed",
+            message=str(error),
+        )
+    except (
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        ETLLoadNotFoundError,
+        CatalogGuardApiResponseError,
+    ) as error:
+        store_catalog_promotion_failure(
+            st.session_state,
+            kind="promotion_failed",
+            message=build_etl_api_error_display_message(
+                _catalog_promotion_error_message(error),
+                error,
+            ),
+        )
+    finally:
+        st.session_state["catalog_promotion_in_flight"] = False
+
+
+def _render_catalog_promotion_preview(api_client) -> None:
+    if not isinstance(
+        st.session_state.get("catalog_promotion_preview_response"),
+        dict,
+    ):
+        st.session_state["catalog_promotion_confirmation_input"] = False
+    st.divider()
+    st.subheader("운영 상품 반영")
+    st.write(
+        "선택한 ETL 적재 결과와 현재 운영 상품을 비교한 뒤, "
+        "변경 내용을 확인하고 명시적으로 승인해 반영합니다."
+    )
+    selected_run_id = st.session_state.get("etl_load_selected_run_id")
+    in_flight = st.session_state.get("catalog_promotion_in_flight") is True
+    if selected_run_id is None:
+        st.info("운영 상품 반영 결과를 확인할 ETL 적재 이력을 선택하세요.")
+
+    if st.button(
+        "운영 반영 미리보기",
+        key="catalog_promotion_preview",
+        disabled=selected_run_id is None or in_flight,
+        type="secondary",
+    ):
+        _request_catalog_promotion_preview(api_client)
+
+    _render_catalog_promotion_result()
+    preview = st.session_state.get("catalog_promotion_preview_response")
+    if not isinstance(preview, dict):
+        return
+
+    eligible = preview.get("promotion_eligible") is True
+    if eligible:
+        st.success(
+            "반영 가능 — ETL 적재 결과를 운영 상품에 반영할 수 있습니다."
+        )
+    else:
+        st.error(
+            "반영 불가 — 현재 ETL 적재 결과는 운영 상품에 반영할 수 없습니다."
+        )
+        for reason in preview.get("blocked_reasons") or []:
+            if isinstance(reason, dict) and reason.get("message"):
+                st.warning(str(reason["message"]))
+
+    metric_columns = st.columns(4)
+    metric_columns[0].metric("신규 등록 예정", preview.get("insert_count", 0))
+    metric_columns[1].metric("수정 예정", preview.get("update_count", 0))
+    metric_columns[2].metric("변경 없음", preview.get("unchanged_count", 0))
+    total_products = (
+        int(preview.get("insert_count", 0))
+        + int(preview.get("update_count", 0))
+        + int(preview.get("unchanged_count", 0))
+    )
+    metric_columns[3].metric("전체 대상 상품", total_products)
+
+    items = preview.get("items") or []
+    if items:
+        st.markdown("#### 상품별 변경 내용")
+        display_dataframe = build_catalog_promotion_changes_dataframe(items)
+        for value_column in ("변경 전 값", "변경 후 값"):
+            display_dataframe[value_column] = display_dataframe[value_column].map(str)
+        st.dataframe(
+            display_dataframe,
+            width="stretch",
+            hide_index=True,
+        )
+
+    confirmation = st.checkbox(
+        "미리보기 내용을 확인했으며 운영 상품 반영에 동의합니다.",
+        key="catalog_promotion_confirmation_input",
+        disabled=not eligible or not st.session_state.get(
+            "catalog_promotion_preview_hash"
+        ),
+    )
+    st.session_state["catalog_promotion_confirmation"] = bool(confirmation)
+    if st.button(
+        "운영 상품에 반영",
+        key="catalog_promotion_submit",
+        disabled=not can_submit_catalog_promotion(st.session_state),
+        type="primary",
+    ):
+        _submit_catalog_promotion(api_client)
+        st.rerun()
 
 
 def build_etl_load_request_params(
@@ -601,11 +956,16 @@ def render_etl_load_history(api_client=None) -> None:
         for item in items
     }
     if st.session_state.get("etl_load_selected_run_id") not in run_options:
-        st.session_state["etl_load_selected_run_id"] = run_options[0]
+        st.session_state["etl_load_selected_run_id"] = None
+    synchronize_catalog_promotion_batch(st.session_state)
     st.selectbox(
         "적재 배치 선택",
-        options=run_options,
-        format_func=lambda run_id: option_labels.get(run_id, str(run_id)),
+        options=[None, *run_options],
+        format_func=lambda run_id: (
+            "ETL 적재 이력을 선택하세요."
+            if run_id is None
+            else option_labels.get(run_id, str(run_id))
+        ),
         key="etl_load_selected_run_id",
         on_change=_on_etl_load_selection_change,
         args=(st.session_state,),
@@ -616,5 +976,6 @@ def render_etl_load_history(api_client=None) -> None:
         st.rerun()
 
     _render_etl_load_pagination(response)
+    _render_catalog_promotion_preview(api_client)
     if st.session_state.get("etl_load_detail_requested", False):
         _render_etl_load_detail(api_client)

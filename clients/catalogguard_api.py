@@ -85,6 +85,68 @@ ETL_REJECTION_ITEM_KEYS = (
 )
 ETL_REJECTION_ERROR_KEYS = ("code", "field", "message")
 ETL_SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+CATALOG_PROMOTION_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+CATALOG_PROMOTION_PREVIEW_RESPONSE_KEYS = (
+    "etl_load_run_id",
+    "supplier_key",
+    "inspection_version",
+    "preview_schema_version",
+    "preview_hash",
+    "promotion_eligible",
+    "blocked_reasons",
+    "insert_count",
+    "update_count",
+    "unchanged_count",
+    "error_count",
+    "warning_count",
+    "items",
+)
+CATALOG_PROMOTION_PREVIEW_ITEM_KEYS = (
+    "supplier_key",
+    "external_product_id",
+    "action",
+    "changed_fields",
+    "before_data",
+    "after_data",
+)
+CATALOG_PROMOTION_PRODUCT_DATA_KEYS = (
+    "external_product_id",
+    "product_group_id",
+    "product_name",
+    "category",
+    "color",
+    "size",
+    "stock",
+    "price",
+    "sale_price",
+    "image_path",
+    "description",
+    "seller",
+)
+CATALOG_PROMOTION_RESPONSE_KEYS = (
+    "promotion_run_id",
+    "etl_load_run_id",
+    "status",
+    "created",
+    "preview_hash",
+    "preview_schema_version",
+    "inspection_version",
+    "inserted_count",
+    "updated_count",
+    "unchanged_count",
+    "blocked_count",
+    "error_count",
+    "warning_count",
+    "started_at",
+    "completed_at",
+)
+CATALOG_PROMOTION_STALE_MESSAGE = (
+    "미리보기 이후 상품 데이터가 변경되었습니다. 미리보기를 다시 실행하세요."
+)
+CATALOG_PROMOTION_BLOCKED_MESSAGE = (
+    "현재 ETL 적재 결과는 운영 상품에 반영할 수 없습니다."
+)
+CATALOG_PROMOTION_FAILED_MESSAGE = "운영 상품 반영 중 오류가 발생했습니다."
 
 
 def _normalize_request_id(value: object) -> str | None:
@@ -314,6 +376,178 @@ def _validate_etl_load_detail_response(data: dict[str, Any]) -> None:
         raise _invalid_etl_response()
 
 
+def _is_catalog_promotion_value(value: object) -> bool:
+    return value is None or isinstance(value, str) or type(value) is int
+
+
+def _validate_catalog_promotion_product_data(data: object) -> bool:
+    if not isinstance(data, dict) or any(
+        key not in data for key in CATALOG_PROMOTION_PRODUCT_DATA_KEYS
+    ):
+        return False
+    text_fields = (
+        "external_product_id",
+        "product_group_id",
+        "product_name",
+        "category",
+        "color",
+        "size",
+        "image_path",
+    )
+    nullable_text_fields = ("description", "seller")
+    return (
+        all(isinstance(data[field], str) for field in text_fields)
+        and type(data["stock"]) is int
+        and type(data["price"]) is int
+        and (data["sale_price"] is None or type(data["sale_price"]) is int)
+        and all(
+            data[field] is None or isinstance(data[field], str)
+            for field in nullable_text_fields
+        )
+    )
+
+
+def _validate_catalog_promotion_blocked_reason(reason: object) -> bool:
+    required_keys = (
+        "code",
+        "message",
+        "supplier_key",
+        "external_product_id",
+        "staging_product_ids",
+    )
+    if not isinstance(reason, dict) or any(key not in reason for key in required_keys):
+        return False
+    return (
+        isinstance(reason["code"], str)
+        and bool(reason["code"].strip())
+        and isinstance(reason["message"], str)
+        and bool(reason["message"].strip())
+        and (
+            reason["supplier_key"] is None
+            or isinstance(reason["supplier_key"], str)
+        )
+        and (
+            reason["external_product_id"] is None
+            or isinstance(reason["external_product_id"], str)
+        )
+        and isinstance(reason["staging_product_ids"], list)
+        and all(
+            type(staging_id) is int and staging_id > 0
+            for staging_id in reason["staging_product_ids"]
+        )
+    )
+
+
+def _validate_catalog_promotion_preview_item(item: object) -> bool:
+    if not isinstance(item, dict) or any(
+        key not in item for key in CATALOG_PROMOTION_PREVIEW_ITEM_KEYS
+    ):
+        return False
+    changed_fields = item["changed_fields"]
+    if not isinstance(changed_fields, dict) or any(
+        not isinstance(field_name, str)
+        or not field_name
+        or not isinstance(change, dict)
+        or "before" not in change
+        or "after" not in change
+        or not _is_catalog_promotion_value(change["before"])
+        or not _is_catalog_promotion_value(change["after"])
+        for field_name, change in changed_fields.items()
+    ):
+        return False
+    action = item["action"]
+    return (
+        isinstance(item["supplier_key"], str)
+        and isinstance(item["external_product_id"], str)
+        and action in {"insert", "update", "unchanged"}
+        and (
+            item["before_data"] is None
+            or _validate_catalog_promotion_product_data(item["before_data"])
+        )
+        and _validate_catalog_promotion_product_data(item["after_data"])
+        and (action != "update" or bool(changed_fields))
+        and (action != "unchanged" or not changed_fields)
+    )
+
+
+def _validate_catalog_promotion_preview_response(data: dict[str, Any]) -> None:
+    if any(key not in data for key in CATALOG_PROMOTION_PREVIEW_RESPONSE_KEYS):
+        raise _invalid_etl_response()
+    count_fields = (
+        "insert_count",
+        "update_count",
+        "unchanged_count",
+        "error_count",
+        "warning_count",
+    )
+    preview_hash = data["preview_hash"]
+    items = data["items"]
+    if (
+        type(data["etl_load_run_id"]) is not int
+        or data["etl_load_run_id"] < 1
+        or not isinstance(data["supplier_key"], str)
+        or not isinstance(data["inspection_version"], str)
+        or type(data["preview_schema_version"]) is not int
+        or data["preview_schema_version"] < 1
+        or (
+            preview_hash is not None
+            and (
+                not isinstance(preview_hash, str)
+                or CATALOG_PROMOTION_SHA256_PATTERN.fullmatch(preview_hash) is None
+            )
+        )
+        or type(data["promotion_eligible"]) is not bool
+        or not isinstance(data["blocked_reasons"], list)
+        or any(
+            not _validate_catalog_promotion_blocked_reason(reason)
+            for reason in data["blocked_reasons"]
+        )
+        or any(type(data[field]) is not int or data[field] < 0 for field in count_fields)
+        or not isinstance(items, list)
+        or any(not _validate_catalog_promotion_preview_item(item) for item in items)
+        or (
+            data["promotion_eligible"]
+            and (
+                preview_hash is None
+                or bool(data["blocked_reasons"])
+                or data["insert_count"] + data["update_count"] + data["unchanged_count"]
+                != len(items)
+            )
+        )
+    ):
+        raise _invalid_etl_response()
+
+
+def _validate_catalog_promotion_response(data: dict[str, Any]) -> None:
+    if any(key not in data for key in CATALOG_PROMOTION_RESPONSE_KEYS):
+        raise _invalid_etl_response()
+    count_fields = (
+        "inserted_count",
+        "updated_count",
+        "unchanged_count",
+        "blocked_count",
+        "error_count",
+        "warning_count",
+    )
+    if (
+        type(data["promotion_run_id"]) is not int
+        or data["promotion_run_id"] < 1
+        or type(data["etl_load_run_id"]) is not int
+        or data["etl_load_run_id"] < 1
+        or data["status"] != "succeeded"
+        or type(data["created"]) is not bool
+        or not isinstance(data["preview_hash"], str)
+        or CATALOG_PROMOTION_SHA256_PATTERN.fullmatch(data["preview_hash"]) is None
+        or type(data["preview_schema_version"]) is not int
+        or data["preview_schema_version"] < 1
+        or not isinstance(data["inspection_version"], str)
+        or any(type(data[field]) is not int or data[field] < 0 for field in count_fields)
+        or not isinstance(data["started_at"], str)
+        or not isinstance(data["completed_at"], str)
+    ):
+        raise _invalid_etl_response()
+
+
 class CatalogGuardApiError(Exception):
     def __init__(
         self,
@@ -346,6 +580,34 @@ class ETLLoadNotFoundError(CatalogGuardApiError):
 
 
 class CatalogGuardApiResponseError(CatalogGuardApiError):
+    pass
+
+
+class CatalogPromotionApiError(CatalogGuardApiResponseError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        promotion_run_id: int | None = None,
+        blocked_reasons: list[dict[str, Any]] | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message, request_id=request_id)
+        self.code = code
+        self.promotion_run_id = promotion_run_id
+        self.blocked_reasons = list(blocked_reasons or [])
+
+
+class CatalogPromotionPreviewStaleError(CatalogPromotionApiError):
+    pass
+
+
+class CatalogPromotionBlockedError(CatalogPromotionApiError):
+    pass
+
+
+class CatalogPromotionFailedError(CatalogPromotionApiError):
     pass
 
 
@@ -573,6 +835,53 @@ class CatalogGuardApiClient:
         _validate_etl_rejection_list_response(data)
         return data
 
+    def get_catalog_promotion_preview(
+        self,
+        etl_load_run_id: int,
+    ) -> dict[str, Any]:
+        _validate_positive_etl_int(etl_load_run_id, "etl_load_run_id")
+        data = self._post_json(
+            f"/api/v1/etl-loads/{etl_load_run_id}/promotion-preview",
+            raise_not_found=True,
+            not_found_error=ETLLoadNotFoundError,
+            not_found_message="ETL 적재 배치를 찾을 수 없습니다.",
+        )
+        _validate_catalog_promotion_preview_response(data)
+        return data
+
+    def create_catalog_promotion(
+        self,
+        etl_load_run_id: int,
+        *,
+        confirmation: bool,
+        expected_preview_hash: str,
+    ) -> dict[str, Any]:
+        _validate_positive_etl_int(etl_load_run_id, "etl_load_run_id")
+        if confirmation is not True:
+            raise ValueError("confirmation must be true")
+        if (
+            not isinstance(expected_preview_hash, str)
+            or CATALOG_PROMOTION_SHA256_PATTERN.fullmatch(expected_preview_hash)
+            is None
+        ):
+            raise ValueError(
+                "expected_preview_hash must be a lowercase SHA-256 hex string"
+            )
+
+        data = self._post_json(
+            f"/api/v1/etl-loads/{etl_load_run_id}/promotions",
+            json_body={
+                "confirmation": True,
+                "expected_preview_hash": expected_preview_hash,
+            },
+            raise_not_found=True,
+            not_found_error=ETLLoadNotFoundError,
+            not_found_message="ETL 적재 배치를 찾을 수 없습니다.",
+            map_promotion_errors=True,
+        )
+        _validate_catalog_promotion_response(data)
+        return data
+
     def _get_json(
         self,
         path: str,
@@ -609,9 +918,22 @@ class CatalogGuardApiClient:
         self,
         path: str,
         *,
-        files: dict[str, tuple[str, bytes, str]],
+        files: dict[str, tuple[str, bytes, str]] | None = None,
+        json_body: dict[str, Any] | None = None,
+        raise_not_found: bool = False,
+        not_found_error: type[CatalogGuardApiError] = InspectionNotFoundError,
+        not_found_message: str = NOT_FOUND_ERROR_MESSAGE,
+        map_promotion_errors: bool = False,
     ) -> dict[str, Any]:
-        response = self._post_response(path, files=files)
+        response = self._post_response(
+            path,
+            files=files,
+            json_body=json_body,
+            raise_not_found=raise_not_found,
+            not_found_error=not_found_error,
+            not_found_message=not_found_message,
+            map_promotion_errors=map_promotion_errors,
+        )
 
         try:
             data = response.json()
@@ -672,7 +994,12 @@ class CatalogGuardApiClient:
         self,
         path: str,
         *,
-        files: dict[str, tuple[str, bytes, str]],
+        files: dict[str, tuple[str, bytes, str]] | None = None,
+        json_body: dict[str, Any] | None = None,
+        raise_not_found: bool = False,
+        not_found_error: type[CatalogGuardApiError] = InspectionNotFoundError,
+        not_found_message: str = NOT_FOUND_ERROR_MESSAGE,
+        map_promotion_errors: bool = False,
     ):
         url = f"{self._base_url}{path}"
 
@@ -680,6 +1007,7 @@ class CatalogGuardApiClient:
             response = self._session.post(
                 url,
                 files=files,
+                json=json_body,
                 timeout=self._timeout_seconds,
             )
             response.raise_for_status()
@@ -688,7 +1016,21 @@ class CatalogGuardApiClient:
         except requests.ConnectionError as error:
             raise CatalogGuardApiConnectionError(CONNECTION_ERROR_MESSAGE) from error
         except requests.HTTPError as error:
-            request_id = _get_response_request_id(getattr(error, "response", None))
+            error_response = getattr(error, "response", None)
+            request_id = _get_response_request_id(error_response)
+            status_code = getattr(error_response, "status_code", None)
+            if status_code == 404 and raise_not_found:
+                raise not_found_error(
+                    not_found_message,
+                    request_id=request_id,
+                ) from error
+            if map_promotion_errors:
+                promotion_error = self._build_catalog_promotion_error(
+                    error_response,
+                    request_id=request_id,
+                )
+                if promotion_error is not None:
+                    raise promotion_error from error
             raise CatalogGuardApiResponseError(
                 SERVER_ERROR_MESSAGE,
                 request_id=request_id,
@@ -697,6 +1039,59 @@ class CatalogGuardApiClient:
             raise CatalogGuardApiResponseError(SERVER_ERROR_MESSAGE) from error
 
         return response
+
+    def _build_catalog_promotion_error(
+        self,
+        response: object,
+        *,
+        request_id: str | None,
+    ) -> CatalogPromotionApiError | None:
+        try:
+            payload = response.json()
+        except (AttributeError, ValueError):
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get("detail"), dict):
+            return None
+
+        detail = payload["detail"]
+        code = detail.get("code")
+        promotion_run_id = detail.get("promotion_run_id")
+        if type(promotion_run_id) is not int or promotion_run_id < 1:
+            promotion_run_id = None
+
+        if code == "preview_stale":
+            return CatalogPromotionPreviewStaleError(
+                CATALOG_PROMOTION_STALE_MESSAGE,
+                code=code,
+                promotion_run_id=promotion_run_id,
+                request_id=request_id,
+            )
+        if code == "promotion_blocked":
+            blocked_reasons = detail.get("blocked_reasons")
+            safe_blocked_reasons = (
+                blocked_reasons
+                if isinstance(blocked_reasons, list)
+                and all(
+                    _validate_catalog_promotion_blocked_reason(reason)
+                    for reason in blocked_reasons
+                )
+                else []
+            )
+            return CatalogPromotionBlockedError(
+                CATALOG_PROMOTION_BLOCKED_MESSAGE,
+                code=code,
+                promotion_run_id=promotion_run_id,
+                blocked_reasons=safe_blocked_reasons,
+                request_id=request_id,
+            )
+        if code == "promotion_failed":
+            return CatalogPromotionFailedError(
+                CATALOG_PROMOTION_FAILED_MESSAGE,
+                code=code,
+                promotion_run_id=promotion_run_id,
+                request_id=request_id,
+            )
+        return None
 
     def _validate_response_keys(
         self,
