@@ -254,7 +254,7 @@ Path의 `etl_load_run_id`는 `1` 이상의 정수만 허용한다. `0`, 음수�
 
 ## Streamlit ETL 적재 이력 화면
 
-Streamlit에는 저장된 ETL 배치와 staging 상품을 확인하는 `ETL 적재 이력` 탭을 제공한다. 이 화면은 적재를 실행하거나 데이터를 변경하지 않고, `CatalogGuardApiClient`를 통해 FastAPI의 읽기 전용 조회 API만 호출한다.
+Streamlit에는 저장된 ETL 배치와 staging 상품을 확인하고 선택한 batch를 운영 상품에 반영하는 `ETL 적재 이력` 탭을 제공한다. 배치·상품·reject 조회는 읽기 전용이며, promotion preview와 실제 반영은 `CatalogGuardApiClient`가 FastAPI의 별도 POST API를 호출한다. Streamlit이 DB에 직접 쓰지는 않는다.
 
 | 화면 기능 | 동작 |
 |---|---|
@@ -265,6 +265,8 @@ Streamlit에는 저장된 ETL 배치와 staging 상품을 확인하는 `ETL 적�
 | 오류 통계 | 오류 코드별 발생 건수를 발생 건수 내림차순·코드 오름차순으로 표시하고 reject 0건은 안내 |
 | reject 상세 | reject 행 페이지네이션, 오류 코드·필드·메시지와 마스킹된 원본 값 표시; 과거 미저장 배치는 안내 |
 | 상품 목록 | 선택한 배치의 staging 상품을 20건씩 표시 |
+| promotion | 선택한 batch의 preview 실행, 반영 가능 여부·차단 사유·변경 전후·insert/update/unchanged 표시 |
+| 승인 반영 | 승인 checkbox 선택 전 반영 버튼 비활성화; 승인 후 `expected_preview_hash`와 함께 FastAPI promotion 요청 |
 | nullable | `sale_price`, `description`, `seller`의 `null`을 빈 값으로 표시 |
 | 빈 결과·404 | 빈 목록 안내와 존재하지 않는 배치의 오류 안내 표시 |
 | 요청 추적 | 유효한 `X-Request-ID`를 오류 화면에 표시 |
@@ -280,13 +282,64 @@ ETL 적재 이력 탭
 -> GET /api/v1/etl-loads/{etl_load_run_id}/rejections (limit=20)
 -> reject 오류 배열·마스킹된 원본·페이지 표시
 -> 상품 이전·다음
+-> 선택한 batch의 promotion preview
+-> insert/update/unchanged·상품별 변경 전후·차단 사유 확인
+-> 승인 checkbox 선택
+-> POST /api/v1/etl-loads/{etl_load_run_id}/promotions
+-> 운영 상품 반영 결과와 promotion run 확인
 ```
 
-Streamlit rerun에 대비해 목록·상세·reject 응답과 선택 상태를 ETL 전용 `session_state`에 보관한다. 검색 조건이나 배치가 바뀌면 이전 상세·상품·reject 상태를 초기화해 stale 데이터가 남거나 다른 배치의 행이 섞이지 않게 한다. 상세 API가 실패하면 동일 클릭에서 API를 중복 호출하지 않으며, 정상 응답만 상태에 저장한다. 품질 요약이 없는 기존 배치는 `null`을 기록 없음으로 표시하고, reject 상세가 없는 기존 배치는 별도 안내를 표시한다. 있는 배치는 화면 helper에서 정상 처리율과 마스킹된 reject 원본을 표시한다. 순수 helper 테스트와 Streamlit AppTest로 목록·검색·페이지 이동·상세·품질 지표·오류 코드·SHA-256·reject 상세·nullable·404·request ID·stale 상태 초기화를 검증한다.
+Streamlit rerun에 대비해 목록·상세·reject 응답과 선택 상태를 ETL 전용 `session_state`에 보관한다. 검색 조건이나 batch가 바뀌면 이전 상세·상품·reject 상태와 promotion preview·승인 상태를 초기화해 stale 데이터가 남거나 다른 batch에 반영되지 않게 한다. preview 요청 중에는 중복 요청을 막고, preview hash가 없거나 승인하지 않은 상태에서는 반영 버튼을 비활성화한다. 성공 후에는 preview·승인 상태를 제거하고 결과만 보존하며, `preview_stale`가 발생하면 이전 preview를 제거해 새 preview를 요구한다. API Client는 preview·promotion 응답의 필수 key, count, action, before/after shape, SHA-256을 검증하고 HTTP 오류를 안전한 사용자 메시지로 변환한다. 순수 helper 테스트와 Streamlit AppTest로 목록·검색·페이지 이동·상세·품질 지표·오류 코드·SHA-256·reject 상세·nullable·404·request ID·promotion 상태 초기화를 검증한다.
+
+## Catalog promotion preview와 승인 반영
+
+ETL staging은 운영 상품을 바로 덮어쓰는 테이블이 아니므로, 사용자가 반영 대상을 확인하고 명시적으로 승인하는 두 단계 workflow를 둔다. ETL batch를 자동으로 고르지 않고 Streamlit에서 사용자가 직접 선택해야 하며, preview 단계에서는 DB의 운영 상품을 변경하지 않는다.
+
+### Preview API
+
+```http
+POST /api/v1/etl-loads/{etl_load_run_id}/promotion-preview
+```
+
+preview service는 선택한 batch의 staging 상품과 같은 공급사·외부 상품 ID를 가진 운영 상품을 비교한다. 각 상품을 `insert`, `update`, `unchanged`로 분류하고, update에는 변경 필드별 `before`·`after` 값을, insert에는 `before_data: null`과 전체 `after_data`를 반환한다. 응답에는 다음 정보가 포함된다.
+
+- `insert_count`, `update_count`, `unchanged_count`
+- `items`의 공급사, 외부 상품 ID, action, 변경 필드와 전후 데이터
+- `promotion_eligible`와 구조화된 `blocked_reasons`
+- `preview_hash`, `preview_schema_version`, `inspection_version`
+- ETL 검수에서 계산한 `error_count`, `warning_count`
+
+품질 summary가 없는 과거 batch, reject 행이 있는 batch, 빈 staging batch, 같은 공급사 상품 ID가 중복된 batch, 상품 검수 오류가 있는 batch는 `promotion_eligible=false`가 된다. 차단 사유가 있으면 상품별 반영 목록은 제공하지 않고, preview hash는 데이터 상태를 설명하는 값으로만 반환할 수 있다.
+
+`preview_hash`는 canonical JSON으로 정렬한 batch ID, 공급사, inspection version, staging 상품과 현재 운영 상품의 값을 SHA-256으로 계산한 것이다. 암호화나 인증 토큰이 아니라 preview 시점과 실제 반영 시점의 데이터가 같은지 비교하는 stale 감지용 값이다.
+
+### 승인과 실제 promotion
+
+```http
+POST /api/v1/etl-loads/{etl_load_run_id}/promotions
+```
+
+```json
+{
+  "confirmation": true,
+  "expected_preview_hash": "64자리 소문자 SHA-256 hex"
+}
+```
+
+서버는 `confirmation=true`와 형식이 맞는 hash를 먼저 검증한다. 그 뒤 하나의 transaction 안에서 ETL batch와 staging·현재 운영 상품을 잠그고 preview를 다시 계산한다.
+
+1. 이미 같은 batch의 `succeeded` run이 있으면 기존 성공 결과를 반환하고 새 반영·audit을 만들지 않는다.
+2. 품질·reject·검수·중복 identity 조건이 맞지 않으면 `promotion_blocked` run을 기록하고 `409`를 반환한다.
+3. 재계산한 hash와 `expected_preview_hash`가 다르면 `preview_stale` run을 기록하고 `409`를 반환한다.
+4. hash가 일치하면 `catalog_products`에 insert/update하고 `catalog_promotion_runs`를 `applying`에서 `succeeded`로 완료한다.
+5. insert/update마다 `catalog_product_changes`에 before/after와 변경 필드를 append-only audit으로 기록한다.
+6. 반영 중 예외가 발생하면 transaction을 rollback하고 안전한 `promotion_failed` 오류와 failed run을 남긴다. 내부 SQL·DB 연결 정보는 사용자에게 노출하지 않는다.
+
+같은 ETL batch의 성공 run은 PostgreSQL partial unique index로 한 건만 허용한다. batch row와 운영 상품 row를 잠그고, 상품 identity를 공급사와 외부 상품 ID의 조합으로 관리해 서로 다른 공급사의 같은 ID가 충돌하지 않게 한다. 동시 요청 테스트는 한 요청만 성공하고 다른 요청은 stale 또는 안전한 failed 결과가 되며, `applying` 상태가 남지 않고 운영 상품과 audit이 한 번만 생성되는지 확인한다.
 
 ## 실제 Chromium 브라우저 E2E
 
-계층별 테스트만으로는 Streamlit rerun, 실제 접근성 이름, 동적 표·expander 렌더링과 브라우저의 raw 개인정보 노출을 확인할 수 없으므로 별도 Playwright E2E를 둔다. `scripts/run_etl_browser_e2e.py`가 테스트 PostgreSQL에 migration을 적용하고 전용 합성 fixture를 ETL CLI·Load CLI로 처리한 뒤 FastAPI와 Streamlit을 시작한다. readiness가 확인되면 `tests/e2e/test_etl_browser_e2e.py`가 Chromium에서 다음 흐름을 실행한다.
+계층별 테스트만으로는 Streamlit rerun, 실제 접근성 이름, 동적 표·expander 렌더링과 브라우저의 raw 개인정보 노출을 확인할 수 없으므로 별도 Playwright E2E를 둔다. `scripts/run_etl_browser_e2e.py`가 테스트 PostgreSQL에 migration을 적용하고 전용 합성 fixture를 ETL CLI·Load CLI로 처리한 뒤 FastAPI와 Streamlit을 시작한다. readiness가 확인되면 `tests/e2e/test_etl_browser_e2e.py`가 Chromium에서 reject 조회와 promotion 성공 흐름을 실행한다.
 
 ```text
 ETL fixture 3행
@@ -298,6 +351,11 @@ ETL fixture 3행
 -> 품질 3행/2행/1행/66.7%
 -> staging 상품 2개
 -> reject 오류 배열과 마스킹 원본
+-> promotion fixture batch 직접 선택
+-> preview와 상품별 변경 전후 확인
+-> 승인 checkbox 선택 전 반영 버튼 disabled 확인
+-> 실제 promotion 실행
+-> succeeded run·운영 상품·audit·applying 0건을 PostgreSQL에서 확인
 ```
 
 브라우저 테스트는 `test@example.com`, `010-1234-5678`, `123-456-789012`, `900101-1234567`이 body text와 HTML에 존재하지 않는지 확인하고, 마스킹된 값·오류 코드·필드·메시지·console error 0·page error 0을 확인한다. 실패 시 `artifacts/browser-e2e/failure.png`, `page.html`, FastAPI·Streamlit·Playwright 로그를 보존하며 runner가 시작한 프로세스와 임시 디렉터리는 성공·실패 모두 정리한다.
@@ -332,9 +390,9 @@ python -m alembic upgrade head
 
 `20260727_0004`에 이어 `20260728_0005` upgrade는 `etl_load_runs`에 reject 상세 저장 여부·reject CSV SHA-256과 all-or-none CHECK constraint를 추가하고, 오류 배열·마스킹된 원본 JSONB를 저장하는 `etl_rejected_rows`와 unique/index/FK를 만든다. downgrade는 새 컬럼·constraint·테이블·index만 제거하며 기존 배치·상품·inspection 데이터는 삭제하지 않는다.
 
-현재 Alembic head는 `20260728_0006`이다. 이 revision은 ETL staging을 변경하지 않고, 별도의 운영 상품·promotion persistence 테이블을 추가한다. 격리된 PostgreSQL 18 테스트 클러스터에서 빈 DB upgrade, `20260728_0006` → `20260728_0005` downgrade, 재-upgrade와 단일 head를 확인했다.
+현재 Alembic head는 `20260728_0006`이다. 이 revision은 ETL staging을 변경하지 않고, 별도의 운영 상품·promotion persistence 테이블을 추가한다. 격리된 PostgreSQL 18 테스트 클러스터에서 빈 DB upgrade, `20260728_0006` → `20260728_0005` downgrade, 재-upgrade와 단일 head를 확인했으며, 이후 promotion service·API·UI가 이 테이블을 사용하는 흐름을 검증했다.
 
-현재 PostgreSQL 연결 상태 전체 pytest는 `988 passed, 3 deselected, 4 warnings`였다. promotion persistence PostgreSQL 테스트는 10 passed, skip 0이었으며, 기존 ETL 테스트와 로컬 Chromium ETL 브라우저 E2E도 `1 passed`, console error 0, page error 0, raw 민감정보 미노출로 확인했다. 기존 기능의 GitHub Actions Test #37 결과는 이전 검증 기록으로 유지한다.
+기준 저장소 상태에서 GitHub Actions run #55는 성공했다. 문서에는 실행별 전체 pytest 수를 고정하지 않고, promotion preview·service·API·client·UI·concurrency 테스트와 Chromium promotion E2E가 검증하는 동작 범위를 기록한다. E2E는 브라우저 메시지뿐 아니라 PostgreSQL의 최종 운영 상품·run·audit 상태도 확인한다.
 
 ## 제한사항
 
@@ -342,9 +400,9 @@ python -m alembic upgrade head
 - 실제 외부 공급사 운영 데이터 연동은 지원하지 않는다.
 - 자동 공급사 감지는 지원하지 않으며, 공급사별 프로필은 수동 선택한다.
 - 웹 수집과 외부 API 연동은 지원하지 않는다.
-- ETL 적재 실행용 웹 API는 지원하지 않으며, Streamlit 적재 이력 화면은 저장된 배치와 상품을 조회하는 읽기 전용 기능만 제공한다.
+- ETL 적재 실행용 웹 API는 지원하지 않는다. Streamlit 적재 이력 화면의 배치·상품·reject 조회는 읽기 전용이지만, 선택한 batch의 promotion preview와 승인된 운영 상품 반영은 FastAPI POST API를 호출한다.
 - staging 상품 수정·삭제와 상품 변경 이력 조회 API는 지원하지 않는다.
-- 운영 상품 테이블 upsert와 기존 상품 갱신·덮어쓰기는 지원하지 않는다. reject 행은 별도 `etl_rejected_rows`에 오류 배열과 마스킹된 동적 원본 컬럼으로 저장한다.
+- promotion은 외부 공급사 운영 데이터나 production catalog가 아닌 합성 fixture·테스트 PostgreSQL 환경에서만 검증했다. reject 행은 별도 `etl_rejected_rows`에 오류 배열과 마스킹된 동적 원본 컬럼으로 저장한다.
 - 증분 ETL과 streaming은 지원하지 않는다.
 - 운영 DB 적재는 검증하지 않았으며, PostgreSQL staging 적재는 임시 테스트 PostgreSQL 환경에서만 검증했다.
 - 실제 브라우저 E2E는 Chromium 한 종류와 합성 fixture만 검증하며, 운영 환경·모바일 브라우저·외부 공급사는 검증하지 않는다.
