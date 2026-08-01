@@ -503,9 +503,9 @@ def _render_catalog_promotion_result() -> None:
                 "이미 처리된 ETL 적재 결과입니다. 기존 운영 상품 반영 결과를 표시합니다."
             )
         count_columns = st.columns(3)
-        count_columns[0].metric("신규 등록", result.get("inserted_count", 0))
-        count_columns[1].metric("정보 수정", result.get("updated_count", 0))
-        count_columns[2].metric("변경 없음", result.get("unchanged_count", 0))
+        count_columns[0].metric("신규 등록", result.get("inserted_count", 0), border=True)
+        count_columns[1].metric("정보 수정", result.get("updated_count", 0), border=True)
+        count_columns[2].metric("변경 없음", result.get("unchanged_count", 0), border=True)
         st.caption("새로운 반영이 필요하면 미리보기를 다시 실행하세요.")
         return
 
@@ -650,15 +650,15 @@ def _render_catalog_promotion_preview(api_client) -> None:
                 st.warning(str(reason["message"]))
 
     metric_columns = st.columns(4)
-    metric_columns[0].metric("신규 등록 예정", preview.get("insert_count", 0))
-    metric_columns[1].metric("수정 예정", preview.get("update_count", 0))
-    metric_columns[2].metric("변경 없음", preview.get("unchanged_count", 0))
+    metric_columns[0].metric("신규 등록 예정", preview.get("insert_count", 0), border=True)
+    metric_columns[1].metric("수정 예정", preview.get("update_count", 0), border=True)
+    metric_columns[2].metric("변경 없음", preview.get("unchanged_count", 0), border=True)
     total_products = (
         int(preview.get("insert_count", 0))
         + int(preview.get("update_count", 0))
         + int(preview.get("unchanged_count", 0))
     )
-    metric_columns[3].metric("전체 대상 상품", total_products)
+    metric_columns[3].metric("전체 대상 상품", total_products, border=True)
 
     items = preview.get("items") or []
     if items:
@@ -857,6 +857,7 @@ def _render_etl_rejections(api_client, detail_response: dict[str, Any]) -> None:
             "거부 행 이전",
             disabled=not has_previous,
             key="etl_reject_previous",
+            type="tertiary",
         ):
             st.session_state["etl_reject_offset"] -= ETL_REJECT_LIMIT
             st.session_state["etl_reject_response"] = None
@@ -866,6 +867,7 @@ def _render_etl_rejections(api_client, detail_response: dict[str, Any]) -> None:
             "거부 행 다음",
             disabled=not has_next,
             key="etl_reject_next",
+            type="tertiary",
         ):
             st.session_state["etl_reject_offset"] += ETL_REJECT_LIMIT
             st.session_state["etl_reject_response"] = None
@@ -909,6 +911,7 @@ def _render_etl_load_pagination(response: dict[str, Any]) -> None:
             "이전",
             disabled=not has_previous,
             key="etl_load_previous",
+            type="tertiary",
         ):
             st.session_state["etl_load_offset"] -= ETL_LOAD_LIMIT
             st.session_state["etl_load_list_response"] = None
@@ -919,6 +922,7 @@ def _render_etl_load_pagination(response: dict[str, Any]) -> None:
             "다음",
             disabled=not has_next,
             key="etl_load_next",
+            type="tertiary",
         ):
             st.session_state["etl_load_offset"] += ETL_LOAD_LIMIT
             st.session_state["etl_load_list_response"] = None
@@ -949,12 +953,15 @@ def _render_etl_load_detail(api_client) -> None:
     rejected_rows = detail_response.get("rejected_rows")
     if total_rows is not None and rejected_rows is not None:
         quality_columns = st.columns(4)
-        quality_columns[0].metric("전체 입력", f"{total_rows}행")
-        quality_columns[1].metric("정상 적재", f"{detail_response.get('loaded_rows', 0)}행")
-        quality_columns[2].metric("변환 거부", f"{rejected_rows}행")
+        quality_columns[0].metric("전체 입력", f"{total_rows}행", border=True)
+        quality_columns[1].metric(
+            "정상 적재", f"{detail_response.get('loaded_rows', 0)}행", border=True
+        )
+        quality_columns[2].metric("변환 거부", f"{rejected_rows}행", border=True)
         quality_columns[3].metric(
             "정상 처리율",
             format_etl_quality_rate(total_rows, detail_response.get("loaded_rows")),
+            border=True,
         )
     else:
         st.info(
@@ -996,6 +1003,7 @@ def _render_etl_load_detail(api_client) -> None:
             "상품 이전",
             disabled=not has_previous,
             key="etl_product_previous",
+            type="tertiary",
         ):
             st.session_state["etl_load_product_offset"] -= ETL_PRODUCT_LIMIT
             st.session_state["etl_load_detail_response"] = None
@@ -1005,6 +1013,7 @@ def _render_etl_load_detail(api_client) -> None:
             "상품 다음",
             disabled=not has_next,
             key="etl_product_next",
+            type="tertiary",
         ):
             st.session_state["etl_load_product_offset"] += ETL_PRODUCT_LIMIT
             st.session_state["etl_load_detail_response"] = None

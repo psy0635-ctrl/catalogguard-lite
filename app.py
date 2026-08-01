@@ -781,7 +781,11 @@ def render_inspection_save_button(
 
     st.caption("검수를 실행하면 결과가 검수 이력에 저장됩니다.")
     st.caption("동일한 파일과 검수 버전은 중복 저장되지 않습니다.")
-    if st.button("검수 실행 및 이력 저장", key="save_inspection_history"):
+    if st.button(
+        "검수 실행 및 이력 저장",
+        key="save_inspection_history",
+        type="primary",
+    ):
         if detail_response is None:
             clear_current_inspection_result(st.session_state)
         else:
@@ -1047,7 +1051,11 @@ def render_background_inspection(
     st.caption("상태 새로고침 버튼을 눌러 진행 상태를 확인해 주세요.")
 
     if job_id is None:
-        if st.button("백그라운드 검수 시작", key="submit_async_inspection"):
+        if st.button(
+            "백그라운드 검수 시작",
+            key="submit_async_inspection",
+            type="primary",
+        ):
             submit_background_inspection_job(
                 source_filename=source_filename,
                 file_bytes=file_bytes,
@@ -1076,6 +1084,7 @@ def render_background_inspection(
         if st.button(
             "백그라운드 검수 다시 시도",
             key="retry_async_inspection",
+            type="primary",
         ):
             submit_background_inspection_job(
                 source_filename=source_filename,
@@ -1127,12 +1136,12 @@ def render_uploaded_inspection_result(
     overall_status = get_overall_status(error_count, warning_count)
 
     st.subheader("검수 요약")
-    status_col, product_col, issue_col, error_col, warning_col = st.columns(5)
-    status_col.metric("전체 상태", overall_status)
-    product_col.metric("전체 상품 수", total_products)
-    issue_col.metric("전체 문제 수", issue_count)
-    error_col.metric("오류 수", error_count)
-    warning_col.metric("주의 수", warning_count)
+    st.metric("전체 상태", overall_status, border=True)
+    product_col, issue_col, error_col, warning_col = st.columns(4)
+    product_col.metric("전체 상품 수", total_products, border=True)
+    issue_col.metric("전체 문제 수", issue_count, border=True)
+    error_col.metric("오류 수", error_count, border=True)
+    warning_col.metric("주의 수", warning_count, border=True)
 
     summary_message = build_validation_summary_message(
         issue_count,
@@ -1300,9 +1309,8 @@ def render_inspection_history_tab() -> None:
 
 def render_history_filename_search_controls() -> None:
     # 입력만으로는 검색하지 않고, 사용자가 검색 버튼을 누를 때만 목록을 다시 조회합니다.
-    input_col, start_col, end_col, status_col, search_col, reset_col = st.columns(
-        [3, 1.4, 1.4, 1.2, 1, 1]
-    )
+    # 좁은 화면에서 한 줄에 너무 많은 입력이 몰리지 않도록 두 줄로 나눕니다.
+    input_col, status_col = st.columns([3, 1])
     with input_col:
         st.text_input(
             "파일명 검색",
@@ -1310,6 +1318,14 @@ def render_history_filename_search_controls() -> None:
             key="history_filename_input",
             max_chars=100,
         )
+    with status_col:
+        st.selectbox(
+            "검수 상태",
+            options=HISTORY_STATUS_OPTIONS,
+            key="history_status_input",
+        )
+
+    start_col, end_col, search_col, reset_col = st.columns([1.4, 1.4, 1, 1])
     with start_col:
         st.date_input(
             "시작일",
@@ -1321,12 +1337,6 @@ def render_history_filename_search_controls() -> None:
             "종료일",
             value=st.session_state.get("history_end_date_input"),
             key="history_end_date_input",
-        )
-    with status_col:
-        st.selectbox(
-            "검수 상태",
-            options=HISTORY_STATUS_OPTIONS,
-            key="history_status_input",
         )
     with search_col:
         st.button(
@@ -1540,11 +1550,21 @@ def render_inspection_history_list(api_client) -> None:
 
     previous_col, next_col = st.columns(2)
     with previous_col:
-        if st.button("이전", disabled=not has_previous, key="history_previous"):
+        if st.button(
+            "이전",
+            disabled=not has_previous,
+            key="history_previous",
+            type="tertiary",
+        ):
             st.session_state.history_offset = max(0, offset - limit)
             st.rerun()
     with next_col:
-        if st.button("다음", disabled=not has_next, key="history_next"):
+        if st.button(
+            "다음",
+            disabled=not has_next,
+            key="history_next",
+            type="tertiary",
+        ):
             st.session_state.history_offset = offset + limit
             st.rerun()
 
@@ -1591,10 +1611,10 @@ def render_inspection_history_detail(api_client) -> None:
 
     summary = detail_response.get("summary") or {}
     product_col, issue_col, error_col, warning_col = st.columns(4)
-    product_col.metric("전체 상품", summary.get("total_products", 0))
-    issue_col.metric("전체 문제", summary.get("total_issues", 0))
-    error_col.metric("오류", summary.get("error_count", 0))
-    warning_col.metric("주의", summary.get("warning_count", 0))
+    product_col.metric("전체 상품", summary.get("total_products", 0), border=True)
+    issue_col.metric("전체 문제", summary.get("total_issues", 0), border=True)
+    error_col.metric("오류", summary.get("error_count", 0), border=True)
+    warning_col.metric("주의", summary.get("warning_count", 0), border=True)
 
     detail_dataframe = build_history_detail_dataframe(detail_response.get("results", []))
     render_inspection_statistics(
@@ -1622,8 +1642,29 @@ def render_inspection_history_detail(api_client) -> None:
     )
 
 
+def render_global_style() -> None:
+    # config.toml 테마로 표현할 수 없는 두 가지만 최소한으로 보완합니다.
+    # 1) 오류/성공/주의/안내 상태를 색상뿐 아니라 좌측 강조선으로도 구분합니다.
+    # 2) 본문 문단은 가로로 너무 길게 늘어지지 않도록 읽기 좋은 폭으로 제한합니다.
+    #    (표와 버튼, 카드에는 적용하지 않아 넓은 화면에서도 데이터는 그대로 넓게 씁니다.)
+    st.html(
+        """
+        <style>
+        [data-testid="stAlertContainer"] {
+            border-left: 4px solid currentColor;
+        }
+        [data-testid="stMarkdownContainer"] p,
+        [data-testid="stCaptionContainer"] p {
+            max-width: 72ch;
+        }
+        </style>
+        """
+    )
+
+
 def main() -> None:
     st.set_page_config(page_title="CatalogGuard Lite", layout="wide")
+    render_global_style()
 
     st.title("CatalogGuard Lite")
     st.write("상품 카탈로그 CSV 파일의 누락 값과 데이터 오류를 검사합니다.")

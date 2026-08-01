@@ -47,7 +47,7 @@ class FakeStreamlitColumn:
     def __exit__(self, exc_type, exc_value, traceback):
         self.streamlit.active_column = None
 
-    def metric(self, label, value):
+    def metric(self, label, value, **kwargs):
         self.streamlit.metrics.append((self.index, label, value))
 
 
@@ -108,6 +108,10 @@ class FakeAppStreamlit:
     def markdown(self, message):
         self.markdowns.append((self.active_column, message))
         self.call_log.append(("markdown", self.active_column, message))
+
+    def metric(self, label, value, **kwargs):
+        self.metrics.append((self.active_column, label, value))
+        self.call_log.append(("metric", self.active_column, label, value))
 
     def columns(self, specification):
         count = specification if isinstance(specification, int) else len(specification)

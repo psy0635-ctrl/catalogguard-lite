@@ -1,0 +1,38 @@
+# CatalogGuard Lite 테마: 상품 데이터를 줄 단위로 대조하는 "검수 대장" 정체성.
+# 원색 그라데이션과 알약(pill) 형태 대신, 하프라인 테두리와 각진 카드로
+# 정보 계층·버튼 우선순위·표 가독성·상태 구분을 명확히 합니다.
+[theme]
+baseRadius = "small"
+showWidgetBorder = true
+font = "sans-serif"
+headingFont = "sans-serif"
+headingFontWeights = [800, 700, 700, 600, 600, 600]
+codeFont = "monospace"
+metricValueFontWeight = 700
+linkUnderline = false
+
+[theme.light]
+primaryColor = "#1F3A5F"
+backgroundColor = "#FAFAF8"
+secondaryBackgroundColor = "#F0EEE6"
+textColor = "#1B1D22"
+borderColor = "#D9D6CB"
+dataframeBorderColor = "#D9D6CB"
+dataframeHeaderBackgroundColor = "#ECE9DF"
+redColor = "#B3261E"
+orangeColor = "#8A5A00"
+greenColor = "#1E6B4F"
+blueColor = "#2B6CB0"
+
+[theme.dark]
+primaryColor = "#6C9BC9"
+backgroundColor = "#14161B"
+secondaryBackgroundColor = "#1D2027"
+textColor = "#E7E5DC"
+borderColor = "#33363F"
+dataframeBorderColor = "#33363F"
+dataframeHeaderBackgroundColor = "#20232B"
+redColor = "#FF6B5E"
+orangeColor = "#E0A64D"
+greenColor = "#4FC38A"
+blueColor = "#6FA8DC"
