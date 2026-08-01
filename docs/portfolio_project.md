@@ -147,7 +147,7 @@ catalogguard_ready.csv + etl_summary.json
 | 마이그레이션 | Alembic |
 | 비동기 처리 | Redis, Celery |
 | 로컬 실행 | Docker Compose |
-| pytest | 9.1.1 |
+| pytest | 일반 unit·integration 9.1.1 / Chromium E2E 8.4.1 |
 | CI | GitHub Actions `Test` workflow |
 | CI 테스트 서비스 | PostgreSQL 18·Redis 7.4 서비스 컨테이너 |
 | CI 검증 범위 | 일반 `test` job의 Alembic·pytest·비동기 E2E와 별도 `browser-e2e` job의 PostgreSQL·Chromium 실제 브라우저 ETL·promotion E2E |

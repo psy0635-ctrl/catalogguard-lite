@@ -242,6 +242,22 @@ PY
 
 ## 9. Alembic 배포 gate와 컨테이너 시작
 
+### 2026-08-01 현재 저장소 이미지 재검증
+
+아래 2026-07-19 배포 기록은 당시 `20260705_0002` head와 image tag를 사용한 이력이다. 현재 코드는 비동기 inspection API를 포함하므로 FastAPI import 시 `services` package가 필요하고, Celery task를 실행하려면 `workers` package도 이미지에 있어야 한다. `Dockerfile.aws`는 두 package를 명시적으로 복사하며, 현재 Alembic head는 `20260728_0006`이다.
+
+현재 저장소에서는 실제 AWS 리소스를 시작하지 않고 로컬 Docker daemon으로 다음 packaging 경계를 다시 검증했다.
+
+```bash
+docker build -f Dockerfile.aws -t catalogguard-lite-api:local-verify .
+docker run --rm catalogguard-lite-api:local-verify \
+  python -c "import api.main; import workers.inspection_tasks; print('api and worker imports ok')"
+```
+
+검증 결과 image build와 FastAPI·Celery task import가 성공했고, image의 실행 UID는 비루트 `10001`이었다. 이 결과는 현재 Dockerfile의 packaging과 Python import 가능 여부만 증명하며, 중지된 EC2·RDS의 현재 상태나 실제 RDS TLS 연결을 재검증한 것은 아니다. 다시 배포할 때는 새 image와 실제 staging `DATABASE_URL`·CA mount로 `alembic upgrade head`, `/health`, `/ready`를 순서대로 확인해야 한다.
+
+### 2026-07-19 실제 AWS staging 배포 기록
+
 `Dockerfile.aws`로 `catalogguard-lite-api:57a713009c7c` image를 빌드했습니다. 빌드는 성공했고 당시 image 크기는 약 335 MB였습니다. image는 비루트 사용자 `catalogguard`로 실행되며 `/health` Healthcheck를 포함합니다. secret과 RDS CA 파일은 image에 포함하지 않습니다.
 
 ```bash

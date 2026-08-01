@@ -1463,12 +1463,24 @@ promotion preview의 응답 schema와 hash 형식, blocked reason, insert/update
 
 실제 Chromium 브라우저 E2E는 ETL reject fixture와 promotion fixture를 각각 `etl.cli`·`etl.load_cli`로 처리하고 테스트 PostgreSQL에 적재한 뒤, runner가 FastAPI와 Streamlit을 직접 시작합니다. promotion 시나리오는 `ETL 적재 이력` 탭에서 파일명·프로필명으로 batch를 검색하고, 실제 combobox 선택, preview, 변경 전·후 표, 승인 checkbox, 반영 버튼 상태, promotion 성공 또는 중복 메시지를 확인합니다. 이후 테스트 코드가 PostgreSQL의 succeeded run 1건, 운영 상품 insert/update, audit 존재, applying run 0건을 직접 확인합니다. reject 시나리오는 별도로 마스킹과 raw 민감정보 미노출, console/page error 0건을 확인합니다.
 
+일반 테스트의 `pytest==9.1.1`과 browser plugin의 `pytest<9` 제약을 섞지 않도록 E2E는 전용 가상환경에 설치하는 방식을 권장합니다.
+
+```powershell
+python -m venv .venv-e2e
+.\.venv-e2e\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements-e2e.txt
+python -m playwright install chromium
+```
+
 ```powershell
 $env:DATABASE_URL = "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/catalogguard_lite_test"
 python .\scripts\run_etl_browser_e2e.py
 ```
 
 runner는 로컬 loopback 테스트 DB만 허용하고, 실패 시 `artifacts/browser-e2e/`에 screenshot·HTML·FastAPI/Streamlit/Playwright 로그를 남긴 뒤 시작한 프로세스만 종료합니다. GitHub Actions의 `browser-e2e` job은 별도 PostgreSQL service와 Chromium을 사용하며 실패 artifact를 업로드합니다.
+
+`requirements-e2e.txt`는 `pytest-playwright==0.7.0`의 `pytest>=6.2.4,<9.0.0` 호환 범위에 맞춰 browser E2E용 `pytest==8.4.1`을 사용합니다. 일반 unit·integration suite와 GitHub Actions `test` job의 `pytest==9.1.1`과는 서로 다른 의존성 환경이며, 두 pin을 임의로 하나로 통합하지 않습니다.
 
 ### 동기 검수 성능 측정
 
