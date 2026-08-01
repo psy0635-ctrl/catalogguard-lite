@@ -172,6 +172,43 @@ def make_promotion_preview(
     }
 
 
+def make_promotion_run(run_id=31, *, status="succeeded"):
+    return {
+        "promotion_run_id": run_id,
+        "etl_load_run_id": 12,
+        "source_filename": "vendor_products.csv",
+        "profile_name": "sample_fashion_vendor_v2",
+        "status": status,
+        "inserted_count": 1,
+        "updated_count": 1,
+        "unchanged_count": 1,
+        "blocked_count": 0,
+        "error_count": 0,
+        "warning_count": 1,
+        "failure_code": None,
+        "safe_failure_message": None,
+        "started_at": "2026-07-30T10:00:00Z",
+        "completed_at": "2026-07-30T10:00:01Z",
+        "created_at": "2026-07-30T10:00:00Z",
+    }
+
+
+def make_promotion_audit(audit_id=41, *, promotion_run_id=31):
+    return {
+        "audit_id": audit_id,
+        "promotion_run_id": promotion_run_id,
+        "catalog_product_id": 51,
+        "action": "update",
+        "changed_fields": {
+            "price": {"before": 19900, "after": 20900},
+            "stock": {"before": 10, "after": 8},
+        },
+        "before_data": {"external_product_id": "SKU-UPDATE", "stock": 10},
+        "after_data": {"external_product_id": "SKU-UPDATE", "stock": 8},
+        "created_at": "2026-07-30T10:00:01Z",
+    }
+
+
 def test_initialize_catalog_promotion_state_is_safe_by_default():
     state = {}
 
@@ -434,12 +471,20 @@ class FakeEtlApiClient:
         promotion_response=None,
         promotion_error=None,
         list_pages=None,
+        promotion_history_items=None,
+        promotion_history_error=None,
+        promotion_history_detail_error=None,
+        promotion_audit_error=None,
+        promotion_audit_pages=None,
     ):
         self.list_calls = []
         self.detail_calls = []
         self.rejection_calls = []
         self.promotion_preview_calls = []
         self.promotion_calls = []
+        self.promotion_history_calls = []
+        self.promotion_history_detail_calls = []
+        self.promotion_audit_calls = []
         self.detail_error = detail_error
         self.list_items = [make_load()] if list_items is None else list_items
         self.list_pages = list_pages
@@ -476,6 +521,15 @@ class FakeEtlApiClient:
             "completed_at": "2026-07-30T10:00:01Z",
         }
         self.promotion_error = promotion_error
+        self.promotion_history_items = (
+            [make_promotion_run()]
+            if promotion_history_items is None
+            else promotion_history_items
+        )
+        self.promotion_history_error = promotion_history_error
+        self.promotion_history_detail_error = promotion_history_detail_error
+        self.promotion_audit_error = promotion_audit_error
+        self.promotion_audit_pages = promotion_audit_pages
 
     def list_etl_loads(self, **params):
         self.list_calls.append(params)
@@ -557,6 +611,69 @@ class FakeEtlApiClient:
             **self.promotion_response,
             "etl_load_run_id": run_id,
             "preview_hash": expected_preview_hash,
+        }
+
+    def list_catalog_promotions(self, **params):
+        self.promotion_history_calls.append(params)
+        if self.promotion_history_error is not None:
+            raise self.promotion_history_error
+        return {
+            "items": self.promotion_history_items,
+            "total": len(self.promotion_history_items),
+            "limit": params["limit"],
+            "offset": params["offset"],
+        }
+
+    def get_catalog_promotion_detail(self, promotion_run_id):
+        self.promotion_history_detail_calls.append(promotion_run_id)
+        if self.promotion_history_detail_error is not None:
+            raise self.promotion_history_detail_error
+        matching = next(
+            (
+                item
+                for item in self.promotion_history_items
+                if item["promotion_run_id"] == promotion_run_id
+            ),
+            make_promotion_run(promotion_run_id),
+        )
+        return {
+            **matching,
+            "preview_hash": "a" * 64,
+            "preview_schema_version": "1",
+            "inspection_version": "2026.07",
+        }
+
+    def list_catalog_promotion_audits(
+        self,
+        promotion_run_id,
+        *,
+        limit,
+        offset,
+    ):
+        self.promotion_audit_calls.append(
+            {
+                "promotion_run_id": promotion_run_id,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
+        if self.promotion_audit_error is not None:
+            raise self.promotion_audit_error
+        items = (
+            self.promotion_audit_pages.get(offset, [])
+            if self.promotion_audit_pages is not None
+            else [make_promotion_audit(promotion_run_id=promotion_run_id)]
+        )
+        total = (
+            sum(len(page) for page in self.promotion_audit_pages.values())
+            if self.promotion_audit_pages is not None
+            else len(items)
+        )
+        return {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
         }
 
 

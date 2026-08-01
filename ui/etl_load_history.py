@@ -12,6 +12,7 @@ from clients.catalogguard_api import (
     CatalogGuardApiTimeoutError,
     CatalogPromotionBlockedError,
     CatalogPromotionFailedError,
+    CatalogPromotionNotFoundError,
     CatalogPromotionPreviewStaleError,
     ETLLoadNotFoundError,
     create_catalogguard_api_client,
@@ -21,6 +22,8 @@ from clients.catalogguard_api import (
 ETL_LOAD_LIMIT = 10
 ETL_PRODUCT_LIMIT = 20
 ETL_REJECT_LIMIT = 20
+PROMOTION_HISTORY_LIMIT = 10
+PROMOTION_AUDIT_LIMIT = 10
 ETL_LOAD_DISPLAY_COLUMNS = [
     "적재 배치 ID",
     "원본 파일명",
@@ -62,6 +65,26 @@ PROMOTION_ACTION_LABELS = {
     "update": "정보 수정",
     "unchanged": "변경 없음",
 }
+PROMOTION_HISTORY_DISPLAY_COLUMNS = [
+    "실행 ID",
+    "ETL 배치",
+    "파일명",
+    "상태",
+    "신규",
+    "수정",
+    "변경 없음",
+    "실행 시각",
+]
+PROMOTION_AUDIT_DISPLAY_COLUMNS = [
+    "Audit ID",
+    "상품 ID",
+    "외부 상품 ID",
+    "변경 유형",
+    "변경 필드",
+    "변경 전",
+    "변경 후",
+    "변경 시각",
+]
 
 ETL_LOAD_STATE_DEFAULTS = {
     "etl_load_initialized": False,
@@ -88,6 +111,17 @@ ETL_LOAD_STATE_DEFAULTS = {
     "catalog_promotion_confirmation_input": False,
     "catalog_promotion_in_flight": False,
     "catalog_promotion_result": None,
+    "catalog_promotion_history_status": "전체",
+    "catalog_promotion_history_offset": 0,
+    "catalog_promotion_history_response": None,
+    "catalog_promotion_history_error": None,
+    "catalog_promotion_history_run_id": None,
+    "catalog_promotion_history_detail_requested": False,
+    "catalog_promotion_history_detail_response": None,
+    "catalog_promotion_history_detail_error": None,
+    "catalog_promotion_audit_offset": 0,
+    "catalog_promotion_audit_response": None,
+    "catalog_promotion_audit_error": None,
 }
 
 
@@ -298,6 +332,8 @@ def store_catalog_promotion_success(
 ) -> None:
     clear_catalog_promotion_preview_state(session_state, clear_result=False)
     session_state["catalog_promotion_result"] = dict(response)
+    session_state["catalog_promotion_history_response"] = None
+    session_state["catalog_promotion_history_error"] = None
 
 
 def store_catalog_promotion_failure(
@@ -352,6 +388,63 @@ def build_catalog_promotion_changes_dataframe(
             }
         )
     return pd.DataFrame(rows, columns=PROMOTION_CHANGE_DISPLAY_COLUMNS)
+
+
+def build_catalog_promotion_history_dataframe(
+    items: list[dict[str, Any]],
+) -> pd.DataFrame:
+    rows = [
+        {
+            "실행 ID": item.get("promotion_run_id"),
+            "ETL 배치": item.get("etl_load_run_id"),
+            "파일명": item.get("source_filename", ""),
+            "상태": item.get("status", ""),
+            "신규": item.get("inserted_count", 0),
+            "수정": item.get("updated_count", 0),
+            "변경 없음": item.get("unchanged_count", 0),
+            "실행 시각": format_etl_datetime(
+                item.get("started_at") or item.get("created_at")
+            ),
+        }
+        for item in items
+    ]
+    return pd.DataFrame(rows, columns=PROMOTION_HISTORY_DISPLAY_COLUMNS)
+
+
+def build_catalog_promotion_audit_dataframe(
+    items: list[dict[str, Any]],
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        after_data = item.get("after_data")
+        before_data = item.get("before_data")
+        safe_after = after_data if isinstance(after_data, dict) else {}
+        safe_before = before_data if isinstance(before_data, dict) else {}
+        external_product_id = safe_after.get(
+            "external_product_id",
+            safe_before.get("external_product_id", ""),
+        )
+        changed_fields = item.get("changed_fields")
+        safe_changes = changed_fields if isinstance(changed_fields, dict) else {}
+        for field_name in sorted(safe_changes):
+            change = safe_changes.get(field_name)
+            safe_change = change if isinstance(change, dict) else {}
+            rows.append(
+                {
+                    "Audit ID": item.get("audit_id"),
+                    "상품 ID": item.get("catalog_product_id"),
+                    "외부 상품 ID": external_product_id,
+                    "변경 유형": PROMOTION_ACTION_LABELS.get(
+                        str(item.get("action", "")),
+                        item.get("action", ""),
+                    ),
+                    "변경 필드": field_name,
+                    "변경 전": _display_nullable(safe_change.get("before")),
+                    "변경 후": _display_nullable(safe_change.get("after")),
+                    "변경 시각": format_etl_datetime(item.get("created_at")),
+                }
+            )
+    return pd.DataFrame(rows, columns=PROMOTION_AUDIT_DISPLAY_COLUMNS)
 
 
 def reset_etl_load_detail_state(session_state) -> None:
@@ -918,6 +1011,312 @@ def _render_etl_load_detail(api_client) -> None:
             st.rerun()
 
 
+def _clear_catalog_promotion_history_detail(session_state) -> None:
+    session_state["catalog_promotion_history_detail_requested"] = False
+    session_state["catalog_promotion_history_detail_response"] = None
+    session_state["catalog_promotion_history_detail_error"] = None
+    session_state["catalog_promotion_audit_offset"] = 0
+    session_state["catalog_promotion_audit_response"] = None
+    session_state["catalog_promotion_audit_error"] = None
+
+
+def _on_catalog_promotion_history_filter_change(session_state) -> None:
+    session_state["catalog_promotion_history_offset"] = 0
+    session_state["catalog_promotion_history_response"] = None
+    session_state["catalog_promotion_history_error"] = None
+    session_state["catalog_promotion_history_run_id"] = None
+    _clear_catalog_promotion_history_detail(session_state)
+
+
+def _on_catalog_promotion_history_run_change(session_state) -> None:
+    _clear_catalog_promotion_history_detail(session_state)
+
+
+def _fetch_catalog_promotion_history(api_client) -> dict[str, Any] | None:
+    cached = st.session_state.get("catalog_promotion_history_response")
+    if isinstance(cached, dict):
+        return cached
+    if st.session_state.get("catalog_promotion_history_error") is not None:
+        return None
+
+    params: dict[str, Any] = {
+        "limit": PROMOTION_HISTORY_LIMIT,
+        "offset": st.session_state["catalog_promotion_history_offset"],
+    }
+    selected_status = st.session_state.get("catalog_promotion_history_status")
+    if selected_status and selected_status != "전체":
+        params["status"] = selected_status
+    try:
+        response = api_client.list_catalog_promotions(**params)
+        st.session_state["catalog_promotion_history_response"] = response
+        st.session_state["catalog_promotion_history_error"] = None
+        return response
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        st.session_state["catalog_promotion_history_error"] = error
+        return None
+
+
+def _fetch_catalog_promotion_history_detail(api_client) -> dict[str, Any] | None:
+    cached = st.session_state.get("catalog_promotion_history_detail_response")
+    if isinstance(cached, dict):
+        return cached
+    if st.session_state.get("catalog_promotion_history_detail_error") is not None:
+        return None
+    promotion_run_id = st.session_state.get("catalog_promotion_history_run_id")
+    if promotion_run_id is None:
+        return None
+    try:
+        response = api_client.get_catalog_promotion_detail(int(promotion_run_id))
+        st.session_state["catalog_promotion_history_detail_response"] = response
+        st.session_state["catalog_promotion_history_detail_error"] = None
+        return response
+    except (
+        CatalogPromotionNotFoundError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        st.session_state["catalog_promotion_history_detail_error"] = error
+        return None
+
+
+def _fetch_catalog_promotion_audits(api_client) -> dict[str, Any] | None:
+    cached = st.session_state.get("catalog_promotion_audit_response")
+    if isinstance(cached, dict):
+        return cached
+    if st.session_state.get("catalog_promotion_audit_error") is not None:
+        return None
+    promotion_run_id = st.session_state.get("catalog_promotion_history_run_id")
+    if promotion_run_id is None:
+        return None
+    try:
+        response = api_client.list_catalog_promotion_audits(
+            int(promotion_run_id),
+            limit=PROMOTION_AUDIT_LIMIT,
+            offset=st.session_state["catalog_promotion_audit_offset"],
+        )
+        st.session_state["catalog_promotion_audit_response"] = response
+        st.session_state["catalog_promotion_audit_error"] = None
+        return response
+    except (
+        CatalogPromotionNotFoundError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        st.session_state["catalog_promotion_audit_error"] = error
+        return None
+
+
+def _render_catalog_promotion_history_error(
+    message: str,
+    error: Exception,
+) -> None:
+    st.error(build_etl_api_error_display_message(message, error))
+
+
+def _render_catalog_promotion_audits(api_client) -> None:
+    st.markdown("#### 상품 변경 Audit")
+    response = _fetch_catalog_promotion_audits(api_client)
+    if response is None:
+        error = st.session_state.get("catalog_promotion_audit_error")
+        if error is not None:
+            _render_catalog_promotion_history_error(
+                "상품 변경 Audit을 불러오지 못했습니다.",
+                error,
+            )
+        return
+
+    items = response.get("items") or []
+    if not items:
+        st.info("이 Promotion 실행에는 상품 변경 Audit이 없습니다.")
+    else:
+        st.dataframe(
+            build_catalog_promotion_audit_dataframe(items),
+            width="stretch",
+            hide_index=True,
+        )
+
+    total = max(0, int(response.get("total", 0)))
+    current_page, total_pages, has_previous, has_next = calculate_etl_pagination(
+        total=total,
+        limit=PROMOTION_AUDIT_LIMIT,
+        offset=st.session_state["catalog_promotion_audit_offset"],
+    )
+    st.caption(f"Audit {current_page} / {total_pages} 페이지 · 전체 {total}건")
+    previous_col, next_col = st.columns(2)
+    with previous_col:
+        if st.button(
+            "Audit 이전",
+            key="catalog_promotion_audit_previous",
+            disabled=not has_previous,
+        ):
+            st.session_state["catalog_promotion_audit_offset"] -= (
+                PROMOTION_AUDIT_LIMIT
+            )
+            st.session_state["catalog_promotion_audit_response"] = None
+            st.session_state["catalog_promotion_audit_error"] = None
+            st.rerun()
+    with next_col:
+        if st.button(
+            "Audit 다음",
+            key="catalog_promotion_audit_next",
+            disabled=not has_next,
+        ):
+            st.session_state["catalog_promotion_audit_offset"] += (
+                PROMOTION_AUDIT_LIMIT
+            )
+            st.session_state["catalog_promotion_audit_response"] = None
+            st.session_state["catalog_promotion_audit_error"] = None
+            st.rerun()
+
+
+def _render_catalog_promotion_history_detail(api_client) -> None:
+    detail = _fetch_catalog_promotion_history_detail(api_client)
+    if detail is None:
+        error = st.session_state.get("catalog_promotion_history_detail_error")
+        if error is not None:
+            _render_catalog_promotion_history_error(
+                "Promotion 실행 상세를 불러오지 못했습니다.",
+                error,
+            )
+        return
+
+    st.markdown("#### Promotion 실행 상세")
+    st.write(f"실행 ID: {detail.get('promotion_run_id', '')}")
+    st.write(f"ETL 배치: {detail.get('etl_load_run_id', '')}")
+    st.write(f"원본 파일명: {detail.get('source_filename', '')}")
+    st.write(f"상태: {detail.get('status', '')}")
+    metric_columns = st.columns(3)
+    metric_columns[0].metric("신규 상품", detail.get("inserted_count", 0))
+    metric_columns[1].metric("수정 상품", detail.get("updated_count", 0))
+    metric_columns[2].metric("변경 없음", detail.get("unchanged_count", 0))
+    failure_message = detail.get("safe_failure_message")
+    if failure_message:
+        st.warning(str(failure_message))
+    st.caption(
+        "실행 시각: "
+        f"{format_etl_datetime(detail.get('started_at') or detail.get('created_at'))}"
+    )
+    _render_catalog_promotion_audits(api_client)
+
+
+def _render_catalog_promotion_history(api_client) -> None:
+    st.divider()
+    st.subheader("Promotion 실행 이력")
+    st.write("저장된 Promotion 실행 결과와 상품 변경 Audit을 조회합니다.")
+    st.selectbox(
+        "상태 필터",
+        options=["전체", "applying", "succeeded", "failed", "blocked"],
+        key="catalog_promotion_history_status",
+        on_change=_on_catalog_promotion_history_filter_change,
+        args=(st.session_state,),
+    )
+
+    response = _fetch_catalog_promotion_history(api_client)
+    if response is None:
+        error = st.session_state.get("catalog_promotion_history_error")
+        if error is not None:
+            _render_catalog_promotion_history_error(
+                "Promotion 실행 이력을 불러오지 못했습니다.",
+                error,
+            )
+        return
+
+    items = response.get("items") or []
+    if not items:
+        st.info("Promotion 실행 이력이 없습니다.")
+    else:
+        st.dataframe(
+            build_catalog_promotion_history_dataframe(items),
+            width="stretch",
+            hide_index=True,
+        )
+        run_ids = [item["promotion_run_id"] for item in items]
+        labels = {
+            item["promotion_run_id"]: (
+                f"{item['promotion_run_id']} · {item.get('source_filename', '')} · "
+                f"{item.get('status', '')}"
+            )
+            for item in items
+        }
+        if st.session_state.get("catalog_promotion_history_run_id") not in run_ids:
+            st.session_state["catalog_promotion_history_run_id"] = None
+            _clear_catalog_promotion_history_detail(st.session_state)
+        st.selectbox(
+            "Promotion 실행 선택",
+            options=[None, *run_ids],
+            format_func=lambda run_id: (
+                "조회할 Promotion 실행을 선택하세요."
+                if run_id is None
+                else labels.get(run_id, str(run_id))
+            ),
+            key="catalog_promotion_history_run_id",
+            on_change=_on_catalog_promotion_history_run_change,
+            args=(st.session_state,),
+        )
+        if st.button(
+            "Promotion 상세 조회",
+            key="catalog_promotion_history_show_detail",
+            disabled=st.session_state.get("catalog_promotion_history_run_id") is None,
+        ):
+            st.session_state["catalog_promotion_history_detail_requested"] = True
+            st.session_state["catalog_promotion_history_detail_response"] = None
+            st.session_state["catalog_promotion_history_detail_error"] = None
+            st.session_state["catalog_promotion_audit_offset"] = 0
+            st.session_state["catalog_promotion_audit_response"] = None
+            st.session_state["catalog_promotion_audit_error"] = None
+            st.rerun()
+
+    total = max(0, int(response.get("total", 0)))
+    current_page, total_pages, has_previous, has_next = calculate_etl_pagination(
+        total=total,
+        limit=PROMOTION_HISTORY_LIMIT,
+        offset=st.session_state["catalog_promotion_history_offset"],
+    )
+    st.caption(f"{current_page} / {total_pages} 페이지 · 전체 {total}건")
+    previous_col, next_col = st.columns(2)
+    with previous_col:
+        if st.button(
+            "이력 이전",
+            key="catalog_promotion_history_previous",
+            disabled=not has_previous,
+        ):
+            st.session_state["catalog_promotion_history_offset"] -= (
+                PROMOTION_HISTORY_LIMIT
+            )
+            st.session_state["catalog_promotion_history_response"] = None
+            st.session_state["catalog_promotion_history_error"] = None
+            st.session_state["catalog_promotion_history_run_id"] = None
+            _clear_catalog_promotion_history_detail(st.session_state)
+            st.rerun()
+    with next_col:
+        if st.button(
+            "이력 다음",
+            key="catalog_promotion_history_next",
+            disabled=not has_next,
+        ):
+            st.session_state["catalog_promotion_history_offset"] += (
+                PROMOTION_HISTORY_LIMIT
+            )
+            st.session_state["catalog_promotion_history_response"] = None
+            st.session_state["catalog_promotion_history_error"] = None
+            st.session_state["catalog_promotion_history_run_id"] = None
+            _clear_catalog_promotion_history_detail(st.session_state)
+            st.rerun()
+
+    if st.session_state.get("catalog_promotion_history_detail_requested"):
+        _render_catalog_promotion_history_detail(api_client)
+
+
 def render_etl_load_history(api_client=None) -> None:
     initialize_etl_load_state()
     st.subheader("ETL 적재 이력")
@@ -943,6 +1342,7 @@ def render_etl_load_history(api_client=None) -> None:
     items = response.get("items") or []
     if not items:
         st.info("조건에 맞는 ETL 적재 이력이 없습니다.")
+        _render_catalog_promotion_history(api_client)
         return
 
     st.dataframe(
@@ -979,3 +1379,4 @@ def render_etl_load_history(api_client=None) -> None:
     _render_catalog_promotion_preview(api_client)
     if st.session_state.get("etl_load_detail_requested", False):
         _render_etl_load_detail(api_client)
+    _render_catalog_promotion_history(api_client)

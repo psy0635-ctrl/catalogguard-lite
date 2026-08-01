@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, st
 from sqlalchemy.orm import Session
 
 from api.schemas import (
+    CatalogPromotionAuditListResponse,
+    CatalogPromotionAuditResponse,
     CatalogPromotionBlockedReasonResponse,
     CatalogPromotionChangedFieldResponse,
     CatalogPromotionPreviewItemResponse,
@@ -9,6 +11,10 @@ from api.schemas import (
     CatalogPromotionProductDataResponse,
     CatalogPromotionRequest,
     CatalogPromotionResponse,
+    CatalogPromotionRunDetailResponse,
+    CatalogPromotionRunListItemResponse,
+    CatalogPromotionRunListResponse,
+    CatalogPromotionRunStatus,
     ETLLoadDetailResponse,
     ETLLoadListItemResponse,
     ETLLoadListResponse,
@@ -39,10 +45,19 @@ from db.catalog_promotion_service import (
     CatalogPromotionInvalidPreviewHashError,
     execute_catalog_promotion,
 )
+from db.catalog_promotion_query_service import (
+    CatalogPromotionAuditList,
+    CatalogPromotionRunDetail,
+    CatalogPromotionRunList,
+    get_catalog_promotion_detail,
+    list_catalog_promotion_audits,
+    list_catalog_promotions,
+)
 from db.session import get_session
 
 
 router = APIRouter()
+CATALOG_PROMOTION_NOT_FOUND_MESSAGE = "Promotion run not found."
 ETL_LOAD_NOT_FOUND_MESSAGE = "ETL 적재 배치를 찾을 수 없습니다."
 
 
@@ -199,6 +214,147 @@ def _build_promotion_response(
         started_at=result.started_at,
         completed_at=result.completed_at,
     )
+
+
+def _build_promotion_run_item_response(
+    item,
+) -> CatalogPromotionRunListItemResponse:
+    return CatalogPromotionRunListItemResponse(
+        promotion_run_id=item.promotion_run_id,
+        etl_load_run_id=item.etl_load_run_id,
+        source_filename=item.source_filename,
+        profile_name=item.profile_name,
+        status=item.status,
+        inserted_count=item.inserted_count,
+        updated_count=item.updated_count,
+        unchanged_count=item.unchanged_count,
+        blocked_count=item.blocked_count,
+        error_count=item.error_count,
+        warning_count=item.warning_count,
+        failure_code=item.failure_code,
+        safe_failure_message=item.safe_failure_message,
+        started_at=item.started_at,
+        completed_at=item.completed_at,
+        created_at=item.created_at,
+    )
+
+
+def _build_promotion_run_list_response(
+    result: CatalogPromotionRunList,
+) -> CatalogPromotionRunListResponse:
+    return CatalogPromotionRunListResponse(
+        items=[_build_promotion_run_item_response(item) for item in result.items],
+        total=result.total,
+        limit=result.limit,
+        offset=result.offset,
+    )
+
+
+def _build_promotion_run_detail_response(
+    result: CatalogPromotionRunDetail,
+) -> CatalogPromotionRunDetailResponse:
+    item = _build_promotion_run_item_response(result)
+    return CatalogPromotionRunDetailResponse(
+        **item.model_dump(),
+        preview_hash=result.preview_hash,
+        preview_schema_version=result.preview_schema_version,
+        inspection_version=result.inspection_version,
+    )
+
+
+def _build_promotion_audit_list_response(
+    result: CatalogPromotionAuditList,
+) -> CatalogPromotionAuditListResponse:
+    return CatalogPromotionAuditListResponse(
+        items=[
+            CatalogPromotionAuditResponse(
+                audit_id=item.audit_id,
+                promotion_run_id=item.promotion_run_id,
+                catalog_product_id=item.catalog_product_id,
+                action=item.action,
+                changed_fields=item.changed_fields,
+                before_data=item.before_data,
+                after_data=item.after_data,
+                created_at=item.created_at,
+            )
+            for item in result.items
+        ],
+        total=result.total,
+        limit=result.limit,
+        offset=result.offset,
+    )
+
+
+@router.get(
+    "/api/v1/catalog-promotions",
+    response_model=CatalogPromotionRunListResponse,
+)
+def list_catalog_promotion_runs(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    promotion_status: CatalogPromotionRunStatus | None = Query(
+        default=None,
+        alias="status",
+    ),
+    etl_load_run_id: int | None = Query(default=None, ge=1),
+    filename: str | None = Query(default=None),
+    profile_name: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+) -> CatalogPromotionRunListResponse:
+    result = list_catalog_promotions(
+        session,
+        limit=limit,
+        offset=offset,
+        status=promotion_status,
+        etl_load_run_id=etl_load_run_id,
+        filename=normalize_etl_filter(filename),
+        profile_name=normalize_etl_filter(profile_name),
+    )
+    return _build_promotion_run_list_response(result)
+
+
+@router.get(
+    "/api/v1/catalog-promotions/{promotion_run_id}",
+    response_model=CatalogPromotionRunDetailResponse,
+)
+def get_catalog_promotion_run(
+    promotion_run_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+) -> CatalogPromotionRunDetailResponse:
+    result = get_catalog_promotion_detail(
+        session,
+        promotion_run_id=promotion_run_id,
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=CATALOG_PROMOTION_NOT_FOUND_MESSAGE,
+        )
+    return _build_promotion_run_detail_response(result)
+
+
+@router.get(
+    "/api/v1/catalog-promotions/{promotion_run_id}/audits",
+    response_model=CatalogPromotionAuditListResponse,
+)
+def list_catalog_promotion_run_audits(
+    promotion_run_id: int = Path(..., ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: Session = Depends(get_session),
+) -> CatalogPromotionAuditListResponse:
+    result = list_catalog_promotion_audits(
+        session,
+        promotion_run_id=promotion_run_id,
+        limit=limit,
+        offset=offset,
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=CATALOG_PROMOTION_NOT_FOUND_MESSAGE,
+        )
+    return _build_promotion_audit_list_response(result)
 
 
 @router.get("/api/v1/etl-loads", response_model=ETLLoadListResponse)

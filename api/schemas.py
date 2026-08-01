@@ -220,6 +220,59 @@ class CatalogPromotionResponse(BaseModel):
     completed_at: datetime
 
 
+CatalogPromotionRunStatus = Literal["applying", "succeeded", "failed", "blocked"]
+
+
+class CatalogPromotionRunListItemResponse(BaseModel):
+    promotion_run_id: int
+    etl_load_run_id: int
+    source_filename: str
+    profile_name: str
+    status: CatalogPromotionRunStatus
+    inserted_count: int
+    updated_count: int
+    unchanged_count: int
+    blocked_count: int
+    error_count: int
+    warning_count: int
+    failure_code: str | None
+    safe_failure_message: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+
+
+class CatalogPromotionRunListResponse(BaseModel):
+    items: list[CatalogPromotionRunListItemResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class CatalogPromotionRunDetailResponse(CatalogPromotionRunListItemResponse):
+    preview_hash: str | None
+    preview_schema_version: str | None
+    inspection_version: str | None
+
+
+class CatalogPromotionAuditResponse(BaseModel):
+    audit_id: int
+    promotion_run_id: int
+    catalog_product_id: int
+    action: Literal["insert", "update"]
+    changed_fields: dict[str, object]
+    before_data: dict[str, object] | None
+    after_data: dict[str, object]
+    created_at: datetime
+
+
+class CatalogPromotionAuditListResponse(BaseModel):
+    items: list[CatalogPromotionAuditResponse]
+    total: int
+    limit: int
+    offset: int
+
+
 InspectionJobStatus = Literal["queued", "running", "succeeded", "failed"]
 
 

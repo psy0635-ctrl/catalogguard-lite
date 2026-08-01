@@ -1408,6 +1408,214 @@ CATALOG_PROMOTION_RESPONSE = {
     "completed_at": "2026-07-30T10:00:01Z",
 }
 
+CATALOG_PROMOTION_RUN_ITEM = {
+    "promotion_run_id": 31,
+    "etl_load_run_id": 12,
+    "source_filename": "vendor.csv",
+    "profile_name": "sample_vendor",
+    "status": "succeeded",
+    "inserted_count": 1,
+    "updated_count": 1,
+    "unchanged_count": 1,
+    "blocked_count": 0,
+    "error_count": 0,
+    "warning_count": 1,
+    "failure_code": None,
+    "safe_failure_message": None,
+    "started_at": "2026-07-30T10:00:00Z",
+    "completed_at": "2026-07-30T10:00:01Z",
+    "created_at": "2026-07-30T10:00:00Z",
+}
+CATALOG_PROMOTION_RUN_LIST_RESPONSE = {
+    "items": [CATALOG_PROMOTION_RUN_ITEM],
+    "total": 1,
+    "limit": 20,
+    "offset": 0,
+}
+CATALOG_PROMOTION_RUN_DETAIL_RESPONSE = {
+    **CATALOG_PROMOTION_RUN_ITEM,
+    "preview_hash": "a" * 64,
+    "preview_schema_version": "1",
+    "inspection_version": "2026.07",
+}
+CATALOG_PROMOTION_AUDIT_RESPONSE = {
+    "items": [
+        {
+            "audit_id": 41,
+            "promotion_run_id": 31,
+            "catalog_product_id": 51,
+            "action": "update",
+            "changed_fields": {"stock": {"before": 1, "after": 2}},
+            "before_data": {"external_product_id": "SKU-001", "stock": 1},
+            "after_data": {"external_product_id": "SKU-001", "stock": 2},
+            "created_at": "2026-07-30T10:00:00Z",
+        }
+    ],
+    "total": 1,
+    "limit": 20,
+    "offset": 0,
+}
+
+
+def test_list_catalog_promotions_calls_get_with_filters_and_validates_contract():
+    client, session = make_client(
+        response=FakeResponse(payload=CATALOG_PROMOTION_RUN_LIST_RESPONSE),
+        timeout_seconds=4.0,
+    )
+
+    data = client.list_catalog_promotions(
+        limit=20,
+        offset=0,
+        status="succeeded",
+        etl_load_run_id=12,
+        filename="  vendor  ",
+    )
+
+    assert data == CATALOG_PROMOTION_RUN_LIST_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/catalog-promotions",
+            "params": {
+                "limit": 20,
+                "offset": 0,
+                "status": "succeeded",
+                "etl_load_run_id": 12,
+                "filename": "vendor",
+            },
+            "timeout": 4.0,
+        }
+    ]
+
+
+def test_get_catalog_promotion_detail_and_audits_validate_contracts():
+    detail_client, detail_session = make_client(
+        response=FakeResponse(payload=CATALOG_PROMOTION_RUN_DETAIL_RESPONSE)
+    )
+    audit_client, audit_session = make_client(
+        response=FakeResponse(payload=CATALOG_PROMOTION_AUDIT_RESPONSE)
+    )
+
+    assert detail_client.get_catalog_promotion_detail(31) == (
+        CATALOG_PROMOTION_RUN_DETAIL_RESPONSE
+    )
+    assert audit_client.list_catalog_promotion_audits(
+        31,
+        limit=20,
+        offset=0,
+    ) == CATALOG_PROMOTION_AUDIT_RESPONSE
+    assert detail_session.calls[0]["url"].endswith("/api/v1/catalog-promotions/31")
+    assert audit_session.calls[0] == {
+        "url": "https://api.example.com/api/v1/catalog-promotions/31/audits",
+        "params": {"limit": 20, "offset": 0},
+        "timeout": 5.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("method_name", "args", "kwargs"),
+    [
+        ("list_catalog_promotions", (), {"limit": 0}),
+        ("list_catalog_promotions", (), {"offset": -1}),
+        ("list_catalog_promotions", (), {"status": "unknown"}),
+        ("list_catalog_promotions", (), {"etl_load_run_id": 0}),
+        ("get_catalog_promotion_detail", (0,), {}),
+        ("list_catalog_promotion_audits", (31,), {"limit": 101}),
+    ],
+)
+def test_catalog_promotion_history_rejects_invalid_arguments_without_request(
+    method_name,
+    args,
+    kwargs,
+):
+    client, session = make_client(
+        response=FakeResponse(payload=CATALOG_PROMOTION_RUN_LIST_RESPONSE)
+    )
+
+    with pytest.raises(ValueError):
+        getattr(client, method_name)(*args, **kwargs)
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["get_catalog_promotion_detail", "list_catalog_promotion_audits"],
+)
+def test_catalog_promotion_history_maps_404_to_not_found(method_name):
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=404,
+            payload={"detail": "postgresql://private"},
+            headers={"X-Request-ID": VALID_REQUEST_ID},
+        )
+    )
+
+    with pytest.raises(client_module.CatalogPromotionNotFoundError) as error:
+        getattr(client, method_name)(31)
+
+    assert error.value.request_id == VALID_REQUEST_ID
+    assert "postgresql" not in str(error.value).lower()
+
+
+@pytest.mark.parametrize(
+    ("method_name", "payload"),
+    [
+        (
+            "list_catalog_promotions",
+            {
+                **CATALOG_PROMOTION_RUN_LIST_RESPONSE,
+                "items": [{"promotion_run_id": 31}],
+            },
+        ),
+        (
+            "get_catalog_promotion_detail",
+            {**CATALOG_PROMOTION_RUN_DETAIL_RESPONSE, "status": "unknown"},
+        ),
+        (
+            "list_catalog_promotion_audits",
+            {
+                **CATALOG_PROMOTION_AUDIT_RESPONSE,
+                "items": [{"audit_id": 41}],
+            },
+        ),
+    ],
+)
+def test_catalog_promotion_history_rejects_missing_or_invalid_fields(
+    method_name,
+    payload,
+):
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        if method_name == "list_catalog_promotions":
+            client.list_catalog_promotions()
+        else:
+            getattr(client, method_name)(31)
+
+
+def test_catalog_promotion_history_rejects_malformed_json_and_hides_500_body():
+    client_module = import_client_module()
+    malformed_client, _ = make_client(
+        response=FakeResponse(json_error=ValueError("bad json"))
+    )
+    failed_client, _ = make_client(
+        response=FakeResponse(
+            status_code=500,
+            payload={"detail": "postgresql://private"},
+            text="Traceback: secret",
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        malformed_client.list_catalog_promotions()
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        failed_client.get_catalog_promotion_detail(31)
+
+    assert "postgresql" not in str(error.value).lower()
+    assert "traceback" not in str(error.value).lower()
+
 
 def test_get_catalog_promotion_preview_posts_without_body_and_validates_response():
     client, session = make_client(

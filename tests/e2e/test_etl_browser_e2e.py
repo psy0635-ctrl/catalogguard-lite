@@ -43,7 +43,7 @@ def _preserve_browser_failure_artifacts(page) -> None:
         pass
 
 
-def _assert_catalog_promotion_persisted(page) -> None:
+def _assert_catalog_promotion_persisted(page) -> dict[str, int]:
     from sqlalchemy import func, select
 
     from db.models import (
@@ -110,6 +110,18 @@ def _assert_catalog_promotion_persisted(page) -> None:
             )
         )
         assert change_count >= 1
+        promotion_run_count = session.scalar(
+            select(func.count()).select_from(CatalogPromotionRun).where(
+                CatalogPromotionRun.etl_load_run_id == load_run_id
+            )
+        )
+        return {
+            "load_run_id": load_run_id,
+            "promotion_run_id": promotion_run.id,
+            "promotion_run_count": int(promotion_run_count or 0),
+            "change_count": int(change_count or 0),
+            "catalog_product_count": int(catalog_product_count or 0),
+        }
 
 
 def _run_catalog_promotion_success_scenario(page) -> None:
@@ -199,7 +211,32 @@ def _run_catalog_promotion_success_scenario(page) -> None:
             r"이미 처리된 ETL 적재 결과입니다\."
         )
     )
-    _assert_catalog_promotion_persisted(page)
+    before_history_snapshot = _assert_catalog_promotion_persisted(page)
+
+    expect(page.locator("body")).to_contain_text("Promotion 실행 이력")
+    history_selector = page.get_by_role(
+        "combobox",
+        name="Promotion 실행 선택",
+    )
+    history_selector.click()
+    page.get_by_role(
+        "option",
+        name=re.compile(r"succeeded"),
+    ).click()
+    page.get_by_role(
+        "button",
+        name="Promotion 상세 조회",
+        exact=True,
+    ).click()
+
+    expect(page.locator("body")).to_contain_text("Promotion 실행 상세")
+    expect(page.locator("body")).to_contain_text("상태: succeeded")
+    expect(page.locator("body")).to_contain_text("상품 변경 Audit")
+    for product_id in PROMOTION_PRODUCT_IDS:
+        expect(page.locator("body")).to_contain_text(product_id)
+
+    after_history_snapshot = _assert_catalog_promotion_persisted(page)
+    assert after_history_snapshot == before_history_snapshot
 
     assert not console_errors, f"Unexpected browser console errors: {console_errors}"
     assert not page_errors, f"Unexpected browser page errors: {page_errors}"

@@ -140,6 +140,44 @@ CATALOG_PROMOTION_RESPONSE_KEYS = (
     "started_at",
     "completed_at",
 )
+CATALOG_PROMOTION_RUN_STATUSES = {"applying", "succeeded", "failed", "blocked"}
+CATALOG_PROMOTION_RUN_ITEM_KEYS = (
+    "promotion_run_id",
+    "etl_load_run_id",
+    "source_filename",
+    "profile_name",
+    "status",
+    "inserted_count",
+    "updated_count",
+    "unchanged_count",
+    "blocked_count",
+    "error_count",
+    "warning_count",
+    "failure_code",
+    "safe_failure_message",
+    "started_at",
+    "completed_at",
+    "created_at",
+)
+CATALOG_PROMOTION_RUN_LIST_KEYS = ("items", "total", "limit", "offset")
+CATALOG_PROMOTION_RUN_DETAIL_KEYS = (
+    *CATALOG_PROMOTION_RUN_ITEM_KEYS,
+    "preview_hash",
+    "preview_schema_version",
+    "inspection_version",
+)
+CATALOG_PROMOTION_AUDIT_LIST_KEYS = ("items", "total", "limit", "offset")
+CATALOG_PROMOTION_AUDIT_ITEM_KEYS = (
+    "audit_id",
+    "promotion_run_id",
+    "catalog_product_id",
+    "action",
+    "changed_fields",
+    "before_data",
+    "after_data",
+    "created_at",
+)
+CATALOG_PROMOTION_NOT_FOUND_MESSAGE = "Promotion run not found."
 CATALOG_PROMOTION_STALE_MESSAGE = (
     "미리보기 이후 상품 데이터가 변경되었습니다. 미리보기를 다시 실행하세요."
 )
@@ -548,6 +586,125 @@ def _validate_catalog_promotion_response(data: dict[str, Any]) -> None:
         raise _invalid_etl_response()
 
 
+def _validate_catalog_promotion_run_item(item: object) -> bool:
+    if not isinstance(item, dict) or any(
+        key not in item for key in CATALOG_PROMOTION_RUN_ITEM_KEYS
+    ):
+        return False
+    count_fields = (
+        "inserted_count",
+        "updated_count",
+        "unchanged_count",
+        "blocked_count",
+        "error_count",
+        "warning_count",
+    )
+    optional_text_fields = ("failure_code", "safe_failure_message")
+    optional_datetime_fields = ("started_at", "completed_at")
+    return (
+        type(item["promotion_run_id"]) is int
+        and item["promotion_run_id"] > 0
+        and type(item["etl_load_run_id"]) is int
+        and item["etl_load_run_id"] > 0
+        and isinstance(item["source_filename"], str)
+        and isinstance(item["profile_name"], str)
+        and item["status"] in CATALOG_PROMOTION_RUN_STATUSES
+        and all(type(item[field]) is int and item[field] >= 0 for field in count_fields)
+        and all(
+            item[field] is None or isinstance(item[field], str)
+            for field in optional_text_fields
+        )
+        and all(
+            item[field] is None or isinstance(item[field], str)
+            for field in optional_datetime_fields
+        )
+        and isinstance(item["created_at"], str)
+    )
+
+
+def _validate_catalog_promotion_run_list(data: dict[str, Any]) -> None:
+    if (
+        any(key not in data for key in CATALOG_PROMOTION_RUN_LIST_KEYS)
+        or not isinstance(data["items"], list)
+        or not _validate_etl_list_metadata(data["total"], allow_limit_zero=True)
+        or not _validate_etl_list_metadata(data["limit"])
+        or not _validate_etl_list_metadata(data["offset"], allow_limit_zero=True)
+        or any(
+            not _validate_catalog_promotion_run_item(item)
+            for item in data["items"]
+        )
+    ):
+        raise _invalid_etl_response()
+
+
+def _validate_catalog_promotion_run_detail(data: dict[str, Any]) -> None:
+    if (
+        any(key not in data for key in CATALOG_PROMOTION_RUN_DETAIL_KEYS)
+        or not _validate_catalog_promotion_run_item(data)
+        or (
+            data["preview_hash"] is not None
+            and (
+                not isinstance(data["preview_hash"], str)
+                or CATALOG_PROMOTION_SHA256_PATTERN.fullmatch(data["preview_hash"])
+                is None
+            )
+        )
+        or (
+            data["preview_schema_version"] is not None
+            and not isinstance(data["preview_schema_version"], str)
+        )
+        or (
+            data["inspection_version"] is not None
+            and not isinstance(data["inspection_version"], str)
+        )
+    ):
+        raise _invalid_etl_response()
+
+
+def _validate_catalog_promotion_audit_item(item: object) -> bool:
+    if not isinstance(item, dict) or any(
+        key not in item for key in CATALOG_PROMOTION_AUDIT_ITEM_KEYS
+    ):
+        return False
+    return (
+        type(item["audit_id"]) is int
+        and item["audit_id"] > 0
+        and type(item["promotion_run_id"]) is int
+        and item["promotion_run_id"] > 0
+        and type(item["catalog_product_id"]) is int
+        and item["catalog_product_id"] > 0
+        and item["action"] in {"insert", "update"}
+        and isinstance(item["changed_fields"], dict)
+        and bool(item["changed_fields"])
+        and all(
+            isinstance(field_name, str)
+            and field_name
+            and isinstance(change, dict)
+            and "before" in change
+            and "after" in change
+            for field_name, change in item["changed_fields"].items()
+        )
+        and (item["before_data"] is None or isinstance(item["before_data"], dict))
+        and isinstance(item["after_data"], dict)
+        and isinstance(item["created_at"], str)
+    )
+
+
+def _validate_catalog_promotion_audit_list(data: dict[str, Any]) -> None:
+    if (
+        any(key not in data for key in CATALOG_PROMOTION_AUDIT_LIST_KEYS)
+        or not isinstance(data["items"], list)
+        or not _validate_etl_list_metadata(data["total"], allow_limit_zero=True)
+        or not _validate_etl_list_metadata(data["limit"])
+        or not _validate_etl_list_metadata(data["offset"], allow_limit_zero=True)
+        or any(
+            not _validate_catalog_promotion_audit_item(item)
+            for item in data["items"]
+        )
+    ):
+        raise _invalid_etl_response()
+
+
 class CatalogGuardApiError(Exception):
     def __init__(
         self,
@@ -576,6 +733,10 @@ class InspectionNotFoundError(CatalogGuardApiError):
 
 
 class ETLLoadNotFoundError(CatalogGuardApiError):
+    pass
+
+
+class CatalogPromotionNotFoundError(CatalogGuardApiError):
     pass
 
 
@@ -833,6 +994,76 @@ class CatalogGuardApiClient:
             not_found_message="ETL ?곸옱 諛곗튂瑜?李얠쓣 ???놁뒿?덈떎.",
         )
         _validate_etl_rejection_list_response(data)
+        return data
+
+    def list_catalog_promotions(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        status: str | None = None,
+        etl_load_run_id: int | None = None,
+        filename: str | None = None,
+        profile_name: str | None = None,
+    ) -> dict[str, Any]:
+        _validate_etl_pagination(limit, offset)
+        params: dict[str, int | str] = {"limit": limit, "offset": offset}
+
+        normalized_status = "" if status is None else str(status).strip()
+        if normalized_status:
+            if normalized_status not in CATALOG_PROMOTION_RUN_STATUSES:
+                raise ValueError(
+                    "status must be one of: applying, succeeded, failed, blocked"
+                )
+            params["status"] = normalized_status
+
+        if etl_load_run_id is not None:
+            _validate_positive_etl_int(etl_load_run_id, "etl_load_run_id")
+            params["etl_load_run_id"] = etl_load_run_id
+
+        for key, value in (
+            ("filename", filename),
+            ("profile_name", profile_name),
+        ):
+            normalized = _normalize_optional_etl_filter(value)
+            if normalized:
+                params[key] = normalized
+
+        data = self._get_json("/api/v1/catalog-promotions", params=params)
+        _validate_catalog_promotion_run_list(data)
+        return data
+
+    def get_catalog_promotion_detail(
+        self,
+        promotion_run_id: int,
+    ) -> dict[str, Any]:
+        _validate_positive_etl_int(promotion_run_id, "promotion_run_id")
+        data = self._get_json(
+            f"/api/v1/catalog-promotions/{promotion_run_id}",
+            raise_not_found=True,
+            not_found_error=CatalogPromotionNotFoundError,
+            not_found_message=CATALOG_PROMOTION_NOT_FOUND_MESSAGE,
+        )
+        _validate_catalog_promotion_run_detail(data)
+        return data
+
+    def list_catalog_promotion_audits(
+        self,
+        promotion_run_id: int,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        _validate_positive_etl_int(promotion_run_id, "promotion_run_id")
+        _validate_etl_pagination(limit, offset)
+        data = self._get_json(
+            f"/api/v1/catalog-promotions/{promotion_run_id}/audits",
+            params={"limit": limit, "offset": offset},
+            raise_not_found=True,
+            not_found_error=CatalogPromotionNotFoundError,
+            not_found_message=CATALOG_PROMOTION_NOT_FOUND_MESSAGE,
+        )
+        _validate_catalog_promotion_audit_list(data)
         return data
 
     def get_catalog_promotion_preview(
