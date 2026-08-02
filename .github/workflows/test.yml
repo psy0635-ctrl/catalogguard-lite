@@ -25,6 +25,7 @@ jobs:
       CELERY_BROKER_URL: "redis://127.0.0.1:6379/0"
       REDIS_JOB_URL: "redis://127.0.0.1:6379/1"
       INSPECTION_JOB_TTL_SECONDS: "300"
+      AWS_RUNTIME_IMAGE: "catalogguard-lite-aws:${{ github.sha }}"
     services:
       postgres:
         image: postgres:18
@@ -65,6 +66,79 @@ jobs:
           python -m pip install -r requirements.txt -r requirements-api.txt pytest==9.1.1
       - name: Apply database migrations
         run: python -m alembic upgrade head
+      - name: Build AWS runtime image
+        run: docker build --file Dockerfile.aws --tag "${AWS_RUNTIME_IMAGE}" .
+      - name: Verify AWS image imports
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          test "$(docker run --rm --entrypoint id "${AWS_RUNTIME_IMAGE}" -u)" = "10001"
+          docker run --rm --entrypoint python "${AWS_RUNTIME_IMAGE}" -c '
+          import api
+          import services
+          import workers
+          from api.main import app
+          from workers.inspection_tasks import inspect_csv_task
+
+          assert app.title == "CatalogGuard Lite API"
+          assert inspect_csv_task.name
+          print("AWS image imports passed.")
+          '
+      - name: Verify AWS container health
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          container_name="catalogguard-aws-runtime"
+          health_check_passed=false
+          health_timeout_seconds=30
+
+          cleanup() {
+            if [[ "${health_check_passed}" != "true" ]]; then
+              echo "===== AWS runtime container logs ====="
+              docker logs "${container_name}" || true
+            fi
+
+            docker rm --force "${container_name}" >/dev/null 2>&1 || true
+          }
+
+          trap cleanup EXIT
+          docker rm --force "${container_name}" >/dev/null 2>&1 || true
+          docker run --detach \
+            --name "${container_name}" \
+            --network host \
+            --env "DATABASE_URL=${DATABASE_URL}" \
+            "${AWS_RUNTIME_IMAGE}" >/dev/null
+
+          deadline=$((SECONDS + health_timeout_seconds))
+          while (( SECONDS < deadline )); do
+            container_status="$(docker inspect --format '{{.State.Status}}' "${container_name}" 2>/dev/null || true)"
+            case "${container_status}" in
+              running)
+                ;;
+              created|restarting|removing|exited|dead)
+                echo "AWS runtime container entered non-running state: ${container_status}."
+                exit 1
+                ;;
+              *)
+                echo "AWS runtime container status could not be determined: ${container_status:-unknown}."
+                exit 1
+                ;;
+            esac
+
+            if curl --fail --silent --show-error --connect-timeout 1 --max-time 1 \
+              http://127.0.0.1:8000/health >/dev/null; then
+              health_check_passed=true
+              echo "AWS runtime /health check passed."
+              exit 0
+            fi
+
+            sleep 1
+          done
+
+          echo "AWS runtime /health check did not pass within ${health_timeout_seconds} seconds."
+          exit 1
       - name: Run tests
         run: python -m pytest -q
       - name: Configure async inspection job directory
