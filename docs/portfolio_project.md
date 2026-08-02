@@ -150,7 +150,7 @@ catalogguard_ready.csv + etl_summary.json
 | pytest | 일반 unit·integration 9.1.1 / Chromium E2E 8.4.1 |
 | CI | GitHub Actions `Test` workflow |
 | CI 테스트 서비스 | PostgreSQL 18·Redis 7.4 서비스 컨테이너 |
-| CI 검증 범위 | 일반 `test` job의 Alembic·pytest·비동기 E2E와 별도 `browser-e2e` job의 PostgreSQL·Chromium 실제 브라우저 ETL·promotion E2E |
+| CI 검증 범위 | 일반 `test` job의 Alembic·pytest·비동기 E2E·AWS Docker runtime smoke와 별도 `browser-e2e` job의 PostgreSQL·Chromium 실제 브라우저 ETL·promotion E2E |
 | 필수 컬럼 | 9개 |
 | 선택 컬럼 | 3개 (`sale_price` 포함) |
 | 등록된 검수 규칙 함수 | 15개 |
@@ -160,7 +160,7 @@ catalogguard_ready.csv + etl_summary.json
 | promotion preview·service·API·concurrency 검증 | preview hash, 승인, 차단·stale·failed, transaction, 중복 성공 방지와 audit |
 | Chromium 브라우저 E2E | ETL reject 마스킹과 promotion 승인·반영, 브라우저 오류 및 PostgreSQL 최종 상태 |
 | 샘플 ETL CLI 결과 | 전체 3건, 정상 변환 2건, 오류 행 1건, 종료 코드 0 |
-| 최신 기준 CI | GitHub Actions run #55 success |
+| 최신 기준 CI | GitHub Actions run `30736143581` success |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
 
 ## 6.6 핵심 구현 구조
@@ -325,7 +325,8 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 통계 집계 함수와 서버 응답 적용 helper에는 정렬, 빈 값 처리, 필수 컬럼 검증, 입력 불변성, TOP 5 적용 위치, malformed 응답 차단을 확인하는 테스트를 추가했습니다. 최신 기능은 GitHub Actions의 PostgreSQL 18 서비스에서 migration과 ETL staging 적재까지 실행해 다음 결과를 확인했습니다.
 
 ```text
-기준 저장소의 GitHub Actions run #55: success
+기준 저장소의 GitHub Actions run `30736143581`: success
+AWS Docker runtime smoke: image build·import·UID 10001·migration·기본 CMD Uvicorn·`/health` HTTP 200 확인
 promotion preview·service·API·client·UI·concurrency 검증 파일 포함
 Chromium promotion E2E: 실제 반영 후 PostgreSQL 최종 상태 확인
 Streamlit startup smoke: `/_stcore/health` 범위는 workflow 결과로 확인
@@ -333,13 +334,15 @@ Streamlit startup smoke: `/_stcore/health` 범위는 workflow 결과로 확인
 
 ETL 적재에서는 표준 CSV 2행을 최초 적재하고 같은 파일을 재실행해 `created=False`와 중복 상품 미생성을 확인했습니다. promotion에서는 합성 batch를 preview한 뒤 승인과 hash를 함께 보내 운영 상품 insert/update, `succeeded` run, audit 저장을 확인하고, 같은 batch의 두 번째 성공 요청은 기존 결과를 재사용하는지 확인했습니다. stale hash, 검수 오류·reject·중복 identity 차단, transaction rollback, malformed API 응답 거부와 Streamlit 상태 초기화도 검증했습니다. 모든 PostgreSQL 결과는 운영 DB가 아닌 테스트 환경의 결과입니다.
 
-GitHub Actions CI에서는 `main` 브랜치 push 또는 `main` 대상 pull request마다 일회성 PostgreSQL 18·Redis 7.4 서비스 컨테이너를 시작합니다. 두 서비스는 workflow 실행 중에만 사용할 테스트용 구성으로 Railway나 운영 DB·Redis와 분리됩니다. 기준 저장소 상태의 run #55는 성공했으며, Alembic·pytest·FastAPI·Celery 비동기 E2E·Streamlit startup과 별도 Chromium promotion E2E의 세부 결과는 workflow 실행 로그를 기준으로 확인합니다.
+GitHub Actions CI에서는 `main` 브랜치 push 또는 `main` 대상 pull request마다 일회성 PostgreSQL 18·Redis 7.4 서비스 컨테이너를 시작합니다. 두 서비스는 workflow 실행 중에만 사용할 테스트용 구성으로 Railway나 운영 DB·Redis와 분리됩니다. 기준 저장소 상태의 run `30736143581`은 성공했으며, Alembic·pytest·AWS Docker runtime smoke·FastAPI·Celery 비동기 E2E·Streamlit startup과 별도 Chromium promotion E2E의 세부 결과는 workflow 실행 로그를 기준으로 확인합니다.
 
 ```text
 main push 또는 main 대상 pull request
 -> GitHub Actions Test workflow
 -> 일회성 PostgreSQL 18·Redis 7.4 서비스 컨테이너
 -> Alembic upgrade head
+-> Dockerfile.aws image build·import·UID 10001 확인
+-> PostgreSQL migration·기본 CMD Uvicorn·`/health` HTTP 200 확인
 -> E2E 제외 전체 pytest 1회 실행
 -> Celery Worker·FastAPI 프로세스 시작
 -> /health·/ready 확인
@@ -350,7 +353,7 @@ main push 또는 main 대상 pull request
 -> Streamlit 프로세스 종료
 ```
 
-run #55의 성공 여부는 기준 작업 상태 확인 시점의 저장소 정보에 근거합니다. 실행별 테스트 수와 warning 세부 내역은 해당 workflow 로그를 확인하지 않은 상태에서는 문서에 추가하지 않습니다.
+run `30736143581`의 성공 여부는 기준 작업 상태 확인 시점의 저장소 정보에 근거합니다. 실행별 테스트 수와 warning 세부 내역은 해당 workflow 로그를 확인하지 않은 상태에서는 문서에 추가하지 않습니다.
 
 ## 6.12 샘플 데이터 기준 결과
 

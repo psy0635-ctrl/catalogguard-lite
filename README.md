@@ -403,7 +403,7 @@ python -m pip install -r requirements-e2e.txt
 python -m playwright install chromium
 ```
 
-GitHub Actions는 일반 `test` job에서 PostgreSQL·Redis 서비스, Alembic 마이그레이션, E2E를 제외한 전체 pytest와 비동기 검수 smoke를 실행하고, 별도 `browser-e2e` job에서 PostgreSQL 서비스와 Chromium을 사용해 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증합니다. 배포는 수행하지 않습니다.
+GitHub Actions는 일반 `test` job에서 PostgreSQL·Redis 서비스, Alembic 마이그레이션, E2E를 제외한 전체 pytest와 비동기 검수 smoke를 실행하고, `Dockerfile.aws` image build·import·UID `10001`·PostgreSQL migration·기본 CMD Uvicorn·`/health` HTTP `200`도 확인합니다. 별도 `browser-e2e` job에서는 PostgreSQL 서비스와 Chromium을 사용해 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증합니다. AWS runtime smoke는 실제 AWS 배포가 아니며, 배포는 수행하지 않습니다.
 
 ## 8. 프로젝트 폴더 구조
 
@@ -1448,7 +1448,7 @@ python -m pytest -q
 
 ### PostgreSQL persistence 포함 검증 결과
 
-promotion 기능은 운영 DB나 Railway DB에 연결하지 않고 저장소의 테스트 PostgreSQL 환경에서 검증했습니다. 기준 저장소 상태의 GitHub Actions run #55는 성공했으며, 문서에는 실행별 전체 테스트 수를 추측해 기록하지 않습니다.
+promotion 기능은 운영 DB나 Railway DB에 연결하지 않고 저장소의 테스트 PostgreSQL 환경에서 검증했습니다. 기준 저장소 상태의 GitHub Actions run `30736143581`은 성공했으며, 문서에는 실행별 전체 테스트 수를 추측해 기록하지 않습니다.
 
 ```text
 promotion preview·service·API·client·UI·concurrency 테스트 파일과 Playwright Chromium promotion E2E를 포함한 검증 범위를 확인
@@ -1509,7 +1509,7 @@ python scripts/benchmark_inspection.py --rows 100 1000 5000 10000 --repeat 3 --w
 
 ### GitHub Actions 자동 테스트
 
-`.github/workflows/test.yml`의 `Test` workflow는 `main` 브랜치 push와 `main` 브랜치를 대상으로 한 pull request에서 실행됩니다. 일반 `test` job은 Python 3.11, PostgreSQL 18·Redis 7.4, Alembic, E2E 제외 pytest, 실제 Celery Worker·FastAPI·비동기 CSV 검수 E2E와 Streamlit startup smoke를 실행합니다. 별도 `browser-e2e` job은 PostgreSQL 18 service와 Playwright Chromium을 준비하고 `scripts/run_etl_browser_e2e.py`로 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증하며, 실패 시에만 browser artifact를 업로드합니다.
+`.github/workflows/test.yml`의 `Test` workflow는 `main` 브랜치 push와 `main` 브랜치를 대상으로 한 pull request에서 실행됩니다. 일반 `test` job은 Python 3.11, PostgreSQL 18·Redis 7.4, Alembic, E2E 제외 pytest, 실제 Celery Worker·FastAPI·비동기 CSV 검수 E2E와 Streamlit startup smoke를 실행합니다. 또한 `Dockerfile.aws` image build, `api`·`services`·`workers`와 Celery task import, 실행 UID `10001`, PostgreSQL migration, 기본 CMD의 Uvicorn 시작과 `/health` HTTP `200`을 검증합니다. 이 AWS 검증은 GitHub Actions Ubuntu의 Docker packaging/runtime smoke이며 실제 AWS 배포는 수행하지 않습니다. 별도 `browser-e2e` job은 PostgreSQL 18 service와 Playwright Chromium을 준비하고 `scripts/run_etl_browser_e2e.py`로 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증하며, 실패 시에만 browser artifact를 업로드합니다.
 
 ```text
 main push 또는 main 대상 pull request
@@ -1517,6 +1517,10 @@ main push 또는 main 대상 pull request
 -> PostgreSQL 18·Redis 7.4 서비스 컨테이너
 -> Python 3.11과 의존성 설치
 -> Alembic upgrade head
+-> Dockerfile.aws image build
+-> AWS image import smoke와 실행 UID 10001 확인
+-> PostgreSQL migration과 Dockerfile.aws 기본 CMD(Uvicorn) 시작
+-> AWS runtime container의 /health HTTP 200 확인
 -> E2E 제외 전체 pytest 1회 실행
 -> Celery Worker와 FastAPI 프로세스 시작
 -> /health·/ready 확인
@@ -1545,7 +1549,7 @@ Streamlit 시작 스모크 테스트는 `python -m streamlit run app.py`로 실�
 
 AppTest는 실제 `app.py` 실행 경로의 CSV 업로드와 검수·필터 위젯을 검증하지만 실제 브라우저의 파일 선택 창이나 픽셀 렌더링까지 자동화하지는 않습니다. GitHub Actions 스모크 테스트도 Railway API 실제 통신, 운영 Secrets 설정, Streamlit Community Cloud 전용 장애나 모든 Segmentation fault를 검증하지 않습니다.
 
-기준 저장소 상태의 GitHub Actions run #55는 성공했습니다. Actions 실행별 전체 테스트 수는 이 문서에 추측해 고정하지 않으며, promotion E2E와 Streamlit startup smoke의 실제 검증 범위는 위 테스트·workflow 설명을 따릅니다. Actions의 일회성 서비스 컨테이너는 운영 DB·Redis와 분리됩니다.
+기준 저장소 상태의 GitHub Actions run `30736143581`은 성공했습니다. Actions 실행별 전체 테스트 수는 이 문서에 추측해 고정하지 않으며, AWS Docker runtime smoke, promotion E2E와 Streamlit startup smoke의 실제 검증 범위는 위 테스트·workflow 설명을 따릅니다. Actions의 일회성 서비스 컨테이너는 운영 DB·Redis와 분리됩니다.
 
 ## 24. 데이터 저장 범위와 보안
 

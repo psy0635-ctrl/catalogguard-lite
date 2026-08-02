@@ -242,19 +242,21 @@ PY
 
 ## 9. Alembic 배포 gate와 컨테이너 시작
 
-### 2026-08-01 현재 저장소 이미지 재검증
+### 2026-08-02 현재 저장소 이미지 CI 재검증
 
 아래 2026-07-19 배포 기록은 당시 `20260705_0002` head와 image tag를 사용한 이력이다. 현재 코드는 비동기 inspection API를 포함하므로 FastAPI import 시 `services` package가 필요하고, Celery task를 실행하려면 `workers` package도 이미지에 있어야 한다. `Dockerfile.aws`는 두 package를 명시적으로 복사하며, 현재 Alembic head는 `20260728_0006`이다.
 
-현재 저장소에서는 실제 AWS 리소스를 시작하지 않고 로컬 Docker daemon으로 다음 packaging 경계를 다시 검증했다.
+현재 저장소에서는 실제 AWS 리소스를 시작하지 않고 GitHub Actions Ubuntu의 Docker runtime CI에서 다음 packaging 경계를 재검증했다. 최신 성공 run은 `30736143581`이며 commit `99c9859d3eb09b5bb6acfeea9c351faf03f41535`에 해당한다.
+
+아래 명령은 CI에서 수행한 packaging·import 검증의 재현 형태이며, 실제 최신 검증은 해당 GitHub Actions run에서 수행했다.
 
 ```bash
 docker build -f Dockerfile.aws -t catalogguard-lite-api:local-verify .
-docker run --rm catalogguard-lite-api:local-verify \
-  python -c "import api.main; import workers.inspection_tasks; print('api and worker imports ok')"
+docker run --rm --user 10001 catalogguard-lite-api:local-verify \
+  python -c "import api, services, workers; import api.main; import workers.inspection_tasks; print('api and worker imports ok')"
 ```
 
-검증 결과 image build와 FastAPI·Celery task import가 성공했고, image의 실행 UID는 비루트 `10001`이었다. 이 결과는 현재 Dockerfile의 packaging과 Python import 가능 여부만 증명하며, 중지된 EC2·RDS의 현재 상태나 실제 RDS TLS 연결을 재검증한 것은 아니다. 다시 배포할 때는 새 image와 실제 staging `DATABASE_URL`·CA mount로 `alembic upgrade head`, `/health`, `/ready`를 순서대로 확인해야 한다.
+검증 결과 image build, `api`·`services`·`workers`와 FastAPI·Celery task import, 실행 UID `10001`, PostgreSQL migration, Dockerfile.aws 기본 CMD의 Uvicorn 시작과 `/health` HTTP `200`이 성공했다. 이 결과는 GitHub Actions Ubuntu의 Docker packaging/runtime smoke만 증명하며, 중지된 EC2·RDS의 현재 상태나 실제 RDS TLS 연결을 재검증한 것은 아니다. 다시 배포할 때는 새 image와 실제 staging `DATABASE_URL`·CA mount로 `alembic upgrade head`, `/health`, `/ready`를 순서대로 확인해야 한다.
 
 ### 2026-07-19 실제 AWS staging 배포 기록
 
