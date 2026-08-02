@@ -392,7 +392,7 @@ python -m alembic upgrade head
 
 현재 Alembic head는 `20260728_0006`이다. 이 revision은 ETL staging을 변경하지 않고, 별도의 운영 상품·promotion persistence 테이블을 추가한다. 격리된 PostgreSQL 18 테스트 클러스터에서 빈 DB upgrade, `20260728_0006` → `20260728_0005` downgrade, 재-upgrade와 단일 head를 확인했으며, 이후 promotion service·API·UI가 이 테이블을 사용하는 흐름을 검증했다.
 
-기준 저장소 상태에서 GitHub Actions run #55는 성공했다. 문서에는 실행별 전체 pytest 수를 고정하지 않고, promotion preview·service·API·client·UI·concurrency 테스트와 Chromium promotion E2E가 검증하는 동작 범위를 기록한다. E2E는 브라우저 메시지뿐 아니라 PostgreSQL의 최종 운영 상품·run·audit 상태도 확인한다.
+현재 기준 저장소의 GitHub Actions run `30736845060`은 성공했다. 문서에는 실행별 전체 pytest 수를 고정하지 않고, promotion preview·service·API·client·UI·concurrency 테스트와 Chromium promotion E2E가 검증하는 동작 범위를 기록한다. E2E는 브라우저 메시지뿐 아니라 PostgreSQL의 최종 운영 상품·run·audit 상태도 확인한다.
 
 ## 제한사항
 
