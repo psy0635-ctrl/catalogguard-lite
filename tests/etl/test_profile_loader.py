@@ -1,8 +1,16 @@
 import json
+from pathlib import Path
 
 import pytest
 
-from etl.profile_loader import ETLProfileValidationError, load_profile
+from etl.profile_loader import (
+    ETL_PROFILE_DIR,
+    ETLProfileNotFoundError,
+    ETLProfileValidationError,
+    get_profile_path,
+    list_etl_profiles,
+    load_profile,
+)
 
 
 VALID_PROFILE = {
@@ -108,3 +116,38 @@ def test_load_profile_rejects_malformed_json(tmp_path):
 
     with pytest.raises(ETLProfileValidationError, match="JSON"):
         load_profile(profile_path)
+
+
+def test_list_etl_profiles_returns_known_allowlisted_profiles():
+    profiles = list_etl_profiles()
+
+    ids = {profile["id"] for profile in profiles}
+    assert ids == {"sample_fashion_vendor_v1", "sample_marketplace_vendor_v1"}
+    for profile in profiles:
+        assert set(profile) == {"id", "display_name"}
+        assert isinstance(profile["display_name"], str) and profile["display_name"]
+
+
+def test_get_profile_path_resolves_known_id_to_a_loadable_profile():
+    path = get_profile_path("sample_fashion_vendor_v1")
+
+    assert path.parent.resolve() == ETL_PROFILE_DIR.resolve()
+    profile = load_profile(path)
+    assert profile.name == "sample_fashion_vendor"
+
+
+@pytest.mark.parametrize(
+    "profile_id",
+    [
+        "unknown_profile",
+        "",
+        "../../config/etl/sample_fashion_vendor_v1.json",
+        "..\\..\\config\\etl\\sample_fashion_vendor_v1.json",
+        str(Path(__file__).resolve()),
+        "sample_fashion_vendor_v1.json",
+        "sample_fashion_vendor_v1/../../../etc/passwd",
+    ],
+)
+def test_get_profile_path_rejects_ids_outside_the_allowlist(profile_id):
+    with pytest.raises(ETLProfileNotFoundError):
+        get_profile_path(profile_id)

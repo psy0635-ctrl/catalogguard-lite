@@ -137,6 +137,27 @@ class ETLRejectedRowListResponse(BaseModel):
     offset: int
 
 
+class ETLWebRunResponse(BaseModel):
+    etl_load_run_id: int
+    created: bool
+    profile_name: str
+    profile_version: str
+    source_filename: str
+    total_rows: int | None
+    loaded_rows: int
+    rejected_rows: int | None
+    error_counts: dict[str, int] | None
+
+
+class ETLProfileResponse(BaseModel):
+    id: str
+    display_name: str
+
+
+class ETLProfileListResponse(BaseModel):
+    items: list[ETLProfileResponse]
+
+
 CatalogPromotionValue = str | int | None
 
 

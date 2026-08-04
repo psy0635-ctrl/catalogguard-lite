@@ -476,6 +476,10 @@ class FakeEtlApiClient:
         promotion_history_detail_error=None,
         promotion_audit_error=None,
         promotion_audit_pages=None,
+        etl_profiles=None,
+        etl_profiles_error=None,
+        etl_run_response=None,
+        etl_run_error=None,
     ):
         self.list_calls = []
         self.detail_calls = []
@@ -485,6 +489,29 @@ class FakeEtlApiClient:
         self.promotion_history_calls = []
         self.promotion_history_detail_calls = []
         self.promotion_audit_calls = []
+        self.etl_profiles_calls = []
+        self.etl_run_calls = []
+        self.etl_profiles = (
+            [
+                {"id": "sample_fashion_vendor_v1", "display_name": "패션 공급사 샘플 v1"},
+                {"id": "sample_marketplace_vendor_v1", "display_name": "마켓플레이스 공급사 샘플 v1"},
+            ]
+            if etl_profiles is None
+            else etl_profiles
+        )
+        self.etl_profiles_error = etl_profiles_error
+        self.etl_run_response = etl_run_response or {
+            "etl_load_run_id": 99,
+            "created": True,
+            "profile_name": "sample_fashion_vendor",
+            "profile_version": "1",
+            "source_filename": "vendor.csv",
+            "total_rows": 2,
+            "loaded_rows": 2,
+            "rejected_rows": 0,
+            "error_counts": {},
+        }
+        self.etl_run_error = etl_run_error
         self.detail_error = detail_error
         self.list_items = [make_load()] if list_items is None else list_items
         self.list_pages = list_pages
@@ -530,6 +557,18 @@ class FakeEtlApiClient:
         self.promotion_history_detail_error = promotion_history_detail_error
         self.promotion_audit_error = promotion_audit_error
         self.promotion_audit_pages = promotion_audit_pages
+
+    def list_etl_profiles(self):
+        self.etl_profiles_calls.append(1)
+        if self.etl_profiles_error is not None:
+            raise self.etl_profiles_error
+        return {"items": self.etl_profiles}
+
+    def run_etl_load(self, **params):
+        self.etl_run_calls.append(params)
+        if self.etl_run_error is not None:
+            raise self.etl_run_error
+        return self.etl_run_response
 
     def list_etl_loads(self, **params):
         self.list_calls.append(params)
@@ -1144,3 +1183,176 @@ def test_catalog_promotion_apptest_stale_clears_preview_and_prompts_retry(
     assert app.session_state["catalog_promotion_preview_hash"] is None
     assert app.session_state["catalog_promotion_confirmation"] is False
     assert any("미리보기를 다시 실행" in error.value for error in app.error)
+
+
+def test_etl_web_run_profile_dropdown_lists_allowlisted_profiles(monkeypatch):
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = AppTest.from_file("app.py").run(timeout=10)
+
+    profile_select = next(
+        widget
+        for widget in app.selectbox
+        if widget.key == "etl_web_run_selected_profile_id"
+    )
+    assert profile_select.options == [
+        "패션 공급사 샘플 v1",
+        "마켓플레이스 공급사 샘플 v1",
+    ]
+    assert api_client.etl_profiles_calls == [1]
+
+
+def test_etl_web_run_submit_button_disabled_without_uploaded_file(monkeypatch):
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = AppTest.from_file("app.py").run(timeout=10)
+
+    submit_button = next(
+        widget for widget in app.button if widget.key == "etl_web_run_submit"
+    )
+    assert submit_button.disabled is True
+    assert api_client.etl_run_calls == []
+
+
+def test_etl_web_run_profile_change_does_not_call_run_etl_load(monkeypatch):
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = AppTest.from_file("app.py").run(timeout=10)
+    next(
+        widget
+        for widget in app.selectbox
+        if widget.key == "etl_web_run_selected_profile_id"
+    ).select("sample_marketplace_vendor_v1").run(timeout=10)
+
+    assert api_client.etl_run_calls == []
+
+
+def test_etl_web_run_profile_change_clears_stale_result_and_error(monkeypatch):
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = AppTest.from_file("app.py").run(timeout=10)
+    app.session_state["etl_web_run_result"] = {"etl_load_run_id": 1, "created": True}
+    app.session_state["etl_web_run_error"] = ValueError("stale")
+    app.run(timeout=10)
+
+    next(
+        widget
+        for widget in app.selectbox
+        if widget.key == "etl_web_run_selected_profile_id"
+    ).select("sample_marketplace_vendor_v1").run(timeout=10)
+
+    assert app.session_state["etl_web_run_result"] is None
+    assert app.session_state["etl_web_run_error"] is None
+
+
+def test_etl_web_run_shows_error_when_profile_list_fails(monkeypatch):
+    from clients.catalogguard_api import CatalogGuardApiConnectionError
+
+    api_client = FakeEtlApiClient(
+        etl_profiles_error=CatalogGuardApiConnectionError("no connection")
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = AppTest.from_file("app.py").run(timeout=10)
+
+    assert any(
+        "ETL 프로필 목록을 불러오지 못했습니다." in error.value for error in app.error
+    )
+    assert not any(
+        widget.key == "etl_web_run_selected_profile_id" for widget in app.selectbox
+    )
+
+
+def test_submit_etl_web_run_success_invalidates_history_cache_but_keeps_promotion_cache():
+    from unittest.mock import Mock
+
+    from ui.etl_load_history import _submit_etl_web_run
+
+    api_client = FakeEtlApiClient()
+    uploaded_file = Mock(name="vendor.csv")
+    uploaded_file.name = "vendor.csv"
+    uploaded_file.getvalue.return_value = b"a,b\n1,2\n"
+
+    state = {
+        "etl_load_list_response": {"items": [{"etl_load_run_id": 1}], "total": 1},
+        "etl_load_initialized": True,
+        "etl_load_offset": 20,
+        "catalog_promotion_preview_response": {"etl_load_run_id": 1},
+        "catalog_promotion_history_response": {"items": []},
+    }
+
+    class _Session(dict):
+        def get(self, key, default=None):
+            return dict.get(self, key, default)
+
+    import streamlit as st
+
+    session_state = _Session(state)
+    original_session_state = st.session_state
+    try:
+        st.session_state = session_state
+        _submit_etl_web_run(
+            api_client,
+            profile_id="sample_fashion_vendor_v1",
+            uploaded_file=uploaded_file,
+        )
+    finally:
+        st.session_state = original_session_state
+
+    assert api_client.etl_run_calls == [
+        {
+            "profile_id": "sample_fashion_vendor_v1",
+            "source_filename": "vendor.csv",
+            "file_content": b"a,b\n1,2\n",
+        }
+    ]
+    assert session_state["etl_load_list_response"] is None
+    assert session_state["etl_load_initialized"] is False
+    assert session_state["etl_load_offset"] == 0
+    assert session_state["etl_web_run_result"] == api_client.etl_run_response
+    assert session_state["etl_web_run_error"] is None
+    # Promotion cache must be left untouched by a successful ETL web run.
+    assert session_state["catalog_promotion_preview_response"] == {"etl_load_run_id": 1}
+    assert session_state["catalog_promotion_history_response"] == {"items": []}
+
+
+def test_submit_etl_web_run_failure_stores_error_and_leaves_history_cache_alone():
+    from unittest.mock import Mock
+
+    from clients.catalogguard_api import ETLUnsupportedProfileError
+    from ui.etl_load_history import _submit_etl_web_run
+
+    api_client = FakeEtlApiClient(
+        etl_run_error=ETLUnsupportedProfileError("no", code="unsupported_profile")
+    )
+    uploaded_file = Mock(name="vendor.csv")
+    uploaded_file.name = "vendor.csv"
+    uploaded_file.getvalue.return_value = b"a,b\n1,2\n"
+
+    state = {
+        "etl_load_list_response": {"items": [], "total": 0},
+        "etl_load_initialized": True,
+        "etl_load_offset": 0,
+    }
+
+    import streamlit as st
+
+    original_session_state = st.session_state
+    try:
+        st.session_state = state
+        _submit_etl_web_run(
+            api_client,
+            profile_id="unknown",
+            uploaded_file=uploaded_file,
+        )
+    finally:
+        st.session_state = original_session_state
+
+    assert state["etl_web_run_result"] is None
+    assert isinstance(state["etl_web_run_error"], ETLUnsupportedProfileError)
+    assert state["etl_load_list_response"] == {"items": [], "total": 0}
+    assert state["etl_load_initialized"] is True

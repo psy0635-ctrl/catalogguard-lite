@@ -1,4 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Path,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from sqlalchemy.orm import Session
 
 from api.schemas import (
@@ -23,12 +34,16 @@ from api.schemas import (
     ETLLoadDetailResponse,
     ETLLoadListItemResponse,
     ETLLoadListResponse,
+    ETLProfileListResponse,
+    ETLProfileResponse,
     ETLRejectErrorResponse,
     ETLRejectedRowListResponse,
     ETLRejectedRowResponse,
     ETLStagingProductListResponse,
     ETLStagingProductResponse,
+    ETLWebRunResponse,
 )
+from core.upload_validator import CsvUploadValidationError
 from db.etl_query_service import (
     ETLLoadDetail,
     ETLLoadList,
@@ -37,6 +52,10 @@ from db.etl_query_service import (
     list_etl_loads,
     normalize_etl_filter,
 )
+from etl.db_loader import ETLLoadError
+from etl.pipeline import ETLPipelineError
+from etl.profile_loader import ETLProfileNotFoundError, list_etl_profiles
+from etl.web_service import ETLWebRunOutcome, run_web_etl
 from db.catalog_promotion_preview_service import (
     CatalogPromotionPreview,
     ETLLoadRunNotFoundError,
@@ -95,6 +114,20 @@ def _build_list_response(result: ETLLoadList) -> ETLLoadListResponse:
         total=result.total,
         limit=result.limit,
         offset=result.offset,
+    )
+
+
+def _build_web_run_response(result: ETLWebRunOutcome) -> ETLWebRunResponse:
+    return ETLWebRunResponse(
+        etl_load_run_id=result.etl_load_run_id,
+        created=result.created,
+        profile_name=result.profile_name,
+        profile_version=result.profile_version,
+        source_filename=result.source_filename,
+        total_rows=result.total_rows,
+        loaded_rows=result.loaded_rows,
+        rejected_rows=result.rejected_rows,
+        error_counts=result.error_counts,
     )
 
 
@@ -389,6 +422,52 @@ def list_etl_load_runs(
         profile_name=normalize_etl_filter(profile_name),
     )
     return _build_list_response(result)
+
+
+@router.get("/api/v1/etl-profiles", response_model=ETLProfileListResponse)
+def list_etl_profile_options() -> ETLProfileListResponse:
+    return ETLProfileListResponse(
+        items=[ETLProfileResponse(**profile) for profile in list_etl_profiles()]
+    )
+
+
+@router.post("/api/v1/etl-loads", response_model=ETLWebRunResponse)
+async def create_etl_load_run(
+    file: UploadFile = File(...),
+    profile_id: str = Form(...),
+    session: Session = Depends(get_session),
+) -> ETLWebRunResponse:
+    file_bytes = await file.read()
+    try:
+        outcome = run_web_etl(
+            session,
+            profile_id=profile_id,
+            source_filename=file.filename or "",
+            input_bytes=file_bytes,
+        )
+    except ETLProfileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "unsupported_profile",
+                "message": "지원하지 않는 공급사 프로필입니다.",
+            },
+        ) from None
+    except (CsvUploadValidationError, ETLPipelineError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "invalid_upload", "message": str(error)},
+        ) from None
+    except ETLLoadError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "etl_load_failed",
+                "message": "ETL 처리 중 오류가 발생했습니다.",
+            },
+        ) from None
+
+    return _build_web_run_response(outcome)
 
 
 @router.get(

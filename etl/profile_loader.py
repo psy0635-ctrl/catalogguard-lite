@@ -1,12 +1,56 @@
 import json
 from pathlib import Path
 
-from config.settings import CSV_TEMPLATE_COLUMNS, REQUIRED_COLUMNS
+from config.settings import BASE_DIR, CSV_TEMPLATE_COLUMNS, REQUIRED_COLUMNS
 from etl.models import ETLProfile
 
 
 class ETLProfileValidationError(ValueError):
     """Raised when a mapping profile cannot safely produce CatalogGuard CSV data."""
+
+
+class ETLProfileNotFoundError(ValueError):
+    """Raised when a requested profile id is not in the server-side allowlist."""
+
+
+# 웹 ETL 실행은 이 allowlist에 있는 profile_id만 받습니다.
+# 사용자가 보낸 파일 경로를 그대로 신뢰하지 않기 위한 유일한 진입점입니다.
+ETL_PROFILE_DIR = BASE_DIR / "config" / "etl"
+_ETL_PROFILE_REGISTRY: dict[str, dict[str, str]] = {
+    "sample_fashion_vendor_v1": {
+        "filename": "sample_fashion_vendor_v1.json",
+        "display_name": "패션 공급사 샘플 v1",
+    },
+    "sample_marketplace_vendor_v1": {
+        "filename": "sample_marketplace_vendor_v1.json",
+        "display_name": "마켓플레이스 공급사 샘플 v1",
+    },
+}
+
+
+def list_etl_profiles() -> list[dict[str, str]]:
+    """Return the allowlisted ETL profiles safe to expose to API/UI callers."""
+    return [
+        {"id": profile_id, "display_name": info["display_name"]}
+        for profile_id, info in _ETL_PROFILE_REGISTRY.items()
+    ]
+
+
+def get_profile_path(profile_id: str) -> Path:
+    """Resolve a profile_id to its config file path using the server allowlist only.
+
+    Never accepts a filesystem path from the caller: profile_id must be an exact
+    allowlist key, so arbitrary/relative paths can't reach load_profile().
+    """
+    info = _ETL_PROFILE_REGISTRY.get(profile_id)
+    if info is None:
+        raise ETLProfileNotFoundError(f"Unknown ETL profile: {profile_id}")
+
+    profile_dir = ETL_PROFILE_DIR.resolve()
+    candidate_path = (ETL_PROFILE_DIR / info["filename"]).resolve()
+    if candidate_path.parent != profile_dir or not candidate_path.is_file():
+        raise ETLProfileNotFoundError(f"Unknown ETL profile: {profile_id}")
+    return candidate_path
 
 
 def _require_non_empty_text(data: dict, key: str) -> str:

@@ -14,7 +14,9 @@ from clients.catalogguard_api import (
     CatalogPromotionFailedError,
     CatalogPromotionNotFoundError,
     CatalogPromotionPreviewStaleError,
+    ETLInvalidUploadError,
     ETLLoadNotFoundError,
+    ETLUnsupportedProfileError,
     create_catalogguard_api_client,
 )
 
@@ -122,6 +124,12 @@ ETL_LOAD_STATE_DEFAULTS = {
     "catalog_promotion_audit_offset": 0,
     "catalog_promotion_audit_response": None,
     "catalog_promotion_audit_error": None,
+    "etl_web_run_profiles_response": None,
+    "etl_web_run_profiles_error": None,
+    "etl_web_run_selected_profile_id": None,
+    "etl_web_run_in_flight": False,
+    "etl_web_run_result": None,
+    "etl_web_run_error": None,
 }
 
 
@@ -1330,13 +1338,164 @@ def _render_catalog_promotion_history(api_client) -> None:
         _render_catalog_promotion_history_detail(api_client)
 
 
+def _fetch_etl_profiles(api_client, session_state) -> list[dict[str, Any]] | None:
+    cached = session_state.get("etl_web_run_profiles_response")
+    if isinstance(cached, dict):
+        return cached.get("items") or []
+    if session_state.get("etl_web_run_profiles_error") is not None:
+        return None
+
+    try:
+        response = api_client.list_etl_profiles()
+        session_state["etl_web_run_profiles_response"] = response
+        session_state["etl_web_run_profiles_error"] = None
+        return response.get("items") or []
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+    ) as error:
+        session_state["etl_web_run_profiles_error"] = error
+        return None
+
+
+def _on_etl_web_run_profile_change(session_state) -> None:
+    session_state["etl_web_run_result"] = None
+    session_state["etl_web_run_error"] = None
+
+
+def _etl_web_run_error_message(error: Exception) -> str:
+    if isinstance(error, ETLUnsupportedProfileError):
+        return "지원하지 않는 공급사 프로필입니다."
+    if isinstance(error, ETLInvalidUploadError):
+        return str(error) or "업로드한 CSV를 처리할 수 없습니다."
+    if isinstance(error, CatalogGuardApiConfigurationError):
+        return "ETL 실행 API 주소가 설정되지 않았습니다."
+    if isinstance(error, CatalogGuardApiConnectionError):
+        return "ETL 실행 서버에 연결할 수 없습니다."
+    if isinstance(error, CatalogGuardApiTimeoutError):
+        return "ETL 실행 서버 응답 시간이 초과되었습니다."
+    return "ETL 실행 중 오류가 발생했습니다."
+
+
+def _submit_etl_web_run(api_client, *, profile_id, uploaded_file) -> None:
+    st.session_state["etl_web_run_in_flight"] = True
+    st.session_state["etl_web_run_error"] = None
+    st.session_state["etl_web_run_result"] = None
+    try:
+        file_bytes = uploaded_file.getvalue()
+        with st.spinner("ETL을 실행하고 있습니다."):
+            response = api_client.run_etl_load(
+                profile_id=profile_id,
+                source_filename=uploaded_file.name,
+                file_content=file_bytes,
+            )
+        st.session_state["etl_web_run_result"] = response
+        # 새 배치가 즉시 보이도록 ETL History 캐시만 무효화합니다.
+        # Promotion 캐시는 이번 ETL 실행과 무관하므로 건드리지 않습니다.
+        st.session_state["etl_load_list_response"] = None
+        st.session_state["etl_load_initialized"] = False
+        st.session_state["etl_load_offset"] = 0
+    except (
+        ETLUnsupportedProfileError,
+        ETLInvalidUploadError,
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        st.session_state["etl_web_run_error"] = error
+    finally:
+        st.session_state["etl_web_run_in_flight"] = False
+
+
+def _render_etl_web_run(api_client) -> None:
+    st.subheader("ETL 실행")
+    st.write("공급사 CSV를 업로드하고 프로필을 선택해 ETL을 실행합니다.")
+
+    profiles = _fetch_etl_profiles(api_client, st.session_state)
+    if profiles is None:
+        error = st.session_state.get("etl_web_run_profiles_error")
+        if error is not None:
+            st.error(
+                build_etl_api_error_display_message(
+                    "ETL 프로필 목록을 불러오지 못했습니다.", error
+                )
+            )
+        return
+    if not profiles:
+        st.info("사용할 수 있는 ETL 프로필이 없습니다.")
+        return
+
+    profile_ids = [profile["id"] for profile in profiles]
+    profile_labels = {profile["id"]: profile["display_name"] for profile in profiles}
+    if st.session_state.get("etl_web_run_selected_profile_id") not in profile_ids:
+        st.session_state["etl_web_run_selected_profile_id"] = profile_ids[0]
+    st.selectbox(
+        "공급사 프로필",
+        options=profile_ids,
+        format_func=lambda profile_id: profile_labels.get(profile_id, profile_id),
+        key="etl_web_run_selected_profile_id",
+        on_change=_on_etl_web_run_profile_change,
+        args=(st.session_state,),
+    )
+    uploaded_file = st.file_uploader(
+        "공급사 CSV 파일",
+        type=["csv"],
+        key="etl_web_run_upload_file",
+    )
+
+    in_flight = st.session_state.get("etl_web_run_in_flight") is True
+    selected_profile_id = st.session_state.get("etl_web_run_selected_profile_id")
+    if st.button(
+        "ETL 실행",
+        key="etl_web_run_submit",
+        type="primary",
+        disabled=uploaded_file is None or selected_profile_id is None or in_flight,
+    ):
+        _submit_etl_web_run(
+            api_client,
+            profile_id=selected_profile_id,
+            uploaded_file=uploaded_file,
+        )
+        st.rerun()
+
+    error = st.session_state.get("etl_web_run_error")
+    if error is not None:
+        st.error(
+            build_etl_api_error_display_message(
+                _etl_web_run_error_message(error), error
+            )
+        )
+
+    result = st.session_state.get("etl_web_run_result")
+    if isinstance(result, dict):
+        if result.get("created") is True:
+            st.success(
+                f"ETL 실행이 완료되었습니다. 적재 배치 ID: {result.get('etl_load_run_id')}"
+            )
+        else:
+            st.info(
+                "동일한 입력으로 이미 처리된 적재 배치입니다. "
+                f"적재 배치 ID: {result.get('etl_load_run_id')}"
+            )
+        metric_columns = st.columns(3)
+        metric_columns[0].metric(
+            "전체 행", _display_nullable(result.get("total_rows")), border=True
+        )
+        metric_columns[1].metric("정상 적재", result.get("loaded_rows", 0), border=True)
+        metric_columns[2].metric(
+            "변환 거부", _display_nullable(result.get("rejected_rows")), border=True
+        )
+        st.caption(
+            "아래 ETL 적재 이력에서 새로 생성된 배치를 선택해 상세 내용과 운영 반영을 진행하세요."
+        )
+
+
 def render_etl_load_history(api_client=None) -> None:
     initialize_etl_load_state()
-    st.subheader("ETL 적재 이력")
-    st.write(
-        "공급사 CSV를 PostgreSQL staging에 적재한 배치와 staging 상품을 조회합니다."
-    )
-    _render_etl_search_controls()
 
     if api_client is None:
         try:
@@ -1344,6 +1503,14 @@ def render_etl_load_history(api_client=None) -> None:
         except CatalogGuardApiConfigurationError as error:
             _render_etl_error(error)
             return
+
+    _render_etl_web_run(api_client)
+
+    st.subheader("ETL 적재 이력")
+    st.write(
+        "공급사 CSV를 PostgreSQL staging에 적재한 배치와 staging 상품을 조회합니다."
+    )
+    _render_etl_search_controls()
 
     response = _fetch_etl_load_list(api_client, st.session_state)
     if response is None:

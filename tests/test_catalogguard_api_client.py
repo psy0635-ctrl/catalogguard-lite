@@ -152,12 +152,14 @@ class FakeSession:
             raise self.error
         return self.response
 
-    def post(self, url, *, files=None, json=None, timeout=None):
+    def post(self, url, *, files=None, data=None, json=None, timeout=None):
         call = {
             "url": url,
             "files": files,
             "timeout": timeout,
         }
+        if data is not None:
+            call["data"] = data
         if json is not None:
             call["json"] = json
         self.calls.append(call)
@@ -1891,3 +1893,213 @@ def test_catalog_promotion_methods_reject_malformed_success_response(
                 confirmation=True,
                 expected_preview_hash="a" * 64,
             )
+
+
+ETL_WEB_RUN_RESPONSE = {
+    "etl_load_run_id": 42,
+    "created": True,
+    "profile_name": "sample_fashion_vendor",
+    "profile_version": "1",
+    "source_filename": "vendor.csv",
+    "total_rows": 2,
+    "loaded_rows": 2,
+    "rejected_rows": 0,
+    "error_counts": {},
+}
+
+ETL_PROFILE_LIST_RESPONSE = {
+    "items": [
+        {"id": "sample_fashion_vendor_v1", "display_name": "패션 공급사 샘플 v1"},
+        {"id": "sample_marketplace_vendor_v1", "display_name": "마켓플레이스 공급사 샘플 v1"},
+    ]
+}
+
+
+def test_run_etl_load_posts_multipart_file_and_profile_id_form_field():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_WEB_RUN_RESPONSE),
+        timeout_seconds=9.0,
+    )
+
+    data = client.run_etl_load(
+        profile_id="sample_fashion_vendor_v1",
+        source_filename="vendor.csv",
+        file_content=b"vendor_sku,item_name\nSKU-1,Shirt\n",
+    )
+
+    assert data == ETL_WEB_RUN_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/etl-loads",
+            "files": {
+                "file": (
+                    "vendor.csv",
+                    b"vendor_sku,item_name\nSKU-1,Shirt\n",
+                    "text/csv",
+                )
+            },
+            "data": {"profile_id": "sample_fashion_vendor_v1"},
+            "timeout": 9.0,
+        }
+    ]
+
+
+def test_run_etl_load_rejects_empty_profile_id_without_request():
+    client, session = make_client(response=FakeResponse(payload=ETL_WEB_RUN_RESPONSE))
+
+    with pytest.raises(ValueError):
+        client.run_etl_load(
+            profile_id="   ",
+            source_filename="vendor.csv",
+            file_content=b"a,b\n1,2\n",
+        )
+    assert session.calls == []
+
+
+def test_run_etl_load_rejects_empty_filename_without_request():
+    client, session = make_client(response=FakeResponse(payload=ETL_WEB_RUN_RESPONSE))
+
+    with pytest.raises(ValueError):
+        client.run_etl_load(
+            profile_id="sample_fashion_vendor_v1",
+            source_filename="   ",
+            file_content=b"a,b\n1,2\n",
+        )
+    assert session.calls == []
+
+
+def test_run_etl_load_rejects_empty_file_content_without_request():
+    client, session = make_client(response=FakeResponse(payload=ETL_WEB_RUN_RESPONSE))
+
+    with pytest.raises(ValueError):
+        client.run_etl_load(
+            profile_id="sample_fashion_vendor_v1",
+            source_filename="vendor.csv",
+            file_content=b"",
+        )
+    assert session.calls == []
+
+
+def test_run_etl_load_rejects_missing_required_response_keys():
+    client, _ = make_client(
+        response=FakeResponse(payload={"etl_load_run_id": 42})
+    )
+    client_module = import_client_module()
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.run_etl_load(
+            profile_id="sample_fashion_vendor_v1",
+            source_filename="vendor.csv",
+            file_content=b"a,b\n1,2\n",
+        )
+
+
+def test_run_etl_load_maps_unsupported_profile_error_without_leaking_body():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=400,
+            payload={
+                "detail": {
+                    "code": "unsupported_profile",
+                    "message": "지원하지 않는 공급사 프로필입니다.",
+                }
+            },
+        )
+    )
+
+    with pytest.raises(client_module.ETLUnsupportedProfileError) as error:
+        client.run_etl_load(
+            profile_id="unknown",
+            source_filename="vendor.csv",
+            file_content=b"a,b\n1,2\n",
+        )
+    assert error.value.code == "unsupported_profile"
+
+
+def test_run_etl_load_maps_invalid_upload_error_with_server_message():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=400,
+            payload={
+                "detail": {
+                    "code": "invalid_upload",
+                    "message": "Input CSV has no product rows",
+                }
+            },
+        )
+    )
+
+    with pytest.raises(client_module.ETLInvalidUploadError) as error:
+        client.run_etl_load(
+            profile_id="sample_fashion_vendor_v1",
+            source_filename="vendor.csv",
+            file_content=b"a,b\n1,2\n",
+        )
+    assert "Input CSV has no product rows" in str(error.value)
+
+
+def test_run_etl_load_maps_unknown_500_to_generic_server_error_without_leaking_body():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=500,
+            payload={"detail": {"code": "etl_load_failed", "message": "internal"}},
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.run_etl_load(
+            profile_id="sample_fashion_vendor_v1",
+            source_filename="vendor.csv",
+            file_content=b"a,b\n1,2\n",
+        )
+    assert "internal" not in str(error.value)
+
+
+def test_run_etl_load_preserves_request_id_on_error():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=400,
+            payload={"detail": {"code": "unsupported_profile", "message": "no"}},
+            headers={"X-Request-ID": "a" * 32},
+        )
+    )
+
+    with pytest.raises(client_module.ETLUnsupportedProfileError) as error:
+        client.run_etl_load(
+            profile_id="unknown",
+            source_filename="vendor.csv",
+            file_content=b"a,b\n1,2\n",
+        )
+    assert error.value.request_id == "a" * 32
+
+
+def test_list_etl_profiles_returns_validated_response():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_PROFILE_LIST_RESPONSE),
+        timeout_seconds=6.0,
+    )
+
+    data = client.list_etl_profiles()
+
+    assert data == ETL_PROFILE_LIST_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/etl-profiles",
+            "params": None,
+            "timeout": 6.0,
+        }
+    ]
+
+
+def test_list_etl_profiles_rejects_malformed_items():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(payload={"items": [{"id": "x"}]})
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.list_etl_profiles()

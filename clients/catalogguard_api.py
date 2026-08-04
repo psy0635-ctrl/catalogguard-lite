@@ -177,6 +177,20 @@ CATALOG_PROMOTION_AUDIT_ITEM_KEYS = (
     "after_data",
     "created_at",
 )
+ETL_WEB_RUN_RESPONSE_KEYS = (
+    "etl_load_run_id",
+    "created",
+    "profile_name",
+    "profile_version",
+    "source_filename",
+    "total_rows",
+    "loaded_rows",
+    "rejected_rows",
+    "error_counts",
+)
+ETL_PROFILE_LIST_KEYS = ("items",)
+ETL_PROFILE_ITEM_KEYS = ("id", "display_name")
+ETL_UNSUPPORTED_PROFILE_MESSAGE = "지원하지 않는 공급사 프로필입니다."
 CATALOG_PROMOTION_NOT_FOUND_MESSAGE = "Promotion run not found."
 CATALOG_PROMOTION_STALE_MESSAGE = (
     "미리보기 이후 상품 데이터가 변경되었습니다. 미리보기를 다시 실행하세요."
@@ -772,6 +786,26 @@ class CatalogPromotionFailedError(CatalogPromotionApiError):
     pass
 
 
+class ETLWebRunApiError(CatalogGuardApiResponseError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message, request_id=request_id)
+        self.code = code
+
+
+class ETLUnsupportedProfileError(ETLWebRunApiError):
+    pass
+
+
+class ETLInvalidUploadError(ETLWebRunApiError):
+    pass
+
+
 class CatalogGuardApiClient:
     # Streamlit 화면은 이 클라이언트만 알면 되고, requests 예외나 HTTP 상태 코드는 여기서 숨깁니다.
     # 그래서 app.py는 사용자에게 보여 줄 메시지만 선택하면 됩니다.
@@ -860,6 +894,52 @@ class CatalogGuardApiClient:
         )
         self._validate_response_keys(data, CREATE_RESPONSE_KEYS)
         return self._normalize_create_response(data)
+
+    def run_etl_load(
+        self,
+        *,
+        profile_id: str,
+        source_filename: str,
+        file_content: bytes,
+        content_type: str = "text/csv",
+    ) -> dict[str, Any]:
+        # 공급사 CSV와 profile_id를 함께 업로드해 기존 ETL Pipeline/staging 적재를
+        # 실행합니다. profile_id는 서버 allowlist의 키일 뿐, 파일 경로가 아닙니다.
+        normalized_profile_id = str(profile_id).strip()
+        if not normalized_profile_id:
+            raise ValueError("profile_id must not be empty")
+        normalized_filename = str(source_filename).strip()
+        if not normalized_filename:
+            raise ValueError("source_filename must not be empty")
+        if not file_content:
+            raise ValueError("file_content must not be empty")
+
+        data = self._post_json(
+            "/api/v1/etl-loads",
+            files={
+                "file": (
+                    normalized_filename,
+                    file_content,
+                    content_type or "text/csv",
+                )
+            },
+            data={"profile_id": normalized_profile_id},
+            map_etl_run_errors=True,
+        )
+        self._validate_response_keys(data, ETL_WEB_RUN_RESPONSE_KEYS)
+        return data
+
+    def list_etl_profiles(self) -> dict[str, Any]:
+        data = self._get_json("/api/v1/etl-profiles")
+        self._validate_response_keys(data, ETL_PROFILE_LIST_KEYS)
+        items = data.get("items")
+        if not isinstance(items, list) or any(
+            not isinstance(item, dict)
+            or any(key not in item for key in ETL_PROFILE_ITEM_KEYS)
+            for item in items
+        ):
+            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+        return data
 
     def submit_inspection_job(
         self,
@@ -1188,20 +1268,24 @@ class CatalogGuardApiClient:
         path: str,
         *,
         files: dict[str, tuple[str, bytes, str]] | None = None,
+        data: dict[str, str] | None = None,
         json_body: dict[str, Any] | None = None,
         raise_not_found: bool = False,
         not_found_error: type[CatalogGuardApiError] = InspectionNotFoundError,
         not_found_message: str = NOT_FOUND_ERROR_MESSAGE,
         map_promotion_errors: bool = False,
+        map_etl_run_errors: bool = False,
     ) -> dict[str, Any]:
         response = self._post_response(
             path,
             files=files,
+            data=data,
             json_body=json_body,
             raise_not_found=raise_not_found,
             not_found_error=not_found_error,
             not_found_message=not_found_message,
             map_promotion_errors=map_promotion_errors,
+            map_etl_run_errors=map_etl_run_errors,
         )
 
         try:
@@ -1264,11 +1348,13 @@ class CatalogGuardApiClient:
         path: str,
         *,
         files: dict[str, tuple[str, bytes, str]] | None = None,
+        data: dict[str, str] | None = None,
         json_body: dict[str, Any] | None = None,
         raise_not_found: bool = False,
         not_found_error: type[CatalogGuardApiError] = InspectionNotFoundError,
         not_found_message: str = NOT_FOUND_ERROR_MESSAGE,
         map_promotion_errors: bool = False,
+        map_etl_run_errors: bool = False,
     ):
         url = f"{self._base_url}{path}"
 
@@ -1276,6 +1362,7 @@ class CatalogGuardApiClient:
             response = self._session.post(
                 url,
                 files=files,
+                data=data,
                 json=json_body,
                 timeout=self._timeout_seconds,
             )
@@ -1300,6 +1387,13 @@ class CatalogGuardApiClient:
                 )
                 if promotion_error is not None:
                     raise promotion_error from error
+            if map_etl_run_errors:
+                etl_run_error = self._build_etl_run_error(
+                    error_response,
+                    request_id=request_id,
+                )
+                if etl_run_error is not None:
+                    raise etl_run_error from error
             raise CatalogGuardApiResponseError(
                 SERVER_ERROR_MESSAGE,
                 request_id=request_id,
@@ -1358,6 +1452,38 @@ class CatalogGuardApiClient:
                 CATALOG_PROMOTION_FAILED_MESSAGE,
                 code=code,
                 promotion_run_id=promotion_run_id,
+                request_id=request_id,
+            )
+        return None
+
+    def _build_etl_run_error(
+        self,
+        response: object,
+        *,
+        request_id: str | None,
+    ) -> ETLWebRunApiError | None:
+        try:
+            payload = response.json()
+        except (AttributeError, ValueError):
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get("detail"), dict):
+            return None
+
+        detail = payload["detail"]
+        code = detail.get("code")
+        message = detail.get("message")
+        safe_message = message if isinstance(message, str) and message else None
+
+        if code == "unsupported_profile":
+            return ETLUnsupportedProfileError(
+                ETL_UNSUPPORTED_PROFILE_MESSAGE,
+                code=code,
+                request_id=request_id,
+            )
+        if code == "invalid_upload":
+            return ETLInvalidUploadError(
+                safe_message or "업로드한 CSV를 처리할 수 없습니다.",
+                code=code,
                 request_id=request_id,
             )
         return None
