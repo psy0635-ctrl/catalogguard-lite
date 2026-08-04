@@ -6,6 +6,8 @@
 
 `catalog_products`, `catalog_promotion_runs`, `catalog_product_changes`의 SQLAlchemy 모델과 Alembic migration은 완료되었고, 현재 저장소에는 promotion preview service/API, 승인형 promotion transaction·upsert, preview hash 계산, promotion run·audit 조회 API, Streamlit UI와 Browser E2E도 구현되어 있다. 아래 5~11절은 설계 당시 정의한 품질 게이트·정책과 현재 구현 결과를 함께 기록한다.
 
+이후 `catalog_promotion_rollbacks`, `catalog_promotion_rollback_changes` 모델과 Alembic migration, rollback preview/실행 service·API, Streamlit rollback UI도 추가되었다. succeeded promotion run을 되돌리는 이 기능은 16~26절에서 다룬다.
+
 ## 2. 현재 구조
 
 현재 흐름은 `공급사 CSV -> etl.pipeline -> 표준 CSV/reject CSV/summary JSON -> etl.load_cli -> PostgreSQL staging`이다.
@@ -308,8 +310,184 @@ POST /api/v1/etl-loads/{etl_load_run_id}/promotions
 
 ## 14. 현재 단계와 후속 범위
 
-현재 MVP에서는 개별 상품 선택 반영, 자동 삭제·비활성화, hard delete, 취소·예약 반영, 권한 관리, promotion 자체의 Redis/Celery 처리, streaming·증분 ETL, preview 영구 저장을 제외한다. 실제 Railway/운영 DB가 아닌 합성 fixture와 테스트 PostgreSQL에서 promotion을 검증했다.
+현재 MVP에서는 개별 상품 선택 반영, 자동 삭제·비활성화, hard delete, 예약 반영, 권한 관리, promotion 자체의 Redis/Celery 처리, streaming·증분 ETL, preview 영구 저장을 제외한다. 실제 Railway/운영 DB가 아닌 합성 fixture와 테스트 PostgreSQL에서 promotion을 검증했다.
+
+succeeded promotion run 단위의 되돌리기는 16~26절의 rollback 기능으로 구현했다. 다만 이는 하나의 promotion run을 대상으로 한 사후 되돌리기이며, promotion 실행 자체를 취소하거나 미래 시점에 예약 실행하는 기능, 여러 promotion을 한 번에 되돌리는 일괄 rollback, 임의 시점으로 되돌리는 point-in-time recovery는 여전히 범위 밖이다.
 
 ## 15. 최종 결정
 
 운영 상품 identity는 `(profile_name, product_id)`를 `(supplier_key, external_product_id)`라는 운영 모델 이름으로 표현한다. 이를 보장하는 persistence 모델·migration과 PostgreSQL 제약 검증은 완료했다. 현재 promotion은 품질 summary, reject, empty staging, batch 내부 중복, 재검수 오류를 배치 전체 차단 사유로 사용하고, preview와 실제 반영에서 동일 staging을 재검수하며 canonical preview hash로 stale 상태를 막는다.
+
+promotion 실행 후 잘못된 반영을 되돌려야 하는 문제는 rollback 기능으로 해결했다. rollback도 promotion과 같은 원칙을 따른다. preview 단계에서는 DB를 바꾸지 않고, 실행 직전 서버가 현재 상태를 다시 확인하며, 하나의 transaction으로 전체를 성공시키거나 전혀 반영하지 않는다. 자세한 설계와 검증은 16~26절에 기록한다.
+
+## 16. Rollback 문제 정의
+
+promotion만 있으면 `staging 데이터 -> 운영 Catalog 반영`은 가능하지만, 잘못된 데이터를 반영한 경우 안전하게 되돌릴 방법이 없었다. 단순히 audit에 저장된 과거 값으로 덮어쓰는 방식은 위험하다.
+
+```text
+Promotion A: price 10000 -> 12000
+이후 다른 변경: price 12000 -> 15000
+Promotion A를 단순 되돌리면: price 15000 -> 10000
+```
+
+이 경우 Promotion A 시점 이후에 발생한 정상적인 최신 변경(12000 -> 15000)까지 사라진다. 따라서 rollback 실행 직전에 현재 Catalog 상태가 해당 promotion이 만든 결과 그대로인지 다시 확인해야 한다는 것이 이 기능의 핵심 문제다.
+
+## 17. Rollback Preview 설계
+
+`db/catalog_promotion_rollback_service.py`의 `preview_catalog_promotion_rollback()`은 다음 순서로 동작한다.
+
+```text
+target CatalogPromotionRun 조회
+-> 상태가 succeeded가 아니면 blocked reason 추가
+-> 이미 succeeded 상태의 CatalogPromotionRollback이 있으면 blocked reason 추가
+-> 해당 promotion_run_id의 CatalogProductChange(promotion audit) 전체 조회
+-> audit이 없으면 blocked reason 추가
+-> 대상 catalog_product_id의 현재 CatalogProduct 조회
+-> build_rollback_preview_items()로 상품별 rollback_action·conflict 계산
+-> build_rollback_preview_hash()로 preview hash 계산
+```
+
+이 함수는 SELECT만 수행하며 어떤 테이블도 변경하지 않는다. 반환하는 `CatalogPromotionRollbackPreview`의 주요 필드는 `target_promotion_run_id`, `preview_schema_version`, `preview_hash`, `rollback_eligible`, `blocked_reasons`, `restore_count`, `delete_count`, `conflict_count`, `items`이며, `items`의 각 항목은 `audit_id`, `catalog_product_id`, `external_product_id`, `rollback_action`(`delete`/`restore`), `current_data`, `restore_data`, `conflict`, `conflict_reason`을 갖는다. 이 필드는 `api/schemas.py`의 `CatalogPromotionRollbackPreviewResponse`/`CatalogPromotionRollbackPreviewItemResponse`와 그대로 대응한다.
+
+## 18. INSERT / UPDATE 복원 전략
+
+`build_rollback_preview_items()`는 promotion audit의 `action`을 기준으로 두 경우를 나눈다.
+
+INSERT promotion 상품(audit.action == `"insert"`)은 `rollback_action = "delete"`이며 `restore_data`는 없다. 실행 시 `session.delete(product)`로 실제 삭제한다.
+
+UPDATE promotion 상품(audit.action == `"update"`)은 `rollback_action = "restore"`이며 `restore_data = audit.before_data`다. 실행 시 `COMPARISON_FIELDS`(`product_name`, `product_group_id`, `category`, `color`, `size`, `stock`, `price`, `sale_price`, `image_path`, `description`, `seller`) 전체를 `before_data` 값으로 되돌리고 `updated_at`도 갱신한다. `before_data`는 promotion 실행 당시 이미 JSONB로 저장해 둔 값이므로, 별도 계산 없이 그 값을 그대로 복원한다.
+
+두 경우 모두 아래 conflict 조건을 만족할 때만 허용한다.
+
+```text
+현재 catalog_products 상태 == 해당 promotion audit의 after_data
+```
+
+## 19. Conflict Detection
+
+이 기능에서 가장 중요한 안전장치다. `_product_data()` 함수는 `CatalogProduct`에서 정확히 다음 business field만 추출한다.
+
+```text
+external_product_id, product_group_id, product_name, category,
+color, size, stock, price, sale_price, image_path, description, seller
+```
+
+`id`, `created_at`, `updated_at`, `source_etl_load_run_id` 같은 ORM 내부·운영 메타 필드는 비교에 포함하지 않는다. promotion 당시 저장해 둔 `audit.after_data`도 같은 필드 집합의 JSONB이므로, 현재 값과 `after_data`를 dict로 직접 비교(`current != expected`)할 수 있다.
+
+두 값이 다르면 `rollback_conflict` blocked reason을 추가하고 해당 상품의 rollback을 막는다. 취지는 명확하다. 과거 promotion을 되돌린다는 이유로 그 이후에 발생한 정상적인 최신 변경까지 덮어써서는 안 된다. preview의 `conflict_count`가 하나라도 있으면 `rollback_eligible`은 `False`가 된다.
+
+## 20. Rollback Preview Hash와 stale 방어
+
+promotion preview와 마찬가지로 rollback preview에도 TOCTOU(preview 확인 시점과 실제 실행 시점 사이의 간극) 문제가 있다. `build_rollback_preview_hash()`는 다음 canonical JSON을 SHA-256으로 계산한 64자리 소문자 hex다.
+
+```text
+preview_schema_version (현재 1)
+target_promotion_run_id
+items: [
+  { audit_id, catalog_product_id, action, expected_after(after_data), restore_before(before_data), current }
+  ...
+]
+```
+
+`items`는 `(catalog_product_id, audit_id)` 오름차순으로 정렬한 뒤 `json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=False)`로 직렬화한다. 정렬 기준을 고정해 DB 조회 순서나 Python dict 순서에 관계없이 같은 데이터면 항상 같은 hash가 나오게 한다. 대상 promotion audit이 없으면 `preview_hash`는 `None`이며 이 경우 rollback을 허용하지 않는다.
+
+실제 실행 endpoint(`execute_catalog_promotion_rollback()`)는 preview 값을 신뢰하지 않는다. 요청을 받으면 대상 promotion run·기존 rollback 여부·audit·현재 상품을 다시 조회해 preview를 새로 계산하고, 새 hash를 요청의 `expected_preview_hash`와 비교한다. 다르면 `preview_stale`로 실행을 막고 운영 상품을 변경하지 않는다.
+
+```text
+Rollback Preview 생성 -> canonical payload -> hash 생성
+(사용자 확인 중 Catalog 변경 가능)
+실제 Rollback 요청 -> 같은 세션에서 preview 재계산 -> hash 재계산 -> 기존 hash와 비교
+불일치 -> preview_stale -> DB 변경 없음
+```
+
+## 21. 서버 Confirmation
+
+`_validate_request()`는 DB에 접근하기 전에 두 조건을 확인한다.
+
+```text
+confirmation이 True가 아니면 CatalogPromotionRollbackConfirmationRequiredError
+expected_preview_hash가 64자리 소문자 SHA-256 hex가 아니면 CatalogPromotionRollbackInvalidPreviewHashError
+```
+
+FastAPI route는 이 두 예외를 각각 HTTP `400`(`confirmation_required`)과 `422`(`invalid_preview_hash`)로 변환한다. Streamlit의 확인 checkbox는 사용자 실수를 막는 1차 안전장치일 뿐이며, API를 직접 호출해도 서버가 같은 조건을 다시 검증한다. 즉 안전성은 `UI 안전장치 + API 서버 안전장치`의 조합으로 보장한다.
+
+## 22. Transaction Atomicity와 실패 기록
+
+rollback 대상 상품이 여러 개일 수 있으므로 전체 실행은 하나의 `with session.begin():` 블록 안에서 처리한다. 이 블록 안에서 대상 promotion run, 기존 rollback 여부, 대상 audit, 대상 상품을 모두 `SELECT ... FOR UPDATE`로 잠근 뒤 preview를 다시 계산한다.
+
+conflict가 있거나 hash가 다르면 상품은 전혀 변경하지 않고, 그 사실을 기록하는 `CatalogPromotionRollback`(상태 `blocked`) 한 건만 같은 transaction 안에서 추가한 뒤 정상 반환한다.
+
+조건을 통과하면 `CatalogPromotionRollback`(상태 `applying`)을 만들고, 상품마다 삭제 또는 필드 복원을 수행하면서 `CatalogPromotionRollbackChange` 감사 행을 함께 추가한다. 모든 상품 처리가 끝나면 상태를 `succeeded`로 갱신하고 `with` 블록이 정상 종료되며 commit된다.
+
+도중 어떤 예외든 발생하면(예: 상품 값 CHECK constraint 위반) `with` 블록이 예외로 종료되며 그 transaction의 모든 변경, 즉 이미 반영한 상품 복원·삭제와 방금 만든 `applying` rollback run까지 전부 rollback된다. 이후 별도의 새 짧은 transaction 하나로 상태 `failed`인 `CatalogPromotionRollback` 한 건만 기록하고, 호출자에게는 `CatalogPromotionRollbackExecutionFailedError`를 발생시킨다.
+
+```text
+상품 A 복원 (세션 내)
+상품 B 복원 (세션 내)
+상품 C 처리 중 예외
+-> 전체 transaction rollback (A, B도 취소)
+-> 별도 transaction으로 failed run 1건만 기록
+-> 성공 rollback run 없음, 부분 audit 없음
+```
+
+이 all-or-nothing 동작은 로컬 disposable PostgreSQL에서 상품 하나의 복원값이 `catalog_products`의 `price >= 0` CHECK constraint를 위반하도록 강제한 뒤, 두 상품 모두 원래 값(rollback 시도 전 값)을 그대로 유지하고 `catalog_promotion_rollback_changes`가 0건, `catalog_promotion_rollbacks`에 `failed` 상태 1건만 남는 것을 확인해 검증했다.
+
+## 23. Duplicate Rollback Protection
+
+같은 promotion run을 두 번 되돌릴 수 없도록 두 layer로 방어한다.
+
+- Service level: 실행 transaction 안에서 같은 `target_promotion_run_id`의 `succeeded` 상태 `CatalogPromotionRollback`을 `SELECT ... FOR UPDATE`로 조회하고, 있으면 `CatalogPromotionRollbackAlreadyExecutedError`를 발생시킨다.
+- DB level: `catalog_promotion_rollbacks`에 `target_promotion_run_id`, `status = 'succeeded'` 조건의 partial unique index(`ux_catalog_promotion_rollbacks_target_promotion_run`)가 있다.
+
+service level 확인은 사용자에게 바로 이해할 수 있는 오류(`already_rolled_back`, HTTP `409`)를 주기 위한 것이고, DB unique index는 동시에 두 요청이 들어오는 경쟁 조건에 대한 최종 방어선이다. 애플리케이션 검증만으로는 두 요청이 거의 동시에 `FOR UPDATE` 잠금을 얻으려는 경우까지 완전히 막는다고 보장할 수 없으므로, DB 제약을 최종 보호선으로 유지한다.
+
+## 24. Rollback Audit 모델과 Migration
+
+`CatalogPromotionRollback`은 rollback 실행 한 건을 기록한다.
+
+| 필드 | 설명 |
+| --- | --- |
+| `id` | `BIGINT` primary key |
+| `target_promotion_run_id` | 대상 `catalog_promotion_runs.id`, FK `ON DELETE RESTRICT` |
+| `status` | `applying` / `succeeded` / `failed` / `blocked` |
+| `preview_hash`, `preview_schema_version` | 실행 시점에 확정된 rollback preview hash와 schema 버전 |
+| `restored_count`, `deleted_count`, `conflict_count` | 처리 결과 count |
+| `failure_code`, `safe_failure_message` | blocked/failed 상태의 안전한 사유 |
+| `started_at`, `completed_at`, `created_at` | 실행 시각 |
+
+`CatalogPromotionRollbackChange`는 rollback이 상품별로 만든 변경을 기록하는 append-only audit이다.
+
+| 필드 | 설명 |
+| --- | --- |
+| `id` | `BIGINT` primary key |
+| `rollback_run_id` | 대상 `catalog_promotion_rollbacks.id`, FK `ON DELETE RESTRICT` |
+| `original_audit_id` | 원본 `catalog_product_changes.id`, FK `ON DELETE RESTRICT` |
+| `catalog_product_id` | 대상 상품 ID, FK 없음 |
+| `action` | `delete` / `restore` |
+| `changed_fields`, `before_data`, `after_data` | JSONB, `delete`는 `after_data`가 `NULL`, `restore`는 `NULL`이 아님 |
+
+`20260803_0007_create_catalog_promotion_rollback_tables.py`는 이 두 테이블과 관련 CHECK constraint·index·FK를 생성한다. 이 시점에는 `catalog_promotion_rollback_changes.catalog_product_id`에도 `catalog_products.id`를 향한 `ON DELETE RESTRICT` FK가 있었다.
+
+`20260803_0008_allow_catalog_product_audit_detach.py`는 `catalog_product_changes.catalog_product_id`와 `catalog_promotion_rollback_changes.catalog_product_id`의 FK를 모두 제거한다. INSERT promotion을 rollback하면 해당 상품을 실제로 삭제하는데, 그 상품을 가리키는 `RESTRICT` FK가 남아 있으면 두 감사 이력 중 하나가 그 상품을 참조하고 있다는 이유로 삭제 자체가 거부된다. 이 migration은 `Catalog Product의 생명주기`와 `Audit 기록의 생명주기`를 분리하기 위한 것이며, 상품이 삭제되어도 원본 promotion audit과 rollback audit 모두 그대로 남도록 한다. downgrade는 두 FK를 다시 `RESTRICT`로 만든다. 이미 삭제된 상품을 참조하는 audit 행이 존재하는 상태에서 이 downgrade를 실행하면 실패할 수 있다는 점은 의도된 제약이며, 검증은 데이터가 없는 빈 DB에서만 수행했다.
+
+## 25. Rollback 완료된 검증 범위
+
+로컬 disposable PostgreSQL(운영·Railway DB와 분리된 컨테이너)과 GitHub Actions PostgreSQL 서비스 양쪽에서 `tests/test_catalog_promotion_rollback_contract.py`의 PostgreSQL 통합 테스트로 다음을 확인했다.
+
+- INSERT promotion rollback: 상품 삭제, 원본 promotion audit과 rollback audit 모두 보존
+- UPDATE promotion rollback: `COMPARISON_FIELDS` 전체가 promotion 이전 값으로 정확히 복원
+- Conflict: promotion 이후 직접 수정된 상품에 대한 rollback 차단과 최신 값 유지
+- Preview stale: 오래된 `expected_preview_hash`로는 실행되지 않고 운영 상품 무변경
+- Duplicate rollback: service 예외와 DB unique constraint 위반 양쪽에서 차단
+- Transaction atomicity: 강제 실패 시 부분 변경 없음, `failed` run 1건만 기록
+- Alembic upgrade head, `0007`/`0006`으로의 downgrade와 재-upgrade, 단일 head
+
+기준 저장소 상태의 GitHub Actions run `30888320849`이 성공했으며, 이 run의 `test` job 로그에서 위 PostgreSQL 통합 테스트가 skip 없이 실제로 실행되고 통과한 것을 확인했다. FastAPI 서버·PostgreSQL·`clients/catalogguard_api.py`를 실제로 연결해 rollback-preview/rollback API의 404·stale·중복 응답도 확인했다.
+
+## 26. Rollback 현재 한계
+
+- Rollback 전용 Streamlit AppTest와 Browser E2E는 아직 없다. 서비스·API 계층 PostgreSQL 통합 테스트와 실제 서버를 통한 수동 검증으로만 확인했다.
+- `already_rolled_back`, `rollback_not_eligible`, `rollback_failed` 같은 일부 오류 코드는 `clients/catalogguard_api.py`에서 전용 예외가 아닌 일반 오류로 처리된다. `preview_stale`만 전용 예외로 매핑되어 있다.
+- 여러 promotion을 한 번에 되돌리는 일괄 rollback은 지원하지 않는다.
+- 임의 시점으로 되돌리는 point-in-time recovery는 지원하지 않으며, rollback은 하나의 succeeded promotion run 단위로만 동작한다.
+- rollback 자체에 대한 인증·권한 관리는 구현되어 있지 않다.

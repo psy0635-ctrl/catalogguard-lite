@@ -91,6 +91,10 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - 승인된 promotion transaction, 운영 상품 insert/update, promotion run 상태와 append-only audit 저장
 - stale preview·중복 promotion·Streamlit rerun 상태 초기화와 안전한 오류 mapping
 - PostgreSQL·FastAPI·Streamlit·Chromium Playwright 전체 promotion E2E와 PostgreSQL 최종 상태 검증
+- Promotion 실행 이력과 상품별 변경 audit 조회
+- Promotion Rollback preview로 대상 상품과 현재 Catalog 상태의 conflict 확인
+- Preview hash 재검증과 서버 confirmation을 거치는 transaction 기반 Rollback
+- INSERT promotion 상품 삭제, UPDATE promotion 상품 이전 상태 복원과 원본 promotion audit 보존
 
 ## 4. 사용자 기능 흐름
 
@@ -160,9 +164,14 @@ API 오류 발생
 -> 승인 checkbox 선택
 -> expected_preview_hash와 함께 promotion 요청
 -> 운영 상품 insert/update 및 promotion run·audit 저장
+-> Promotion 실행 이력 조회
+-> 필요 시 Rollback Preview 확인
+-> conflict 없으면 confirmation 후 Rollback 실행
 ```
 
 배치 조회 API가 CatalogGuard 검수나 promotion을 자동으로 실행하는 것은 아닙니다. 생성된 표준 CSV의 검수, staging 적재 이력 조회, 선택한 batch의 promotion preview와 실제 반영은 각각의 API·CLI 호출로 구분합니다. ETL 변환·staging 적재는 여전히 CLI 책임이며, Streamlit은 DB에 직접 쓰지 않고 `CatalogGuardApiClient`를 통해 FastAPI를 호출합니다.
+
+succeeded promotion run은 되돌릴 수 있습니다. Rollback preview는 해당 promotion이 만든 after 상태와 현재 Catalog 상태를 비교해 그 사이에 다른 변경이 있었는지 확인하고, 값이 달라졌으면 conflict로 표시해 실행을 막습니다. 문제가 없으면 사용자 confirmation과 preview hash 재검증을 거쳐 하나의 transaction으로 INSERT promotion 상품은 삭제하고 UPDATE promotion 상품은 이전 상태로 복원합니다. 원본 promotion audit은 상품이 삭제된 뒤에도 삭제하지 않고 별도 rollback audit과 함께 보존합니다.
 
 ## 5. 전체 시스템 구조
 
@@ -479,6 +488,8 @@ catalogguard-lite/
       20260727_0004_add_etl_quality_summary.py
       20260728_0005_add_etl_rejected_rows.py
       20260728_0006_create_catalog_promotion_tables.py
+      20260803_0007_create_catalog_promotion_rollback_tables.py
+      20260803_0008_allow_catalog_product_audit_detach.py
   data/
     dev/
       category_mismatch_test.csv
@@ -795,7 +806,7 @@ python -m alembic upgrade head
 python -m alembic history
 ```
 
-현재 Alembic head는 `20260728_0006`입니다.
+현재 Alembic head는 `20260803_0008`입니다.
 
 `20260703_0001_create_inspection_tables.py`는 다음 테이블을 만듭니다.
 
@@ -821,6 +832,13 @@ python -m alembic history
 
 새 테이블의 출처·감사 FK는 모두 `ON DELETE RESTRICT`다. `catalog_product_changes.before_data`는 `JSONB(none_as_null=True)`를 사용해 insert 이력의 Python `None`을 SQL `NULL`로 저장한다. `catalog_promotion_preview_service.py`와 `catalog_promotion_service.py`가 이 테이블을 사용해 preview, 승인된 transaction upsert, promotion run과 append-only audit을 처리한다.
 
+`20260803_0007_create_catalog_promotion_rollback_tables.py`는 promotion rollback을 위한 다음 테이블을 추가합니다.
+
+- `catalog_promotion_rollbacks`: rollback 실행 단위 상태(`applying`/`succeeded`/`failed`/`blocked`)와 count·preview 메타데이터를 저장하며, 같은 `target_promotion_run_id`의 `succeeded` 실행을 partial unique index로 한 건만 허용
+- `catalog_promotion_rollback_changes`: rollback이 상품별로 삭제(`delete`)했는지 이전 상태로 복원(`restore`)했는지 기록하는 append-only JSONB audit log이며, 원본 `catalog_product_changes` 행을 FK로 연결
+
+`20260803_0008_allow_catalog_product_audit_detach.py`는 `catalog_product_changes.catalog_product_id`와 `catalog_promotion_rollback_changes.catalog_product_id`의 `ON DELETE RESTRICT` 외래 키를 제거합니다. INSERT promotion을 rollback하면 운영 상품이 실제로 삭제될 수 있는데, 이 외래 키가 남아 있으면 감사 이력이 상품을 계속 참조하고 있어 삭제 자체가 막힙니다. 외래 키를 제거해 상품이 삭제되어도 두 audit 테이블의 행은 그대로 남도록 했습니다.
+
 upgrade 동작은 다음 순서입니다.
 
 1. `file_sha256` nullable 컬럼 추가
@@ -843,9 +861,13 @@ psql "$env:DATABASE_URL" -c "\d catalog_products_staging"
 psql "$env:DATABASE_URL" -c "\d catalog_products"
 psql "$env:DATABASE_URL" -c "\d catalog_promotion_runs"
 psql "$env:DATABASE_URL" -c "\d catalog_product_changes"
+psql "$env:DATABASE_URL" -c "\d catalog_promotion_rollbacks"
+psql "$env:DATABASE_URL" -c "\d catalog_promotion_rollback_changes"
 ```
 
 테스트용 PostgreSQL 18 임시 클러스터에서 빈 DB의 `upgrade head`, `downgrade 20260728_0005`, 재-upgrade와 단일 head를 확인했다. `0006` downgrade는 새 운영 상품 persistence 테이블만 제거하며 기존 inspection·ETL staging 테이블은 유지한다.
+
+같은 방식으로 로컬 disposable PostgreSQL 18에서 빈 DB의 `upgrade head`, `downgrade 20260803_0007`, `downgrade 20260728_0006`, 재-upgrade와 단일 head도 확인했다.
 
 ## 16. FastAPI 실행 방법
 
@@ -1236,6 +1258,23 @@ PostgreSQL staging에 저장된 ETL 적재 배치 목록을 조회합니다. 목
 
 서버는 transaction 안에서 batch·staging·현재 운영 상품을 잠그고 preview를 다시 계산합니다. hash가 달라지면 `preview_stale`, 반영 조건이 맞지 않으면 `promotion_blocked`로 `409`를 반환하며 운영 상품을 변경하지 않습니다. 성공 시 운영 상품 insert/update와 `catalog_promotion_runs`의 `succeeded` 기록, `catalog_product_changes` append-only audit을 함께 저장합니다. 같은 ETL batch의 성공 반영은 partial unique index와 잠금으로 한 번만 허용하고, 경쟁 요청의 실패는 내부 SQL 오류를 노출하지 않는 안전한 메시지로 변환합니다.
 
+### `POST /api/v1/catalog-promotions/{promotion_run_id}/rollback-preview`
+
+succeeded promotion run 하나를 되돌릴 수 있는지 확인하는 미리보기입니다. DB를 변경하지 않고 `rollback_eligible`, `blocked_reasons`, `restore_count`, `delete_count`, `conflict_count`, `preview_hash`와 상품별 `rollback_action`(`delete`/`restore`)·`current_data`·`restore_data`·`conflict` 목록을 반환합니다. 존재하지 않는 `promotion_run_id`는 HTTP `404`입니다.
+
+### `POST /api/v1/catalog-promotions/{promotion_run_id}/rollback`
+
+미리보기 확인 후 실제로 되돌립니다. 요청에는 `confirmation: true`와 미리보기 응답의 64자리 소문자 SHA-256 `expected_preview_hash`가 필요합니다.
+
+```json
+{
+  "confirmation": true,
+  "expected_preview_hash": "rollback preview 응답의 SHA-256 hash"
+}
+```
+
+서버는 transaction 안에서 대상 promotion run과 관련 상품을 다시 잠그고 rollback preview를 다시 계산합니다. hash가 달라지면 `preview_stale`, 그 사이에 상품이 다시 바뀌었거나 반영 조건이 맞지 않으면 `rollback_conflict`/`rollback_not_eligible`로 `409`를 반환하며 운영 상품을 변경하지 않습니다. 이미 같은 promotion run이 성공적으로 rollback된 경우에도 `409`(`already_rolled_back`)로 차단합니다. 성공 시 INSERT promotion 상품은 삭제하고 UPDATE promotion 상품은 이전 상태로 복원하며, `catalog_promotion_rollbacks`의 `succeeded` 기록과 `catalog_promotion_rollback_changes` append-only audit을 함께 저장합니다. 원본 `catalog_product_changes` audit은 상품이 삭제되어도 삭제하지 않습니다.
+
 ## 19. 검수 이력 검색과 전체 요약 CSV 다운로드
 
 검수 이력 목록 API와 Streamlit 검수 이력 탭은 파일명, 날짜, 검수 상태 검색을 지원합니다.
@@ -1448,16 +1487,18 @@ python -m pytest -q
 
 ### PostgreSQL persistence 포함 검증 결과
 
-promotion 기능은 운영 DB나 Railway DB에 연결하지 않고 저장소의 테스트 PostgreSQL 환경에서 검증했습니다. 기준 저장소 상태의 GitHub Actions run `30736143581`은 성공했으며, 문서에는 실행별 전체 테스트 수를 추측해 기록하지 않습니다.
+promotion과 rollback 기능은 운영 DB나 Railway DB에 연결하지 않고 저장소의 테스트 PostgreSQL 환경에서 검증했습니다. 기준 저장소 상태의 GitHub Actions run `30888320849`은 성공했으며, 문서에는 실행별 전체 테스트 수를 추측해 기록하지 않습니다.
 
 ```text
 promotion preview·service·API·client·UI·concurrency 테스트 파일과 Playwright Chromium promotion E2E를 포함한 검증 범위를 확인
-Alembic history/heads: `20260728_0006` 단일 head 확인
+rollback preview·service·API 계약과 PostgreSQL 통합 테스트 파일을 포함한 검증 범위를 확인
+Alembic history/heads: `20260803_0008` 단일 head 확인
 promotion PostgreSQL transaction·partial unique index·audit·stale/중복 경쟁 조건 확인
+rollback PostgreSQL INSERT 삭제·UPDATE 복원·conflict 차단·중복 rollback 차단·transaction 원자성·원본 audit 보존 확인
 Chromium promotion E2E: preview·승인 전 버튼 비활성화·실제 반영·성공/중복 메시지·PostgreSQL 최종 상태 확인
 ```
 
-promotion preview의 응답 schema와 hash 형식, blocked reason, insert/update/unchanged 계산, confirmation 요구, stale preview, 안전한 오류 mapping, Streamlit 상태 초기화와 중복 제출 방지를 테스트했습니다. promotion E2E는 브라우저 성공 메시지에 의존하지 않고 `catalog_products`, `catalog_promotion_runs`, `catalog_product_changes`의 PostgreSQL 최종 상태와 `applying` 잔존 여부까지 확인합니다.
+promotion preview의 응답 schema와 hash 형식, blocked reason, insert/update/unchanged 계산, confirmation 요구, stale preview, 안전한 오류 mapping, Streamlit 상태 초기화와 중복 제출 방지를 테스트했습니다. promotion E2E는 브라우저 성공 메시지에 의존하지 않고 `catalog_products`, `catalog_promotion_runs`, `catalog_product_changes`의 PostgreSQL 최종 상태와 `applying` 잔존 여부까지 확인합니다. rollback은 아직 전용 Streamlit AppTest와 Browser E2E는 없으며, 서비스·API 계층의 PostgreSQL 통합 테스트와 실제 FastAPI 서버를 통한 수동 검증으로 확인했습니다.
 
 ### 실제 브라우저 ETL E2E
 
@@ -1549,7 +1590,7 @@ Streamlit 시작 스모크 테스트는 `python -m streamlit run app.py`로 실�
 
 AppTest는 실제 `app.py` 실행 경로의 CSV 업로드와 검수·필터 위젯을 검증하지만 실제 브라우저의 파일 선택 창이나 픽셀 렌더링까지 자동화하지는 않습니다. GitHub Actions 스모크 테스트도 Railway API 실제 통신, 운영 Secrets 설정, Streamlit Community Cloud 전용 장애나 모든 Segmentation fault를 검증하지 않습니다.
 
-기준 저장소 상태의 GitHub Actions run `30736143581`은 성공했습니다. Actions 실행별 전체 테스트 수는 이 문서에 추측해 고정하지 않으며, AWS Docker runtime smoke, promotion E2E와 Streamlit startup smoke의 실제 검증 범위는 위 테스트·workflow 설명을 따릅니다. Actions의 일회성 서비스 컨테이너는 운영 DB·Redis와 분리됩니다.
+기준 저장소 상태의 GitHub Actions run `30888320849`은 성공했습니다. Actions 실행별 전체 테스트 수는 이 문서에 추측해 고정하지 않으며, AWS Docker runtime smoke, promotion E2E와 Streamlit startup smoke의 실제 검증 범위는 위 테스트·workflow 설명을 따릅니다. Actions의 일회성 서비스 컨테이너는 운영 DB·Redis와 분리됩니다.
 
 ## 24. 데이터 저장 범위와 보안
 
@@ -1581,7 +1622,7 @@ ETL staging에는 다음 값을 저장합니다.
 
 ETL 적재는 summary의 필수 필드, 실제 표준 CSV·reject CSV SHA-256, 실제 행 수와 reject CSV의 구조를 확인한 뒤 배치·정상 상품·reject 행을 하나의 트랜잭션으로 저장합니다. `(input_file_sha256, profile_name, profile_version)` unique index로 중복을 판단하며, 실패 시 전체 rollback합니다. reject 원본 값은 마스킹된 문자열만 `etl_rejected_rows`에 저장하고 raw CSV와 개인정보 원문은 저장하지 않습니다.
 
-운영 상품 persistence에는 `catalog_products`의 공급사·외부 상품 ID, 표준 상품 필드와 마지막 ETL 출처, `catalog_promotion_runs`의 상태·count·preview 메타데이터, `catalog_product_changes`의 action·변경 JSONB·전후 값을 저장합니다. 승인된 promotion transaction이 운영 상품과 run·audit을 함께 저장하며, 감사 이력은 append-only 제약과 FK RESTRICT로 보호합니다. audit 조회 전용 API는 제공하지 않지만 promotion 결과와 최종 DB 상태는 테스트에서 확인합니다.
+운영 상품 persistence에는 `catalog_products`의 공급사·외부 상품 ID, 표준 상품 필드와 마지막 ETL 출처, `catalog_promotion_runs`의 상태·count·preview 메타데이터, `catalog_product_changes`의 action·변경 JSONB·전후 값, `catalog_promotion_rollbacks`의 rollback 실행 상태·count·preview 메타데이터, `catalog_promotion_rollback_changes`의 상품별 delete/restore 변경 JSONB를 저장합니다. 승인된 promotion transaction이 운영 상품과 run·audit을 함께 저장하며, 감사 이력은 append-only 제약과 FK RESTRICT로 보호합니다. 다만 `catalog_product_changes`와 `catalog_promotion_rollback_changes`의 `catalog_product_id`에는 FK를 두지 않아, INSERT promotion을 rollback해 상품이 실제로 삭제되어도 두 감사 이력은 삭제되지 않고 남습니다. `GET /api/v1/catalog-promotions`, `GET /api/v1/catalog-promotions/{promotion_run_id}`, `GET /api/v1/catalog-promotions/{promotion_run_id}/audits`로 promotion 실행 이력과 상품별 변경 audit을 조회할 수 있습니다.
 
 저장하지 않는 값은 다음과 같습니다.
 
@@ -1626,8 +1667,12 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - 실제 외부 공급사 운영 데이터와 연동하지 않았습니다.
 - ETL 적재를 시작하는 웹 API는 없으며 파일 변환과 staging 적재는 CLI로 실행합니다.
 - Streamlit ETL 적재 이력 화면은 배치·staging 상품 조회는 읽기 전용으로 유지하면서, 선택한 batch에 대해 promotion preview와 승인된 운영 상품 반영을 FastAPI API로 요청합니다. ETL 적재 실행과 staging 상품 직접 수정·삭제는 지원하지 않습니다.
-- staging 상품을 수정·삭제하는 API와 상품 변경 이력 조회 API는 구현되어 있지 않습니다.
+- staging 상품을 수정·삭제하는 API는 구현되어 있지 않습니다.
 - promotion은 품질 summary·reject·검수 오류·중복 identity가 없는 선택 batch만 대상으로 하며, 실제 외부 공급사 운영 데이터와 production catalog 반영은 검증하지 않았습니다.
+- Rollback 전용 Streamlit AppTest와 Browser E2E는 아직 없습니다.
+- 일부 rollback 오류 코드(`already_rolled_back` 등)는 API client에서 전용 예외가 아닌 일반 오류로 처리됩니다.
+- 여러 promotion을 한 번에 되돌리는 일괄 rollback은 지원하지 않습니다.
+- 임의 시점으로 되돌리는 point-in-time recovery는 지원하지 않으며, rollback은 하나의 succeeded promotion run 단위로만 동작합니다.
 - reject 행은 `etl_rejected_rows`에 구조화된 오류와 마스킹된 원본으로 저장하며, 자동 공급사 감지는 지원하지 않습니다.
 - 증분 ETL과 streaming을 지원하지 않습니다.
 - 운영 DB 적재는 검증하지 않았고, PostgreSQL 적재는 임시 테스트 환경에서만 검증했습니다.
@@ -1649,7 +1694,7 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - 브랜드 표준화
 - `gender` 선택 컬럼과 표준화
 - ETL 적재 실행용 웹 API와 권한·실행 상태 관리
-- promotion run·audit 조회 API와 인증·권한 관리
+- promotion·rollback 실행에 대한 인증·권한 관리
 - 실제 운영 공급사·production catalog 연동과 배포 환경 promotion 검증
 - 증분 ETL과 대용량 streaming 처리
 
