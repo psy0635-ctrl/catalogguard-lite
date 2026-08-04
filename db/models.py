@@ -16,7 +16,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, foreign, mapped_column, relationship
 
 from db.base import Base
 
@@ -432,6 +432,7 @@ class CatalogProduct(Base):
     )
     changes: Mapped[list[CatalogProductChange]] = relationship(
         back_populates="catalog_product",
+        primaryjoin="CatalogProduct.id == foreign(CatalogProductChange.catalog_product_id)",
         passive_deletes=True,
     )
 
@@ -561,6 +562,10 @@ class CatalogPromotionRun(Base):
         back_populates="promotion_run",
         passive_deletes=True,
     )
+    rollback_runs: Mapped[list[CatalogPromotionRollback]] = relationship(
+        back_populates="target_promotion_run",
+        passive_deletes=True,
+    )
 
 
 class CatalogProductChange(Base):
@@ -618,7 +623,6 @@ class CatalogProductChange(Base):
     )
     catalog_product_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("catalog_products.id", ondelete="RESTRICT"),
         nullable=False,
     )
     action: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -637,4 +641,68 @@ class CatalogProductChange(Base):
     promotion_run: Mapped[CatalogPromotionRun] = relationship(
         back_populates="changes"
     )
-    catalog_product: Mapped[CatalogProduct] = relationship(back_populates="changes")
+    catalog_product: Mapped[CatalogProduct] = relationship(
+        back_populates="changes",
+        primaryjoin="CatalogProduct.id == foreign(CatalogProductChange.catalog_product_id)",
+    )
+
+
+class CatalogPromotionRollback(Base):
+    """One atomic rollback attempt for a succeeded promotion run."""
+
+    __tablename__ = "catalog_promotion_rollbacks"
+    __table_args__ = (
+        CheckConstraint("status IN ('applying', 'succeeded', 'failed', 'blocked')", name="ck_catalog_promotion_rollbacks_status"),
+        CheckConstraint("preview_hash IS NULL OR length(preview_hash) = 64", name="ck_catalog_promotion_rollbacks_preview_hash_length"),
+        CheckConstraint("restored_count >= 0", name="ck_catalog_promotion_rollbacks_restored_count_non_negative"),
+        CheckConstraint("deleted_count >= 0", name="ck_catalog_promotion_rollbacks_deleted_count_non_negative"),
+        CheckConstraint("conflict_count >= 0", name="ck_catalog_promotion_rollbacks_conflict_count_non_negative"),
+        CheckConstraint("(status = 'applying' AND completed_at IS NULL) OR (status IN ('succeeded', 'failed', 'blocked') AND completed_at IS NOT NULL)", name="ck_catalog_promotion_rollbacks_completed_at_matches_status"),
+        Index("ux_catalog_promotion_rollbacks_target_promotion_run", "target_promotion_run_id", unique=True, postgresql_where=text("status = 'succeeded'")),
+        Index("ix_catalog_promotion_rollbacks_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    target_promotion_run_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("catalog_promotion_runs.id", ondelete="RESTRICT"), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    preview_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    preview_schema_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    restored_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    deleted_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    conflict_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    safe_failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    target_promotion_run: Mapped[CatalogPromotionRun] = relationship(back_populates="rollback_runs")
+    changes: Mapped[list[CatalogPromotionRollbackChange]] = relationship(back_populates="rollback_run", passive_deletes=True)
+
+
+class CatalogPromotionRollbackChange(Base):
+    """Audit entry for one product changed by a rollback."""
+
+    __tablename__ = "catalog_promotion_rollback_changes"
+    __table_args__ = (
+        CheckConstraint("action IN ('delete', 'restore')", name="ck_catalog_promotion_rollback_changes_action"),
+        CheckConstraint("jsonb_typeof(changed_fields) = 'object'", name="ck_catalog_promotion_rollback_changes_changed_fields_object"),
+        CheckConstraint("changed_fields <> '{}'::jsonb", name="ck_catalog_promotion_rollback_changes_changed_fields_non_empty"),
+        CheckConstraint("jsonb_typeof(before_data) = 'object'", name="ck_catalog_promotion_rollback_changes_before_data_object"),
+        CheckConstraint("after_data IS NULL OR jsonb_typeof(after_data) = 'object'", name="ck_catalog_promotion_rollback_changes_after_data_object"),
+        CheckConstraint("(action = 'delete' AND after_data IS NULL) OR (action = 'restore' AND after_data IS NOT NULL)", name="ck_catalog_promotion_rollback_changes_after_data_matches_action"),
+        Index("ix_catalog_promotion_rollback_changes_rollback_run_id", "rollback_run_id"),
+        Index("ix_catalog_promotion_rollback_changes_catalog_product_id", "catalog_product_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    rollback_run_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("catalog_promotion_rollbacks.id", ondelete="RESTRICT"), nullable=False)
+    original_audit_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("catalog_product_changes.id", ondelete="RESTRICT"), nullable=False)
+    catalog_product_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    changed_fields: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    before_data: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    after_data: Mapped[dict[str, object] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    rollback_run: Mapped[CatalogPromotionRollback] = relationship(back_populates="changes")

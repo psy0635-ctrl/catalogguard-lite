@@ -292,3 +292,56 @@ class InspectionJobStatusResponse(BaseModel):
     message: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class CatalogPromotionRollbackBlockedReasonResponse(BaseModel):
+    code: str
+    message: str
+    catalog_product_id: int | None = None
+    external_product_id: str | None = None
+
+
+class CatalogPromotionRollbackPreviewItemResponse(BaseModel):
+    audit_id: int
+    catalog_product_id: int
+    external_product_id: str
+    rollback_action: Literal["delete", "restore"]
+    current_data: CatalogPromotionProductDataResponse | None
+    restore_data: CatalogPromotionProductDataResponse | None
+    conflict: bool
+    conflict_reason: str | None
+
+
+class CatalogPromotionRollbackPreviewResponse(BaseModel):
+    target_promotion_run_id: int
+    preview_schema_version: int
+    preview_hash: str | None
+    rollback_eligible: bool
+    blocked_reasons: list[CatalogPromotionRollbackBlockedReasonResponse]
+    restore_count: int
+    delete_count: int
+    conflict_count: int
+    items: list[CatalogPromotionRollbackPreviewItemResponse]
+
+
+class CatalogPromotionRollbackRequest(BaseModel):
+    confirmation: bool
+    expected_preview_hash: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+
+class CatalogPromotionRollbackResponse(BaseModel):
+    rollback_run_id: int
+    target_promotion_run_id: int
+    status: Literal["succeeded"]
+    created: bool
+    preview_hash: str
+    preview_schema_version: int
+    restored_count: int
+    deleted_count: int
+    conflict_count: int
+    started_at: datetime
+    completed_at: datetime

@@ -15,6 +15,11 @@ from api.schemas import (
     CatalogPromotionRunListItemResponse,
     CatalogPromotionRunListResponse,
     CatalogPromotionRunStatus,
+    CatalogPromotionRollbackBlockedReasonResponse,
+    CatalogPromotionRollbackPreviewItemResponse,
+    CatalogPromotionRollbackPreviewResponse,
+    CatalogPromotionRollbackRequest,
+    CatalogPromotionRollbackResponse,
     ETLLoadDetailResponse,
     ETLLoadListItemResponse,
     ETLLoadListResponse,
@@ -44,6 +49,17 @@ from db.catalog_promotion_service import (
     CatalogPromotionExecutionResult,
     CatalogPromotionInvalidPreviewHashError,
     execute_catalog_promotion,
+)
+from db.catalog_promotion_rollback_service import (
+    CatalogPromotionRollbackAlreadyExecutedError,
+    CatalogPromotionRollbackConfirmationRequiredError,
+    CatalogPromotionRollbackExecutionFailedError,
+    CatalogPromotionRollbackInvalidPreviewHashError,
+    CatalogPromotionRollbackNotFoundError,
+    CatalogPromotionRollbackPreview,
+    CatalogPromotionRollbackExecutionResult,
+    execute_catalog_promotion_rollback,
+    preview_catalog_promotion_rollback,
 )
 from db.catalog_promotion_query_service import (
     CatalogPromotionAuditList,
@@ -550,3 +566,73 @@ def create_catalog_promotion(
 
     response.headers["Cache-Control"] = "no-store"
     return _build_promotion_response(result)
+
+
+def _build_rollback_product_data_response(data):
+    if data is None:
+        return None
+    return _build_promotion_product_data_response(data)
+
+
+def _build_rollback_preview_response(result: CatalogPromotionRollbackPreview):
+    return CatalogPromotionRollbackPreviewResponse(
+        target_promotion_run_id=result.target_promotion_run_id,
+        preview_schema_version=result.preview_schema_version,
+        preview_hash=result.preview_hash,
+        rollback_eligible=result.rollback_eligible,
+        blocked_reasons=[CatalogPromotionRollbackBlockedReasonResponse(code=r.code, message=r.message, catalog_product_id=r.catalog_product_id, external_product_id=r.external_product_id) for r in result.blocked_reasons],
+        restore_count=result.restore_count,
+        delete_count=result.delete_count,
+        conflict_count=result.conflict_count,
+        items=[CatalogPromotionRollbackPreviewItemResponse(audit_id=i.audit_id, catalog_product_id=i.catalog_product_id, external_product_id=i.external_product_id, rollback_action=i.rollback_action, current_data=_build_rollback_product_data_response(i.current_data), restore_data=_build_rollback_product_data_response(i.restore_data), conflict=i.conflict, conflict_reason=i.conflict_reason) for i in result.items],
+    )
+
+
+def _build_rollback_response(result: CatalogPromotionRollbackExecutionResult):
+    return CatalogPromotionRollbackResponse(
+        rollback_run_id=result.rollback_run_id,
+        target_promotion_run_id=result.target_promotion_run_id,
+        status="succeeded",
+        created=result.created,
+        preview_hash=result.preview_hash,
+        preview_schema_version=result.preview_schema_version,
+        restored_count=result.restored_count,
+        deleted_count=result.deleted_count,
+        conflict_count=result.conflict_count,
+        started_at=result.started_at,
+        completed_at=result.completed_at,
+    )
+
+
+@router.post("/api/v1/catalog-promotions/{promotion_run_id}/rollback-preview", response_model=CatalogPromotionRollbackPreviewResponse, status_code=status.HTTP_200_OK)
+def create_catalog_promotion_rollback_preview(promotion_run_id: int = Path(..., ge=1), response: Response = None, session: Session = Depends(get_session)):
+    try:
+        result = preview_catalog_promotion_rollback(session, promotion_run_id=promotion_run_id)
+    except CatalogPromotionRollbackNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"code": "promotion_not_found", "message": CATALOG_PROMOTION_NOT_FOUND_MESSAGE}) from None
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store"
+    return _build_rollback_preview_response(result)
+
+
+@router.post("/api/v1/catalog-promotions/{promotion_run_id}/rollback", response_model=CatalogPromotionRollbackResponse, status_code=status.HTTP_200_OK)
+def create_catalog_promotion_rollback(request: CatalogPromotionRollbackRequest, response: Response, promotion_run_id: int = Path(..., ge=1), session: Session = Depends(get_session)):
+    try:
+        result = execute_catalog_promotion_rollback(session, promotion_run_id=promotion_run_id, confirmation=request.confirmation, expected_preview_hash=request.expected_preview_hash)
+    except CatalogPromotionRollbackConfirmationRequiredError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"code": "confirmation_required", "message": "Explicit confirmation is required to execute rollback."}) from None
+    except CatalogPromotionRollbackInvalidPreviewHashError:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"code": "invalid_preview_hash", "message": "expected_preview_hash has an invalid format."}) from None
+    except CatalogPromotionRollbackNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"code": "promotion_not_found", "message": CATALOG_PROMOTION_NOT_FOUND_MESSAGE}) from None
+    except CatalogPromotionRollbackAlreadyExecutedError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "already_rolled_back", "message": "This promotion run has already been rolled back.", "rollback_run_id": error.rollback_run_id}) from None
+    except CatalogPromotionRollbackExecutionFailedError as error:
+        detail = {"code": "rollback_failed", "message": "Rollback could not be completed."}
+        if error.rollback_run_id is not None:
+            detail["rollback_run_id"] = error.rollback_run_id
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail) from None
+    if result.status == "blocked":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": result.failure_code, "message": result.safe_failure_message, "rollback_run_id": result.rollback_run_id, "blocked_reasons": [{"code": r.code, "message": r.message, "catalog_product_id": r.catalog_product_id, "external_product_id": r.external_product_id} for r in result.blocked_reasons]})
+    response.headers["Cache-Control"] = "no-store"
+    return _build_rollback_response(result)

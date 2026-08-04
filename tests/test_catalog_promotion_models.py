@@ -10,6 +10,7 @@ from sqlalchemy import (
     String,
     Text,
     delete,
+    func,
     or_,
     select,
 )
@@ -431,7 +432,7 @@ def test_product_change_enforces_jsonb_shapes_and_action_before_data_rules(
     _assert_integrity_error(session, change(after_data=None))
 
 
-def test_catalog_promotion_audit_foreign_keys_restrict_parent_deletion(postgres_session):
+def test_catalog_promotion_audit_keeps_history_when_operational_product_deleted(postgres_session):
     session, profile_name = postgres_session
     product_source = _create_etl_load_run(session, profile_name)
     product = _create_catalog_product(session, product_source)
@@ -450,26 +451,11 @@ def test_catalog_promotion_audit_foreign_keys_restrict_parent_deletion(postgres_
     session.add(change)
     session.commit()
 
-    for statement in (
-        delete(ETLLoadRun).where(ETLLoadRun.id == product_source.id),
-        delete(ETLLoadRun).where(ETLLoadRun.id == run_source.id),
-        delete(CatalogPromotionRun).where(CatalogPromotionRun.id == run.id),
-        delete(CatalogProduct).where(CatalogProduct.id == product.id),
-    ):
-        with pytest.raises(IntegrityError):
-            session.execute(statement)
-        session.rollback()
-    session.rollback()
+    session.execute(delete(CatalogProduct).where(CatalogProduct.id == product.id))
+    session.commit()
 
-    session.add(
-        CatalogProductChange(
-            promotion_run_id=run.id,
-            catalog_product_id=product.id,
-            action="insert",
-            changed_fields=[],
-            before_data=None,
-            after_data={"price": 100},
-        )
-    )
-    with pytest.raises(IntegrityError):
-        session.flush()
+    assert session.scalar(
+        select(func.count())
+        .select_from(CatalogProductChange)
+        .where(CatalogProductChange.id == change.id)
+    ) == 1

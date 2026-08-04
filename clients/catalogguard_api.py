@@ -1113,6 +1113,44 @@ class CatalogGuardApiClient:
         _validate_catalog_promotion_response(data)
         return data
 
+    def get_catalog_promotion_rollback_preview(self, promotion_run_id: int) -> dict[str, Any]:
+        _validate_positive_etl_int(promotion_run_id, "promotion_run_id")
+        data = self._post_json(
+            f"/api/v1/catalog-promotions/{promotion_run_id}/rollback-preview",
+            raise_not_found=True,
+            not_found_error=CatalogPromotionNotFoundError,
+            not_found_message=CATALOG_PROMOTION_NOT_FOUND_MESSAGE,
+        )
+        required = {"target_promotion_run_id", "preview_schema_version", "preview_hash", "rollback_eligible", "blocked_reasons", "restore_count", "delete_count", "conflict_count", "items"}
+        if not isinstance(data, dict) or not required.issubset(data) or data["target_promotion_run_id"] != promotion_run_id:
+            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+        return data
+
+    def create_catalog_promotion_rollback(
+        self,
+        promotion_run_id: int,
+        *,
+        confirmation: bool,
+        expected_preview_hash: str,
+    ) -> dict[str, Any]:
+        _validate_positive_etl_int(promotion_run_id, "promotion_run_id")
+        if confirmation is not True:
+            raise ValueError("confirmation must be true")
+        if not isinstance(expected_preview_hash, str) or CATALOG_PROMOTION_SHA256_PATTERN.fullmatch(expected_preview_hash) is None:
+            raise ValueError("expected_preview_hash must be a lowercase SHA-256 hex string")
+        data = self._post_json(
+            f"/api/v1/catalog-promotions/{promotion_run_id}/rollback",
+            json_body={"confirmation": True, "expected_preview_hash": expected_preview_hash},
+            raise_not_found=True,
+            not_found_error=CatalogPromotionNotFoundError,
+            not_found_message=CATALOG_PROMOTION_NOT_FOUND_MESSAGE,
+            map_promotion_errors=True,
+        )
+        required = {"rollback_run_id", "target_promotion_run_id", "status", "created", "preview_hash", "preview_schema_version", "restored_count", "deleted_count", "conflict_count", "started_at", "completed_at"}
+        if not isinstance(data, dict) or not required.issubset(data) or data["target_promotion_run_id"] != promotion_run_id:
+            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+        return data
+
     def _get_json(
         self,
         path: str,

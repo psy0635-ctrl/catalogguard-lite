@@ -1027,6 +1027,9 @@ def _clear_catalog_promotion_history_detail(session_state) -> None:
     session_state["catalog_promotion_audit_offset"] = 0
     session_state["catalog_promotion_audit_response"] = None
     session_state["catalog_promotion_audit_error"] = None
+    session_state["catalog_promotion_rollback_result"] = None
+    session_state["catalog_promotion_rollback_error"] = None
+    session_state["catalog_promotion_rollback_confirmation"] = False
 
 
 def _on_catalog_promotion_history_filter_change(session_state) -> None:
@@ -1215,6 +1218,7 @@ def _render_catalog_promotion_history_detail(api_client) -> None:
         "실행 시각: "
         f"{format_etl_datetime(detail.get('started_at') or detail.get('created_at'))}"
     )
+    _render_catalog_promotion_rollback(api_client, detail)
     _render_catalog_promotion_audits(api_client)
 
 
@@ -1389,3 +1393,62 @@ def render_etl_load_history(api_client=None) -> None:
     if st.session_state.get("etl_load_detail_requested", False):
         _render_etl_load_detail(api_client)
     _render_catalog_promotion_history(api_client)
+
+
+def _rollback_ui_error_message(error: Exception) -> str:
+    if isinstance(error, CatalogPromotionNotFoundError):
+        return "The selected Promotion run no longer exists."
+    if isinstance(error, CatalogPromotionPreviewStaleError):
+        return "Rollback preview is stale. Create a new preview before executing rollback."
+    return "Rollback request could not be completed."
+
+
+def _render_catalog_promotion_rollback(api_client, detail: dict[str, Any]) -> None:
+    if detail.get("status") != "succeeded":
+        return
+    st.markdown("#### Rollback")
+    st.caption("Rollback restores the selected Promotion's recorded before-state. Later changes are detected as conflicts.")
+    run_id = detail.get("promotion_run_id")
+    if not isinstance(run_id, int):
+        return
+    preview_key = "catalog_promotion_rollback_preview"
+    result_key = "catalog_promotion_rollback_result"
+    if st.button("Rollback Preview", key=preview_key):
+        try:
+            st.session_state[result_key] = api_client.get_catalog_promotion_rollback_preview(run_id)
+            st.session_state["catalog_promotion_rollback_error"] = None
+        except Exception as error:
+            st.session_state[result_key] = None
+            st.session_state["catalog_promotion_rollback_error"] = error
+    error = st.session_state.get("catalog_promotion_rollback_error")
+    if error is not None:
+        st.error(_rollback_ui_error_message(error))
+        return
+    preview = st.session_state.get(result_key)
+    if not isinstance(preview, dict):
+        return
+    if preview.get("rollback_eligible") is True:
+        st.success("Rollback is available.")
+    else:
+        st.error("Rollback is blocked.")
+        for reason in preview.get("blocked_reasons") or []:
+            if isinstance(reason, dict) and reason.get("message"):
+                st.warning(str(reason["message"]))
+    cols = st.columns(3)
+    cols[0].metric("Restore", preview.get("restore_count", 0))
+    cols[1].metric("Delete", preview.get("delete_count", 0))
+    cols[2].metric("Conflict", preview.get("conflict_count", 0))
+    items = preview.get("items") or []
+    if items:
+        st.dataframe(pd.DataFrame([{"Product": item.get("external_product_id"), "Action": item.get("rollback_action"), "Conflict": item.get("conflict")} for item in items]), hide_index=True, width="stretch")
+    confirmed = st.checkbox("I reviewed the rollback preview and confirm execution.", key="catalog_promotion_rollback_confirmation", disabled=preview.get("rollback_eligible") is not True)
+    expected_hash = preview.get("preview_hash")
+    if st.button("Execute Rollback", key="catalog_promotion_rollback_execute", type="primary", disabled=not (confirmed and isinstance(expected_hash, str))):
+        try:
+            response = api_client.create_catalog_promotion_rollback(run_id, confirmation=True, expected_preview_hash=expected_hash)
+            st.session_state[result_key] = None
+            st.session_state["catalog_promotion_rollback_error"] = None
+            st.success(f"Rollback completed. Rollback run ID: {response.get('rollback_run_id')}")
+            st.session_state["catalog_promotion_history_response"] = None
+        except Exception as error:
+            st.error(_rollback_ui_error_message(error))
