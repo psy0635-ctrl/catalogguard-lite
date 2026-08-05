@@ -17,6 +17,7 @@ COPY --chown=catalogguard:catalogguard api ./api
 COPY --chown=catalogguard:catalogguard config ./config
 COPY --chown=catalogguard:catalogguard core ./core
 COPY --chown=catalogguard:catalogguard db ./db
+COPY --chown=catalogguard:catalogguard etl ./etl
 COPY --chown=catalogguard:catalogguard services ./services
 COPY --chown=catalogguard:catalogguard workers ./workers
 

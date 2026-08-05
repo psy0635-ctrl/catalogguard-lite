@@ -1434,7 +1434,7 @@ def _render_etl_web_run(api_client) -> None:
     if st.session_state.get("etl_web_run_selected_profile_id") not in profile_ids:
         st.session_state["etl_web_run_selected_profile_id"] = profile_ids[0]
     st.selectbox(
-        "공급사 프로필",
+        "ETL 실행 프로필",
         options=profile_ids,
         format_func=lambda profile_id: profile_labels.get(profile_id, profile_id),
         key="etl_web_run_selected_profile_id",
