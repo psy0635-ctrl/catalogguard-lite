@@ -2,7 +2,7 @@
 
 # CatalogGuard Lite
 
-상품 카탈로그 CSV를 업로드해 누락, 형식 오류, 중복, 가격 이상치, 카테고리 불일치, 금지어와 개인정보 의심 정보를 검사하고, 검수 결과를 저장·검색·조회·다운로드하는 Python·FastAPI + PostgreSQL 기반 MVP입니다. Streamlit은 CSV 업로드 검증·검수 결과 화면과 ETL 적재 이력, 선택한 batch의 운영 상품 반영 흐름을 담당합니다. 별도 CLI는 JSON 프로필 기반 공급사 CSV ETL과 PostgreSQL staging 적재를 실행하고, FastAPI는 ETL 조회·promotion preview·승인된 promotion API를 제공합니다. promotion은 미리보기, 변경 전후 확인, 사용자 승인, preview hash 재검증을 거쳐 운영 상품을 insert/update하고 run과 append-only audit을 저장합니다.
+상품 카탈로그 CSV를 업로드해 누락, 형식 오류, 중복, 가격 이상치, 카테고리 불일치, 금지어와 개인정보 의심 정보를 검사하고, 검수 결과를 저장·검색·조회·다운로드하는 Python·FastAPI + PostgreSQL 기반 MVP입니다. Streamlit은 CSV 업로드 검증·검수 결과 화면, 공급사 CSV와 허용된 ETL 프로필을 선택해 웹에서 바로 ETL을 실행하는 화면, ETL 적재 이력과 선택한 batch의 운영 상품 반영 흐름을 담당합니다. JSON 프로필 기반 공급사 CSV ETL과 PostgreSQL staging 적재는 기존 CLI로도 계속 실행할 수 있으며, Streamlit에서 시작한 웹 ETL도 FastAPI를 거쳐 같은 ETL Pipeline과 staging 적재 함수를 재사용합니다. FastAPI는 웹 ETL 실행·ETL 조회·promotion preview·승인된 promotion API를 제공합니다. promotion은 미리보기, 변경 전후 확인, 사용자 승인, preview hash 재검증을 거쳐 운영 상품을 insert/update하고 run과 append-only audit을 저장합니다.
 
 공개 Streamlit 앱은 아래 주소에서 확인할 수 있습니다.
 
@@ -28,7 +28,8 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - 금지어, 이메일, 전화번호, 주민등록번호 형식, 계좌번호 의심 정보를 찾습니다.
 - 검수 결과를 화면, CSV 다운로드, PostgreSQL 이력으로 확인할 수 있게 합니다.
 - 공급사별 JSON 매핑 프로필로 원본 CSV를 CatalogGuard 표준 CSV로 변환하고 오류 행을 별도 reject CSV로 분리합니다.
-- 표준 CSV와 summary JSON을 별도 CLI로 PostgreSQL staging에 배치 적재하고, 같은 원본·프로필 버전의 중복 적재를 막습니다.
+- 표준 CSV와 summary JSON을 CLI 또는 Streamlit 업로드 기반 웹 ETL로 PostgreSQL staging에 배치 적재하고, 같은 원본·프로필 버전의 중복 적재를 막습니다.
+- Streamlit에서 공급사 CSV를 업로드하고 서버가 허용하는 ETL 프로필을 선택해 FastAPI를 통해 같은 ETL Pipeline과 staging 적재 함수로 웹에서 바로 ETL을 실행합니다.
 - ETL 적재 배치 목록과 배치별 staging 상품을 FastAPI로 조회합니다.
 - 운영 상품 persistence 모델, promotion 실행 이력, append-only 상품 변경 이력을 PostgreSQL 제약조건과 함께 관리합니다.
 
@@ -85,6 +86,10 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - 요청 ID를 이용한 Railway 구조화 로그 추적
 - `etl.cli`를 통한 공급사 CSV 표준화, reject CSV·요약 JSON 생성
 - `etl.load_cli`를 통한 표준 CSV·summary JSON의 PostgreSQL staging 적재
+- Streamlit `ETL 실행` 영역에서 공급사 CSV 업로드와 서버 allowlist 기반 ETL 프로필 선택
+- `POST /api/v1/etl-loads`로 업로드 CSV와 profile_id를 받아 기존 `run_pipeline()`·`load_standard_csv()`를 그대로 실행하고 PostgreSQL staging까지 적재
+- 동일한 원본 파일 해시·프로필 이름·버전의 웹 ETL 요청은 새 배치를 만들지 않고 기존 배치를 `created=false`로 재사용
+- 웹 ETL 성공 후 ETL 적재 이력 캐시만 자동 무효화하고, 운영 상품 반영은 사용자가 이력에서 batch를 선택해 별도로 진행
 - ETL batch를 명시적으로 선택하는 catalog promotion preview
 - insert/update/unchanged 건수와 상품별 변경 전·후 값 표시
 - 반영 가능 여부·차단 사유·사용자 승인 checkbox·SHA-256 preview hash 재검증
@@ -141,11 +146,11 @@ API 오류 발생
 
 같은 CSV를 이미 저장한 경우에는 PostgreSQL에 저장된 파일 해시와 검수 규칙 버전을 기준으로 기존 실행 ID를 안내합니다. 같은 Streamlit 세션 안에서는 `saved_file_hash`, `saved_inspection_run_id` 상태값으로 저장 API 재호출을 줄이고, 브라우저나 Streamlit 서버를 재시작한 뒤에는 DB의 중복 제약조건으로 새 이력이 중복 생성되지 않도록 막습니다.
 
-공급사 CSV의 변환·적재·조회·운영 반영 흐름은 다음과 같습니다. ETL 변환과 staging 적재는 CLI로 수행하고, FastAPI는 저장된 배치 조회와 별도의 promotion API를 제공합니다.
+공급사 CSV의 변환·적재·조회·운영 반영 흐름은 다음과 같습니다. ETL 변환과 staging 적재는 CLI 또는 Streamlit 기반 웹 ETL로 실행할 수 있으며, 두 경로 모두 같은 `run_pipeline()`·`load_standard_csv()`를 재사용합니다. FastAPI는 웹 ETL 실행, 저장된 배치 조회와 별도의 promotion API를 제공합니다.
 
 ```text
 공급사 원본 CSV
--> JSON 프로필 선택
+-> JSON 프로필 선택 (CLI) 또는 Streamlit에서 허용된 ETL 프로필 선택 (웹)
 -> 표준 컬럼 변환
 -> 정상 행과 reject 행 분리
 -> 표준 CSV·reject CSV·summary JSON 생성
@@ -169,7 +174,22 @@ API 오류 발생
 -> conflict 없으면 confirmation 후 Rollback 실행
 ```
 
-배치 조회 API가 CatalogGuard 검수나 promotion을 자동으로 실행하는 것은 아닙니다. 생성된 표준 CSV의 검수, staging 적재 이력 조회, 선택한 batch의 promotion preview와 실제 반영은 각각의 API·CLI 호출로 구분합니다. ETL 변환·staging 적재는 여전히 CLI 책임이며, Streamlit은 DB에 직접 쓰지 않고 `CatalogGuardApiClient`를 통해 FastAPI를 호출합니다.
+웹 ETL 실행 흐름은 다음과 같습니다.
+
+```text
+Streamlit ETL 실행 영역
+-> GET /api/v1/etl-profiles로 허용된 프로필 목록 조회
+-> "ETL 실행 프로필" 선택
+-> 공급사 CSV 업로드
+-> ETL 실행 버튼 클릭 (파일 선택·프로필 변경만으로는 API 호출 안 함)
+-> POST /api/v1/etl-loads
+-> 기존 run_pipeline()·load_standard_csv() 실행
+-> 정상/거부 행 수와 배치 ID 표시
+-> ETL 적재 이력 캐시 무효화
+-> ETL 적재 이력에서 새 배치 확인
+```
+
+웹 ETL 성공이 운영 상품 반영을 자동으로 시작하지는 않습니다. 사용자가 ETL 적재 이력에서 새로 생성된 batch를 직접 선택한 뒤 기존 promotion preview·승인 흐름을 그대로 사용합니다. 배치 조회 API가 CatalogGuard 검수나 promotion을 자동으로 실행하는 것도 아닙니다. 생성된 표준 CSV의 검수, staging 적재 이력 조회, 선택한 batch의 promotion preview와 실제 반영은 각각의 API·CLI 호출로 구분합니다. Streamlit은 DB에 직접 쓰지 않고 `CatalogGuardApiClient`를 통해 FastAPI를 호출합니다.
 
 succeeded promotion run은 되돌릴 수 있습니다. Rollback preview는 해당 promotion이 만든 after 상태와 현재 Catalog 상태를 비교해 그 사이에 다른 변경이 있었는지 확인하고, 값이 달라졌으면 conflict로 표시해 실행을 막습니다. 문제가 없으면 사용자 confirmation과 preview hash 재검증을 거쳐 하나의 transaction으로 INSERT promotion 상품은 삭제하고 UPDATE promotion 상품은 이전 상태로 복원합니다. 원본 promotion audit은 상품이 삭제된 뒤에도 삭제하지 않고 별도 rollback audit과 함께 보존합니다.
 
@@ -271,9 +291,15 @@ Railway FastAPI
 
 API Client는 헤더 값의 앞뒤 공백을 제거한 뒤 정확히 32자리인 소문자 16진수만 요청 ID로 인정합니다. 잘못된 형식은 표시하지 않으며, 서버 응답이 없는 timeout과 연결 실패에는 요청 ID가 없습니다. 클라이언트가 임의 요청 ID를 생성하지도 않습니다.
 
-ETL 적재 이력은 검수 이력과 별도 조회 계층을 사용합니다.
+ETL 적재 이력은 검수 이력과 별도 조회 계층을 사용합니다. 같은 `/api/v1/etl-loads` 경로의 `POST`는 조회가 아니라 웹 ETL 실행이며, `api.routes.etl_loads`가 `etl.web_service.run_web_etl()`을 호출해 새 배치를 만든 뒤 아래 조회 계층에서 그대로 조회할 수 있습니다.
 
 ```text
+FastAPI POST /api/v1/etl-loads
+-> etl.web_service.run_web_etl()
+-> etl.pipeline.run_pipeline()
+-> etl.db_loader.load_standard_csv()
+-> PostgreSQL staging
+
 FastAPI GET /api/v1/etl-loads
 -> db.etl_query_service
 -> etl_load_runs 목록·count
@@ -298,7 +324,7 @@ ETL 적재 이력 탭
 -> 상품 이전·다음 페이지
 ```
 
-화면은 `CatalogGuardApiClient`를 통해서만 API를 호출하며 DB에 직접 연결하거나 ETL 적재를 실행하지 않는다. Streamlit rerun 사이에는 정상 응답과 선택 상태를 session state로 유지하고, 검색·배치·상품 페이지가 바뀌면 관련 상태를 초기화한다. 상세 API가 실패한 뒤 같은 화면 rerun에서 동일 요청을 반복하지 않으며, 존재하지 않는 배치는 404와 request ID를 함께 안내한다.
+화면은 `CatalogGuardApiClient`를 통해서만 API를 호출하며 DB에 직접 연결하지 않는다. 웹 ETL 실행도 `POST /api/v1/etl-loads`를 통한 API 호출이며, Streamlit이 파일을 직접 PostgreSQL에 적재하지는 않는다. Streamlit rerun 사이에는 정상 응답과 선택 상태를 session state로 유지하고, 검색·배치·상품 페이지가 바뀌면 관련 상태를 초기화한다. 상세 API가 실패한 뒤 같은 화면 rerun에서 동일 요청을 반복하지 않으며, 존재하지 않는 배치는 404와 request ID를 함께 안내한다.
 
 검수 이력 탭의 전체 요약 CSV 다운로드는 같은 목록 API를 재사용합니다. 화면에 보이는 현재 페이지 10건만 쓰지 않고, 사용자가 `CSV 다운로드 준비` 버튼을 누르면 검색 버튼으로 확정된 파일명·날짜·상태 조건을 유지한 채 `limit=100`, `offset=0`부터 반복 조회해 전체 결과를 모은 뒤 CSV로 변환합니다.
 
@@ -412,7 +438,7 @@ python -m pip install -r requirements-e2e.txt
 python -m playwright install chromium
 ```
 
-GitHub Actions는 일반 `test` job에서 PostgreSQL·Redis 서비스, Alembic 마이그레이션, E2E를 제외한 전체 pytest와 비동기 검수 smoke를 실행하고, `Dockerfile.aws` image build·import·UID `10001`·PostgreSQL migration·기본 CMD Uvicorn·`/health` HTTP `200`도 확인합니다. 별도 `browser-e2e` job에서는 PostgreSQL 서비스와 Chromium을 사용해 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증합니다. AWS runtime smoke는 실제 AWS 배포가 아니며, 배포는 수행하지 않습니다.
+GitHub Actions는 일반 `test` job에서 PostgreSQL·Redis 서비스, Alembic 마이그레이션, E2E를 제외한 전체 pytest와 비동기 검수 smoke를 실행하고, `Dockerfile.aws` image build·import·UID `10001`·PostgreSQL migration·기본 CMD Uvicorn·`/health` HTTP `200`도 확인합니다. `Dockerfile.aws`는 `api`·`config`·`core`·`db`·`etl`·`services`·`workers` package를 모두 image에 포함하며, import 검증은 `api.main` import 시 연결되는 `api.routes.etl_loads` -> `etl.*` import chain까지 실제로 확인합니다. 별도 `browser-e2e` job에서는 PostgreSQL 서비스와 Chromium을 사용해 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증합니다. AWS runtime smoke는 실제 AWS 배포가 아니며, 배포는 수행하지 않습니다.
 
 ## 8. 프로젝트 폴더 구조
 
@@ -477,6 +503,7 @@ catalogguard-lite/
     pipeline.py
     profile_loader.py
     transformer.py
+    web_service.py
   compose.local.yaml
   alembic/
     env.py
@@ -551,7 +578,7 @@ catalogguard-lite/
 | `app.py` | Streamlit 화면, CSV 검수·이력 탭, 공통 통계 UI, 검수 저장, 목록·상세·CSV 다운로드, API 오류 안내와 요청 ID 표시 |
 | `clients/catalogguard_api.py` | FastAPI 검수·ETL·promotion API 호출, 응답 schema·SHA-256 검증, HTTP·404·JSON 오류 mapping |
 | `api/main.py` | FastAPI 앱 생성, 라우터 등록, `/health`와 `/ready`, 요청 ID 및 요청 단위 로그 처리 |
-| `api/routes/etl_loads.py` | ETL 조회와 promotion preview·실행 endpoint, Query·Path 검증, 오류 응답과 응답 변환 |
+| `api/routes/etl_loads.py` | 웹 ETL 실행(`POST /api/v1/etl-loads`)과 ETL 프로필 목록 조회, ETL 조회와 promotion preview·실행 endpoint, Query·Path 검증, 오류 응답과 응답 변환 |
 | `api/routes/inspections.py` | 검수 생성, 서버 SHA-256 계산, 중복 이력 응답, 검수 이력 목록, 검수 상세 조회 API |
 | `api/schemas.py` | 검수·ETL 조회·promotion API의 응답 Pydantic 모델 |
 | `config/logging.py` | 중복 handler 없이 한 줄 JSON 운영 로그를 기록하는 표준 라이브러리 유틸리티 |
@@ -575,10 +602,11 @@ catalogguard-lite/
 | `services/redis_job_store.py` | Redis에 비동기 검수 작업 상태와 TTL 저장 |
 | `services/inspection_job_service.py`, `services/job_files.py` | 작업 제출, 서버 생성 job 파일 저장·검증·정리 |
 | `workers/celery_app.py`, `workers/inspection_tasks.py` | Celery Worker 실행과 비동기 CSV 검수·결과 저장 |
-| `etl/profile_loader.py`, `etl/transformer.py`, `etl/pipeline.py` | JSON 프로필 검증, 공급사 행 변환, reject 분리와 원자적 출력 저장 |
+| `etl/profile_loader.py`, `etl/transformer.py`, `etl/pipeline.py` | JSON 프로필 검증, 공급사 행 변환, reject 분리와 원자적 출력 저장. `profile_loader.py`는 웹 ETL이 사용하는 `profile_id` allowlist(`get_profile_path()`)도 함께 제공 |
 | `etl/cli.py` | 공급사 CSV ETL CLI 진입점 |
-| `etl/db_loader.py` | 표준 CSV·summary JSON 검증, 중복 배치 조회와 staging 트랜잭션 적재 |
+| `etl/db_loader.py` | 표준 CSV·summary JSON 검증, 중복 배치 조회와 staging 트랜잭션 적재. CLI(`load_cli.py`)와 웹 ETL(`web_service.py`)이 함께 재사용 |
 | `etl/load_cli.py` | ETL 결과를 PostgreSQL staging에 적재하는 별도 CLI 진입점 |
+| `etl/web_service.py` | 업로드 bytes를 `TemporaryDirectory`에 저장해 기존 `run_pipeline()`·`load_standard_csv()`를 실행하는 웹 ETL 진입점(`run_web_etl()`) |
 | `scripts/run_etl_browser_e2e.py` | 테스트 DB migration, ETL CLI·Loader, FastAPI·Streamlit readiness, Playwright 실행과 cleanup을 담당하는 E2E runner |
 | `tests/e2e/test_etl_browser_e2e.py` | 실제 Chromium의 ETL 탭·promotion 승인·반영·reject 마스킹·raw 미노출과 PostgreSQL 최종 상태 검증 |
 | `tests/fixtures/e2e/etl_browser_vendor.csv` | 정상 2행·복수 오류 reject 1행과 합성 민감정보를 담은 브라우저 E2E fixture |
@@ -1215,6 +1243,31 @@ CSV 파일을 업로드해 검수하고, 검수 실행과 상세 결과를 Postg
 - 숫자가 아닌 ID는 HTTP `422`
 - 응답에는 파일명, 저장 시각, 요약, 상세 결과 목록이 포함됩니다.
 
+### `GET /api/v1/etl-profiles`
+
+Streamlit이 웹 ETL 실행 화면에서 사용할 수 있는 ETL 프로필 목록을 서버 allowlist 기준으로 반환합니다. 서버 파일 경로는 노출하지 않고 `id`, `display_name`만 반환합니다.
+
+```json
+{
+  "items": [
+    {"id": "sample_fashion_vendor_v1", "display_name": "패션 공급사 샘플 v1"},
+    {"id": "sample_marketplace_vendor_v1", "display_name": "마켓플레이스 공급사 샘플 v1"}
+  ]
+}
+```
+
+### `POST /api/v1/etl-loads`
+
+공급사 CSV와 `profile_id`를 받아 웹에서 바로 ETL을 실행하고 PostgreSQL staging에 적재합니다. `profile_id`는 위 목록 API가 반환하는 값 중 하나만 허용하며, 임의 파일 경로는 받지 않습니다.
+
+- 요청 형식: `multipart/form-data`
+- 파일 필드명: `file`, 프로필 필드명: `profile_id`
+- 정상 응답: `etl_load_run_id`, `created`, `profile_name`, `profile_version`, `source_filename`, `total_rows`, `loaded_rows`, `rejected_rows`, `error_counts`
+- 지원하지 않는 `profile_id`: HTTP `400` (`unsupported_profile`)
+- 빈 파일, 크기 초과, ETL 변환 실패 등 잘못된 업로드: HTTP `400` (`invalid_upload`)
+
+동일한 `input_file_sha256`·`profile_name`·`profile_version` 조합으로 다시 요청하면 새 배치를 만들지 않고 기존 배치를 `created: false`로 반환합니다. 내부적으로는 CLI의 `etl.cli`·`etl.load_cli`가 호출하는 `run_pipeline()`·`load_standard_csv()`를 그대로 실행합니다.
+
 ### `GET /api/v1/etl-loads`
 
 PostgreSQL staging에 저장된 ETL 적재 배치 목록을 조회합니다. 목록 응답에는 응답 크기가 큰 SHA-256과 상품 목록을 포함하지 않습니다.
@@ -1487,7 +1540,7 @@ python -m pytest -q
 
 ### PostgreSQL persistence 포함 검증 결과
 
-promotion과 rollback 기능은 운영 DB나 Railway DB에 연결하지 않고 저장소의 테스트 PostgreSQL 환경에서 검증했습니다. 기준 저장소 상태의 GitHub Actions run `30888320849`은 성공했으며, 문서에는 실행별 전체 테스트 수를 추측해 기록하지 않습니다.
+promotion과 rollback 기능은 운영 DB나 Railway DB에 연결하지 않고 저장소의 테스트 PostgreSQL 환경에서 검증했습니다. 기준 저장소 상태(commit `cb5ed81`)의 GitHub Actions run `30969273954`은 성공했으며, 문서에는 실행별 전체 테스트 수를 추측해 기록하지 않습니다.
 
 ```text
 promotion preview·service·API·client·UI·concurrency 테스트 파일과 Playwright Chromium promotion E2E를 포함한 검증 범위를 확인
@@ -1502,7 +1555,7 @@ promotion preview의 응답 schema와 hash 형식, blocked reason, insert/update
 
 ### 실제 브라우저 ETL E2E
 
-실제 Chromium 브라우저 E2E는 ETL reject fixture와 promotion fixture를 각각 `etl.cli`·`etl.load_cli`로 처리하고 테스트 PostgreSQL에 적재한 뒤, runner가 FastAPI와 Streamlit을 직접 시작합니다. promotion 시나리오는 `ETL 적재 이력` 탭에서 파일명·프로필명으로 batch를 검색하고, 실제 combobox 선택, preview, 변경 전·후 표, 승인 checkbox, 반영 버튼 상태, promotion 성공 또는 중복 메시지를 확인합니다. 이후 테스트 코드가 PostgreSQL의 succeeded run 1건, 운영 상품 insert/update, audit 존재, applying run 0건을 직접 확인합니다. reject 시나리오는 별도로 마스킹과 raw 민감정보 미노출, console/page error 0건을 확인합니다.
+실제 Chromium 브라우저 E2E는 ETL reject fixture와 promotion fixture를 각각 `etl.cli`·`etl.load_cli`로 처리하고 테스트 PostgreSQL에 적재한 뒤, runner가 FastAPI와 Streamlit을 직접 시작합니다. promotion 시나리오는 `ETL 적재 이력` 탭에서 파일명·프로필명으로 batch를 검색하고, 실제 combobox 선택, preview, 변경 전·후 표, 승인 checkbox, 반영 버튼 상태, promotion 성공 또는 중복 메시지를 확인합니다. 이후 테스트 코드가 PostgreSQL의 succeeded run 1건, 운영 상품 insert/update, audit 존재, applying run 0건을 직접 확인합니다. reject 시나리오는 별도로 마스킹과 raw 민감정보 미노출, console/page error 0건을 확인합니다. 이 기존 E2E는 ETL 검색·promotion 화면만 다루며, 웹 ETL CSV 업로드 화면 자체를 실제 브라우저에서 검증하지는 않습니다. 웹 ETL selectbox를 추가할 때 이 검색 필드와 accessible label(`공급사 프로필`)이 겹쳐 기존 E2E의 `get_by_label()`이 strict-mode violation으로 실패한 적이 있으며, selectbox label을 `ETL 실행 프로필`로 분리해 해결했습니다.
 
 일반 테스트의 `pytest==9.1.1`과 browser plugin의 `pytest<9` 제약을 섞지 않도록 E2E는 전용 가상환경에 설치하는 방식을 권장합니다.
 
@@ -1590,7 +1643,7 @@ Streamlit 시작 스모크 테스트는 `python -m streamlit run app.py`로 실�
 
 AppTest는 실제 `app.py` 실행 경로의 CSV 업로드와 검수·필터 위젯을 검증하지만 실제 브라우저의 파일 선택 창이나 픽셀 렌더링까지 자동화하지는 않습니다. GitHub Actions 스모크 테스트도 Railway API 실제 통신, 운영 Secrets 설정, Streamlit Community Cloud 전용 장애나 모든 Segmentation fault를 검증하지 않습니다.
 
-기준 저장소 상태의 GitHub Actions run `30888320849`은 성공했습니다. Actions 실행별 전체 테스트 수는 이 문서에 추측해 고정하지 않으며, AWS Docker runtime smoke, promotion E2E와 Streamlit startup smoke의 실제 검증 범위는 위 테스트·workflow 설명을 따릅니다. Actions의 일회성 서비스 컨테이너는 운영 DB·Redis와 분리됩니다.
+기준 저장소 상태(commit `cb5ed81`)의 GitHub Actions run `30969273954`은 성공했습니다. Actions 실행별 전체 테스트 수는 이 문서에 추측해 고정하지 않으며, AWS Docker runtime smoke, promotion E2E와 Streamlit startup smoke의 실제 검증 범위는 위 테스트·workflow 설명을 따릅니다. Actions의 일회성 서비스 컨테이너는 운영 DB·Redis와 분리됩니다.
 
 ## 24. 데이터 저장 범위와 보안
 
@@ -1665,8 +1718,12 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - 저장된 검수 이력 삭제 기능은 구현되어 있지 않습니다.
 - 전체 요약 CSV는 목록 API를 반복 조회하므로 다운로드 중 DB 내용이 바뀌는 상황의 완전한 스냅샷 보장은 별도 트랜잭션/내보내기 API가 필요합니다.
 - 실제 외부 공급사 운영 데이터와 연동하지 않았습니다.
-- ETL 적재를 시작하는 웹 API는 없으며 파일 변환과 staging 적재는 CLI로 실행합니다.
-- Streamlit ETL 적재 이력 화면은 배치·staging 상품 조회는 읽기 전용으로 유지하면서, 선택한 batch에 대해 promotion preview와 승인된 운영 상품 반영을 FastAPI API로 요청합니다. ETL 적재 실행과 staging 상품 직접 수정·삭제는 지원하지 않습니다.
+- 웹 ETL은 업로드부터 staging 적재까지 하나의 동기 HTTP 요청으로 처리하며, 비동기(Celery) 처리는 아직 없습니다.
+- 웹 ETL은 한 번에 CSV 파일 1개만 업로드할 수 있으며, 여러 파일 동시 업로드는 지원하지 않습니다.
+- 웹 ETL은 CSV만 지원하며 Excel/XLSX 업로드는 지원하지 않습니다.
+- 웹 ETL의 ETL 프로필은 서버 allowlist(`config/etl/*.json`)로 고정되어 있으며, 사용자가 새 프로필을 업로드하거나 만드는 기능은 없습니다.
+- Web ETL CSV 업로드 자체를 대상으로 하는 전용 Chromium Browser E2E는 아직 없습니다. 웹 ETL 핵심 로직은 API·Client·PostgreSQL 통합 테스트와 Streamlit AppTest로 검증합니다.
+- Streamlit ETL 적재 이력 화면은 배치·staging 상품 조회는 읽기 전용으로 유지하면서, 선택한 batch에 대해 promotion preview와 승인된 운영 상품 반영을 FastAPI API로 요청합니다. staging 상품 직접 수정·삭제는 지원하지 않습니다.
 - staging 상품을 수정·삭제하는 API는 구현되어 있지 않습니다.
 - promotion은 품질 summary·reject·검수 오류·중복 identity가 없는 선택 batch만 대상으로 하며, 실제 외부 공급사 운영 데이터와 production catalog 반영은 검증하지 않았습니다.
 - Rollback 전용 Streamlit AppTest와 Browser E2E는 아직 없습니다.
@@ -1693,7 +1750,10 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - 카테고리별 사이즈 형식 검수
 - 브랜드 표준화
 - `gender` 선택 컬럼과 표준화
-- ETL 적재 실행용 웹 API와 권한·실행 상태 관리
+- 웹 ETL 실행에 대한 인증·권한 관리와 처리 시간이 길어질 경우의 비동기(Celery) 실행
+- 웹 ETL 다중 파일 업로드와 XLSX 등 추가 입력 형식 지원
+- 사용자 정의 ETL 프로필 등록·관리(Profile CRUD)
+- Web ETL CSV 업로드 전용 Browser E2E
 - promotion·rollback 실행에 대한 인증·권한 관리
 - 실제 운영 공급사·production catalog 연동과 배포 환경 promotion 검증
 - 증분 ETL과 대용량 streaming 처리
@@ -1753,3 +1813,5 @@ DB 적재 완료
 ```
 
 적재 후에는 `GET /api/v1/etl-loads`로 배치 목록을, `GET /api/v1/etl-loads/{etl_load_run_id}`로 파일 해시와 해당 배치의 staging 상품을, `GET /api/v1/etl-loads/{etl_load_run_id}/rejections`로 구조화된 오류와 마스킹된 원본을 페이지 단위로 조회할 수 있습니다. 프로필 구조, 변환·오류 기준, 조회 규칙과 제한사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.
+
+위 두 CLI 명령과 같은 변환·적재 로직을 Streamlit에서도 실행할 수 있습니다. `ETL 실행` 영역에서 공급사 CSV를 업로드하고 `ETL 실행 프로필`을 선택한 뒤 버튼을 클릭하면 `POST /api/v1/etl-loads`가 같은 `run_pipeline()`·`load_standard_csv()`를 호출해 staging까지 적재합니다. 웹 ETL의 profile allowlist, 업로드 검증, 중복 재사용과 임시 파일 정리 같은 구현 세부사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.

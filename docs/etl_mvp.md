@@ -2,7 +2,9 @@
 
 ## 목적
 
-샘플 패션 공급사의 CSV를 CatalogGuard Lite 검수기가 읽을 수 있는 표준 CSV로 변환하고, 변환 결과와 요약 JSON을 PostgreSQL staging에 배치 적재한다. 파일 변환과 DB 적재는 별도 CLI로 실행한다.
+샘플 패션 공급사의 CSV를 CatalogGuard Lite 검수기가 읽을 수 있는 표준 CSV로 변환하고, 변환 결과와 요약 JSON을 PostgreSQL staging에 배치 적재한다. 파일 변환과 DB 적재는 CLI로 실행할 수 있고, 같은 로직을 Streamlit 업로드 화면과 FastAPI를 통해 웹에서도 실행할 수 있다.
+
+기존 구조에서는 공급사 CSV를 CLI로 변환·적재한 뒤에야 ETL 적재 이력·promotion을 웹에서 확인할 수 있었다. 즉 ETL 실행은 CLI, ETL 이후의 조회·운영 반영은 웹으로 사용자 흐름이 나뉘어 있었다. Web ETL은 이 CLI 전용 구간을 없애기 위한 새 ETL 엔진이 아니라, 기존 `run_pipeline()`·`load_standard_csv()`를 FastAPI/Streamlit에 연결해 CSV 선택부터 staging 적재까지 웹 화면에서 끝낼 수 있게 만든 얇은 실행 경로다.
 
 ## 지원 프로필
 
@@ -96,6 +98,132 @@ python -m etl.cli `
 ```
 
 `tests/fixtures/etl/sample_marketplace_vendor_mixed.csv`의 처리 결과는 입력 3행, 정상 변환 2행, reject 1행이다. 두 정상 행은 같은 `STYLE-100` 그룹 아래 `SKU-100-BLK-M`과 `SKU-100-WHT-L`을 각각 유지하며, 빈 `available_qty`는 stock `0`으로 변환된다. `가격문의`와 `-1` 재고가 함께 있는 행은 `INVALID_PRICE`와 `NEGATIVE_STOCK`로 reject된다. `59000`과 `69000`은 모두 변환 가능한 숫자이므로 정상 CSV에 남고, `69000 > 59000` 관계는 CatalogGuard 검수 단계에서 `sale_price_greater_than_price`로 탐지된다.
+
+## 웹 ETL 실행
+
+### 공통 ETL 재사용 구조
+
+CLI와 Web은 실행 인터페이스만 다르고 핵심 ETL 로직은 하나다.
+
+```text
+CLI:
+  etl/cli.py       -> run_pipeline()
+  etl/load_cli.py  -> load_standard_csv()
+
+Web:
+  Streamlit -> CatalogGuardApiClient -> FastAPI
+  -> etl/web_service.py: run_web_etl()
+  -> run_pipeline()
+  -> load_standard_csv()
+```
+
+`run_web_etl()`은 `etl.cli`/`etl.load_cli`가 호출하는 `run_pipeline()`·`load_standard_csv()`를 그대로 호출한다. transformer 매핑, normal/reject 판단, summary 생성, SHA-256 계산, staging 저장 로직은 복제하지 않는다. 새 함수는 in-memory 업로드 bytes를 기존 Path 기반 Pipeline 계약에 연결하는 adapter 역할만 한다.
+
+### `run_web_etl()` 역할
+
+`etl/web_service.py`의 `run_web_etl()`은 얇은 orchestration 계층이다.
+
+```text
+upload bytes
+-> validate_csv_filename() / validate_csv_file_size()로 선검증
+-> profile_id를 서버 allowlist로 해석 (get_profile_path())
+-> TemporaryDirectory 생성
+-> 업로드 CSV를 임시 입력 파일로 저장
+-> run_pipeline(input_path, profile_path, output_path, rejects_path, summary_path)
+-> output/rejects/summary 파일을 bytes로 다시 읽음
+-> load_standard_csv(session, output_bytes, summary_bytes, ...)
+-> TemporaryDirectory 종료 시 임시 파일 자동 삭제
+-> ETLWebRunOutcome 반환
+```
+
+### Profile allowlist 설계
+
+`etl.profile_loader.load_profile(profile_path)`는 임의 `Path`를 받는 내부 함수이며, 이를 Web API에 그대로 노출하면 사용자가 보낸 경로로 서버 파일을 읽는 통로가 될 수 있다. Web 경로는 이 함수를 직접 호출하지 않고 `profile_id`만 받는다.
+
+```text
+profile_id (Streamlit selectbox 값)
+-> etl.profile_loader._ETL_PROFILE_REGISTRY[profile_id]
+-> get_profile_path(profile_id)
+-> config/etl/<registry가 아는 파일명>.json
+```
+
+`get_profile_path()`는 registry에 없는 `profile_id`를 `ETLProfileNotFoundError`로 거부하고, registry에 있는 경우에도 `(ETL_PROFILE_DIR / info["filename"]).resolve()`의 부모 디렉터리가 `ETL_PROFILE_DIR.resolve()`와 같은지 다시 확인한 뒤에만 경로를 반환한다. 현재 registry는 다음 두 항목만 포함한다.
+
+| `profile_id` | 파일 | `display_name` |
+|---|---|---|
+| `sample_fashion_vendor_v1` | `config/etl/sample_fashion_vendor_v1.json` | 패션 공급사 샘플 v1 |
+| `sample_marketplace_vendor_v1` | `config/etl/sample_marketplace_vendor_v1.json` | 마켓플레이스 공급사 샘플 v1 |
+
+`profile_id`에 `../../etc/passwd`, 절대경로, `..\..\` 같은 값을 보내면 registry 조회에서 바로 `ETLProfileNotFoundError`가 되며 `resolve()`도 실행되지 않으므로 서버 filesystem을 읽지 못한다. `tests/etl/test_web_service.py::test_run_web_etl_rejects_unknown_profile_without_touching_the_database`가 이 경로를 직접 확인하며, DB에 아무 것도 쓰지 않는 것(`session.new`/`session.dirty` 비어 있음)도 함께 검증한다.
+
+### Profile 목록 API
+
+```http
+GET /api/v1/etl-profiles
+```
+
+Streamlit이 허용된 프로필 목록을 서버에서 가져오는 용도다. `etl.profile_loader.list_etl_profiles()`가 registry를 순회해 `id`·`display_name`만 반환하며, 내부 filesystem 경로(`filename`)는 API 응답에 포함하지 않는다.
+
+### CSV Upload 보안
+
+웹 ETL 업로드는 새 검증 코드를 추가하지 않고 기존 검증을 재사용한다.
+
+- 파일 크기: `config/settings.py`의 `MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024`(5MB)를 `core.upload_validator.validate_csv_file_size()`로 그대로 확인한다.
+- 파일명: `validate_csv_filename()`이 `.csv` 확장자와 빈 파일명을 확인한다. 원본 파일명은 `_leaf_filename()`이 디렉터리 구분자를 제거해 실제 filesystem 경로 구성에는 쓰지 않고, `TemporaryDirectory` 안의 파일 이름 한 조각으로만 사용한다.
+- 내용 검증: `run_pipeline()`이 호출하는 기존 CSV 파서가 인코딩, 헤더, 필수 컬럼, 행 수, 행 형식을 그대로 검사한다.
+- Content-Type이나 확장자 문자열만으로 CSV 여부를 판단하지 않고, 실제 파일 내용을 pandas로 읽어 검증한다.
+
+### 임시 파일 처리
+
+기존 `run_pipeline()`은 `Path` 기반 계약이므로, Web upload bytes를 위해 별도 변환 코드를 만들지 않고 `tempfile.TemporaryDirectory()`를 adapter로 사용한다.
+
+```text
+upload bytes
+-> TemporaryDirectory 안의 임시 입력 파일
+-> 기존 run_pipeline() (Path 기반)
+-> output/rejects/summary 파일 읽기
+-> with 블록 종료
+-> 임시 디렉터리와 파일 삭제
+```
+
+성공, `ETLPipelineError`(잘못된 프로필 매핑/변환 실패), `ETLLoadError`(요약·CSV 불일치) 등 어느 경로로 함수가 끝나도 `TemporaryDirectory`의 `__exit__`가 임시 파일을 정리한다. `tests/etl/test_web_service.py`의 `test_run_web_etl_rejects_empty_upload_without_creating_a_run`, `test_run_web_etl_rejects_malformed_supplier_csv_without_creating_a_run`, `test_run_web_etl_cleans_up_temp_files_after_pipeline_failure`가 실행 전후 `catalogguard_web_etl_*` 임시 디렉터리 목록을 비교해 실패 경로에서도 정리되는지 확인한다. 원본 업로드 파일명은 임시 파일 이름 한 조각에만 쓰이고 실제 filesystem 경로 구성에는 사용하지 않는다.
+
+### normal / reject / summary 정책 유지
+
+Web ETL은 새 reject 의미를 만들지 않고 기존 Pipeline의 normal/reject/summary 정책을 그대로 사용한다.
+
+- 부분 reject: normal 행만 staging에 적재되고 reject 건수는 summary·`etl_rejected_rows`에 유지된다.
+- 전체 reject: 표준 CSV의 normal 행이 0건이면 `load_standard_csv()`가 `ETLLoadError`를 발생시켜 staging batch 자체가 생성되지 않는다. 이는 Web ETL이 새로 만든 제약이 아니라 CLI(`etl.load_cli`)가 이미 갖고 있던 `load_standard_csv()` 계약을 그대로 물려받은 것이다.
+
+### PostgreSQL staging 재사용
+
+Web ETL을 위한 새 DB 테이블이나 Alembic migration은 없다. 기존 `etl_load_runs`, `catalog_products_staging`, `etl_rejected_rows`를 그대로 사용하며, `load_standard_csv()`의 기존 트랜잭션 경계를 그대로 재사용한다. 상품·reject 저장 중 오류가 발생하면 배치를 포함해 전체 rollback하므로 부분 staging은 남지 않는다.
+
+### 중복 Web ETL 실행
+
+중복 판단 키는 CLI와 동일하게 `(input_file_sha256, profile_name, profile_version)`이다. 같은 조합으로 다시 요청하면 새 `etl_load_runs` 행을 만들지 않고 기존 배치를 `created=false`로 반환한다. 이 DB 수준 중복 방어와 Streamlit UI의 중복 클릭 방지(버튼 클릭으로만 요청, `in_flight` 상태로 중복 클릭 무시)는 서로 다른 계층의 방어이며, 최종 기준은 항상 DB unique index다. `tests/etl/test_web_service.py::test_run_web_etl_duplicate_input_returns_existing_run_without_creating_new_row`는 서로 다른 두 세션(두 개의 독립된 HTTP 요청을 흉내)에서 같은 입력으로 `run_web_etl()`을 두 번 호출해 두 번째 호출이 `created=False`와 첫 번째와 같은 `etl_load_run_id`를 반환하는지, DB에 배치가 한 건만 남는지 확인한다.
+
+### Streamlit Web ETL UI
+
+`ui/etl_load_history.py`의 `_render_etl_web_run()`이 웹 ETL 실행 화면을 그린다.
+
+```text
+_fetch_etl_profiles()로 GET /api/v1/etl-profiles 조회
+-> "ETL 실행 프로필" selectbox
+-> "공급사 CSV 파일" file_uploader
+-> "ETL 실행" 버튼 (파일 미선택 시 disabled)
+-> 버튼 클릭 시에만 _submit_etl_web_run() 호출
+-> POST /api/v1/etl-loads
+-> 정상 응답: total_rows/loaded_rows/rejected_rows와 etl_load_run_id 표시
+-> ETL 적재 이력 캐시(etl_load_list_response 등)만 무효화
+-> st.rerun()
+```
+
+파일 선택이나 프로필 변경만으로는 API를 호출하지 않는다. `_on_etl_web_run_profile_change()`는 프로필이 바뀌면 이전 `etl_web_run_result`/`etl_web_run_error`를 지워 stale 결과가 새 프로필의 결과처럼 보이지 않게 한다. `POST` 호출은 `_render_etl_web_run()`의 `if st.button(...)` 블록 안에서만 실행되므로, 이후 같은 화면이 다시 rerun되어도(다른 위젯 조작, 페이지 이동 등) 버튼을 다시 클릭하지 않는 한 같은 요청이 반복되지 않는다. 성공 시에는 `etl_load_list_response`·`etl_load_initialized`·`etl_load_offset`만 초기화해 ETL 적재 이력이 새 배치를 다시 조회하게 하며, `catalog_promotion_*` 상태는 건드리지 않는다. 즉 웹 ETL 실행 성공이 promotion을 자동으로 실행하지 않는다. `tests/test_etl_load_history_ui.py`의 `test_etl_web_run_profile_dropdown_lists_allowlisted_profiles`, `test_etl_web_run_submit_button_disabled_without_uploaded_file`, `test_etl_web_run_profile_change_does_not_call_run_etl_load`, `test_etl_web_run_profile_change_clears_stale_result_and_error`, `test_submit_etl_web_run_success_invalidates_history_cache_but_keeps_promotion_cache`가 이 동작을 각각 검증한다.
+
+### Promotion과의 연결
+
+웹 ETL 성공은 promotion을 자동으로 트리거하지 않는다. 사용자가 ETL 적재 이력에서 새로 생성된 batch를 직접 선택해야 기존 promotion preview·승인 흐름(위 "Catalog promotion preview와 승인 반영" 절)을 시작할 수 있다. 웹 ETL이 만든 배치와 CLI가 만든 배치는 `etl_load_runs` 스키마상 구분되지 않으므로, promotion 이후 단계에서는 배치가 어느 경로로 생성됐는지에 따른 분기가 없다.
 
 ## 안전성과 호환성
 
@@ -198,9 +326,33 @@ DB 적재 완료
 거부 행: 0
 ```
 
-## 적재 배치 조회 API
+## 적재 배치 실행·조회 API
 
-ETL 실행과 PostgreSQL 적재는 CLI의 책임으로 유지하고, FastAPI는 저장된 배치와 상품을 읽기 전용으로 조회한다.
+ETL 실행은 CLI 또는 FastAPI의 `POST /api/v1/etl-loads`(웹 ETL, 위 "웹 ETL 실행" 절 참고)로 할 수 있으며, 배치·상품 조회는 아래 `GET` API로 읽기 전용으로 제공한다.
+
+### 웹 ETL 실행
+
+```http
+POST /api/v1/etl-loads
+```
+
+`multipart/form-data` 요청이며 파일 필드명은 `file`, 프로필 필드명은 `profile_id`다. `profile_id`는 `GET /api/v1/etl-profiles`가 반환하는 값만 허용한다.
+
+| 오류 | 상태 코드 | `code` |
+|---|---|---|
+| 지원하지 않는 `profile_id` | `400` | `unsupported_profile` |
+| 빈 파일, 크기 초과, ETL 변환 실패 | `400` | `invalid_upload` |
+| staging 저장 실패 | `500` | `etl_load_failed` |
+
+정상 응답은 `etl_load_run_id`, `created`, `profile_name`, `profile_version`, `source_filename`, `total_rows`, `loaded_rows`, `rejected_rows`, `error_counts`를 포함한다(`api/schemas.py`의 `ETLWebRunResponse`). `tests/test_api_etl_web_run.py`가 성공, 프로필 미지원, 잘못된 업로드, 적재 실패 각각의 HTTP 상태·오류 code·응답 계약을 검증한다.
+
+### ETL 프로필 목록
+
+```http
+GET /api/v1/etl-profiles
+```
+
+`etl.profile_loader.list_etl_profiles()`가 반환하는 allowlist를 `{id, display_name}` 목록으로 반환한다. 서버 파일 경로는 노출하지 않는다.
 
 ### 적재 배치 목록
 
@@ -244,9 +396,13 @@ Path의 `etl_load_run_id`는 `1` 이상의 정수만 허용한다. `0`, 음수�
 
 | 파일 | 역할 |
 |---|---|
-| `api/routes/etl_loads.py` | HTTP 요청과 Query·Path 범위 검증, 404 처리, 응답 모델 변환 |
-| `api/schemas.py` | 배치 목록·상세·reject 상세와 staging 상품의 Pydantic 응답 구조 |
+| `api/routes/etl_loads.py` | 웹 ETL 실행·프로필 목록 endpoint, HTTP 요청과 Query·Path 범위 검증, 404 처리, 응답 모델 변환 |
+| `api/schemas.py` | 웹 ETL 실행·배치 목록·상세·reject 상세와 staging 상품의 Pydantic 응답 구조 |
+| `etl/web_service.py` | `run_web_etl()`: 업로드 bytes를 `TemporaryDirectory`로 옮겨 기존 `run_pipeline()`·`load_standard_csv()`를 실행하는 얇은 웹 ETL 진입점 |
+| `etl/profile_loader.py` | JSON 프로필 검증과 웹 ETL이 사용하는 `profile_id` allowlist(`get_profile_path()`, `list_etl_profiles()`) |
 | `db/etl_query_service.py` | SQLAlchemy 기반 읽기 전용 필터·정렬·count·페이지 조회와 reject 상세 조회 |
+| `tests/etl/test_web_service.py` | `run_web_etl()`의 정상 적재, 부분/전체 reject, 중복 재사용, allowlist 위반, 업로드 검증 실패, 임시 파일 정리 |
+| `tests/test_api_etl_web_run.py` | `POST /api/v1/etl-loads`의 HTTP 상태, 오류 code, 응답 계약 |
 | `tests/test_api_etl_loads.py` | HTTP 상태, 파라미터 전달, 응답 필드와 nullable 값 계약 |
 | `tests/test_etl_query_service.py` | 실제 PostgreSQL의 검색·정렬·페이지네이션·NULL·배치 격리 |
 
@@ -254,10 +410,11 @@ Path의 `etl_load_run_id`는 `1` 이상의 정수만 허용한다. `0`, 음수�
 
 ## Streamlit ETL 적재 이력 화면
 
-Streamlit에는 저장된 ETL 배치와 staging 상품을 확인하고 선택한 batch를 운영 상품에 반영하는 `ETL 적재 이력` 탭을 제공한다. 배치·상품·reject 조회는 읽기 전용이며, promotion preview와 실제 반영은 `CatalogGuardApiClient`가 FastAPI의 별도 POST API를 호출한다. Streamlit이 DB에 직접 쓰지는 않는다.
+Streamlit에는 공급사 CSV를 업로드해 ETL을 직접 실행하는 `ETL 실행` 영역과, 저장된 ETL 배치와 staging 상품을 확인하고 선택한 batch를 운영 상품에 반영하는 `ETL 적재 이력` 탭을 제공한다. ETL 실행, 배치·상품·reject 조회, promotion preview와 실제 반영 모두 `CatalogGuardApiClient`가 FastAPI API를 호출하는 방식이며, Streamlit이 DB에 직접 쓰지는 않는다.
 
 | 화면 기능 | 동작 |
 |---|---|
+| ETL 실행 | 공급사 CSV 업로드와 "ETL 실행 프로필" 선택, 버튼 클릭으로 `POST /api/v1/etl-loads` 실행, 정상/거부 행 수와 배치 ID 표시 |
 | 배치 목록 | 최신 적재부터 10건씩 표시하고 전체 행·정상 적재·변환 거부 행과 전체 건수를 표시 |
 | 검색 | 파일명과 프로필명 검색을 함께 적용하는 AND 조건 |
 | 배치 페이지 | 이전·다음 버튼으로 목록 offset 이동 |
@@ -272,6 +429,13 @@ Streamlit에는 저장된 ETL 배치와 staging 상품을 확인하고 선택한
 | 요청 추적 | 유효한 `X-Request-ID`를 오류 화면에 표시 |
 
 ```text
+ETL 실행 영역
+-> GET /api/v1/etl-profiles
+-> "ETL 실행 프로필" 선택, CSV 업로드
+-> ETL 실행 버튼 클릭
+-> POST /api/v1/etl-loads
+-> ETL 적재 이력 캐시 무효화
+
 ETL 적재 이력 탭
 -> GET /api/v1/etl-loads (limit=10)
 -> 파일명·프로필명 검색(AND)
@@ -394,13 +558,70 @@ python -m alembic upgrade head
 
 현재 기준 저장소의 GitHub Actions run `30736845060`은 성공했다. 문서에는 실행별 전체 pytest 수를 고정하지 않고, promotion preview·service·API·client·UI·concurrency 테스트와 Chromium promotion E2E가 검증하는 동작 범위를 기록한다. E2E는 브라우저 메시지뿐 아니라 PostgreSQL의 최종 운영 상품·run·audit 상태도 확인한다.
 
+## Web ETL 검증에서 발견한 CI 결함과 수정
+
+Web ETL 기능 commit(`ef08109`)이 병합된 뒤 실행된 GitHub Actions run `30911933934`에서 `test`·`browser-e2e` job이 모두 blocking defect로 실패했다. 두 결함 모두 Web ETL이 처음 만든 새 import·UI 경로 때문에 발생했으며, fix commit(`cb5ed81`)에서 최소 범위로 수정했다.
+
+### AWS runtime packaging 결함
+
+로컬 전체 테스트(`1189 passed`)와 `docker build`는 모두 성공했지만, CI의 `Verify AWS image imports` 단계는 다음 오류로 실패했다.
+
+```text
+File "/app/api/routes/etl_loads.py", line 55, in <module>
+    from etl.db_loader import ETLLoadError
+ModuleNotFoundError: No module named 'etl'
+```
+
+원인은 `Dockerfile.aws`가 `alembic`·`api`·`config`·`core`·`db`·`services`·`workers` package만 image에 `COPY`하고 `etl/`은 포함하지 않았기 때문이다. Web ETL 이전에는 ETL History 조회가 `db.etl_query_service`만 사용했고 `api` 패키지가 `etl.*`를 직접 import하지 않았으므로 이 누락이 드러나지 않았다. Web ETL이 `api.routes.etl_loads -> etl.db_loader/etl.pipeline/etl.profile_loader/etl.web_service` import chain을 처음 만들면서 로컬 개발 환경(`etl/`이 항상 있는 소스 트리)에서는 재현되지 않고 AWS runtime image에서만 재현되는 결함이 되었다.
+
+수정은 `Dockerfile.aws`에 다음 한 줄을 기존 COPY 순서(알파벳 순)에 맞춰 추가하는 것으로 끝났다.
+
+```dockerfile
+COPY --chown=catalogguard:catalogguard etl ./etl
+```
+
+로컬에서 `docker build --file Dockerfile.aws --tag catalogguard-lite-aws:localfix .` 후 다음을 확인했다.
+
+```text
+docker run --rm --entrypoint id catalogguard-lite-aws:localfix -u        # 10001
+docker run --rm --entrypoint python catalogguard-lite-aws:localfix -c '
+import api; import services; import workers
+import etl; import etl.web_service
+from api.main import app
+'                                                                          # 성공
+```
+
+disposable PostgreSQL 18 컨테이너를 대상으로 `alembic upgrade head` -> 기본 CMD(Uvicorn) 시작 -> `/health` HTTP `200`까지 로컬에서 재현해 확인했다.
+
+### Streamlit accessible label 결함
+
+신규 `ETL 실행` selectbox와 기존 ETL 적재 이력 검색 필터(`st.text_input`)가 처음에는 같은 label 문자열 `"공급사 프로필"`을 사용했다. 그 결과 기존 Chromium Browser E2E의 `page.get_by_label("공급사 프로필")`가 두 요소에 동시에 매칭되어 strict-mode violation으로 실패했다.
+
+```text
+strict mode violation: get_by_label("공급사 프로필") resolved to 2 elements:
+  1) ... aria-label="Selected 패션 공급사 샘플 v1. 공급사 프로필" (combobox)
+  2) ... aria-label="공급사 프로필" (textbox)
+```
+
+첫 수정은 selectbox label을 `"실행할 공급사 프로필"`로 바꾸는 것이었지만, Streamlit이 combobox의 accessible name을 `"Selected {선택값}. {label}"` 형태로 만들고 Playwright `get_by_label()`은 기본적으로 부분 문자열(substring) 매칭이므로 `"실행할 공급사 프로필"`도 여전히 `"공급사 프로필"`을 부분 문자열로 포함해 같은 위반이 재현되었다. 로컬에서 `scripts/run_etl_browser_e2e.py`를 재실행해 이 재현을 직접 확인한 뒤, label을 `"공급사 프로필"` 문자열 자체를 포함하지 않는 `"ETL 실행 프로필"`로 다시 바꿔 accessible name 충돌 자체를 없앴다. 테스트 코드의 selector(`get_by_label("공급사 프로필")`, `.first()`, `nth()` 등)는 변경하지 않았다.
+
+수정 후 검색 필터의 accessible label은 `"공급사 프로필"`(text_input) 하나만 남고, ETL 실행 selectbox는 `"ETL 실행 프로필"`이라는 별도 label을 갖는다. `tests/e2e/test_etl_browser_e2e.py`의 기존 시나리오(`test_catalog_promotion_success_flow_in_real_browser`, `test_etl_reject_details_are_visible_and_masked_in_real_browser`)는 selector 수정 없이 다시 통과했다.
+
+### 재검증 결과
+
+fix commit(`cb5ed81`) push 후 GitHub Actions run `30969273954`에서 `test`·`browser-e2e` job이 모두 성공했다. `test` job의 `Run tests` 단계는 이번에는 실제로 실행되어 `1189 passed, 4 deselected in 18.24s`를 기록했으며(`0 skipped`, `0 failed`), `Verify AWS image imports`·`Verify AWS container health`·`Run async inspection E2E smoke test`·`Smoke test Streamlit startup` 단계도 모두 성공했다. `browser-e2e` job은 이전의 strict-mode violation 없이 `Chromium E2E 성공` 로그로 종료했다.
+
 ## 제한사항
 
 - 합성 패션 공급사 프로필 2종을 지원한다.
 - 실제 외부 공급사 운영 데이터 연동은 지원하지 않는다.
 - 자동 공급사 감지는 지원하지 않으며, 공급사별 프로필은 수동 선택한다.
 - 웹 수집과 외부 API 연동은 지원하지 않는다.
-- ETL 적재 실행용 웹 API는 지원하지 않는다. Streamlit 적재 이력 화면의 배치·상품·reject 조회는 읽기 전용이지만, 선택한 batch의 promotion preview와 승인된 운영 상품 반영은 FastAPI POST API를 호출한다.
+- 웹 ETL(`POST /api/v1/etl-loads`)은 업로드부터 staging 적재까지 하나의 동기 HTTP 요청으로 처리하며, Celery 같은 비동기 실행은 지원하지 않는다.
+- 웹 ETL은 한 번에 CSV 파일 1개만 받으며, 여러 파일 동시 업로드나 ZIP 업로드는 지원하지 않는다.
+- 웹 ETL은 CSV만 지원하며 XLSX 등 다른 형식은 지원하지 않는다.
+- 웹 ETL의 `profile_id`는 서버 allowlist(`etl.profile_loader._ETL_PROFILE_REGISTRY`)로 고정되어 있으며, 사용자가 새 프로필을 업로드하거나 등록하는 Profile CRUD는 지원하지 않는다.
+- 웹 ETL CSV 업로드 화면 자체를 다루는 전용 Chromium Browser E2E는 아직 없다. 기존 Browser E2E는 ETL 적재 이력 검색과 promotion 화면만 검증하며, 웹 ETL 핵심 실행 로직은 `tests/etl/test_web_service.py`, `tests/test_api_etl_web_run.py`, `tests/test_catalogguard_api_client.py`, `tests/test_etl_load_history_ui.py`의 API·client·PostgreSQL 통합·Streamlit AppTest로 검증한다.
 - staging 상품 수정·삭제와 상품 변경 이력 조회 API는 지원하지 않는다.
 - promotion은 외부 공급사 운영 데이터나 production catalog가 아닌 합성 fixture·테스트 PostgreSQL 환경에서만 검증했다. reject 행은 별도 `etl_rejected_rows`에 오류 배열과 마스킹된 동적 원본 컬럼으로 저장한다.
 - 증분 ETL과 streaming은 지원하지 않는다.
