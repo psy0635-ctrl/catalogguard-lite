@@ -41,6 +41,8 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 10. ETL batch 선택 → promotion preview → 변경 전·후 확인 → 명시적 승인 → preview hash 재검증 → 운영 상품 insert/update를 연결하고, transaction·stale 차단·중복 성공 방지·promotion run·append-only audit을 구현했습니다. Chromium E2E에서는 브라우저 메시지뿐 아니라 PostgreSQL 최종 상태까지 확인했습니다.
 11. CLI 전용이던 ETL 실행을 Streamlit 업로드 화면과 FastAPI `POST /api/v1/etl-loads`로 확장하면서 변환·적재 로직(`run_pipeline()`, `load_standard_csv()`)은 새로 만들지 않고 CLI와 그대로 공유하도록 설계했으며, 배포 이미지에서 새 import 경로가 실제로 깨지는 packaging 결함과 신규 UI가 만든 접근성 이름 충돌을 CI runtime smoke·Browser E2E로 직접 잡아 최소 범위로 수정했습니다.
 12. succeeded promotion을 되돌리는 rollback을 추가하면서 과거 값으로 단순 덮어쓰지 않고, 되돌리기 직전 현재 운영 상품이 해당 promotion이 만든 결과 그대로인지 재확인해 이후 발생한 정상 변경은 conflict로 보존하도록 구현했습니다. preview hash 재계산, confirmation 검증, 단일 transaction 원자성과 중복 rollback 이중 방어(service·DB unique index)를 PostgreSQL 통합 테스트로 검증했습니다.
+13. Streamlit 로그인과 FastAPI JWT Access Token 발급, viewer(조회)·operator(운영 데이터 변경) 2개 역할 분리를 구현했습니다. `get_current_user()`가 토큰의 role을 그대로 신뢰하지 않고 매 요청마다 PostgreSQL `users` 테이블에서 role·is_active를 다시 확인하도록 설계해, 계정을 비활성화하면 이미 발급된 토큰도 즉시 차단되게 했습니다. 검수·ETL·Promotion·Rollback 전체 endpoint에 401(인증 실패)/403(권한 부족) 경계를 적용하고 실제 PostgreSQL 사용자·JWT로 검증했습니다.
+14. Authentication 도입 과정에서 인증 dependency가 route와 같은 SQLAlchemy Session을 공유하며 SELECT가 트랜잭션을 암묵적으로 시작(autobegin)시켜 이후 쓰기 트랜잭션과 충돌하는 문제를 실제 Browser E2E로 발견하고, 관련 없는 사전 조회에는 독립된 Session을 쓰도록 최소 범위로 수정했습니다. 같은 원인으로 이미 존재하던 sync inspection API의 PostgreSQL transaction 충돌도 실제 PostgreSQL regression test로 재현·수정하고, 기존 monkeypatch 기반 테스트가 놓친 Session 상호작용 검증 공백을 보완했습니다.
 
 ## 6.2 문제 정의
 
@@ -182,8 +184,8 @@ catalogguard_ready.csv + etl_summary.json
 | Chromium 브라우저 E2E | ETL reject 마스킹과 promotion 승인·반영, 브라우저 오류 및 PostgreSQL 최종 상태 |
 | 샘플 ETL CLI 결과 | 전체 3건, 정상 변환 2건, 오류 행 1건, 종료 코드 0 |
 | Web ETL·Rollback 검증 | `POST /api/v1/etl-loads`·`GET /api/v1/etl-profiles`, rollback preview/실행 API의 PostgreSQL 통합·API·client·UI 테스트 |
-| 최신 전체 pytest | `1189 passed`, `0 skipped`, `4 deselected`, `0 failed` |
-| 최신 기준 CI | GitHub Actions run `30972097167` success |
+| 최신 전체 pytest | `1267 passed`, `0 skipped`, `4 deselected`, `0 failed` |
+| 최신 기준 CI | GitHub Actions run `31077410946` success |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
 
 ## 6.6 핵심 구현 구조
@@ -562,6 +564,32 @@ Streamlit이 combobox의 accessible name을 `"Selected {선택값}. {label}"` �
 
 새 위젯을 추가할 때 기존 label과의 accessible name 중복 여부를 문자열 포함 관계까지 확인합니다. 테스트가 실패하면 selector를 완화하기 전에 UI 쪽 접근성 이름 충돌인지 먼저 확인합니다.
 
+### SQLAlchemy autobegin과 sync inspection transaction 충돌
+
+#### 문제
+
+Authentication 작업을 검증하던 중, 로그인한 operator가 실제 신규 CSV로 `POST /api/v1/inspections`를 호출하면 `sqlalchemy.exc.InvalidRequestError: A transaction is already begun on this Session.`으로 500이 발생했습니다. Auth를 적용하기 이전 커밋(`git show HEAD:...`로 추출한, auth 코드가 전혀 없는 원본 파일)에 동일 입력으로 재현해 본 결과 똑같이 500이 발생해, 이 결함이 Authentication 때문에 생긴 회귀가 아니라 그 이전부터 있던 독립된 버그임을 먼저 확인했습니다.
+
+#### 실제 원인
+
+`create_inspection()`이 중복 여부를 빠르게 확인하기 위한 `find_existing_inspection_run()` 조회와, 실제 저장을 담당하는 `save_inspection_report()` 호출에 **같은 요청 범위 SQLAlchemy Session**을 전달하고 있었습니다. 앞의 SELECT가 SQLAlchemy 2.x의 autobegin으로 그 Session에 암묵적 트랜잭션을 열었고, 뒤이어 `save_inspection_report()`가 자신의 트랜잭션 경계로 `with session.begin()`을 다시 호출하면서 "이미 시작된 트랜잭션" 충돌이 발생했습니다. `save_inspection_report()` 자체는 dedupe 조회 → `begin_nested()`(SAVEPOINT)로 run·results 삽입 → unique 충돌 시 재조회까지 이미 하나의 완결된 트랜잭션 소유자로 설계되어 있었으므로, 문제는 오직 그 앞 단계에서 같은 Session을 먼저 건드린 것이었습니다.
+
+#### 왜 기존 테스트가 못 잡았는가
+
+`tests/test_api_inspections.py`는 `find_existing_inspection_run`과 `save_inspection_report`를 둘 다 monkeypatch로 대체하기 때문에, 실제 SQLAlchemy Session이 두 함수 사이에서 어떻게 상호작용하는지 한 번도 검증한 적이 없었습니다. `tests/test_inspection_persistence.py`는 `save_inspection_report`의 원자성을 실제 PostgreSQL로 이미 검증하고 있었지만, 이는 함수를 직접 호출하는 테스트였고 `find_existing_inspection_run`을 먼저 거치는 route 경로를 재현하지 않았습니다.
+
+#### 수정 방법
+
+`db/persistence_service.py`는 전혀 수정하지 않았습니다. 대신 `api/routes/inspections.py`의 `create_inspection()`에 `precheck_session: Session = Depends(get_session, use_cache=False)`를 추가해, 사전 중복조회만 완전히 독립된 Session에서 실행하도록 분리했습니다. 실제 저장은 원래의 요청 Session으로 그대로 전달해 `save_inspection_report()`가 그 Session에서 처음이자 유일하게 `session.begin()`을 호출합니다. `nullcontext()`나 `session.in_transaction()` 조건부 `begin()`, SELECT 직후 임시 `commit()`/`rollback()` 같은 우회는 commit/rollback 책임을 불명확하게 만들 수 있어 사용하지 않았습니다.
+
+#### 검증
+
+monkeypatch 없이 실제 PostgreSQL Session·실제 route·실제 persistence service를 사용하는 `tests/test_api_inspections_transaction_regression.py`를 새로 추가해 신규 CSV 저장(새 Session으로 재조회해 commit 확인), 동일 CSV 재사용(신규 row 없음), 저장 도중 강제 실패 시 전체 rollback(부분 row 0건), anonymous 401, viewer 403을 확인했습니다.
+
+#### 재발 방지 기준
+
+한 요청 안에서는 하나의 Session에 대해 하나의 트랜잭션 소유자만 두는 것을 원칙으로 합니다. 쓰기 트랜잭션을 시작하기 전에 같은 Session으로 부수적인 조회를 먼저 실행하지 않으며, 필요하면 `Depends(get_session, use_cache=False)`로 완전히 독립된 Session을 사용합니다.
+
 ## 6.14 면접 예상 질문과 답변
 
 ### Q1. 왜 Streamlit을 사용했나요?
@@ -627,6 +655,14 @@ preview 이후 staging이나 현재 운영 상품이 바뀌었는데 오래된 �
 ### Q16. Rollback이 왜 단순히 과거 값으로 되돌리지 않나요?
 
 Promotion A가 가격을 10,000원에서 12,000원으로 바꾼 뒤 다른 작업이 12,000원을 15,000원으로 바꿨다면, Promotion A를 단순히 되돌려 10,000원으로 만드는 것은 그 사이의 정상적인 최신 변경(15,000원)까지 지우는 것입니다. 그래서 rollback 실행 직전에 현재 값이 해당 promotion의 after 값과 같은지 다시 비교하고, 다르면 conflict로 그 상품의 rollback을 막아 최신 값을 보존합니다.
+
+### Q17. viewer/operator 2개 역할만 만들고 admin은 왜 만들지 않았나요?
+
+현재 endpoint를 전부 분석한 결과 admin만 접근해야 하는 기능이 하나도 없었습니다(회원가입·사용자 관리 화면 자체가 이번 범위 밖입니다). 역할 수를 늘리는 것이 목표가 아니라 실제 필요한 최소 역할을 만드는 것이 목표였으므로, 조회(viewer)와 운영 데이터 변경(operator) 2개로 충분하다고 판단했습니다.
+
+### Q18. JWT의 role을 그대로 믿지 않고 왜 매 요청마다 DB를 다시 조회하나요?
+
+토큰에 있는 role만 믿으면 이미 발급된 토큰을 가진 사용자를 비활성화하거나 역할을 바꿔도 토큰이 만료될 때까지 예전 권한이 그대로 유지됩니다. 현재 프로젝트는 PostgreSQL이 이미 있고 사용자 수도 매우 적은 MVP이므로, `get_current_user()`가 매 요청마다 `users` 테이블에서 최신 role·is_active를 다시 확인하는 방식을 선택했습니다. 요청마다 조회가 한 번 더 늘어나지만 이 규모에서는 무시할 수 있고, 계정 비활성화를 즉시 반영할 수 있다는 이점이 더 크다고 판단했습니다.
 
 ## 6.15 포트폴리오 소개 문구
 
@@ -843,3 +879,44 @@ Streamlit은 `CatalogGuardApiClient`를 통해 웹 ETL 실행, 목록·상세 �
 - 가격·재고 파싱 실패는 상품 품질 규칙의 오류와 성격이 다르므로 `rejected_rows.csv`로 분리하고, 정상 행만 기존 CatalogGuard 검수기에 전달합니다.
 - 입력·프로필을 보호하고 출력 세 파일의 일관성을 유지하기 위해 임시 파일을 같은 디렉터리에 쓴 뒤 `os.replace()`로 교체합니다. 기존 출력이 있다면 백업 후 교체하고, 중간 실패 시 기존 파일을 복구합니다.
 - `etl_summary.json`에는 입력·출력 SHA-256과 처리 건수를 남겨 변환 결과를 추적할 수 있게 했으며, 생성된 표준 CSV는 기존 `validate_and_read_uploaded_csv()`와 `inspect_dataframe()`에 연결해 호환성을 확인했습니다.
+
+## 6.18 Authentication과 RBAC
+
+### 문제
+
+검수·ETL·Promotion·Rollback 기능은 모두 완성되어 있었지만, "누가 조회만 할 수 있고 누가 실제 운영 데이터를 변경할 수 있는가"를 서버가 통제하는 계층이 없었습니다. 누구나 Streamlit이나 API를 직접 호출해 Promotion·Rollback 같은 운영 데이터 변경 작업을 실행할 수 있는 상태였습니다.
+
+### 역할 설계
+
+전체 endpoint를 조회(Public/Authenticated read)와 운영 데이터 변경(Write)으로 분류한 뒤, 조회는 로그인한 사용자면 누구나, 변경은 별도 역할만 가능하도록 최소 역할을 설계했습니다. admin 전용 기능이 없어 admin 역할은 만들지 않고 `viewer`(조회)·`operator`(운영 데이터 변경) 2개로 확정했습니다.
+
+| Endpoint | anonymous | viewer | operator |
+|---|---|---|---|
+| `GET /health`, `GET /ready` | 200 | 200 | 200 |
+| `POST /api/v1/auth/login` | 200(자격 증명 유효 시) | - | - |
+| `GET /api/v1/auth/me` | 401 | 200 | 200 |
+| 검수·ETL·Promotion/Rollback 이력·History/Audit 조회, Promotion/Rollback Preview | 401 | 200 | 200 |
+| CSV 검수 실행, 비동기 검수 실행, Web ETL 실행, Promotion 실행, Rollback 실행 | 401 | 403 | 200 |
+
+Promotion Preview·Rollback Preview는 DB를 변경하지 않고 "무엇이 바뀔지"만 보여주므로 viewer에게도 허용했고, 실제 반영·되돌리기만 operator로 제한해 조회와 실행의 경계를 분명히 했습니다.
+
+### 인증 설계
+
+- **User model**: `id`, `username`(unique), `password_hash`, `role`, `is_active`, `created_at`만 저장합니다. email·전화번호·마지막 로그인 시각·OAuth provider처럼 이번 MVP에 필요하지 않은 필드는 넣지 않았습니다.
+- **비밀번호**: bcrypt로 hash만 저장합니다. hash는 복호화하는 방식이 아니라, 로그인할 때마다 같은 알고리즘으로 재계산해 저장된 hash와 비교하는 단방향 함수입니다.
+- **JWT**: PyJWT, `HS256` 서버 고정, payload는 `sub`(username)·`role`·`iat`·`exp`만 포함합니다. secret은 `CATALOGGUARD_JWT_SECRET` 환경변수로 관리하며 기본값을 두지 않아, 값이 없으면 로그인·토큰 검증이 fail-fast로 실패합니다. `/health`, `/ready`, CLI ETL, Alembic migration은 이 값을 요구하지 않도록 설정 로딩 시점을 분리했습니다.
+- **current user 조회**: `get_current_user()`는 토큰의 role을 그대로 신뢰하지 않고 매 요청마다 `sub`로 PostgreSQL `users`를 다시 조회해 최신 role·is_active를 확인합니다. 이미 발급된 토큰이 있어도 계정을 비활성화하면 다음 요청부터 즉시 차단됩니다.
+- **401/403**: 401은 로그인되지 않았거나 토큰이 없거나 무효/만료됐거나 계정이 비활성인 경우, 403은 로그인은 됐지만 role이 부족한 경우입니다. 로그인 실패는 아이디 없음/비밀번호 오류/비활성 계정을 모두 같은 `invalid_credentials` 메시지로 응답해 계정 존재 여부를 노출하지 않습니다.
+- **초기 계정 생성**: 회원가입 API는 만들지 않았습니다. `scripts/create_user.py` bootstrap CLI로만 계정을 만들며, 비밀번호는 인자·환경변수·대화형 prompt 중 하나로 받고 코드에 하드코딩하지 않습니다.
+
+### Streamlit 연동
+
+`ui/auth.py`가 사이드바 로그인·로그아웃 폼과 `session_state` 기반 Access Token 저장을 담당합니다. `CatalogGuardApiClient`는 로그인 성공 시 `Authorization: Bearer` 헤더를 세션에 한 번 설정해 이후 모든 요청에 자동으로 붙입니다. 로그인 전에는 어떤 탭도 렌더링하지 않고, viewer로 로그인하면 ETL 실행·Promotion·Rollback 버튼이 비활성화됩니다. 다만 이 비활성화는 편의 기능일 뿐이고, 실제 권한 검사는 항상 FastAPI가 수행합니다 — viewer가 API를 직접 호출해도 403으로 차단됩니다.
+
+### 검증
+
+`get_current_user()`, `require_viewer`/`require_operator` dependency, 로그인/현재 사용자 API, Streamlit 로그인 UI를 각각 단위 테스트로 검증한 뒤, 실제 PostgreSQL 사용자·JWT로 401/403/성공 경계 전체를 `tests/test_api_rbac.py`로 검증했습니다. 기존 Async Inspection E2E와 Chromium Browser E2E(Promotion, ETL reject 시나리오)에는 synthetic operator 계정 생성과 로그인 단계를 추가해 Auth 도입 후에도 기존 흐름이 그대로 성공하는지 확인했습니다. AWS Docker runtime에서는 build·import·migration·Uvicorn·`/health`가 정상 동작하는지 확인했습니다. 이 과정에서 인증 dependency가 route와 Session을 공유해 쓰기 트랜잭션과 충돌하는 문제와, 그 조사 중 발견한 이미 존재하던 sync inspection의 별도 transaction 결함을 함께 해결했습니다(6.13 "SQLAlchemy autobegin과 sync inspection transaction 충돌" 참고).
+
+### 현재 한계
+
+Refresh Token 없음(만료 시 재로그인), 회원가입/password reset/OAuth/MFA/SSO 없음, 로그인 rate limit 없음, 누가 실행했는지를 기존 실행 이력에 기록하는 Actor Audit 없음(이번 기능은 "누가 실행할 수 있는지"만 통제합니다). 모두 이번 MVP에서 의도적으로 제외한 범위입니다.

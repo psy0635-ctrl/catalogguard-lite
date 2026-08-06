@@ -100,6 +100,8 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - Promotion Rollback preview로 대상 상품과 현재 Catalog 상태의 conflict 확인
 - Preview hash 재검증과 서버 confirmation을 거치는 transaction 기반 Rollback
 - INSERT promotion 상품 삭제, UPDATE promotion 상품 이전 상태 복원과 원본 promotion audit 보존
+- Streamlit 로그인과 JWT Access Token 발급, viewer(조회)·operator(운영 데이터 변경) 역할 분리
+- FastAPI의 모든 보호된 endpoint에서 현재 사용자와 역할을 서버가 최종 검증(Streamlit 버튼 비활성화는 편의 기능일 뿐 실제 보안 경계는 아님)
 
 ## 4. 사용자 기능 흐름
 
@@ -363,6 +365,31 @@ ETL 적재 이력 탭
 
 상품 그룹 카테고리 일관성 검수는 `core.group_category_consistency_detector`가 기존 `core.category_mismatch_detector.normalize_category()`를 재사용합니다. 이 비교는 원본 category를 고치지 않으며, 표시 계층에는 JSON 구조화 메시지로 값을 전달합니다. JSON이 손상되거나 예상 구조가 아니어도 내부 prefix, 영문 메시지나 JSON 원문 대신 안전한 한글 기본 문구를 표시합니다.
 
+Streamlit에 로그인하면 이후 모든 화면과 API 호출이 JWT Access Token을 거칩니다. FastAPI는 매 요청마다 role/is_active를 PostgreSQL에서 다시 확인한 뒤에만 검수·ETL·Promotion·Rollback 로직에 진입시킵니다.
+
+```text
+Streamlit
+-> 로그인(아이디·비밀번호)
+-> POST /api/v1/auth/login
+-> JWT Access Token 발급
+-> CatalogGuardApiClient가 Authorization: Bearer 헤더로 이후 모든 요청에 자동 첨부
+-> FastAPI get_current_user(): 토큰 검증 + PostgreSQL users 재조회(role, is_active)
+-> require_viewer / require_operator: 역할 검사
+-> Inspection / ETL / Promotion / Rollback endpoint 진입
+-> PostgreSQL
+```
+
+비동기 검수는 이 인증 단계를 그대로 거친 뒤 별도 경로로 처리합니다.
+
+```text
+FastAPI (인증·RBAC 통과 후 작업 등록)
+-> Redis
+-> Celery Worker
+-> PostgreSQL
+```
+
+로그인하지 않았거나 토큰이 유효하지 않으면 401을, 로그인은 됐지만 역할이 부족하면 403을 반환합니다. 자세한 endpoint별 권한 표는 18장을 참고하세요.
+
 ## 6. 실행 화면
 
 ### CSV 템플릿 및 파일 업로드
@@ -425,6 +452,7 @@ ETL 적재 이력 탭
 | API 클라이언트 | requests `2.34.2` |
 | 데이터베이스 | PostgreSQL, SQLAlchemy `2.0.51`, psycopg `3.3.4` |
 | 마이그레이션 | Alembic `1.18.5` |
+| 인증 | PyJWT `2.10.1`(JWT, HS256), bcrypt `4.2.1`(password hash) |
 | 비동기 처리 | Redis `7.4`, Celery `5.6.3` |
 | 로컬 실행 | Docker Compose |
 | 테스트 | pytest |
@@ -456,8 +484,10 @@ catalogguard-lite/
     __init__.py
     main.py
     schemas.py
+    dependencies.py
     routes/
       __init__.py
+      auth.py
       etl_loads.py
       inspections.py
       inspection_jobs.py
@@ -481,9 +511,11 @@ catalogguard-lite/
     product_template.py
     result_exporter.py
     rules.py
+    security.py
     upload_validator.py
   db/
     __init__.py
+    auth_service.py
     base.py
     etl_query_service.py
     models.py
@@ -517,6 +549,7 @@ catalogguard-lite/
       20260728_0006_create_catalog_promotion_tables.py
       20260803_0007_create_catalog_promotion_rollback_tables.py
       20260803_0008_allow_catalog_product_audit_detach.py
+      20260805_0009_create_users_table.py
   data/
     dev/
       category_mismatch_test.csv
@@ -580,7 +613,9 @@ catalogguard-lite/
 | `api/main.py` | FastAPI 앱 생성, 라우터 등록, `/health`와 `/ready`, 요청 ID 및 요청 단위 로그 처리 |
 | `api/routes/etl_loads.py` | 웹 ETL 실행(`POST /api/v1/etl-loads`)과 ETL 프로필 목록 조회, ETL 조회와 promotion preview·실행 endpoint, Query·Path 검증, 오류 응답과 응답 변환 |
 | `api/routes/inspections.py` | 검수 생성, 서버 SHA-256 계산, 중복 이력 응답, 검수 이력 목록, 검수 상세 조회 API |
-| `api/schemas.py` | 검수·ETL 조회·promotion API의 응답 Pydantic 모델 |
+| `api/schemas.py` | 검수·ETL 조회·promotion API의 응답 Pydantic 모델과 `LoginRequest`/`LoginResponse`/`CurrentUserResponse` |
+| `api/dependencies.py` | `get_current_user()`(JWT 검증 + PostgreSQL 재조회), `require_viewer`/`require_operator` RBAC dependency |
+| `api/routes/auth.py` | `POST /api/v1/auth/login`(Access Token 발급), `GET /api/v1/auth/me` |
 | `config/logging.py` | 중복 handler 없이 한 줄 JSON 운영 로그를 기록하는 표준 라이브러리 유틸리티 |
 | `config/settings.py` | CSV 컬럼, 허용 카테고리, 업로드 제한, 금지어, API 클라이언트 환경변수, `INSPECTION_VERSION` |
 | `config/database.py` | `DATABASE_URL`, `TEST_DATABASE_URL` 환경변수 읽기와 검증 |
@@ -594,11 +629,15 @@ catalogguard-lite/
 | `core/result_exporter.py` | 검수 결과 CSV 다운로드 데이터와 파일명 생성 |
 | `core/product_template.py` | CSV 입력 템플릿 생성 |
 | `core/privacy.py` | 개인정보 정규식과 마스킹 처리 |
-| `db/models.py` | `inspection_runs`, `inspection_results`와 ETL staging 배치·상품 SQLAlchemy 모델 |
+| `core/security.py` | bcrypt 비밀번호 hash·검증, JWT Access Token 발급·검증 |
+| `db/models.py` | `inspection_runs`, `inspection_results`, ETL staging 배치·상품, `users` SQLAlchemy 모델 |
+| `db/auth_service.py` | `users` 조회, 로그인 인증(`authenticate_user`), 계정 생성(`create_user`, bootstrap CLI 전용) |
 | `db/etl_query_service.py` | 필터·정렬·count·SQL 페이지네이션을 적용하는 읽기 전용 ETL 배치·상품 조회 Service |
 | `db/repositories.py` | 검수 실행과 상세 결과 저장·조회, 파일 identity 조회 Repository |
 | `db/persistence_service.py` | 검수 결과 저장 트랜잭션, 중복 조회, 경쟁 상태 처리, 목록 조회, 상세 조회 Service |
 | `db/session.py` | SQLAlchemy 엔진, 세션 팩토리, DB 연결 확인, FastAPI 세션 의존성 |
+| `ui/auth.py` | Streamlit 로그인·로그아웃 UI, `session_state` 기반 Access Token 저장, 인증된 API Client 생성 |
+| `ui/etl_load_history.py` | ETL 목록·검색·페이지네이션·상세·promotion 승인 UI. viewer는 실행 버튼이 비활성화되지만 실제 차단은 FastAPI가 수행 |
 | `services/redis_job_store.py` | Redis에 비동기 검수 작업 상태와 TTL 저장 |
 | `services/inspection_job_service.py`, `services/job_files.py` | 작업 제출, 서버 생성 job 파일 저장·검증·정리 |
 | `workers/celery_app.py`, `workers/inspection_tasks.py` | Celery Worker 실행과 비동기 CSV 검수·결과 저장 |
@@ -608,6 +647,7 @@ catalogguard-lite/
 | `etl/load_cli.py` | ETL 결과를 PostgreSQL staging에 적재하는 별도 CLI 진입점 |
 | `etl/web_service.py` | 업로드 bytes를 `TemporaryDirectory`에 저장해 기존 `run_pipeline()`·`load_standard_csv()`를 실행하는 웹 ETL 진입점(`run_web_etl()`) |
 | `scripts/run_etl_browser_e2e.py` | 테스트 DB migration, ETL CLI·Loader, FastAPI·Streamlit readiness, Playwright 실행과 cleanup을 담당하는 E2E runner |
+| `scripts/create_user.py` | 로그인 계정을 생성하는 bootstrap CLI(회원가입 API 없음). `--username`, `--role`, 비밀번호는 인자·환경변수·interactive prompt 중 하나로 지정 |
 | `tests/e2e/test_etl_browser_e2e.py` | 실제 Chromium의 ETL 탭·promotion 승인·반영·reject 마스킹·raw 미노출과 PostgreSQL 최종 상태 검증 |
 | `tests/fixtures/e2e/etl_browser_vendor.csv` | 정상 2행·복수 오류 reject 1행과 합성 민감정보를 담은 브라우저 E2E fixture |
 | `config/etl/sample_fashion_vendor_v1.json` | 샘플 공급사 컬럼과 CatalogGuard 표준 컬럼 매핑 프로필 |
@@ -616,6 +656,7 @@ catalogguard-lite/
 | `alembic/versions/20260703_0001_create_inspection_tables.py` | 검수 이력 저장 테이블 생성 마이그레이션 |
 | `alembic/versions/20260705_0002_add_inspection_file_identity.py` | 파일 해시와 검수 버전 컬럼, CHECK constraint, partial unique index 추가 마이그레이션 |
 | `alembic/versions/20260725_0003_create_etl_staging_tables.py` | ETL 배치·상품 staging 테이블, unique index, FK와 CHECK constraint 추가 마이그레이션 |
+| `alembic/versions/20260805_0009_create_users_table.py` | `users` 테이블(`username` unique, `role` CHECK, `is_active`) 생성 마이그레이션 |
 | `.github/workflows/test.yml` | 일반 테스트와 분리된 `browser-e2e` job을 포함해 PostgreSQL·Chromium 실제 브라우저 흐름까지 실행하는 GitHub Actions workflow |
 | `.env.example` | 로컬 PostgreSQL 연결 환경변수 예시 |
 | `requirements.txt` | Streamlit 앱 기본 실행 패키지 |
@@ -822,6 +863,19 @@ $env:CATALOGGUARD_API_TIMEOUT_SECONDS="5.0"
 
 `CATALOGGUARD_API_TIMEOUT_SECONDS`는 생략하거나 잘못된 값이 들어가면 기본값 `5.0`초를 사용합니다. `CATALOGGUARD_API_BASE_URL`이 없으면 Streamlit의 CSV 검수 자체는 가능하지만, 검수 이력 저장과 조회는 사용할 수 없습니다.
 
+로그인·JWT 검증에는 `CATALOGGUARD_JWT_SECRET`이 필요합니다. 이 값이 없으면 로그인, 토큰 검증이 필요한 요청은 실패하지만 `/health`, `/ready`, CLI ETL(`etl.cli`, `etl.load_cli`), Alembic migration은 이 값을 요구하지 않습니다.
+
+```powershell
+$env:CATALOGGUARD_JWT_SECRET="로컬에서만 사용할 임의의 긴 문자열"
+```
+
+| 환경변수 | 기본값 | 설명 |
+|---|---|---|
+| `CATALOGGUARD_JWT_SECRET` | 없음(필수) | JWT Access Token 서명 secret. 서버 설정으로 고정되며 요청에서 선택할 수 없음(알고리즘은 `HS256` 고정) |
+| `CATALOGGUARD_JWT_ACCESS_TOKEN_TTL_SECONDS` | `3600` | Access Token 만료 시간(초). 만료되면 Refresh Token 없이 다시 로그인해야 함 |
+
+실제 `CATALOGGUARD_JWT_SECRET` 값은 저장소에 커밋하지 않으며, 이 문서에도 실제 값을 적지 않습니다.
+
 ## 15. Alembic 마이그레이션
 
 마이그레이션은 `DATABASE_URL`이 설정된 PowerShell에서 저장소 루트 기준으로 실행합니다.
@@ -834,7 +888,7 @@ python -m alembic upgrade head
 python -m alembic history
 ```
 
-현재 Alembic head는 `20260803_0008`입니다.
+현재 Alembic head는 `20260805_0009`입니다.
 
 `20260703_0001_create_inspection_tables.py`는 다음 테이블을 만듭니다.
 
@@ -867,6 +921,11 @@ python -m alembic history
 
 `20260803_0008_allow_catalog_product_audit_detach.py`는 `catalog_product_changes.catalog_product_id`와 `catalog_promotion_rollback_changes.catalog_product_id`의 `ON DELETE RESTRICT` 외래 키를 제거합니다. INSERT promotion을 rollback하면 운영 상품이 실제로 삭제될 수 있는데, 이 외래 키가 남아 있으면 감사 이력이 상품을 계속 참조하고 있어 삭제 자체가 막힙니다. 외래 키를 제거해 상품이 삭제되어도 두 audit 테이블의 행은 그대로 남도록 했습니다.
 
+`20260805_0009_create_users_table.py`는 Authentication + RBAC를 위한 `users` 테이블을 추가합니다.
+
+- `id`, `username`(`VARCHAR(50)`, unique index), `password_hash`(`VARCHAR(255)`, bcrypt hash만 저장), `role`(`VARCHAR(20)`, `CHECK (role IN ('viewer', 'operator'))`), `is_active`(기본 `true`), `created_at`
+- 기존 `inspection_runs`, `etl_load_runs`, `catalog_products`, `catalog_promotion_runs` 등 다른 테이블은 이 마이그레이션에서 변경하지 않았습니다. 누가 실행했는지를 기존 실행 이력에 기록하는 actor 컬럼·FK는 추가하지 않았으며, 이는 "누가 실행할 수 있는지"를 통제하는 이번 Authentication 범위와는 다른 별도 기능입니다.
+
 upgrade 동작은 다음 순서입니다.
 
 1. `file_sha256` nullable 컬럼 추가
@@ -891,15 +950,16 @@ psql "$env:DATABASE_URL" -c "\d catalog_promotion_runs"
 psql "$env:DATABASE_URL" -c "\d catalog_product_changes"
 psql "$env:DATABASE_URL" -c "\d catalog_promotion_rollbacks"
 psql "$env:DATABASE_URL" -c "\d catalog_promotion_rollback_changes"
+psql "$env:DATABASE_URL" -c "\d users"
 ```
 
 테스트용 PostgreSQL 18 임시 클러스터에서 빈 DB의 `upgrade head`, `downgrade 20260728_0005`, 재-upgrade와 단일 head를 확인했다. `0006` downgrade는 새 운영 상품 persistence 테이블만 제거하며 기존 inspection·ETL staging 테이블은 유지한다.
 
-같은 방식으로 로컬 disposable PostgreSQL 18에서 빈 DB의 `upgrade head`, `downgrade 20260803_0007`, `downgrade 20260728_0006`, 재-upgrade와 단일 head도 확인했다.
+같은 방식으로 로컬 disposable PostgreSQL 18에서 빈 DB의 `upgrade head`, `downgrade 20260803_0007`, `downgrade 20260728_0006`, 재-upgrade와 단일 head도 확인했다. `20260805_0009`도 같은 방식으로 `downgrade 20260803_0008` 뒤 재-upgrade와 단일 head(`20260805_0009`)를 disposable PostgreSQL 18에서 확인했다.
 
 ## 16. FastAPI 실행 방법
 
-FastAPI는 검수 이력 저장, 목록 조회, 상세 조회를 담당합니다. 실행 전에 `DATABASE_URL`이 설정되어 있고 Alembic 마이그레이션이 적용되어 있어야 합니다.
+FastAPI는 검수 이력 저장, 목록 조회, 상세 조회를 담당합니다. 실행 전에 `DATABASE_URL`, `CATALOGGUARD_JWT_SECRET`이 설정되어 있고 Alembic 마이그레이션이 적용되어 있어야 합니다.
 
 ```powershell
 cd C:\study\catalogguard-lite
@@ -913,11 +973,23 @@ python -m uvicorn api.main:app --host 127.0.0.1 --port 8001 --reload
 - Readiness check: http://127.0.0.1:8001/ready
 - API docs: http://127.0.0.1:8001/docs
 
-CSV 검수 저장 API는 `multipart/form-data` 요청을 사용하며 파일 필드명은 `file`입니다.
+`/health`와 `/ready`는 로그인 없이 접근할 수 있지만, 검수·ETL·promotion·rollback API는 로그인이 필요합니다. 회원가입 API는 없으므로 먼저 `scripts/create_user.py`로 계정을 만듭니다.
 
 ```powershell
+$env:CATALOGGUARD_SEED_USER_PASSWORD="로컬에서만 사용할 임의의 비밀번호"
+python scripts/create_user.py --username operator1 --role operator
+```
+
+`--password`를 생략하면 `CATALOGGUARD_SEED_USER_PASSWORD` 환경변수를 사용하고, 그것도 없으면 대화형으로 비밀번호를 입력받습니다. 로그인 후 발급받은 Access Token을 `Authorization: Bearer` 헤더에 넣어 요청합니다.
+
+```powershell
+$login = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8001/api/v1/auth/login" `
+  -ContentType "application/json" `
+  -Body (@{ username = "operator1"; password = "위에서 설정한 비밀번호" } | ConvertTo-Json)
+
 curl.exe -X POST "http://127.0.0.1:8001/api/v1/inspections" `
   -H "accept: application/json" `
+  -H "Authorization: Bearer $($login.access_token)" `
   -F "file=@data/dev/products_dev.csv;type=text/csv"
 ```
 
@@ -1093,6 +1165,8 @@ python -m streamlit run app.py
 
 브라우저가 자동으로 열리지 않으면 터미널에 표시되는 Streamlit 주소를 열면 됩니다.
 
+화면을 열면 좌측 사이드바에 로그인 폼이 표시됩니다. 로그인 전에는 "좌측 사이드바에서 로그인한 뒤 이용해 주세요" 안내만 보이며 어떤 탭도 사용할 수 없습니다. 위 16장에서 만든 계정으로 아이디·비밀번호를 입력해 로그인하면 사이드바에 `아이디 (운영자/조회자)로 로그인했습니다`가 표시되고, 로그아웃 버튼으로 세션을 종료할 수 있습니다. viewer로 로그인하면 조회 화면은 그대로 사용할 수 있지만 ETL 실행·Promotion·Rollback 버튼은 비활성화됩니다(실제 차단은 FastAPI가 수행하며 이 비활성화는 편의 기능입니다).
+
 ## 18. API 목록
 
 ### `GET /health`
@@ -1112,7 +1186,57 @@ FastAPI 서버 상태를 확인합니다. PostgreSQL 연결을 확인하는 엔�
 
 FastAPI 프로세스와 PostgreSQL 연결 상태를 함께 확인합니다. 기존 SQLAlchemy 엔진으로 `SELECT 1`을 실행하며, 성공하면 HTTP `200`과 `database: "ok"`를 반환하고 연결 또는 쿼리가 실패하면 내부 오류 내용을 노출하지 않고 HTTP `503`과 `database: "unavailable"`을 반환합니다.
 
-공개 확인 주소는 https://catalogguard-lite-production.up.railway.app/ready 입니다. 운영 배포에서 `/health`와 `/ready`가 HTTP `200`을 반환하고 `/ready`의 `database`가 `"ok"`인지 확인합니다. Railway Healthcheck Path는 `/health`로 유지합니다.
+공개 확인 주소는 https://catalogguard-lite-production.up.railway.app/ready 입니다. 운영 배포에서 `/health`와 `/ready`가 HTTP `200`을 반환하고 `/ready`의 `database`가 `"ok"`인지 확인합니다. Railway Healthcheck Path는 `/health`로 유지합니다. `/health`, `/ready`는 `POST /api/v1/auth/login`과 함께 로그인 없이 접근할 수 있는 유일한 endpoint입니다.
+
+### `POST /api/v1/auth/login`
+
+아이디·비밀번호로 로그인하고 JWT Access Token을 발급받습니다. 회원가입 API는 없으며 계정은 `scripts/create_user.py`로만 만듭니다(13장 참고).
+
+```json
+{
+  "username": "operator1",
+  "password": "..."
+}
+```
+
+성공 응답에는 `access_token`, `token_type`(`"bearer"`), `expires_in`(초)이 있습니다. 아이디가 없거나, 비밀번호가 틀리거나, 계정이 비활성 상태여도 모두 같은 HTTP `401`과 `{"code": "invalid_credentials", ...}`만 반환해 계정 존재 여부나 활성 상태를 외부에 노출하지 않습니다.
+
+### `GET /api/v1/auth/me`
+
+현재 로그인한 사용자의 `username`, `role`을 반환합니다(`password_hash`는 절대 포함하지 않습니다). 로그인이 필요합니다.
+
+### 인증(Authentication)과 권한(RBAC)
+
+로그인 후에는 모든 요청에 `Authorization: Bearer <access_token>` 헤더가 필요합니다. Streamlit의 `CatalogGuardApiClient`는 로그인 성공 시 이 헤더를 세션에 한 번 설정해 이후 모든 요청에 자동으로 붙입니다.
+
+- **401 Unauthorized**: 로그인되지 않았거나(토큰 없음), JWT가 없거나 형식이 잘못됐거나 만료됐거나, 토큰은 유효하지만 계정이 비활성(`is_active=false`)인 경우
+- **403 Forbidden**: 로그인은 성공했지만 현재 역할(`role`)로는 허용되지 않는 작업인 경우
+
+예를 들어 viewer 계정으로 로그인한 뒤 Promotion 실행 API를 호출하면, 로그인 자체는 성공했으므로 401이 아니라 403(`insufficient_role`)이 반환됩니다.
+
+`get_current_user()`는 토큰의 `role`을 그대로 신뢰하지 않고 매 요청마다 PostgreSQL의 `users` 테이블에서 현재 `role`·`is_active`를 다시 확인합니다. 따라서 이미 발급된 토큰이 있어도 관리자가 계정을 비활성화하면 다음 요청부터 즉시 차단됩니다.
+
+역할은 `viewer`(조회)와 `operator`(운영 데이터 변경) 2개만 있습니다. 현재 admin 전용 기능이 없어 admin 역할은 만들지 않았습니다.
+
+| Endpoint | 인증 | 필요 역할 |
+|---|---|---|
+| `GET /health`, `GET /ready`, `POST /api/v1/auth/login` | 불필요 | - |
+| `GET /api/v1/auth/me` | 필요 | viewer 이상 |
+| `GET /api/v1/inspections`, `GET /api/v1/inspections/{id}` | 필요 | viewer 이상 |
+| `POST /api/v1/inspections` | 필요 | operator |
+| `GET /api/v1/inspection-jobs/{job_id}` | 필요 | viewer 이상 |
+| `POST /api/v1/inspection-jobs` | 필요 | operator |
+| `GET /api/v1/etl-profiles`, `GET /api/v1/etl-loads`, `GET /api/v1/etl-loads/{id}` | 필요 | viewer 이상 |
+| `POST /api/v1/etl-loads` | 필요 | operator |
+| `POST /api/v1/etl-loads/{id}/promotion-preview` | 필요 | viewer 이상 |
+| `POST /api/v1/etl-loads/{id}/promotions` | 필요 | operator |
+| `GET /api/v1/catalog-promotions`, `GET /api/v1/catalog-promotions/{id}`, `GET /api/v1/catalog-promotions/{id}/audits` | 필요 | viewer 이상 |
+| `POST /api/v1/catalog-promotions/{id}/rollback-preview` | 필요 | viewer 이상 |
+| `POST /api/v1/catalog-promotions/{id}/rollback` | 필요 | operator |
+
+Promotion Preview·Rollback Preview는 DB를 변경하지 않고 "무엇이 바뀔지"만 보여주므로 viewer도 조회할 수 있게 했고, 실제 반영(Promotion 실행)·되돌리기(Rollback 실행)만 operator로 제한했습니다. UI에서 viewer의 실행 버튼을 비활성화하는 것은 편의 기능일 뿐이며, 실제 권한 검사는 항상 FastAPI가 수행합니다.
+
+현재 Access Token만 구현되어 있으며 Refresh Token은 없습니다. 토큰이 만료되면 다시 로그인해야 합니다.
 
 ### 요청 ID와 운영 구조화 로그
 
@@ -1515,6 +1639,8 @@ python -m pytest tests/test_catalogguard_api_client.py -q
 python -m pytest tests/test_app_history_helpers.py -q
 python -m pytest tests/test_app_history_download_helpers.py -q
 python -m pytest tests/test_app_inspection_save_helpers.py -q
+python -m pytest tests/test_security.py tests/test_auth_service.py tests/test_create_user_cli.py -q
+python -m pytest tests/test_api_auth.py tests/test_ui_auth.py -q
 ```
 
 요청 ID 전달 관련 테스트는 다음 명령으로 한 번에 실행합니다.
@@ -1530,6 +1656,7 @@ $env:TEST_DATABASE_URL="postgresql+psycopg://catalogguard_test_user:CHANGE_ME@lo
 $env:DATABASE_URL=$env:TEST_DATABASE_URL
 python -m alembic upgrade head
 python -m pytest tests/test_inspection_persistence.py -q
+python -m pytest tests/test_api_rbac.py tests/test_api_inspections_transaction_regression.py -q
 ```
 
 전체 테스트는 다음 명령으로 실행합니다.
@@ -1538,24 +1665,31 @@ python -m pytest tests/test_inspection_persistence.py -q
 python -m pytest -q
 ```
 
+### Authentication/RBAC와 sync inspection transaction 테스트
+
+`tests/test_security.py`는 bcrypt 비밀번호 hash·검증과 JWT 발급·검증(만료, 잘못된 서명, 형식 오류)을 확인합니다. `tests/test_auth_service.py`, `tests/test_create_user_cli.py`는 `users` 조회·로그인 인증·계정 생성 CLI를 실제 PostgreSQL로 검증합니다. `tests/test_api_auth.py`는 로그인·현재 사용자 API 계약을, `tests/test_api_rbac.py`는 실제 PostgreSQL 사용자·JWT로 401(인증 실패)과 403(권한 부족) 경계를 endpoint 단위로 검증합니다. `tests/test_ui_auth.py`는 Streamlit 로그인·로그아웃·역할별 버튼 제한을 AppTest로 검증합니다.
+
+`tests/test_api_inspections_transaction_regression.py`는 `find_existing_inspection_run`·`save_inspection_report`를 monkeypatch하지 않고 실제 PostgreSQL Session으로 `POST /api/v1/inspections`를 검증하는 regression test입니다. 신규 CSV 저장 후 새 Session으로 재조회해 commit을 확인하고, 동일 CSV 재요청이 기존 run을 재사용하는지, 저장 도중 강제 실패가 발생하면 `inspection_runs`·`inspection_results`가 모두 rollback되는지, anonymous(401)·viewer(403)·operator(성공)의 권한 경계를 함께 확인합니다.
+
 ### PostgreSQL persistence 포함 검증 결과
 
-promotion과 rollback 기능은 운영 DB나 Railway DB에 연결하지 않고 저장소의 테스트 PostgreSQL 환경에서 검증했습니다. 기준 저장소 상태(commit `cb5ed81`)의 GitHub Actions run `30969273954`은 성공했으며, 문서에는 실행별 전체 테스트 수를 추측해 기록하지 않습니다.
+promotion과 rollback 기능은 운영 DB나 Railway DB에 연결하지 않고 저장소의 테스트 PostgreSQL 환경에서 검증했습니다. 기준 저장소 상태(commit `488bbd18`)의 GitHub Actions run `31077410946`은 성공했으며, 문서에는 실행별 전체 테스트 수를 추측해 기록하지 않습니다.
 
 ```text
 promotion preview·service·API·client·UI·concurrency 테스트 파일과 Playwright Chromium promotion E2E를 포함한 검증 범위를 확인
 rollback preview·service·API 계약과 PostgreSQL 통합 테스트 파일을 포함한 검증 범위를 확인
-Alembic history/heads: `20260803_0008` 단일 head 확인
+Alembic history/heads: `20260805_0009` 단일 head 확인
 promotion PostgreSQL transaction·partial unique index·audit·stale/중복 경쟁 조건 확인
 rollback PostgreSQL INSERT 삭제·UPDATE 복원·conflict 차단·중복 rollback 차단·transaction 원자성·원본 audit 보존 확인
-Chromium promotion E2E: preview·승인 전 버튼 비활성화·실제 반영·성공/중복 메시지·PostgreSQL 최종 상태 확인
+Chromium promotion E2E: preview·승인 전 버튼 비활성화·실제 반영·성공/중복 메시지·PostgreSQL 최종 상태 확인. 로그인 후 operator 권한으로 실행
+Authentication/RBAC: 401/403 경계, viewer/operator 권한 분리, sync inspection PostgreSQL transaction regression을 실제 PostgreSQL로 확인
 ```
 
 promotion preview의 응답 schema와 hash 형식, blocked reason, insert/update/unchanged 계산, confirmation 요구, stale preview, 안전한 오류 mapping, Streamlit 상태 초기화와 중복 제출 방지를 테스트했습니다. promotion E2E는 브라우저 성공 메시지에 의존하지 않고 `catalog_products`, `catalog_promotion_runs`, `catalog_product_changes`의 PostgreSQL 최종 상태와 `applying` 잔존 여부까지 확인합니다. rollback은 아직 전용 Streamlit AppTest와 Browser E2E는 없으며, 서비스·API 계층의 PostgreSQL 통합 테스트와 실제 FastAPI 서버를 통한 수동 검증으로 확인했습니다.
 
 ### 실제 브라우저 ETL E2E
 
-실제 Chromium 브라우저 E2E는 ETL reject fixture와 promotion fixture를 각각 `etl.cli`·`etl.load_cli`로 처리하고 테스트 PostgreSQL에 적재한 뒤, runner가 FastAPI와 Streamlit을 직접 시작합니다. promotion 시나리오는 `ETL 적재 이력` 탭에서 파일명·프로필명으로 batch를 검색하고, 실제 combobox 선택, preview, 변경 전·후 표, 승인 checkbox, 반영 버튼 상태, promotion 성공 또는 중복 메시지를 확인합니다. 이후 테스트 코드가 PostgreSQL의 succeeded run 1건, 운영 상품 insert/update, audit 존재, applying run 0건을 직접 확인합니다. reject 시나리오는 별도로 마스킹과 raw 민감정보 미노출, console/page error 0건을 확인합니다. 이 기존 E2E는 ETL 검색·promotion 화면만 다루며, 웹 ETL CSV 업로드 화면 자체를 실제 브라우저에서 검증하지는 않습니다. 웹 ETL selectbox를 추가할 때 이 검색 필드와 accessible label(`공급사 프로필`)이 겹쳐 기존 E2E의 `get_by_label()`이 strict-mode violation으로 실패한 적이 있으며, selectbox label을 `ETL 실행 프로필`로 분리해 해결했습니다.
+실제 Chromium 브라우저 E2E는 ETL reject fixture와 promotion fixture를 각각 `etl.cli`·`etl.load_cli`로 처리하고 테스트 PostgreSQL에 적재한 뒤, runner가 FastAPI와 Streamlit을 직접 시작합니다. Authentication 도입 후에는 두 시나리오 모두 시작 시 `browser_e2e_operator` 계정을 `scripts/create_user.py`로 생성하고, Streamlit 로그인 폼에서 실제 로그인한 뒤 기존 흐름을 이어갑니다. promotion 시나리오는 `ETL 적재 이력` 탭에서 파일명·프로필명으로 batch를 검색하고, 실제 combobox 선택, preview, 변경 전·후 표, 승인 checkbox, 반영 버튼 상태, promotion 성공 또는 중복 메시지를 확인합니다. 이후 테스트 코드가 PostgreSQL의 succeeded run 1건, 운영 상품 insert/update, audit 존재, applying run 0건을 직접 확인합니다. reject 시나리오는 별도로 마스킹과 raw 민감정보 미노출, console/page error 0건을 확인합니다. 이 기존 E2E는 ETL 검색·promotion 화면과 로그인 흐름만 다루며, 웹 ETL CSV 업로드 화면 자체를 실제 브라우저에서 검증하는 전용 시나리오는 아직 없습니다. 웹 ETL selectbox를 추가할 때 이 검색 필드와 accessible label(`공급사 프로필`)이 겹쳐 기존 E2E의 `get_by_label()`이 strict-mode violation으로 실패한 적이 있으며, selectbox label을 `ETL 실행 프로필`로 분리해 해결했습니다. 로그인 폼의 `아이디`·`비밀번호` label도 기존 UI label과 겹치지 않도록 새로 붙였습니다.
 
 일반 테스트의 `pytest==9.1.1`과 browser plugin의 `pytest<9` 제약을 섞지 않도록 E2E는 전용 가상환경에 설치하는 방식을 권장합니다.
 
@@ -1605,6 +1739,8 @@ python scripts/benchmark_inspection.py --rows 100 1000 5000 10000 --repeat 3 --w
 
 `.github/workflows/test.yml`의 `Test` workflow는 `main` 브랜치 push와 `main` 브랜치를 대상으로 한 pull request에서 실행됩니다. 일반 `test` job은 Python 3.11, PostgreSQL 18·Redis 7.4, Alembic, E2E 제외 pytest, 실제 Celery Worker·FastAPI·비동기 CSV 검수 E2E와 Streamlit startup smoke를 실행합니다. 또한 `Dockerfile.aws` image build, `api`·`services`·`workers`와 Celery task import, 실행 UID `10001`, PostgreSQL migration, 기본 CMD의 Uvicorn 시작과 `/health` HTTP `200`을 검증합니다. 이 AWS 검증은 GitHub Actions Ubuntu의 Docker packaging/runtime smoke이며 실제 AWS 배포는 수행하지 않습니다. 별도 `browser-e2e` job은 PostgreSQL 18 service와 Playwright Chromium을 준비하고 `scripts/run_etl_browser_e2e.py`로 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증하며, 실패 시에만 browser artifact를 업로드합니다.
 
+두 job 모두 `CATALOGGUARD_JWT_SECRET`을 `ci-test-only-jwt-secret-do-not-use-in-production` 같은 CI 전용 값으로 설정하며 운영 secret과 공유하지 않습니다. `test` job은 비동기 E2E 실행 전 `scripts/create_user.py`로 synthetic operator 계정을 만들고, `browser-e2e` job은 Chromium 실행 전 `browser_e2e_operator` 계정을 만들어 로그인 후 기존 흐름을 검증합니다.
+
 ```text
 main push 또는 main 대상 pull request
 -> GitHub Actions Test workflow
@@ -1627,7 +1763,7 @@ main push 또는 main 대상 pull request
 
 서비스 컨테이너는 workflow가 실행되는 동안만 사용하는 일회성 PostgreSQL·Redis CI 테스트 구성입니다. Railway나 운영 PostgreSQL·Redis에 연결하지 않으며, E2E를 제외한 단위 테스트와 실제 PostgreSQL 연결·저장 통합 테스트를 함께 실행합니다.
 
-비동기 E2E 테스트는 기본 `pytest`에서 `e2e` marker로 제외하고, workflow에서만 다음 명령으로 명시 실행합니다. 이 검사는 테스트용 PostgreSQL·Redis, FastAPI, Celery Worker가 모두 준비된 환경을 요구하며 운영 Redis·Celery 배포 검증과는 구분됩니다.
+비동기 E2E 테스트는 기본 `pytest`에서 `e2e` marker로 제외하고, workflow에서만 다음 명령으로 명시 실행합니다. 이 검사는 테스트용 PostgreSQL·Redis, FastAPI, Celery Worker가 모두 준비된 환경을 요구하며 운영 Redis·Celery 배포 검증과는 구분됩니다. Authentication 도입 후에는 FastAPI가 준비된 뒤 synthetic operator 계정으로 로그인해 발급받은 JWT Access Token으로 `POST /api/v1/inspection-jobs`를 호출합니다.
 
 ```bash
 python -m pytest -m e2e tests/e2e/test_async_inspection_ci.py -q
@@ -1643,7 +1779,7 @@ Streamlit 시작 스모크 테스트는 `python -m streamlit run app.py`로 실�
 
 AppTest는 실제 `app.py` 실행 경로의 CSV 업로드와 검수·필터 위젯을 검증하지만 실제 브라우저의 파일 선택 창이나 픽셀 렌더링까지 자동화하지는 않습니다. GitHub Actions 스모크 테스트도 Railway API 실제 통신, 운영 Secrets 설정, Streamlit Community Cloud 전용 장애나 모든 Segmentation fault를 검증하지 않습니다.
 
-기준 저장소 상태(commit `cb5ed81`)의 GitHub Actions run `30969273954`은 성공했습니다. Actions 실행별 전체 테스트 수는 이 문서에 추측해 고정하지 않으며, AWS Docker runtime smoke, promotion E2E와 Streamlit startup smoke의 실제 검증 범위는 위 테스트·workflow 설명을 따릅니다. Actions의 일회성 서비스 컨테이너는 운영 DB·Redis와 분리됩니다.
+기준 저장소 상태(commit `488bbd18`)의 GitHub Actions run `31077410946`은 성공했습니다. Actions 실행별 전체 테스트 수는 이 문서에 추측해 고정하지 않으며, AWS Docker runtime smoke, promotion E2E와 Streamlit startup smoke의 실제 검증 범위는 위 테스트·workflow 설명을 따릅니다. Actions의 일회성 서비스 컨테이너는 운영 DB·Redis와 분리됩니다.
 
 ## 24. 데이터 저장 범위와 보안
 
@@ -1696,6 +1832,10 @@ SHA-256 해시는 파일 동일성 확인용입니다. 해시만으로 원본 CS
 
 API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메시지로 바꾸며 내부 URL이나 서버 응답 본문을 그대로 노출하지 않도록 테스트되어 있습니다.
 
+`users` 테이블에는 `username`, `password_hash`(bcrypt hash), `role`, `is_active`, `created_at`만 저장합니다. 비밀번호 원문은 저장하지 않으며, bcrypt hash는 복호화가 아니라 매 로그인마다 재계산해 비교하는 단방향 함수입니다. JWT Access Token의 payload도 `sub`(username), `role`, `iat`, `exp`만 포함하고 `password_hash` 등 민감정보는 넣지 않습니다.
+
+Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니다. 현재 `inspection_runs`, `etl_load_runs`, `catalog_promotion_runs` 등 기존 실행 이력 테이블에는 실행한 사용자를 기록하는 actor 컬럼이 없으므로, "누가 실행했는지"를 사후에 조회하는 actor audit 기능은 아직 없습니다.
+
 ## 25. 현재 한계
 
 - MVP 단계의 규칙 기반 검사이므로 실제 운영 정책에 맞춘 금지어와 개인정보 탐지 조정이 필요합니다.
@@ -1714,7 +1854,12 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - migration 이전 기존 이력은 `file_sha256=NULL`이라 과거 이력까지 소급해 중복 판단할 수 없습니다.
 - `INSPECTION_VERSION`은 검수 규칙이 변경될 때 개발자가 직접 올려야 합니다.
 - 공개 Streamlit 앱에서는 FastAPI와 PostgreSQL 연동 상태에 따라 검수 이력 기능을 사용할 수 없을 수 있습니다.
-- 인증과 권한 관리는 구현되어 있지 않습니다.
+- Refresh Token은 없으며 Access Token이 만료되면 다시 로그인해야 합니다.
+- 회원가입 API, 비밀번호 찾기/재설정 기능은 없습니다. 계정은 `scripts/create_user.py` bootstrap CLI로만 만듭니다.
+- OAuth, MFA, SSO 연동은 없습니다.
+- 로그인 시도 rate limit이나 brute-force 방어는 구현되어 있지 않습니다.
+- 역할은 `viewer`·`operator` 2개만 있으며, 세밀한 permission 단위 ACL이나 관리자 전용 화면은 없습니다.
+- 누가 실행할 수 있는지(Authentication/RBAC)는 통제하지만, 누가 실행했는지를 기존 실행 이력에 기록하는 actor audit은 아직 없습니다.
 - 저장된 검수 이력 삭제 기능은 구현되어 있지 않습니다.
 - 전체 요약 CSV는 목록 API를 반복 조회하므로 다운로드 중 DB 내용이 바뀌는 상황의 완전한 스냅샷 보장은 별도 트랜잭션/내보내기 API가 필요합니다.
 - 실제 외부 공급사 운영 데이터와 연동하지 않았습니다.
@@ -1741,7 +1886,8 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - 검수 규칙 변경 시 `inspection_version` 관리 정책 수립
 - 과거 이력 backfill 정책 검토
 - 검수 이력 삭제와 보관 정책
-- 인증과 사용자별 이력 분리
+- Actor Audit: 누가 실행했는지를 기존 실행 이력(검수·ETL·promotion·rollback)에 기록
+- Refresh Token, 회원가입, password reset, OAuth/MFA/SSO, 로그인 rate limit
 - 중복 저장 이벤트 로그 또는 감사 기록 검토
 - 기간별 검수 추세와 파일 간 비교 통계 추가
 - 대용량 CSV 처리 성능 개선
@@ -1750,13 +1896,13 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - 카테고리별 사이즈 형식 검수
 - 브랜드 표준화
 - `gender` 선택 컬럼과 표준화
-- 웹 ETL 실행에 대한 인증·권한 관리와 처리 시간이 길어질 경우의 비동기(Celery) 실행
+- 웹 ETL 처리 시간이 길어질 경우의 비동기(Celery) 실행
 - 웹 ETL 다중 파일 업로드와 XLSX 등 추가 입력 형식 지원
 - 사용자 정의 ETL 프로필 등록·관리(Profile CRUD)
 - Web ETL CSV 업로드 전용 Browser E2E
-- promotion·rollback 실행에 대한 인증·권한 관리
 - 실제 운영 공급사·production catalog 연동과 배포 환경 promotion 검증
 - 증분 ETL과 대용량 streaming 처리
+- Async worker(`workers/inspection_tasks.py`)의 세션 트랜잭션 경계 정리(현재는 `session.rollback()`으로 사전 조회를 분리하며, sync 경로와 다른 방식)
 
 ## 27. 개발 시 주의사항
 
@@ -1765,7 +1911,8 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 - DB 모델을 바꾸면 SQLAlchemy 모델과 Alembic 마이그레이션을 함께 수정합니다.
 - 검수 규칙을 바꿔 같은 CSV도 다시 검수해야 하는 경우 `config/settings.py`의 `INSPECTION_VERSION`을 함께 올립니다.
 - `inspection_version`에는 DB `server_default`를 두지 않고 애플리케이션에서 명시적으로 저장합니다.
-- `DATABASE_URL`, `TEST_DATABASE_URL` 같은 비밀번호 포함 환경변수는 저장소에 커밋하지 않습니다.
+- `DATABASE_URL`, `TEST_DATABASE_URL`, `CATALOGGUARD_JWT_SECRET` 같은 비밀번호·secret 포함 환경변수는 저장소에 커밋하지 않습니다.
+- 같은 요청 안에서 다른 목적의 SQLAlchemy Session이 필요하면(예: 쓰기 트랜잭션을 시작하기 전의 빠른 조회) `Depends(get_session)`을 재사용해 같은 Session을 공유하지 말고, `Depends(get_session, use_cache=False)`로 독립된 Session을 받습니다. 같은 Session에서 SELECT가 먼저 실행되면 SQLAlchemy가 트랜잭션을 암묵적으로 시작(autobegin)시켜, 이후 Service가 여는 `with session.begin()`과 충돌합니다(`api/routes/inspections.py`의 `precheck_session` 참고).
 - `requirements.txt`와 `requirements-api.txt`의 역할이 나뉘어 있으므로 로컬 전체 시스템에서는 두 파일을 모두 설치합니다.
 - 파일명 검색을 수정할 때는 `%`, `_`, `\`가 일반 문자처럼 검색되는지 확인합니다.
 - Streamlit 세션 중복 방지와 DB 수준 중복 방지는 역할이 다르므로 둘 다 유지합니다.
