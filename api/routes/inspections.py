@@ -220,6 +220,7 @@ def list_inspection_runs(
 async def create_inspection(
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
+    precheck_session: Session = Depends(get_session, use_cache=False),
     _current_user=Depends(require_operator),
 ) -> InspectionResponse:
     file_bytes = await file.read()
@@ -231,9 +232,15 @@ async def create_inspection(
 
     # 중복 저장 판단에 쓰는 해시는 서버가 업로드 bytes로 직접 계산합니다.
     # 클라이언트가 보낸 값을 믿으면 조작된 해시로 DB 중복 방지가 깨질 수 있습니다.
+    #
+    # 이 사전 조회는 대부분의 중복 요청에서 inspect_dataframe()을 건너뛰기 위한 빠른 확인이며,
+    # 아래 save_inspection_report()가 자체 트랜잭션(with session.begin())으로 다시 한번
+    # 안전하게 중복을 확인/저장합니다. 두 조회가 같은 session을 쓰면 이 SELECT가 session을
+    # autobegin시켜 save_inspection_report()의 session.begin()과 충돌하므로, 이 사전 조회만
+    # 별도의(use_cache=False) session을 사용해 본 요청의 session과 완전히 분리합니다.
     file_sha256 = hashlib.sha256(file_bytes).hexdigest()
     existing_run = find_existing_inspection_run(
-        session,
+        precheck_session,
         file_sha256=file_sha256,
         inspection_version=INSPECTION_VERSION,
     )
