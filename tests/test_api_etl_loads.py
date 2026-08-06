@@ -6,11 +6,19 @@ from fastapi.testclient import TestClient
 
 from api.main import app
 from api.routes import etl_loads as etl_loads_route
+from conftest import clear_current_user_override, override_current_user
 from db.session import get_session
 
 
 client = TestClient(app)
 ENDPOINT = "/api/v1/etl-loads"
+
+
+@pytest.fixture(autouse=True)
+def authenticated_operator():
+    override_current_user(role="operator")
+    yield
+    clear_current_user_override()
 
 
 def _product(**overrides):

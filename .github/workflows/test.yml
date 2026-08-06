@@ -26,6 +26,10 @@ jobs:
       REDIS_JOB_URL: "redis://127.0.0.1:6379/1"
       INSPECTION_JOB_TTL_SECONDS: "300"
       AWS_RUNTIME_IMAGE: "catalogguard-lite-aws:${{ github.sha }}"
+      # CI 전용 테스트 secret입니다. 운영 JWT secret과 공유하지 않습니다.
+      CATALOGGUARD_JWT_SECRET: "ci-test-only-jwt-secret-do-not-use-in-production"
+      ASYNC_E2E_OPERATOR_USERNAME: "async_e2e_operator"
+      ASYNC_E2E_OPERATOR_PASSWORD: "ci-test-only-async-e2e-password"
     services:
       postgres:
         image: postgres:18
@@ -215,6 +219,14 @@ jobs:
           echo "FastAPI server did not become ready within 30 seconds."
           cat "${log_file}" || true
           exit 1
+      - name: Create synthetic operator user for async E2E
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CATALOGGUARD_SEED_USER_PASSWORD="${ASYNC_E2E_OPERATOR_PASSWORD}" \
+            python scripts/create_user.py \
+              --username "${ASYNC_E2E_OPERATOR_USERNAME}" \
+              --role operator
       - name: Run async inspection E2E smoke test
         env:
           ASYNC_E2E_API_BASE_URL: "http://127.0.0.1:8000"

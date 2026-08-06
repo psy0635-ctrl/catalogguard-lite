@@ -199,6 +199,13 @@ CATALOG_PROMOTION_BLOCKED_MESSAGE = (
     "현재 ETL 적재 결과는 운영 상품에 반영할 수 없습니다."
 )
 CATALOG_PROMOTION_FAILED_MESSAGE = "운영 상품 반영 중 오류가 발생했습니다."
+LOGIN_RESPONSE_KEYS = ("access_token", "token_type", "expires_in")
+CURRENT_USER_RESPONSE_KEYS = ("username", "role")
+AUTHENTICATION_REQUIRED_MESSAGE = "로그인이 필요합니다."
+INVALID_TOKEN_MESSAGE = "인증 토큰이 유효하지 않습니다. 다시 로그인해 주세요."
+INACTIVE_USER_MESSAGE = "비활성화된 계정입니다."
+INVALID_CREDENTIALS_MESSAGE = "아이디 또는 비밀번호가 올바르지 않습니다."
+INSUFFICIENT_ROLE_MESSAGE = "이 작업을 수행할 권한이 없습니다."
 
 
 def _normalize_request_id(value: object) -> str | None:
@@ -806,6 +813,38 @@ class ETLInvalidUploadError(ETLWebRunApiError):
     pass
 
 
+class CatalogGuardApiAuthenticationError(CatalogGuardApiResponseError):
+    """HTTP 401: 로그인되지 않았거나 access token이 유효하지 않습니다."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message, request_id=request_id)
+        self.code = code
+
+
+class InvalidCredentialsError(CatalogGuardApiAuthenticationError):
+    """로그인 시 아이디/비밀번호가 올바르지 않거나 계정이 비활성 상태입니다."""
+
+
+class CatalogGuardApiAuthorizationError(CatalogGuardApiResponseError):
+    """HTTP 403: 로그인은 됐지만 현재 역할로는 허용되지 않는 작업입니다."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        request_id: str | None = None,
+    ) -> None:
+        super().__init__(message, request_id=request_id)
+        self.code = code
+
+
 class CatalogGuardApiClient:
     # Streamlit 화면은 이 클라이언트만 알면 되고, requests 예외나 HTTP 상태 코드는 여기서 숨깁니다.
     # 그래서 app.py는 사용자에게 보여 줄 메시지만 선택하면 됩니다.
@@ -815,6 +854,7 @@ class CatalogGuardApiClient:
         *,
         timeout_seconds: float = CATALOGGUARD_API_DEFAULT_TIMEOUT_SECONDS,
         session: requests.Session | None = None,
+        access_token: str | None = None,
     ):
         normalized_base_url = str(base_url).strip().rstrip("/")
         if not normalized_base_url:
@@ -825,6 +865,28 @@ class CatalogGuardApiClient:
         self._base_url = normalized_base_url
         self._timeout_seconds = timeout_seconds
         self._session = session or requests.Session()
+        if access_token:
+            self.set_access_token(access_token)
+
+    def set_access_token(self, access_token: str | None) -> None:
+        # 매 호출마다 인자로 넘기지 않고, 세션 헤더에 한 번 설정해 이후 모든 요청에 자동으로 붙습니다.
+        if access_token:
+            self._session.headers["Authorization"] = f"Bearer {access_token}"
+        else:
+            self._session.headers.pop("Authorization", None)
+
+    def login(self, *, username: str, password: str) -> dict[str, Any]:
+        data = self._post_json(
+            "/api/v1/auth/login",
+            json_body={"username": username, "password": password},
+        )
+        self._validate_response_keys(data, LOGIN_RESPONSE_KEYS)
+        return data
+
+    def get_current_user(self) -> dict[str, Any]:
+        data = self._get_json("/api/v1/auth/me")
+        self._validate_response_keys(data, CURRENT_USER_RESPONSE_KEYS)
+        return data
 
     def list_inspections(
         self,
@@ -1334,6 +1396,13 @@ class CatalogGuardApiClient:
                     not_found_message,
                     request_id=request_id,
                 ) from error
+            auth_error = self._build_auth_error(
+                status_code,
+                error_response,
+                request_id=request_id,
+            )
+            if auth_error is not None:
+                raise auth_error from error
             raise CatalogGuardApiResponseError(
                 SERVER_ERROR_MESSAGE,
                 request_id=request_id,
@@ -1394,6 +1463,13 @@ class CatalogGuardApiClient:
                 )
                 if etl_run_error is not None:
                     raise etl_run_error from error
+            auth_error = self._build_auth_error(
+                status_code,
+                error_response,
+                request_id=request_id,
+            )
+            if auth_error is not None:
+                raise auth_error from error
             raise CatalogGuardApiResponseError(
                 SERVER_ERROR_MESSAGE,
                 request_id=request_id,
@@ -1402,6 +1478,55 @@ class CatalogGuardApiClient:
             raise CatalogGuardApiResponseError(SERVER_ERROR_MESSAGE) from error
 
         return response
+
+    def _build_auth_error(
+        self,
+        status_code: int | None,
+        response: object,
+        *,
+        request_id: str | None,
+    ) -> CatalogGuardApiResponseError | None:
+        if status_code not in (401, 403):
+            return None
+
+        code = None
+        try:
+            payload = response.json()
+        except (AttributeError, ValueError):
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("detail"), dict):
+            code = payload["detail"].get("code")
+
+        if status_code == 403:
+            return CatalogGuardApiAuthorizationError(
+                INSUFFICIENT_ROLE_MESSAGE,
+                code=code or "insufficient_role",
+                request_id=request_id,
+            )
+
+        if code == "invalid_credentials":
+            return InvalidCredentialsError(
+                INVALID_CREDENTIALS_MESSAGE,
+                code=code,
+                request_id=request_id,
+            )
+        if code == "inactive_user":
+            return CatalogGuardApiAuthenticationError(
+                INACTIVE_USER_MESSAGE,
+                code=code,
+                request_id=request_id,
+            )
+        if code == "authentication_required":
+            return CatalogGuardApiAuthenticationError(
+                AUTHENTICATION_REQUIRED_MESSAGE,
+                code=code,
+                request_id=request_id,
+            )
+        return CatalogGuardApiAuthenticationError(
+            INVALID_TOKEN_MESSAGE,
+            code=code or "invalid_token",
+            request_id=request_id,
+        )
 
     def _build_catalog_promotion_error(
         self,

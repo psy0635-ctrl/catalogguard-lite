@@ -366,3 +366,20 @@ class CatalogPromotionRollbackResponse(BaseModel):
     conflict_count: int
     started_at: datetime
     completed_at: datetime
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=50)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"]
+    expires_in: int
+
+
+class CurrentUserResponse(BaseModel):
+    # password_hash는 절대 포함하지 않습니다.
+    username: str
+    role: Literal["viewer", "operator"]

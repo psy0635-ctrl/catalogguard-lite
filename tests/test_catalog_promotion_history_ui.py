@@ -1,6 +1,5 @@
-from streamlit.testing.v1 import AppTest
-
 from clients import catalogguard_api
+from conftest import run_authenticated_app_test
 from tests.test_etl_load_history_ui import (
     FakeEtlApiClient,
     make_promotion_audit,
@@ -11,7 +10,7 @@ from ui import etl_load_history
 def _patch_api_client(monkeypatch, api_client):
     monkeypatch.setattr(
         etl_load_history,
-        "create_catalogguard_api_client",
+        "get_authenticated_api_client",
         lambda: api_client,
     )
     monkeypatch.setattr(
@@ -48,7 +47,7 @@ def test_catalog_promotion_history_apptest_shows_cached_list(monkeypatch):
     api_client = FakeEtlApiClient()
     _patch_api_client(monkeypatch, api_client)
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
 
     assert len(app.exception) == 0
     assert any(
@@ -73,7 +72,7 @@ def test_catalog_promotion_history_apptest_selects_detail_and_flattens_audit(
 ):
     api_client = FakeEtlApiClient()
     _patch_api_client(monkeypatch, api_client)
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
 
     next(
         selectbox
@@ -115,7 +114,7 @@ def test_catalog_promotion_history_apptest_paginates_audits(monkeypatch):
         }
     )
     _patch_api_client(monkeypatch, api_client)
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
     next(
         selectbox
         for selectbox in app.selectbox
@@ -146,7 +145,7 @@ def test_catalog_promotion_history_apptest_handles_empty_and_safe_api_error(
 ):
     empty_client = FakeEtlApiClient(promotion_history_items=[])
     _patch_api_client(monkeypatch, empty_client)
-    empty_app = AppTest.from_file("app.py").run(timeout=10)
+    empty_app = run_authenticated_app_test(timeout=10)
 
     assert "Promotion 실행 이력이 없습니다." in [
         info.value for info in empty_app.info
@@ -159,7 +158,7 @@ def test_catalog_promotion_history_apptest_handles_empty_and_safe_api_error(
         )
     )
     _patch_api_client(monkeypatch, error_client)
-    error_app = AppTest.from_file("app.py").run(timeout=10)
+    error_app = run_authenticated_app_test(timeout=10)
 
     messages = [error.value for error in error_app.error]
     assert any("Promotion 실행 이력을 불러오지 못했습니다." in value for value in messages)

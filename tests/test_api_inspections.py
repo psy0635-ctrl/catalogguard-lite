@@ -19,11 +19,20 @@ from core.inspection_service import InspectionReport
 from core.inspection_service import inspect_dataframe as real_inspect_dataframe
 from core.product_template import build_product_template_csv, get_product_template_filename
 from core.upload_validator import validate_and_read_uploaded_csv as real_validate_and_read_uploaded_csv
+from conftest import clear_current_user_override, override_current_user
 from db.session import get_session
 
 
 client = TestClient(app)
 ENDPOINT = "/api/v1/inspections"
+
+
+@pytest.fixture(autouse=True)
+def authenticated_operator():
+    # 이 파일은 인증 자체가 아니라 검수 endpoint 동작을 검증하므로 operator로 항상 인증된 상태를 가정합니다.
+    override_current_user(role="operator")
+    yield
+    clear_current_user_override()
 
 BASE_ROW = {
     "product_group_id": "G001",

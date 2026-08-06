@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
+from api.dependencies import require_operator, require_viewer
 from api.schemas import (
     InspectionJobStatusResponse,
     InspectionJobSubmissionResponse,
@@ -28,6 +29,7 @@ router = APIRouter()
 async def submit_inspection_job(
     file: UploadFile = File(...),
     service: InspectionJobService = Depends(get_inspection_job_service),
+    _current_user=Depends(require_operator),
 ) -> InspectionJobSubmissionResponse:
     file_bytes = await file.read()
     try:
@@ -51,6 +53,7 @@ async def submit_inspection_job(
 def get_inspection_job(
     job_id: UUID,
     service: InspectionJobService = Depends(get_inspection_job_service),
+    _current_user=Depends(require_viewer),
 ) -> InspectionJobStatusResponse:
     state = service.get(str(job_id))
     if state is None:

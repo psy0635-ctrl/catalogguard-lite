@@ -139,6 +139,7 @@ class FakeSession:
         self.response = response
         self.error = error
         self.calls = []
+        self.headers = {}
 
     def get(self, url, *, params=None, timeout=None):
         self.calls.append(
@@ -2103,3 +2104,162 @@ def test_list_etl_profiles_rejects_malformed_items():
 
     with pytest.raises(client_module.CatalogGuardApiResponseError):
         client.list_etl_profiles()
+
+
+LOGIN_RESPONSE = {
+    "access_token": "a.b.c",
+    "token_type": "bearer",
+    "expires_in": 3600,
+}
+CURRENT_USER_RESPONSE = {"username": "operator_user", "role": "operator"}
+
+
+def test_login_returns_validated_token_response():
+    client, session = make_client(response=FakeResponse(payload=LOGIN_RESPONSE))
+
+    data = client.login(username="operator_user", password="correct-password")
+
+    assert data == LOGIN_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/auth/login",
+            "files": None,
+            "timeout": 5.0,
+            "json": {"username": "operator_user", "password": "correct-password"},
+        }
+    ]
+
+
+def test_login_rejects_malformed_response():
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload={"access_token": "x"}))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.login(username="someone", password="pw")
+
+
+def test_login_maps_invalid_credentials_to_typed_error():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=401,
+            payload={"detail": {"code": "invalid_credentials", "message": "no"}},
+        )
+    )
+
+    with pytest.raises(client_module.InvalidCredentialsError) as error:
+        client.login(username="someone", password="wrong")
+    assert isinstance(error.value, client_module.CatalogGuardApiAuthenticationError)
+    assert error.value.code == "invalid_credentials"
+
+
+def test_get_current_user_returns_username_and_role():
+    client, session = make_client(response=FakeResponse(payload=CURRENT_USER_RESPONSE))
+
+    data = client.get_current_user()
+
+    assert data == CURRENT_USER_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/auth/me",
+            "params": None,
+            "timeout": 5.0,
+        }
+    ]
+
+
+def test_get_current_user_maps_missing_token_to_authentication_error():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=401,
+            payload={
+                "detail": {
+                    "code": "authentication_required",
+                    "message": "login required",
+                }
+            },
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiAuthenticationError) as error:
+        client.get_current_user()
+    assert error.value.code == "authentication_required"
+
+
+def test_get_current_user_maps_inactive_user_to_authentication_error():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=401,
+            payload={"detail": {"code": "inactive_user", "message": "disabled"}},
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiAuthenticationError) as error:
+        client.get_current_user()
+    assert error.value.code == "inactive_user"
+
+
+def test_get_current_user_maps_invalid_token_to_authentication_error():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=401,
+            payload={"detail": {"code": "invalid_token", "message": "bad token"}},
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiAuthenticationError) as error:
+        client.get_current_user()
+    assert error.value.code == "invalid_token"
+
+
+def test_run_etl_load_maps_forbidden_response_to_authorization_error():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=403,
+            payload={
+                "detail": {"code": "insufficient_role", "message": "no permission"}
+            },
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiAuthorizationError) as error:
+        client.run_etl_load(
+            profile_id="sample_fashion_vendor_v1",
+            source_filename="vendor.csv",
+            file_content=b"a,b\n1,2\n",
+        )
+    assert error.value.code == "insufficient_role"
+
+
+def test_set_access_token_adds_authorization_header():
+    client, session = make_client(response=FakeResponse(payload=LIST_RESPONSE))
+
+    client.set_access_token("token-value")
+
+    assert session.headers["Authorization"] == "Bearer token-value"
+
+
+def test_set_access_token_none_removes_authorization_header():
+    client, session = make_client(response=FakeResponse(payload=LIST_RESPONSE))
+
+    client.set_access_token("token-value")
+    client.set_access_token(None)
+
+    assert "Authorization" not in session.headers
+
+
+def test_constructor_access_token_sets_authorization_header():
+    client_module = import_client_module()
+    session = FakeSession(response=FakeResponse(payload=LIST_RESPONSE))
+
+    client_module.CatalogGuardApiClient(
+        "https://api.example.com",
+        session=session,
+        access_token="constructor-token",
+    )
+
+    assert session.headers["Authorization"] == "Bearer constructor-token"

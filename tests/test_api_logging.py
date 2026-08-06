@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 import api.main as api_main
 from api.routes import inspections as inspections_route
+from conftest import override_current_user
 from db.session import get_session
 
 
@@ -23,6 +24,7 @@ def fake_database_session():
         yield object()
 
     api_main.app.dependency_overrides[get_session] = override_session
+    override_current_user(role="operator")
     yield
     api_main.app.dependency_overrides.clear()
 

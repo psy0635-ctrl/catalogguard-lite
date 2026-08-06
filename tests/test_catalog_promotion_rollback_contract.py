@@ -10,6 +10,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from api.main import app
+from conftest import override_current_user
 from config.database import get_optional_database_url
 from db.catalog_promotion_preview_service import preview_catalog_promotion
 from db.catalog_promotion_rollback_service import (
@@ -180,6 +181,7 @@ def test_rollback_api_exposes_preview_and_requires_confirmation(monkeypatch):
         yield session
 
     app.dependency_overrides[route.get_session] = override_session
+    override_current_user(role="operator")
     client = TestClient(app, raise_server_exceptions=False)
     try:
         response = client.post(

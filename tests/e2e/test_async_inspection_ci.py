@@ -9,6 +9,8 @@ import requests
 
 
 API_BASE_URL = os.environ.get("ASYNC_E2E_API_BASE_URL", "http://127.0.0.1:8000")
+OPERATOR_USERNAME = os.environ.get("ASYNC_E2E_OPERATOR_USERNAME", "")
+OPERATOR_PASSWORD = os.environ.get("ASYNC_E2E_OPERATOR_PASSWORD", "")
 POLL_INTERVAL_SECONDS = 1
 POLL_TIMEOUT_SECONDS = 45
 REQUEST_TIMEOUT_SECONDS = 5
@@ -20,10 +22,36 @@ SUMMARY_FIELDS = (
     "warning_count",
 )
 
+_cached_access_token: str | None = None
+
+
+def _access_token() -> str:
+    # POST/GET 요청마다 매번 로그인하지 않도록 모듈 안에서 한 번만 로그인합니다.
+    global _cached_access_token
+    if _cached_access_token is not None:
+        return _cached_access_token
+
+    assert OPERATOR_USERNAME and OPERATOR_PASSWORD, (
+        "ASYNC_E2E_OPERATOR_USERNAME/ASYNC_E2E_OPERATOR_PASSWORD 환경변수가 필요합니다."
+    )
+    response = requests.post(
+        f"{API_BASE_URL}/api/v1/auth/login",
+        json={"username": OPERATOR_USERNAME, "password": OPERATOR_PASSWORD},
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    assert response.status_code == 200, response.text
+    _cached_access_token = response.json()["access_token"]
+    return _cached_access_token
+
+
+def _auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {_access_token()}"}
+
 
 def _get(path: str) -> requests.Response:
     return requests.get(
         f"{API_BASE_URL}{path}",
+        headers=_auth_headers(),
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
 
@@ -32,6 +60,7 @@ def _submit_csv(csv_bytes: bytes) -> dict[str, object]:
     response = requests.post(
         f"{API_BASE_URL}/api/v1/inspection-jobs",
         files={"file": ("products_dev.csv", csv_bytes, "text/csv")},
+        headers=_auth_headers(),
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
     assert response.status_code == 202, response.text

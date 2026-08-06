@@ -8,6 +8,7 @@ from sqlalchemy import delete, select
 
 from api.main import app
 from api.routes import etl_loads as etl_loads_route
+from conftest import override_current_user
 from config.database import get_optional_database_url
 from config.settings import MAX_UPLOAD_SIZE_BYTES
 from core.upload_validator import CsvUploadValidationError
@@ -29,6 +30,7 @@ def _files(*, content: bytes = b"header\nvalue\n", filename: str = "vendor.csv")
 
 @pytest.fixture(autouse=True)
 def clear_overrides():
+    override_current_user(role="operator")
     yield
     app.dependency_overrides.clear()
 

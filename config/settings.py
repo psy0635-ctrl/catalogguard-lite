@@ -16,6 +16,14 @@ DEFAULT_CELERY_BROKER_URL = "redis://localhost:6379/0"
 DEFAULT_REDIS_JOB_URL = "redis://localhost:6379/1"
 DEFAULT_INSPECTION_JOB_DIR = BASE_DIR / "var" / "inspection_jobs"
 DEFAULT_INSPECTION_JOB_TTL_SECONDS = 24 * 60 * 60
+
+# JWT access token 서명 키입니다. 서버 설정으로 고정하며 요청에서 선택할 수 없습니다.
+CATALOGGUARD_JWT_SECRET_ENV_VAR = "CATALOGGUARD_JWT_SECRET"
+CATALOGGUARD_JWT_ALGORITHM = "HS256"
+CATALOGGUARD_JWT_ACCESS_TOKEN_TTL_SECONDS_ENV_VAR = (
+    "CATALOGGUARD_JWT_ACCESS_TOKEN_TTL_SECONDS"
+)
+DEFAULT_JWT_ACCESS_TOKEN_TTL_SECONDS = 60 * 60
 # 검수 규칙 버전입니다. 규칙이 바뀌어 같은 CSV도 다시 저장해야 하면 이 값을 올립니다.
 INSPECTION_VERSION = "5"
 
@@ -218,3 +226,34 @@ def get_inspection_job_ttl_seconds() -> int:
         return DEFAULT_INSPECTION_JOB_TTL_SECONDS
 
     return ttl_seconds if ttl_seconds > 0 else DEFAULT_INSPECTION_JOB_TTL_SECONDS
+
+
+class JWTConfigurationError(RuntimeError):
+    """Raised when CATALOGGUARD_JWT_SECRET is missing where a token must be signed or verified."""
+
+
+def get_jwt_secret() -> str:
+    # 로그인/토큰 검증이 실제로 필요한 순간에만 읽습니다.
+    # /health, CLI ETL, migration 명령은 이 값을 요구하지 않습니다.
+    secret = os.environ.get(CATALOGGUARD_JWT_SECRET_ENV_VAR, "").strip()
+    if not secret:
+        raise JWTConfigurationError(
+            f"{CATALOGGUARD_JWT_SECRET_ENV_VAR} 환경변수가 설정되지 않았습니다. "
+            "로그인/토큰 검증이 필요한 명령에서만 이 값을 설정해 주세요."
+        )
+    return secret
+
+
+def get_jwt_access_token_ttl_seconds() -> int:
+    value = os.environ.get(
+        CATALOGGUARD_JWT_ACCESS_TOKEN_TTL_SECONDS_ENV_VAR, ""
+    ).strip()
+    if not value:
+        return DEFAULT_JWT_ACCESS_TOKEN_TTL_SECONDS
+
+    try:
+        ttl_seconds = int(value)
+    except ValueError:
+        return DEFAULT_JWT_ACCESS_TOKEN_TTL_SECONDS
+
+    return ttl_seconds if ttl_seconds > 0 else DEFAULT_JWT_ACCESS_TOKEN_TTL_SECONDS

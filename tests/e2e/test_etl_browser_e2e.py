@@ -28,6 +28,21 @@ PROMOTION_PRODUCT_IDS = (
     "CG-E2E-PROMO-BLK-M",
     "CG-E2E-PROMO-WHT-L",
 )
+E2E_OPERATOR_USERNAME = os.environ.get("E2E_OPERATOR_USERNAME", "")
+E2E_OPERATOR_PASSWORD = os.environ.get("E2E_OPERATOR_PASSWORD", "")
+
+
+def _login_as_operator(page) -> None:
+    from playwright.sync_api import expect
+
+    assert E2E_OPERATOR_USERNAME and E2E_OPERATOR_PASSWORD, (
+        "E2E_OPERATOR_USERNAME/E2E_OPERATOR_PASSWORD 환경변수가 필요합니다."
+    )
+    expect(page.locator("body")).to_contain_text("좌측 사이드바에서 로그인한 뒤 이용해 주세요.")
+    page.get_by_label("아이디").fill(E2E_OPERATOR_USERNAME)
+    page.get_by_label("비밀번호").fill(E2E_OPERATOR_PASSWORD)
+    page.get_by_role("button", name="로그인", exact=True).click()
+    expect(page.get_by_role("tab", name="ETL 적재 이력")).to_be_visible()
 
 
 def _preserve_browser_failure_artifacts(page) -> None:
@@ -54,8 +69,20 @@ def _assert_catalog_promotion_persisted(page) -> dict[str, int]:
     )
     from db.session import create_session_factory
 
+    login_response = page.request.post(
+        f"{API_URL}/api/v1/auth/login",
+        data={
+            "username": E2E_OPERATOR_USERNAME,
+            "password": E2E_OPERATOR_PASSWORD,
+        },
+    )
+    assert login_response.ok, login_response.text()
+    access_token = login_response.json()["access_token"]
+    auth_headers = {"Authorization": f"Bearer {access_token}"}
+
     response = page.request.get(
         f"{API_URL}/api/v1/etl-loads",
+        headers=auth_headers,
         params={
             "filename": PROMOTION_SOURCE_FILENAME,
             "profile_name": "sample_marketplace_vendor",
@@ -140,6 +167,8 @@ def _run_catalog_promotion_success_scenario(page) -> None:
     page.goto(STREAMLIT_URL, wait_until="domcontentloaded")
     expect(page.locator("body")).to_contain_text("CatalogGuard Lite")
     expect(page.locator("body")).not_to_contain_text("StreamlitAPIException")
+
+    _login_as_operator(page)
 
     page.get_by_role("tab", name="ETL 적재 이력").click()
     expect(page.locator("body")).to_contain_text("ETL 적재 이력")
@@ -266,6 +295,8 @@ def _run_etl_reject_details_scenario(page):
     page.goto(STREAMLIT_URL, wait_until="domcontentloaded")
     expect(page.locator("body")).to_contain_text("CatalogGuard Lite")
     expect(page.locator("body")).not_to_contain_text("StreamlitAPIException")
+
+    _login_as_operator(page)
 
     page.get_by_role("tab", name="ETL 적재 이력").click()
     expect(page.locator("body")).to_contain_text("ETL 적재 이력")

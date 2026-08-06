@@ -1,10 +1,10 @@
 from datetime import datetime
 
 import pandas as pd
-from streamlit.testing.v1 import AppTest
 
 from clients import catalogguard_api
 from clients.catalogguard_api import ETLLoadNotFoundError
+from conftest import run_authenticated_app_test
 from ui import etl_load_history
 
 from ui.etl_load_history import (
@@ -745,10 +745,10 @@ def test_etl_load_history_shows_rejection_rows_and_paginates(monkeypatch):
         rejection_total=25,
         reject_details_stored=True,
     )
-    monkeypatch.setattr(etl_load_history, "create_catalogguard_api_client", lambda: api_client)
+    monkeypatch.setattr(etl_load_history, "get_authenticated_api_client", lambda: api_client)
     monkeypatch.setattr(catalogguard_api, "create_catalogguard_api_client", lambda: api_client)
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
     select_etl_batch(app, 12)
     next(widget for widget in app.button if widget.label == "상세 조회").click().run(
         timeout=10
@@ -770,7 +770,7 @@ def test_etl_load_history_apptest_queries_once_and_shows_detail(monkeypatch):
     api_client = FakeEtlApiClient()
     monkeypatch.setattr(
         etl_load_history,
-        "create_catalogguard_api_client",
+        "get_authenticated_api_client",
         lambda: api_client,
     )
     monkeypatch.setattr(
@@ -779,7 +779,7 @@ def test_etl_load_history_apptest_queries_once_and_shows_detail(monkeypatch):
         lambda: api_client,
     )
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
 
     assert len(app.exception) == 0
     assert "ETL 적재 이력" in [subheader.value for subheader in app.subheader]
@@ -817,7 +817,7 @@ def test_etl_load_history_does_not_retry_failed_detail_within_one_click(
     )
     monkeypatch.setattr(
         etl_load_history,
-        "create_catalogguard_api_client",
+        "get_authenticated_api_client",
         lambda: api_client,
     )
     monkeypatch.setattr(
@@ -826,7 +826,7 @@ def test_etl_load_history_does_not_retry_failed_detail_within_one_click(
         lambda: api_client,
     )
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
     select_etl_batch(app, 12)
     next(widget for widget in app.button if widget.label == "상세 조회").click().run(
         timeout=10
@@ -847,7 +847,7 @@ def test_etl_load_history_apptest_applies_filters_and_product_pagination(
     )
     monkeypatch.setattr(
         etl_load_history,
-        "create_catalogguard_api_client",
+        "get_authenticated_api_client",
         lambda: api_client,
     )
     monkeypatch.setattr(
@@ -856,7 +856,7 @@ def test_etl_load_history_apptest_applies_filters_and_product_pagination(
         lambda: api_client,
     )
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
     next(widget for widget in app.text_input if widget.label == "원본 파일명").set_value(
         "  vendor_products.csv  "
     ).run(timeout=10)
@@ -901,7 +901,7 @@ def test_etl_load_history_clears_previous_products_when_batch_changes(monkeypatc
     )
     monkeypatch.setattr(
         etl_load_history,
-        "create_catalogguard_api_client",
+        "get_authenticated_api_client",
         lambda: api_client,
     )
     monkeypatch.setattr(
@@ -910,7 +910,7 @@ def test_etl_load_history_clears_previous_products_when_batch_changes(monkeypatc
         lambda: api_client,
     )
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
     select_etl_batch(app, 12)
     next(widget for widget in app.button if widget.key == "etl_load_show_detail").click().run(
         timeout=10
@@ -943,7 +943,7 @@ def test_etl_load_history_shows_empty_result_message(monkeypatch):
     api_client = FakeEtlApiClient(list_items=[], list_total=0)
     monkeypatch.setattr(
         etl_load_history,
-        "create_catalogguard_api_client",
+        "get_authenticated_api_client",
         lambda: api_client,
     )
     monkeypatch.setattr(
@@ -952,7 +952,7 @@ def test_etl_load_history_shows_empty_result_message(monkeypatch):
         lambda: api_client,
     )
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
 
     assert len(app.exception) == 0
     assert "조건에 맞는 ETL 적재 이력이 없습니다." in [
@@ -963,7 +963,7 @@ def test_etl_load_history_shows_empty_result_message(monkeypatch):
 def _patch_etl_api_client(monkeypatch, api_client):
     monkeypatch.setattr(
         etl_load_history,
-        "create_catalogguard_api_client",
+        "get_authenticated_api_client",
         lambda: api_client,
     )
     monkeypatch.setattr(
@@ -977,7 +977,7 @@ def test_catalog_promotion_apptest_requires_batch_selection(monkeypatch):
     api_client = FakeEtlApiClient()
     _patch_etl_api_client(monkeypatch, api_client)
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
 
     assert app.session_state["etl_load_selected_run_id"] is None
     assert next(
@@ -995,7 +995,7 @@ def test_catalog_promotion_apptest_preview_confirm_and_apply_once(monkeypatch):
     api_client = FakeEtlApiClient()
     _patch_etl_api_client(monkeypatch, api_client)
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
     next(
         selectbox
         for selectbox in app.selectbox
@@ -1071,7 +1071,7 @@ def test_catalog_promotion_apptest_blocked_preview_shows_reasons(monkeypatch):
     )
     _patch_etl_api_client(monkeypatch, api_client)
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
     next(
         selectbox
         for selectbox in app.selectbox
@@ -1096,7 +1096,7 @@ def test_catalog_promotion_apptest_batch_change_clears_preview(monkeypatch):
     api_client = FakeEtlApiClient(list_items=[make_load(12), make_load(13)])
     _patch_etl_api_client(monkeypatch, api_client)
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
     batch_select = next(
         selectbox
         for selectbox in app.selectbox
@@ -1132,7 +1132,7 @@ def test_catalog_promotion_apptest_page_change_invalidates_missing_batch(
     )
     _patch_etl_api_client(monkeypatch, api_client)
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
     select_etl_batch(app, 12)
     next(
         button for button in app.button if button.key == "catalog_promotion_preview"
@@ -1161,7 +1161,7 @@ def test_catalog_promotion_apptest_stale_clears_preview_and_prompts_retry(
     )
     _patch_etl_api_client(monkeypatch, api_client)
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
     next(
         selectbox
         for selectbox in app.selectbox
@@ -1189,7 +1189,7 @@ def test_etl_web_run_profile_dropdown_lists_allowlisted_profiles(monkeypatch):
     api_client = FakeEtlApiClient()
     _patch_etl_api_client(monkeypatch, api_client)
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
 
     profile_select = next(
         widget
@@ -1207,7 +1207,7 @@ def test_etl_web_run_submit_button_disabled_without_uploaded_file(monkeypatch):
     api_client = FakeEtlApiClient()
     _patch_etl_api_client(monkeypatch, api_client)
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
 
     submit_button = next(
         widget for widget in app.button if widget.key == "etl_web_run_submit"
@@ -1220,7 +1220,7 @@ def test_etl_web_run_profile_change_does_not_call_run_etl_load(monkeypatch):
     api_client = FakeEtlApiClient()
     _patch_etl_api_client(monkeypatch, api_client)
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
     next(
         widget
         for widget in app.selectbox
@@ -1234,7 +1234,7 @@ def test_etl_web_run_profile_change_clears_stale_result_and_error(monkeypatch):
     api_client = FakeEtlApiClient()
     _patch_etl_api_client(monkeypatch, api_client)
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
     app.session_state["etl_web_run_result"] = {"etl_load_run_id": 1, "created": True}
     app.session_state["etl_web_run_error"] = ValueError("stale")
     app.run(timeout=10)
@@ -1257,7 +1257,7 @@ def test_etl_web_run_shows_error_when_profile_list_fails(monkeypatch):
     )
     _patch_etl_api_client(monkeypatch, api_client)
 
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
 
     assert any(
         "ETL 프로필 목록을 불러오지 못했습니다." in error.value for error in app.error

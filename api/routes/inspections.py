@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, 
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from api.dependencies import require_operator, require_viewer
 from api.schemas import (
     InspectionDetailResponse,
     InspectionListItemResponse,
@@ -193,6 +194,7 @@ def list_inspection_runs(
         alias="status",
     ),
     session: Session = Depends(get_session),
+    _current_user=Depends(require_viewer),
 ) -> InspectionListResponse:
     created_at_start, created_at_end_exclusive = build_created_at_bounds(
         start_date=start_date,
@@ -218,6 +220,7 @@ def list_inspection_runs(
 async def create_inspection(
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
+    _current_user=Depends(require_operator),
 ) -> InspectionResponse:
     file_bytes = await file.read()
 
@@ -283,6 +286,7 @@ async def create_inspection(
 def get_inspection(
     inspection_run_id: int,
     session: Session = Depends(get_session),
+    _current_user=Depends(require_viewer),
 ) -> InspectionDetailResponse:
     detail = get_inspection_detail(
         session,

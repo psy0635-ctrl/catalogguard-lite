@@ -21,6 +21,41 @@ from sqlalchemy.orm import Mapped, foreign, mapped_column, relationship
 from db.base import Base
 
 
+class User(Base):
+    # 로그인 계정 하나를 나타냅니다. Authentication + RBAC MVP 범위의 최소 필드만 둡니다.
+    __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('viewer', 'operator')",
+            name="ck_users_role",
+        ),
+        CheckConstraint(
+            "length(trim(username)) > 0",
+            name="ck_users_username_not_blank",
+        ),
+        Index("ux_users_username", "username", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+    )
+    username: Mapped[str] = mapped_column(String(50), nullable=False)
+    # 평문 비밀번호는 저장하지 않고 bcrypt hash 문자열만 저장합니다.
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        nullable=False,
+        server_default=text("true"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class InspectionRun(Base):
     # CSV 파일 하나를 검수한 "실행 기록"을 저장합니다.
     __tablename__ = "inspection_runs"

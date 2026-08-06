@@ -2,15 +2,24 @@ from pathlib import Path
 from types import SimpleNamespace
 from datetime import datetime, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from conftest import clear_current_user_override, override_current_user
 from services.inspection_job_service import get_inspection_job_service
 from services.redis_job_store import InspectionJobState
 
 
 DEV_DATA_PATH = Path(__file__).parents[1] / "data" / "dev" / "products_dev.csv"
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def authenticated_operator():
+    override_current_user(role="operator")
+    yield
+    clear_current_user_override()
 
 
 def test_submit_inspection_job_returns_accepted_queued_job() -> None:

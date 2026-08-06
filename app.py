@@ -13,7 +13,6 @@ from clients.catalogguard_api import (
     CatalogGuardApiResponseError,
     CatalogGuardApiTimeoutError,
     InspectionNotFoundError,
-    create_catalogguard_api_client,
 )
 from config.settings import OPTIONAL_COLUMNS, REQUIRED_COLUMNS
 from core.presentation import (
@@ -32,6 +31,7 @@ from core.upload_validator import (
     CsvUploadValidationError,
     validate_and_read_uploaded_csv,
 )
+from ui.auth import get_authenticated_api_client, is_authenticated, render_auth_sidebar
 from ui.etl_load_history import render_etl_load_history
 
 
@@ -806,7 +806,7 @@ def render_inspection_save_button(
             return detail_response
 
         try:
-            api_client = create_catalogguard_api_client()
+            api_client = get_authenticated_api_client()
             response = api_client.create_inspection(
                 source_filename=source_filename,
                 file_content=file_bytes,
@@ -895,7 +895,7 @@ def submit_background_inspection_job(
     clear_current_inspection_result(st.session_state)
     clear_async_inspection_job(st.session_state)
     try:
-        api_client = create_catalogguard_api_client()
+        api_client = get_authenticated_api_client()
         response = api_client.submit_inspection_job(
             source_filename=source_filename,
             file_content=file_bytes,
@@ -1068,7 +1068,7 @@ def render_background_inspection(
     if isinstance(job_id, str) and status in {"queued", "running"}:
         if st.button("상태 새로고침", key="refresh_async_inspection"):
             try:
-                api_client = create_catalogguard_api_client()
+                api_client = get_authenticated_api_client()
             except CatalogGuardApiConfigurationError:
                 st.session_state[ASYNC_JOB_ERROR_STATE_KEY] = (
                     "작업 상태를 확인할 수 없습니다."
@@ -1104,7 +1104,7 @@ def render_background_inspection(
     if status == "succeeded" and detail_response is None:
         if st.button("결과 다시 불러오기", key="reload_async_result"):
             try:
-                api_client = create_catalogguard_api_client()
+                api_client = get_authenticated_api_client()
             except CatalogGuardApiConfigurationError:
                 st.session_state[ASYNC_JOB_ERROR_STATE_KEY] = (
                     "완료된 검수 결과를 불러올 수 없습니다."
@@ -1294,7 +1294,7 @@ def render_inspection_history_tab() -> None:
     initialize_history_state()
 
     try:
-        api_client = create_catalogguard_api_client()
+        api_client = get_authenticated_api_client()
     except CatalogGuardApiConfigurationError:
         st.warning("검수 이력 API 주소가 설정되지 않았습니다.")
         st.caption("로컬 실행 시 CATALOGGUARD_API_BASE_URL 환경변수를 설정해 주세요.")
@@ -1667,6 +1667,12 @@ def main() -> None:
     render_global_style()
 
     st.title("CatalogGuard Lite")
+    render_auth_sidebar()
+
+    if not is_authenticated():
+        st.info("좌측 사이드바에서 로그인한 뒤 이용해 주세요.")
+        return
+
     st.write("상품 카탈로그 CSV 파일의 누락 값과 데이터 오류를 검사합니다.")
 
     inspection_tab, history_tab, etl_load_history_tab = st.tabs(

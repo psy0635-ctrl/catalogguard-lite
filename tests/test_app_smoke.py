@@ -1,7 +1,9 @@
 # 역할: Streamlit 앱이 업로드 전 초기 화면에서 예외 없이 렌더링되는지 테스트합니다.
 from clients import catalogguard_api
+from conftest import build_authenticated_app_test, run_authenticated_app_test
 from core import inspection_service
 from streamlit.testing.v1 import AppTest
+from ui import auth as ui_auth
 
 
 GROUP_CATEGORY_TEST_CSV = """product_group_id,product_id,product_name,category,color,size,stock,price,image_path
@@ -156,6 +158,10 @@ class FakeInspectionApiClient:
         self.submit_calls = []
         self.status_calls = []
 
+    def set_access_token(self, access_token):
+        # 로그인 상태 UI 배선을 위한 no-op입니다. 이 fake는 인증 여부를 검증하지 않습니다.
+        pass
+
     def create_inspection(self, **kwargs):
         self.create_calls.append(kwargs)
         if self.create_error is not None:
@@ -217,9 +223,25 @@ def find_result_dataframe(app):
     )
 
 
+def test_app_requires_login_before_rendering_tabs():
+    # 로그인 전에는 검수 탭이 아니라 로그인 안내와 사이드바 로그인 폼만 보여야 합니다.
+    app = AppTest.from_file("app.py")
+
+    app.run(timeout=10)
+
+    assert len(app.exception) == 0
+    assert [title.value for title in app.title] == ["CatalogGuard Lite"]
+    assert "좌측 사이드바에서 로그인한 뒤 이용해 주세요." in [
+        info.value for info in app.info
+    ]
+    assert "CSV 입력 템플릿" not in [subheader.value for subheader in app.subheader]
+    assert app.file_uploader == []
+    assert find_widget(app.button, "로그인") is not None
+
+
 def test_app_initial_render_without_upload(monkeypatch):
     monkeypatch.delenv("CATALOGGUARD_API_BASE_URL", raising=False)
-    app = AppTest.from_file("app.py")
+    app = build_authenticated_app_test("app.py")
 
     app.run(timeout=10)
 
@@ -259,11 +281,16 @@ def test_app_upload_filters_and_downloads_group_category_results(monkeypatch):
         lambda: api_client,
     )
     monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    monkeypatch.setattr(
         inspection_service,
         "inspect_dataframe",
         spy_inspect_dataframe,
     )
-    app = AppTest.from_file("app.py").run(timeout=10)
+    app = run_authenticated_app_test(timeout=10)
 
     app.file_uploader[0].upload(
         "group_category_consistency_test.csv",
@@ -401,7 +428,12 @@ def test_app_background_job_posts_once_refreshes_with_get_and_reuses_result_ui(
         "create_catalogguard_api_client",
         lambda: api_client,
     )
-    app = AppTest.from_file("app.py").run(timeout=10)
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
     find_widget(app.radio, "검수 방식").set_value("백그라운드 검수").run(
         timeout=10
     )
@@ -461,7 +493,12 @@ def test_app_background_duplicate_result_preserves_created_false(monkeypatch):
         "create_catalogguard_api_client",
         lambda: api_client,
     )
-    app = AppTest.from_file("app.py").run(timeout=10)
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
     find_widget(app.radio, "검수 방식").set_value("백그라운드 검수").run(
         timeout=10
     )
@@ -489,7 +526,12 @@ def test_app_background_failed_job_hides_internal_error_and_keeps_sync_available
         "create_catalogguard_api_client",
         lambda: api_client,
     )
-    app = AppTest.from_file("app.py").run(timeout=10)
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
     find_widget(app.radio, "검수 방식").set_value("백그라운드 검수").run(
         timeout=10
     )
@@ -522,7 +564,12 @@ def test_app_background_failed_job_can_be_resubmitted_only_by_user_click(monkeyp
         "create_catalogguard_api_client",
         lambda: api_client,
     )
-    app = AppTest.from_file("app.py").run(timeout=10)
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
     find_widget(app.radio, "검수 방식").set_value("백그라운드 검수").run(
         timeout=10
     )
@@ -553,7 +600,12 @@ def test_app_new_upload_clears_background_job_state(monkeypatch):
         "create_catalogguard_api_client",
         lambda: api_client,
     )
-    app = AppTest.from_file("app.py").run(timeout=10)
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
     find_widget(app.radio, "검수 방식").set_value("백그라운드 검수").run(
         timeout=10
     )
@@ -585,7 +637,12 @@ def test_app_background_submission_error_is_safe_and_does_not_store_job(monkeypa
         "create_catalogguard_api_client",
         lambda: api_client,
     )
-    app = AppTest.from_file("app.py").run(timeout=10)
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
     find_widget(app.radio, "검수 방식").set_value("백그라운드 검수").run(
         timeout=10
     )
@@ -612,7 +669,12 @@ def test_app_background_status_error_keeps_job_without_reposting(monkeypatch):
         "create_catalogguard_api_client",
         lambda: api_client,
     )
-    app = AppTest.from_file("app.py").run(timeout=10)
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
     find_widget(app.radio, "검수 방식").set_value("백그라운드 검수").run(
         timeout=10
     )
@@ -641,7 +703,12 @@ def test_app_background_missing_run_id_is_reported_without_detail_request(monkey
         "create_catalogguard_api_client",
         lambda: api_client,
     )
-    app = AppTest.from_file("app.py").run(timeout=10)
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
     find_widget(app.radio, "검수 방식").set_value("백그라운드 검수").run(
         timeout=10
     )
@@ -676,7 +743,12 @@ def test_app_background_detail_retry_only_repeats_detail_get(monkeypatch):
         "create_catalogguard_api_client",
         lambda: api_client,
     )
-    app = AppTest.from_file("app.py").run(timeout=10)
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
     find_widget(app.radio, "검수 방식").set_value("백그라운드 검수").run(
         timeout=10
     )
@@ -716,7 +788,12 @@ def test_app_background_detail_not_found_preserves_completed_job(monkeypatch):
         "create_catalogguard_api_client",
         lambda: api_client,
     )
-    app = AppTest.from_file("app.py").run(timeout=10)
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
     find_widget(app.radio, "검수 방식").set_value("백그라운드 검수").run(
         timeout=10
     )
@@ -739,7 +816,12 @@ def test_app_inspection_mode_round_trip_does_not_call_any_inspection_api(monkeyp
         "create_catalogguard_api_client",
         lambda: api_client,
     )
-    app = AppTest.from_file("app.py").run(timeout=10)
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
     app.file_uploader[0].upload(
         "products.csv", GROUP_CATEGORY_TEST_CSV, "text/csv"
     ).run(timeout=10)
@@ -767,7 +849,12 @@ def test_app_duplicate_upload_loads_existing_server_result(monkeypatch):
         "create_catalogguard_api_client",
         lambda: api_client,
     )
-    app = AppTest.from_file("app.py").run(timeout=10)
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
 
     app.file_uploader[0].upload(
         "group_category_consistency_test.csv",
@@ -793,7 +880,12 @@ def test_app_new_upload_clears_previous_server_result(monkeypatch):
         "create_catalogguard_api_client",
         lambda: api_client,
     )
-    app = AppTest.from_file("app.py").run(timeout=10)
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
     app.file_uploader[0].upload(
         "first.csv",
         GROUP_CATEGORY_TEST_CSV,
@@ -826,7 +918,12 @@ def test_app_api_error_does_not_show_stale_success_result(monkeypatch):
         "create_catalogguard_api_client",
         lambda: api_client,
     )
-    app = AppTest.from_file("app.py").run(timeout=10)
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
     app.file_uploader[0].upload(
         "invalid.csv",
         GROUP_CATEGORY_TEST_CSV,

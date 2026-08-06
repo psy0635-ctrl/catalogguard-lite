@@ -12,6 +12,7 @@ from sqlalchemy import delete, func, or_, select
 
 from api.main import app
 from api.routes import etl_loads as etl_loads_route
+from conftest import clear_current_user_override, override_current_user
 from config.database import get_optional_database_url
 from db.catalog_promotion_preview_service import (
     CatalogPromotionPreview,
@@ -39,6 +40,13 @@ from db.session import (
 
 ENDPOINT = "/api/v1/etl-loads/42/promotion-preview"
 client = TestClient(app, raise_server_exceptions=False)
+
+
+@pytest.fixture(autouse=True)
+def authenticated_operator():
+    override_current_user(role="operator")
+    yield
+    clear_current_user_override()
 
 
 class WriteGuardSession:

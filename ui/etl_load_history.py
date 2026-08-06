@@ -17,8 +17,8 @@ from clients.catalogguard_api import (
     ETLInvalidUploadError,
     ETLLoadNotFoundError,
     ETLUnsupportedProfileError,
-    create_catalogguard_api_client,
 )
+from ui.auth import get_authenticated_api_client, is_operator
 
 
 ETL_LOAD_LIMIT = 10
@@ -688,10 +688,12 @@ def _render_catalog_promotion_preview(api_client) -> None:
         ),
     )
     st.session_state["catalog_promotion_confirmation"] = bool(confirmation)
+    if not is_operator():
+        st.caption("운영 상품 반영은 운영자 권한이 필요합니다.")
     if st.button(
         "운영 상품에 반영",
         key="catalog_promotion_submit",
-        disabled=not can_submit_catalog_promotion(st.session_state),
+        disabled=not can_submit_catalog_promotion(st.session_state) or not is_operator(),
         type="primary",
     ):
         _submit_catalog_promotion(api_client)
@@ -1449,11 +1451,19 @@ def _render_etl_web_run(api_client) -> None:
 
     in_flight = st.session_state.get("etl_web_run_in_flight") is True
     selected_profile_id = st.session_state.get("etl_web_run_selected_profile_id")
+    can_run_etl = is_operator()
+    if not can_run_etl:
+        st.caption("ETL 실행은 운영자 권한이 필요합니다.")
     if st.button(
         "ETL 실행",
         key="etl_web_run_submit",
         type="primary",
-        disabled=uploaded_file is None or selected_profile_id is None or in_flight,
+        disabled=(
+            uploaded_file is None
+            or selected_profile_id is None
+            or in_flight
+            or not can_run_etl
+        ),
     ):
         _submit_etl_web_run(
             api_client,
@@ -1499,7 +1509,7 @@ def render_etl_load_history(api_client=None) -> None:
 
     if api_client is None:
         try:
-            api_client = create_catalogguard_api_client()
+            api_client = get_authenticated_api_client()
         except CatalogGuardApiConfigurationError as error:
             _render_etl_error(error)
             return
@@ -1610,7 +1620,9 @@ def _render_catalog_promotion_rollback(api_client, detail: dict[str, Any]) -> No
         st.dataframe(pd.DataFrame([{"Product": item.get("external_product_id"), "Action": item.get("rollback_action"), "Conflict": item.get("conflict")} for item in items]), hide_index=True, width="stretch")
     confirmed = st.checkbox("I reviewed the rollback preview and confirm execution.", key="catalog_promotion_rollback_confirmation", disabled=preview.get("rollback_eligible") is not True)
     expected_hash = preview.get("preview_hash")
-    if st.button("Execute Rollback", key="catalog_promotion_rollback_execute", type="primary", disabled=not (confirmed and isinstance(expected_hash, str))):
+    if not is_operator():
+        st.caption("Rollback execution requires the operator role.")
+    if st.button("Execute Rollback", key="catalog_promotion_rollback_execute", type="primary", disabled=not (confirmed and isinstance(expected_hash, str) and is_operator())):
         try:
             response = api_client.create_catalog_promotion_rollback(run_id, confirmation=True, expected_preview_hash=expected_hash)
             st.session_state[result_key] = None

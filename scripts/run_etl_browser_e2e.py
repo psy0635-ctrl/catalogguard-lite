@@ -135,10 +135,18 @@ class ETLBrowserE2ERunner:
         self.temp_dir = Path(tempfile.mkdtemp(prefix="catalogguard-etl-browser-e2e-"))
         self.artifact_dir = args.artifacts_dir.resolve()
         self.processes: list[tuple[str, subprocess.Popen[bytes], Path]] = []
+        self.operator_username = "browser_e2e_operator"
+        self.operator_password = os.environ.get(
+            "E2E_OPERATOR_PASSWORD", "browser-e2e-test-only-password"
+        )
         self.environment = {
             **os.environ,
             "DATABASE_URL": args.database_url,
             "TEST_DATABASE_URL": args.database_url,
+            # 로컬에서 별도로 설정하지 않았다면 이 disposable 테스트 실행 전용 값을 사용합니다.
+            "CATALOGGUARD_JWT_SECRET": os.environ.get(
+                "CATALOGGUARD_JWT_SECRET", "browser-e2e-test-only-jwt-secret"
+            ),
             "CATALOGGUARD_API_BASE_URL": (
                 f"http://127.0.0.1:{args.api_port}"
             ),
@@ -146,6 +154,9 @@ class ETLBrowserE2ERunner:
             "E2E_SOURCE_FILENAME": FIXTURE_PATH.name,
             "E2E_PROMOTION_SOURCE_FILENAME": PROMOTION_FIXTURE_PATH.name,
             "E2E_ARTIFACT_DIR": str(self.artifact_dir),
+            "E2E_OPERATOR_USERNAME": self.operator_username,
+            "E2E_OPERATOR_PASSWORD": self.operator_password,
+            "CATALOGGUARD_SEED_USER_PASSWORD": self.operator_password,
             "PYTHONIOENCODING": "utf-8",
         }
 
@@ -266,6 +277,18 @@ class ETLBrowserE2ERunner:
                 "Alembic migration",
                 [sys.executable, "-m", "alembic", "upgrade", "head"],
                 log_name="alembic.log",
+            )
+            self._run_command(
+                "Create browser E2E operator user",
+                [
+                    sys.executable,
+                    "scripts/create_user.py",
+                    "--username",
+                    self.operator_username,
+                    "--role",
+                    "operator",
+                ],
+                log_name="create-operator-user.log",
             )
             self._prepare_etl_batch(
                 fixture_path=FIXTURE_PATH,

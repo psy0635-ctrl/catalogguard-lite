@@ -172,7 +172,7 @@ def test_render_inspection_button_posts_once_fetches_detail_and_stores_server_re
     monkeypatch.setattr(app_module, "st", fake_streamlit)
     monkeypatch.setattr(
         app_module,
-        "create_catalogguard_api_client",
+        "get_authenticated_api_client",
         lambda: api_client,
     )
 
@@ -211,7 +211,7 @@ def test_render_inspection_button_fetches_existing_detail_for_duplicate(
     monkeypatch.setattr(app_module, "st", fake_streamlit)
     monkeypatch.setattr(
         app_module,
-        "create_catalogguard_api_client",
+        "get_authenticated_api_client",
         lambda: api_client,
     )
 
@@ -269,7 +269,7 @@ def test_render_inspection_button_clears_previous_result_on_create_failure(
     monkeypatch.setattr(app_module, "st", fake_streamlit)
     monkeypatch.setattr(
         app_module,
-        "create_catalogguard_api_client",
+        "get_authenticated_api_client",
         lambda: api_client,
     )
 
@@ -302,7 +302,7 @@ def test_render_inspection_button_does_not_keep_result_when_detail_lookup_fails(
     monkeypatch.setattr(app_module, "st", fake_streamlit)
     monkeypatch.setattr(
         app_module,
-        "create_catalogguard_api_client",
+        "get_authenticated_api_client",
         lambda: api_client,
     )
 
@@ -357,7 +357,7 @@ def test_render_inspection_button_rejects_malformed_detail_before_storing_result
     monkeypatch.setattr(app_module, "st", fake_streamlit)
     monkeypatch.setattr(
         app_module,
-        "create_catalogguard_api_client",
+        "get_authenticated_api_client",
         lambda: api_client,
     )
 
