@@ -43,6 +43,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 12. succeeded promotion을 되돌리는 rollback을 추가하면서 과거 값으로 단순 덮어쓰지 않고, 되돌리기 직전 현재 운영 상품이 해당 promotion이 만든 결과 그대로인지 재확인해 이후 발생한 정상 변경은 conflict로 보존하도록 구현했습니다. preview hash 재계산, confirmation 검증, 단일 transaction 원자성과 중복 rollback 이중 방어(service·DB unique index)를 PostgreSQL 통합 테스트로 검증했습니다.
 13. Streamlit 로그인과 FastAPI JWT Access Token 발급, viewer(조회)·operator(운영 데이터 변경) 2개 역할 분리를 구현했습니다. `get_current_user()`가 토큰의 role을 그대로 신뢰하지 않고 매 요청마다 PostgreSQL `users` 테이블에서 role·is_active를 다시 확인하도록 설계해, 계정을 비활성화하면 이미 발급된 토큰도 즉시 차단되게 했습니다. 검수·ETL·Promotion·Rollback 전체 endpoint에 401(인증 실패)/403(권한 부족) 경계를 적용하고 실제 PostgreSQL 사용자·JWT로 검증했습니다.
 14. Authentication 도입 과정에서 인증 dependency가 route와 같은 SQLAlchemy Session을 공유하며 SELECT가 트랜잭션을 암묵적으로 시작(autobegin)시켜 이후 쓰기 트랜잭션과 충돌하는 문제를 실제 Browser E2E로 발견하고, 관련 없는 사전 조회에는 독립된 Session을 쓰도록 최소 범위로 수정했습니다. 같은 원인으로 이미 존재하던 sync inspection API의 PostgreSQL transaction 충돌도 실제 PostgreSQL regression test로 재현·수정하고, 기존 monkeypatch 기반 테스트가 놓친 Session 상호작용 검증 공백을 보완했습니다.
+15. RBAC가 "누가 실행할 수 있는지"만 통제하고 "누가 실행했는지"는 남기지 않는다는 한계를 확인한 뒤, 새 범용 Audit 테이블 대신 기존 `ETLLoadRun`·`CatalogPromotionRun`·`CatalogPromotionRollback` 실행 이력에 `actor_user_id`(`users.id` FK, `ON DELETE SET NULL`)·`actor_username`(snapshot) 컬럼을 추가하는 Actor Audit MVP를 구현했습니다. actor는 request body가 아니라 인증된 JWT `current_user`에서만 가져오도록 해 위조를 원천적으로 차단했고, 실제 PostgreSQL로 JWT actor 기록·401/403·actor 위조 방지·Promotion 실패 시 기록·legacy row 호환을 검증하는 regression test 10개를 추가했습니다.
 
 ## 6.2 문제 정의
 
@@ -184,8 +185,10 @@ catalogguard_ready.csv + etl_summary.json
 | Chromium 브라우저 E2E | ETL reject 마스킹과 promotion 승인·반영, 브라우저 오류 및 PostgreSQL 최종 상태 |
 | 샘플 ETL CLI 결과 | 전체 3건, 정상 변환 2건, 오류 행 1건, 종료 코드 0 |
 | Web ETL·Rollback 검증 | `POST /api/v1/etl-loads`·`GET /api/v1/etl-profiles`, rollback preview/실행 API의 PostgreSQL 통합·API·client·UI 테스트 |
-| 최신 전체 pytest | `1267 passed`, `0 skipped`, `4 deselected`, `0 failed` |
-| 최신 기준 CI | GitHub Actions run `31077410946` success |
+| Actor Audit 검증 | `tests/test_actor_audit.py` 10 scenarios: JWT actor 기록, viewer 403(세 endpoint)·Web ETL anonymous 401, actor 위조 방지, Promotion 실패 기록, legacy row 호환 |
+| 최신 전체 pytest | `1277 passed`, `0 skipped`, `4 deselected`, `0 failed` |
+| 최신 기준 CI | GitHub Actions run `31140000580` success (commit `a1036bc1`) |
+| 최신 Alembic head | `20260806_0010` |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
 
 ## 6.6 핵심 구현 구조
@@ -351,6 +354,7 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 | `tests/etl/` | 공급사 프로필 검증, 행 변환, 파일 교체, CLI와 기존 검수 흐름 호환성 |
 | `tests/test_api_inspections.py` | ETL 출력과 연동되는 FastAPI CSV 검수·중복 결과 재사용·응답 계약 |
 | `tests/test_api_inspection_jobs.py`, `tests/test_inspection_tasks.py` | 비동기 작업 API, Celery task 상태 전이와 임시 파일 정리 |
+| `tests/test_actor_audit.py` | Web ETL·Promotion·Rollback의 `actor_user_id`·`actor_username`이 JWT `current_user`에서만 기록되는지, viewer 403(세 endpoint)·Web ETL anonymous 401, request body 위조 무시, Promotion 실패 기록, legacy row 호환을 실제 PostgreSQL로 검증(10 scenarios) |
 
 통계 집계 함수와 서버 응답 적용 helper에는 정렬, 빈 값 처리, 필수 컬럼 검증, 입력 불변성, TOP 5 적용 위치, malformed 응답 차단을 확인하는 테스트를 추가했습니다. 최신 기능은 GitHub Actions의 PostgreSQL 18 서비스에서 migration과 ETL staging 적재까지 실행해 다음 결과를 확인했습니다.
 
@@ -672,7 +676,7 @@ Python·FastAPI와 PostgreSQL을 기반으로 CSV 상품 데이터의 필수 값
 
 ### 포트폴리오용 설명
 
-CatalogGuard Lite는 상품 운영자가 CSV 상품 데이터를 검수하고, ETL staging 결과를 확인한 뒤 운영 상품에 안전하게 반영할 수 있도록 만든 품질 검사 앱입니다. 업로드 검증, 원본 보존형 개인정보 마스킹 미리보기, 중복 상품 탐지, 가격 이상치 탐지, 정상가·할인가 관계 검수, 상품명과 카테고리 불일치 탐지, 필터와 독립된 전체 결과 통계, 결과 필터링, CSV 다운로드를 제공합니다. 합성 공급사 CSV는 JSON 프로필로 표준화한 뒤 PostgreSQL staging에 배치 적재하며, CLI와 Streamlit 웹 업로드가 같은 ETL Pipeline·loader를 공유합니다. Streamlit에서 사용자가 batch를 직접 선택해 promotion preview를 실행하면 insert/update/unchanged와 상품별 변경 전후를 보여 주고, 명시적 승인과 SHA-256 preview hash 재검증을 통과한 경우에만 FastAPI transaction이 운영 상품을 insert/update하며 promotion run과 append-only audit을 저장합니다. succeeded promotion은 이후 발생한 정상 변경을 conflict로 보존하는 rollback으로 되돌릴 수 있습니다. Playwright Chromium E2E는 승인 전 버튼 상태와 실제 UI 선택을 확인한 뒤 브라우저 성공 메시지뿐 아니라 PostgreSQL 최종 상태까지 검증했으며, 별도로 Web ETL이 추가한 UI 접근성 이름 충돌과 AWS 배포 이미지의 package 누락도 이 브라우저 E2E와 CI runtime smoke가 실제로 발견해 수정했습니다. 이 검증은 합성 공급사 fixture와 테스트 PostgreSQL 환경에서 수행했으며, 실제 외부 공급사 운영 데이터나 production catalog에 반영한 것은 아닙니다. 공개 Streamlit 앱의 배포 기능 범위는 로컬 전체 시스템과 다를 수 있습니다.
+CatalogGuard Lite는 상품 운영자가 CSV 상품 데이터를 검수하고, ETL staging 결과를 확인한 뒤 운영 상품에 안전하게 반영할 수 있도록 만든 품질 검사 앱입니다. 업로드 검증, 원본 보존형 개인정보 마스킹 미리보기, 중복 상품 탐지, 가격 이상치 탐지, 정상가·할인가 관계 검수, 상품명과 카테고리 불일치 탐지, 필터와 독립된 전체 결과 통계, 결과 필터링, CSV 다운로드를 제공합니다. 합성 공급사 CSV는 JSON 프로필로 표준화한 뒤 PostgreSQL staging에 배치 적재하며, CLI와 Streamlit 웹 업로드가 같은 ETL Pipeline·loader를 공유합니다. Streamlit에서 사용자가 batch를 직접 선택해 promotion preview를 실행하면 insert/update/unchanged와 상품별 변경 전후를 보여 주고, 명시적 승인과 SHA-256 preview hash 재검증을 통과한 경우에만 FastAPI transaction이 운영 상품을 insert/update하며 promotion run과 append-only audit을 저장합니다. succeeded promotion은 이후 발생한 정상 변경을 conflict로 보존하는 rollback으로 되돌릴 수 있습니다. Playwright Chromium E2E는 승인 전 버튼 상태와 실제 UI 선택을 확인한 뒤 브라우저 성공 메시지뿐 아니라 PostgreSQL 최종 상태까지 검증했으며, 별도로 Web ETL이 추가한 UI 접근성 이름 충돌과 AWS 배포 이미지의 package 누락도 이 브라우저 E2E와 CI runtime smoke가 실제로 발견해 수정했습니다. 이 검증은 합성 공급사 fixture와 테스트 PostgreSQL 환경에서 수행했으며, 실제 외부 공급사 운영 데이터나 production catalog에 반영한 것은 아닙니다. 공개 Streamlit 앱의 배포 기능 범위는 로컬 전체 시스템과 다를 수 있습니다. Web ETL·Promotion·Rollback이 실제로 실행되면 그 요청을 처리한 JWT 사용자를 실행 이력에 actor로 함께 기록하는 Actor Audit MVP를 추가했으며, 이 값은 request body가 아니라 인증된 `current_user`에서만 채워집니다.
 
 ### 면접에서 강조할 포인트
 
@@ -685,6 +689,7 @@ CatalogGuard Lite는 상품 운영자가 CSV 상품 데이터를 검수하고, E
 - ETL 실행 인터페이스를 CLI/API/UI마다 따로 만들지 않고 하나의 ETL Core(`run_pipeline()`, `load_standard_csv()`)를 재사용해, 로직 중복과 그로 인한 불일치 위험을 없앴습니다.
 - 승인 없이 되돌리는 rollback이 최신 정상 변경을 지울 수 있다는 위험을 conflict 판정으로 차단했습니다.
 - 테스트는 통과했지만 실제 배포 이미지에서만 재현되는 package 누락과, 신규 UI가 만든 접근성 이름 충돌을 CI runtime smoke와 기존 Browser E2E가 실제로 잡아 재발 방지 기준까지 정리했습니다.
+- Actor Audit은 새 범용 Audit 테이블 대신 기존 실행 이력 테이블에 컬럼만 추가해 복잡도를 최소화했고, actor 값은 클라이언트 입력이 아니라 인증된 JWT `current_user`에서만 가져오도록 설계해 위조를 원천 차단했습니다.
 
 ## 6.16 PostgreSQL 쿼리·인덱스 성능 검증
 
@@ -919,4 +924,62 @@ Promotion Preview·Rollback Preview는 DB를 변경하지 않고 "무엇이 바�
 
 ### 현재 한계
 
-Refresh Token 없음(만료 시 재로그인), 회원가입/password reset/OAuth/MFA/SSO 없음, 로그인 rate limit 없음, 누가 실행했는지를 기존 실행 이력에 기록하는 Actor Audit 없음(이번 기능은 "누가 실행할 수 있는지"만 통제합니다). 모두 이번 MVP에서 의도적으로 제외한 범위입니다.
+Refresh Token 없음(만료 시 재로그인), 회원가입/password reset/OAuth/MFA/SSO 없음, 로그인 rate limit 없음. 이번 기능은 "누가 실행할 수 있는지"만 통제하며, "누가 실행했는지"를 기록하는 Actor Audit은 6.19절에서 별도로 다룹니다. 모두 이번 MVP에서 의도적으로 제외한 범위입니다.
+
+## 6.19 Actor Audit
+
+### 문제 정의
+
+RBAC로 "누가 실행할 수 있는지"는 통제할 수 있었지만, 실제로 Web ETL·Promotion·Rollback을 누가 실행했는지는 실행 이력 어디에도 남지 않았습니다.
+
+```text
+기존: 운영 작업을 실행할 권한은 RBAC로 제어 가능
+문제: 실제로 어느 사용자가 실행했는지는 기록되지 않음
+개선: JWT current_user를 기준으로 Web ETL/Promotion/Rollback 실행자를 기록
+```
+
+### 설계 결정
+
+새로운 범용 Audit 테이블을 만드는 대신 기존 `ETLLoadRun`·`CatalogPromotionRun`·`CatalogPromotionRollback` 실행 이력에 `actor_user_id`·`actor_username` 컬럼만 추가했습니다.
+
+- 기존 History 조회 API·Streamlit 화면 구조를 그대로 재사용할 수 있습니다.
+- 별도 Audit 테이블과 새 JOIN, 범용 audit framework를 만들지 않아 복잡도가 늘지 않습니다.
+- 검수(Inspection)는 이번 범위에 포함하지 않아 변경 범위를 Web ETL·Promotion·Rollback 3곳으로 한정했습니다.
+
+### 보안 설계
+
+actor 값을 클라이언트가 보내는 값이 아니라 서버가 인증한 사용자에서만 가져오는 것이 핵심입니다.
+
+```text
+잘못된 방식: 클라이언트 -> actor_username 전송
+현재 방식:   JWT -> FastAPI current_user -> actor 기록
+```
+
+`api/routes/etl_loads.py`는 `require_operator`로 인증을 통과한 `current_user.id`·`current_user.username`만 `actor_user_id`·`actor_username`으로 전달합니다. `api/schemas.py`의 요청 모델(`CatalogPromotionRequest`, `CatalogPromotionRollbackRequest` 등)에는 actor를 지정하는 필드 자체가 없으므로, 클라이언트가 `actor_username` 같은 값을 함께 보내도 서버가 받는 필드가 없어 무시됩니다. `tests/test_actor_audit.py`의 `test_actor_cannot_be_forged_via_request_body`는 실제로 `actor_username="someone_else"`를 함께 보내도 저장된 값은 요청 토큰의 실제 사용자 이름과 같은지를 실제 PostgreSQL로 확인합니다.
+
+### Migration 호환성
+
+이 migration 실행 이전에 만들어진 row는 실행한 사용자를 알 방법이 없습니다. 그렇다고 특정 사용자(예: 첫 번째 관리자 계정)로 임의 backfill하면 실제로 그 사람이 실행하지 않은 작업까지 실행한 것으로 잘못 기록하게 됩니다. 그래서 `actor_user_id`·`actor_username` 모두 `NULL`로 남기는 쪽을 선택했습니다.
+
+```text
+DB: actor_user_id = NULL, actor_username = NULL
+UI: "알 수 없음"
+```
+
+DB에는 실제 값이 없다는 사실(`NULL`)을 그대로 저장하고, 사용자에게 보여줄 때만 `ui/etl_load_history.py`의 `format_actor_username()`이 `NULL`을 "알 수 없음" 문구로 바꿉니다. DB 저장값과 화면 표시 문구의 책임을 분리해, 나중에 다른 화면(API 소비자 등)에서 `NULL`을 다르게 표시하고 싶어도 DB 값 자체는 건드리지 않아도 됩니다.
+
+### Transaction 설계
+
+Actor Audit을 위해 새 transaction 구조를 만들지 않았습니다. `actor_user_id`·`actor_username`은 각 실행이 원래 만들던 row(`ETLLoadRun`, `CatalogPromotionRun`, `CatalogPromotionRollback`)에 다른 컬럼과 함께 같은 insert/update 문으로 저장되며, 별도 후속 쓰기나 두 번째 commit이 필요하지 않습니다. Promotion·Rollback이 실패해 `failed` run을 남기는 기존 설계도 그대로 유지하면서 그 `failed` run에도 actor를 함께 기록하도록 인자만 추가했습니다. `tests/test_actor_audit.py`의 `test_promotion_failure_records_failed_status_not_false_success`는 저장 도중 강제로 예외를 발생시켜도 `catalog_promotion_runs`에 `failed` row 1건과 정확한 actor가 남고, 운영 상품(`catalog_products`)은 생성되지 않는지 확인합니다. Actor Audit 작업 중 Sync Inspection transaction 구조와 `workers/inspection_tasks.py`는 수정하지 않았습니다.
+
+### 테스트 전략
+
+`tests/test_actor_audit.py`는 monkeypatch로 대체하지 않고 실제 PostgreSQL과 실제 JWT를 사용하는 10개 통합 테스트입니다.
+
+- JWT actor 기록: 응답 값뿐 아니라 새 Session으로 재조회해 실제 commit된 `actor_user_id`·`actor_username`을 확인합니다.
+- viewer(403, 세 endpoint 모두)·Web ETL anonymous(401): 요청이 차단되고 실행 이력 row 자체가 생성되지 않는지 확인합니다.
+- actor 위조 방지: request body에 다른 사용자 이름을 함께 보내도 무시되는지 확인합니다.
+- legacy row 호환: actor 컬럼이 `NULL`인 row도 조회 API가 예외 없이 반환하는지 확인합니다.
+- Promotion 실패 기록: 저장 도중 강제 실패에도 `failed` run에 actor가 정확히 남고 운영 상품은 생성되지 않는지(false success 방지) 확인합니다.
+
+단순히 "테스트 10개를 추가했다"는 숫자보다, 이 테스트들이 "actor가 위조될 수 없다"와 "권한 없는 요청은 이력조차 남기지 않는다"는 보안 속성을 실제 PostgreSQL commit 결과로 증명한다는 점이 중요합니다.

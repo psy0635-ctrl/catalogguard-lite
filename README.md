@@ -102,6 +102,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - INSERT promotion 상품 삭제, UPDATE promotion 상품 이전 상태 복원과 원본 promotion audit 보존
 - Streamlit 로그인과 JWT Access Token 발급, viewer(조회)·operator(운영 데이터 변경) 역할 분리
 - FastAPI의 모든 보호된 endpoint에서 현재 사용자와 역할을 서버가 최종 검증(Streamlit 버튼 비활성화는 편의 기능일 뿐 실제 보안 경계는 아님)
+- Web ETL·Promotion·Rollback 실행에 성공하면 인증된 JWT `current_user`를 실행 이력에 actor로 기록(Actor Audit MVP). 검수(Inspection) 실행 이력에는 아직 적용하지 않음
 
 ## 4. 사용자 기능 흐름
 
@@ -170,10 +171,10 @@ API 오류 발생
 -> insert/update/unchanged 및 상품별 변경 전·후 확인
 -> 승인 checkbox 선택
 -> expected_preview_hash와 함께 promotion 요청
--> 운영 상품 insert/update 및 promotion run·audit 저장
+-> 운영 상품 insert/update 및 promotion run(actor 포함)·audit 저장
 -> Promotion 실행 이력 조회
 -> 필요 시 Rollback Preview 확인
--> conflict 없으면 confirmation 후 Rollback 실행
+-> conflict 없으면 confirmation 후 Rollback 실행(actor 포함 rollback run 저장)
 ```
 
 웹 ETL 실행 흐름은 다음과 같습니다.
@@ -186,6 +187,7 @@ Streamlit ETL 실행 영역
 -> ETL 실행 버튼 클릭 (파일 선택·프로필 변경만으로는 API 호출 안 함)
 -> POST /api/v1/etl-loads
 -> 기존 run_pipeline()·load_standard_csv() 실행
+-> current_user 기준 actor_user_id·actor_username 저장
 -> 정상/거부 행 수와 배치 ID 표시
 -> ETL 적재 이력 캐시 무효화
 -> ETL 적재 이력에서 새 배치 확인
@@ -365,7 +367,7 @@ ETL 적재 이력 탭
 
 상품 그룹 카테고리 일관성 검수는 `core.group_category_consistency_detector`가 기존 `core.category_mismatch_detector.normalize_category()`를 재사용합니다. 이 비교는 원본 category를 고치지 않으며, 표시 계층에는 JSON 구조화 메시지로 값을 전달합니다. JSON이 손상되거나 예상 구조가 아니어도 내부 prefix, 영문 메시지나 JSON 원문 대신 안전한 한글 기본 문구를 표시합니다.
 
-Streamlit에 로그인하면 이후 모든 화면과 API 호출이 JWT Access Token을 거칩니다. FastAPI는 매 요청마다 role/is_active를 PostgreSQL에서 다시 확인한 뒤에만 검수·ETL·Promotion·Rollback 로직에 진입시킵니다.
+Streamlit에 로그인하면 이후 모든 화면과 API 호출이 JWT Access Token을 거칩니다. FastAPI는 매 요청마다 role/is_active를 PostgreSQL에서 다시 확인한 뒤에만 검수·ETL·Promotion·Rollback 로직에 진입시킵니다. Authentication(로그인한 사용자가 누구인지 확인)과 RBAC(그 사용자가 무엇을 할 수 있는지 확인)은 실행 전 통제이고, Web ETL·Promotion·Rollback이 실제로 성공하면 그 요청의 `current_user`를 실행 이력에 actor로 남기는 Actor Audit(누가 실행했는지 기록)이 이어집니다.
 
 ```text
 Streamlit
@@ -376,6 +378,7 @@ Streamlit
 -> FastAPI get_current_user(): 토큰 검증 + PostgreSQL users 재조회(role, is_active)
 -> require_viewer / require_operator: 역할 검사
 -> Inspection / ETL / Promotion / Rollback endpoint 진입
+-> Web ETL / Promotion / Rollback 성공 시 current_user 기준 actor_user_id·actor_username 저장
 -> PostgreSQL
 ```
 
@@ -550,6 +553,7 @@ catalogguard-lite/
       20260803_0007_create_catalog_promotion_rollback_tables.py
       20260803_0008_allow_catalog_product_audit_detach.py
       20260805_0009_create_users_table.py
+      20260806_0010_add_actor_audit_columns.py
   data/
     dev/
       category_mismatch_test.csv
@@ -657,6 +661,7 @@ catalogguard-lite/
 | `alembic/versions/20260705_0002_add_inspection_file_identity.py` | 파일 해시와 검수 버전 컬럼, CHECK constraint, partial unique index 추가 마이그레이션 |
 | `alembic/versions/20260725_0003_create_etl_staging_tables.py` | ETL 배치·상품 staging 테이블, unique index, FK와 CHECK constraint 추가 마이그레이션 |
 | `alembic/versions/20260805_0009_create_users_table.py` | `users` 테이블(`username` unique, `role` CHECK, `is_active`) 생성 마이그레이션 |
+| `alembic/versions/20260806_0010_add_actor_audit_columns.py` | `etl_load_runs`·`catalog_promotion_runs`·`catalog_promotion_rollbacks`에 `actor_user_id`(FK `ON DELETE SET NULL`)·`actor_username` nullable 컬럼 추가 마이그레이션 |
 | `.github/workflows/test.yml` | 일반 테스트와 분리된 `browser-e2e` job을 포함해 PostgreSQL·Chromium 실제 브라우저 흐름까지 실행하는 GitHub Actions workflow |
 | `.env.example` | 로컬 PostgreSQL 연결 환경변수 예시 |
 | `requirements.txt` | Streamlit 앱 기본 실행 패키지 |
@@ -888,7 +893,7 @@ python -m alembic upgrade head
 python -m alembic history
 ```
 
-현재 Alembic head는 `20260805_0009`입니다.
+현재 Alembic head는 `20260806_0010`입니다.
 
 `20260703_0001_create_inspection_tables.py`는 다음 테이블을 만듭니다.
 
@@ -926,6 +931,13 @@ python -m alembic history
 - `id`, `username`(`VARCHAR(50)`, unique index), `password_hash`(`VARCHAR(255)`, bcrypt hash만 저장), `role`(`VARCHAR(20)`, `CHECK (role IN ('viewer', 'operator'))`), `is_active`(기본 `true`), `created_at`
 - 기존 `inspection_runs`, `etl_load_runs`, `catalog_products`, `catalog_promotion_runs` 등 다른 테이블은 이 마이그레이션에서 변경하지 않았습니다. 누가 실행했는지를 기존 실행 이력에 기록하는 actor 컬럼·FK는 추가하지 않았으며, 이는 "누가 실행할 수 있는지"를 통제하는 이번 Authentication 범위와는 다른 별도 기능입니다.
 
+`20260806_0010_add_actor_audit_columns.py`는 `etl_load_runs`, `catalog_promotion_runs`, `catalog_promotion_rollbacks` 3개 테이블에 다음 컬럼을 nullable로 추가합니다.
+
+- `actor_user_id`(`BigInteger`, `users.id` FK, `ON DELETE SET NULL`)
+- `actor_username`(`VARCHAR(50)`, `users.username`과 같은 길이)
+
+기존 row는 이 migration 실행 전에 만들어졌으므로 실행한 사용자를 알 수 없어 두 컬럼 모두 `NULL`로 유지하며, 임의 사용자로 backfill하지 않습니다. 새로 생성되는 row는 `api/routes/etl_loads.py`가 `require_operator`로 인증된 JWT `current_user.id`·`current_user.username`에서 값을 가져와 채웁니다. `actor_username`은 `users.username`이 나중에 바뀌어도 실행 당시 이름을 보존하는 snapshot이고, `actor_user_id`는 `users` 테이블과의 현재 FK 연결을 위한 값입니다. `actor_user_id`가 가리키는 사용자가 삭제되면 `ON DELETE SET NULL`로 `actor_user_id`만 `NULL`이 되고 `actor_username` snapshot과 실행 이력 행 자체는 그대로 남습니다. downgrade는 FK 제약을 먼저 제거한 뒤 `actor_username`, `actor_user_id` 컬럼을 순서대로 제거합니다. 이번 migration은 검수(`inspection_runs`)에는 actor 컬럼을 추가하지 않았습니다.
+
 upgrade 동작은 다음 순서입니다.
 
 1. `file_sha256` nullable 컬럼 추가
@@ -956,6 +968,8 @@ psql "$env:DATABASE_URL" -c "\d users"
 테스트용 PostgreSQL 18 임시 클러스터에서 빈 DB의 `upgrade head`, `downgrade 20260728_0005`, 재-upgrade와 단일 head를 확인했다. `0006` downgrade는 새 운영 상품 persistence 테이블만 제거하며 기존 inspection·ETL staging 테이블은 유지한다.
 
 같은 방식으로 로컬 disposable PostgreSQL 18에서 빈 DB의 `upgrade head`, `downgrade 20260803_0007`, `downgrade 20260728_0006`, 재-upgrade와 단일 head도 확인했다. `20260805_0009`도 같은 방식으로 `downgrade 20260803_0008` 뒤 재-upgrade와 단일 head(`20260805_0009`)를 disposable PostgreSQL 18에서 확인했다.
+
+`tests/test_catalog_promotion_migration.py`는 `alembic.script.ScriptDirectory`로 현재 단일 head가 `20260806_0010`인지 확인한다. CI의 `Apply database migrations` step에서 `20260806_0010`까지 `upgrade head`가 매 push마다 실행되며 성공을 확인한다.
 
 ## 16. FastAPI 실행 방법
 
@@ -1236,6 +1250,21 @@ FastAPI 프로세스와 PostgreSQL 연결 상태를 함께 확인합니다. 기�
 
 Promotion Preview·Rollback Preview는 DB를 변경하지 않고 "무엇이 바뀔지"만 보여주므로 viewer도 조회할 수 있게 했고, 실제 반영(Promotion 실행)·되돌리기(Rollback 실행)만 operator로 제한했습니다. UI에서 viewer의 실행 버튼을 비활성화하는 것은 편의 기능일 뿐이며, 실제 권한 검사는 항상 FastAPI가 수행합니다.
 
+### Actor Audit
+
+Authentication(로그인한 사용자가 누구인지 확인)과 RBAC(그 사용자가 무엇을 할 수 있는지 확인)은 실행 전 통제입니다. Actor Audit은 여기에 실행 후 기록을 더합니다. Web ETL·Promotion·Rollback이 실제로 성공(또는 실패)하면, 그 요청을 처리한 `current_user.id`·`current_user.username`을 `etl_load_runs`·`catalog_promotion_runs`·`catalog_promotion_rollbacks`의 `actor_user_id`·`actor_username`에 함께 저장합니다.
+
+```text
+JWT
+-> require_operator
+-> current_user
+-> current_user.id, current_user.username
+-> actor_user_id, actor_username
+-> 실행 이력 DB 저장
+```
+
+`actor_username`은 request body나 form 어디에서도 클라이언트가 값을 지정할 수 있는 필드가 아니며, 항상 인증된 `current_user`에서만 가져옵니다. 예를 들어 `POST /api/v1/etl-loads` 요청에 `actor_username` 필드를 함께 보내도 서버는 이를 받는 필드가 없으므로 무시하고 토큰의 사용자 이름만 기록합니다. 검수(Inspection) 실행 이력에는 이번 범위에서 actor 컬럼을 추가하지 않았습니다. 컬럼·FK 구조는 15장, 저장 범위는 24장을 참고하세요.
+
 현재 Access Token만 구현되어 있으며 Refresh Token은 없습니다. 토큰이 만료되면 다시 로그인해야 합니다.
 
 ### 요청 ID와 운영 구조화 로그
@@ -1386,7 +1415,7 @@ Streamlit이 웹 ETL 실행 화면에서 사용할 수 있는 ETL 프로필 목�
 
 - 요청 형식: `multipart/form-data`
 - 파일 필드명: `file`, 프로필 필드명: `profile_id`
-- 정상 응답: `etl_load_run_id`, `created`, `profile_name`, `profile_version`, `source_filename`, `total_rows`, `loaded_rows`, `rejected_rows`, `error_counts`
+- 정상 응답: `etl_load_run_id`, `created`, `profile_name`, `profile_version`, `source_filename`, `total_rows`, `loaded_rows`, `rejected_rows`, `error_counts`, `actor_username`(요청한 JWT `current_user`의 username)
 - 지원하지 않는 `profile_id`: HTTP `400` (`unsupported_profile`)
 - 빈 파일, 크기 초과, ETL 변환 실패 등 잘못된 업로드: HTTP `400` (`invalid_upload`)
 
@@ -1433,7 +1462,7 @@ PostgreSQL staging에 저장된 ETL 적재 배치 목록을 조회합니다. 목
 }
 ```
 
-서버는 transaction 안에서 batch·staging·현재 운영 상품을 잠그고 preview를 다시 계산합니다. hash가 달라지면 `preview_stale`, 반영 조건이 맞지 않으면 `promotion_blocked`로 `409`를 반환하며 운영 상품을 변경하지 않습니다. 성공 시 운영 상품 insert/update와 `catalog_promotion_runs`의 `succeeded` 기록, `catalog_product_changes` append-only audit을 함께 저장합니다. 같은 ETL batch의 성공 반영은 partial unique index와 잠금으로 한 번만 허용하고, 경쟁 요청의 실패는 내부 SQL 오류를 노출하지 않는 안전한 메시지로 변환합니다.
+서버는 transaction 안에서 batch·staging·현재 운영 상품을 잠그고 preview를 다시 계산합니다. hash가 달라지면 `preview_stale`, 반영 조건이 맞지 않으면 `promotion_blocked`로 `409`를 반환하며 운영 상품을 변경하지 않습니다. 성공 시 운영 상품 insert/update와 `catalog_promotion_runs`의 `succeeded` 기록(요청한 JWT `current_user` 기준 `actor_user_id`·`actor_username` 포함), `catalog_product_changes` append-only audit을 함께 저장합니다. 같은 ETL batch의 성공 반영은 partial unique index와 잠금으로 한 번만 허용하고, 경쟁 요청의 실패는 내부 SQL 오류를 노출하지 않는 안전한 메시지로 변환합니다. promotion이 실패해도(예: 예외) `failed` run에 같은 방식으로 actor를 기록해 누가 시도했는지는 남습니다.
 
 ### `POST /api/v1/catalog-promotions/{promotion_run_id}/rollback-preview`
 
@@ -1450,7 +1479,7 @@ succeeded promotion run 하나를 되돌릴 수 있는지 확인하는 미리보
 }
 ```
 
-서버는 transaction 안에서 대상 promotion run과 관련 상품을 다시 잠그고 rollback preview를 다시 계산합니다. hash가 달라지면 `preview_stale`, 그 사이에 상품이 다시 바뀌었거나 반영 조건이 맞지 않으면 `rollback_conflict`/`rollback_not_eligible`로 `409`를 반환하며 운영 상품을 변경하지 않습니다. 이미 같은 promotion run이 성공적으로 rollback된 경우에도 `409`(`already_rolled_back`)로 차단합니다. 성공 시 INSERT promotion 상품은 삭제하고 UPDATE promotion 상품은 이전 상태로 복원하며, `catalog_promotion_rollbacks`의 `succeeded` 기록과 `catalog_promotion_rollback_changes` append-only audit을 함께 저장합니다. 원본 `catalog_product_changes` audit은 상품이 삭제되어도 삭제하지 않습니다.
+서버는 transaction 안에서 대상 promotion run과 관련 상품을 다시 잠그고 rollback preview를 다시 계산합니다. hash가 달라지면 `preview_stale`, 그 사이에 상품이 다시 바뀌었거나 반영 조건이 맞지 않으면 `rollback_conflict`/`rollback_not_eligible`로 `409`를 반환하며 운영 상품을 변경하지 않습니다. 이미 같은 promotion run이 성공적으로 rollback된 경우에도 `409`(`already_rolled_back`)로 차단합니다. 성공 시 INSERT promotion 상품은 삭제하고 UPDATE promotion 상품은 이전 상태로 복원하며, `catalog_promotion_rollbacks`의 `succeeded` 기록(요청한 JWT `current_user` 기준 `actor_user_id`·`actor_username` 포함)과 `catalog_promotion_rollback_changes` append-only audit을 함께 저장합니다. 원본 `catalog_product_changes` audit은 상품이 삭제되어도 삭제하지 않습니다. 응답의 `actor_username`으로 실행 직후에는 누가 되돌렸는지 확인할 수 있지만, rollback 실행 이력만 목록으로 조회하는 전용 GET API는 아직 없습니다.
 
 ## 19. 검수 이력 검색과 전체 요약 CSV 다운로드
 
@@ -1657,6 +1686,7 @@ $env:DATABASE_URL=$env:TEST_DATABASE_URL
 python -m alembic upgrade head
 python -m pytest tests/test_inspection_persistence.py -q
 python -m pytest tests/test_api_rbac.py tests/test_api_inspections_transaction_regression.py -q
+python -m pytest tests/test_actor_audit.py -q
 ```
 
 전체 테스트는 다음 명령으로 실행합니다.
@@ -1671,18 +1701,22 @@ python -m pytest -q
 
 `tests/test_api_inspections_transaction_regression.py`는 `find_existing_inspection_run`·`save_inspection_report`를 monkeypatch하지 않고 실제 PostgreSQL Session으로 `POST /api/v1/inspections`를 검증하는 regression test입니다. 신규 CSV 저장 후 새 Session으로 재조회해 commit을 확인하고, 동일 CSV 재요청이 기존 run을 재사용하는지, 저장 도중 강제 실패가 발생하면 `inspection_runs`·`inspection_results`가 모두 rollback되는지, anonymous(401)·viewer(403)·operator(성공)의 권한 경계를 함께 확인합니다.
 
+`tests/test_actor_audit.py`는 Web ETL·Promotion·Rollback 각각에서 `actor_user_id`·`actor_username`이 인증된 JWT `current_user`로부터 기록되는지 실제 PostgreSQL로 검증하는 10개 시나리오입니다. JWT actor 기록(신규 Session으로 재조회해 commit 확인), viewer 요청 차단(403)과 run 미생성(세 endpoint 모두), Web ETL의 anonymous 요청 차단(401)과 run 미생성, request body에 `actor_username`을 함께 보내도 무시되고 토큰의 사용자로만 기록되는지(actor 위조 방지), Promotion 저장 중 강제 실패 시에도 `failed` run에 actor가 정확히 기록되고 운영 상품은 생성되지 않는지(false success 방지), migration 이전 legacy row(actor 컬럼 `NULL`)를 안전하게 조회할 수 있는지를 확인합니다.
+
 ### PostgreSQL persistence 포함 검증 결과
 
-promotion과 rollback 기능은 운영 DB나 Railway DB에 연결하지 않고 저장소의 테스트 PostgreSQL 환경에서 검증했습니다. 기준 저장소 상태(commit `488bbd18`)의 GitHub Actions run `31077410946`은 성공했으며, 문서에는 실행별 전체 테스트 수를 추측해 기록하지 않습니다.
+promotion과 rollback 기능은 운영 DB나 Railway DB에 연결하지 않고 저장소의 테스트 PostgreSQL 환경에서 검증했습니다. 문서에는 실행별 전체 테스트 수를 추측해 기록하지 않으며, 아래 수치는 기준 저장소 상태(commit `a1036bc1`)의 GitHub Actions run `31140000580`에서 실제로 확인된 결과입니다.
 
 ```text
 promotion preview·service·API·client·UI·concurrency 테스트 파일과 Playwright Chromium promotion E2E를 포함한 검증 범위를 확인
 rollback preview·service·API 계약과 PostgreSQL 통합 테스트 파일을 포함한 검증 범위를 확인
-Alembic history/heads: `20260805_0009` 단일 head 확인
+Alembic history/heads: `20260806_0010` 단일 head 확인
 promotion PostgreSQL transaction·partial unique index·audit·stale/중복 경쟁 조건 확인
 rollback PostgreSQL INSERT 삭제·UPDATE 복원·conflict 차단·중복 rollback 차단·transaction 원자성·원본 audit 보존 확인
 Chromium promotion E2E: preview·승인 전 버튼 비활성화·실제 반영·성공/중복 메시지·PostgreSQL 최종 상태 확인. 로그인 후 operator 권한으로 실행
 Authentication/RBAC: 401/403 경계, viewer/operator 권한 분리, sync inspection PostgreSQL transaction regression을 실제 PostgreSQL로 확인
+Actor Audit: Web ETL·Promotion·Rollback의 JWT actor 기록, viewer 403(세 endpoint)과 Web ETL anonymous 401의 run 미생성, actor 위조 방지, Promotion 실패 시 failed run actor 기록, legacy row(actor NULL) 안전 조회를 tests/test_actor_audit.py 10개 시나리오로 실제 PostgreSQL 확인
+Run tests: `1277 passed`, `0 skipped`, `4 deselected`, `0 failed`
 ```
 
 promotion preview의 응답 schema와 hash 형식, blocked reason, insert/update/unchanged 계산, confirmation 요구, stale preview, 안전한 오류 mapping, Streamlit 상태 초기화와 중복 제출 방지를 테스트했습니다. promotion E2E는 브라우저 성공 메시지에 의존하지 않고 `catalog_products`, `catalog_promotion_runs`, `catalog_product_changes`의 PostgreSQL 최종 상태와 `applying` 잔존 여부까지 확인합니다. rollback은 아직 전용 Streamlit AppTest와 Browser E2E는 없으며, 서비스·API 계층의 PostgreSQL 통합 테스트와 실제 FastAPI 서버를 통한 수동 검증으로 확인했습니다.
@@ -1779,7 +1813,7 @@ Streamlit 시작 스모크 테스트는 `python -m streamlit run app.py`로 실�
 
 AppTest는 실제 `app.py` 실행 경로의 CSV 업로드와 검수·필터 위젯을 검증하지만 실제 브라우저의 파일 선택 창이나 픽셀 렌더링까지 자동화하지는 않습니다. GitHub Actions 스모크 테스트도 Railway API 실제 통신, 운영 Secrets 설정, Streamlit Community Cloud 전용 장애나 모든 Segmentation fault를 검증하지 않습니다.
 
-기준 저장소 상태(commit `488bbd18`)의 GitHub Actions run `31077410946`은 성공했습니다. Actions 실행별 전체 테스트 수는 이 문서에 추측해 고정하지 않으며, AWS Docker runtime smoke, promotion E2E와 Streamlit startup smoke의 실제 검증 범위는 위 테스트·workflow 설명을 따릅니다. Actions의 일회성 서비스 컨테이너는 운영 DB·Redis와 분리됩니다.
+기준 저장소 상태(commit `a1036bc1`)의 GitHub Actions run `31140000580`은 `test`·`browser-e2e` job 모두 성공했습니다. Actions 실행별 전체 테스트 수는 이 문서에 추측해 고정하지 않으며, 위 "PostgreSQL persistence 포함 검증 결과"에 적은 수치는 이 run에서 실제로 확인한 값입니다. AWS Docker runtime smoke(image build·import·UID `10001`·migration·Uvicorn 시작·`/health` HTTP `200`), promotion E2E와 Streamlit startup smoke의 실제 검증 범위는 위 테스트·workflow 설명을 따릅니다. Actions의 일회성 서비스 컨테이너는 운영 DB·Redis와 분리됩니다.
 
 ## 24. 데이터 저장 범위와 보안
 
@@ -1834,7 +1868,7 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 
 `users` 테이블에는 `username`, `password_hash`(bcrypt hash), `role`, `is_active`, `created_at`만 저장합니다. 비밀번호 원문은 저장하지 않으며, bcrypt hash는 복호화가 아니라 매 로그인마다 재계산해 비교하는 단방향 함수입니다. JWT Access Token의 payload도 `sub`(username), `role`, `iat`, `exp`만 포함하고 `password_hash` 등 민감정보는 넣지 않습니다.
 
-Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니다. 현재 `inspection_runs`, `etl_load_runs`, `catalog_promotion_runs` 등 기존 실행 이력 테이블에는 실행한 사용자를 기록하는 actor 컬럼이 없으므로, "누가 실행했는지"를 사후에 조회하는 actor audit 기능은 아직 없습니다.
+Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니다. `etl_load_runs`, `catalog_promotion_runs`, `catalog_promotion_rollbacks` 3개 실행 이력 테이블에는 "누가 실행했는지"를 기록하는 `actor_user_id`(`users.id` FK, `ON DELETE SET NULL`)·`actor_username`(snapshot) 컬럼이 있습니다. 이 값은 Web ETL·Promotion·Rollback 요청을 처리한 JWT `current_user`에서만 채워지며, request body나 form으로 클라이언트가 다른 사용자 이름을 지정할 수 없습니다. `inspection_runs`에는 이번 범위에서 actor 컬럼을 추가하지 않았습니다.
 
 ## 25. 현재 한계
 
@@ -1859,7 +1893,8 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - OAuth, MFA, SSO 연동은 없습니다.
 - 로그인 시도 rate limit이나 brute-force 방어는 구현되어 있지 않습니다.
 - 역할은 `viewer`·`operator` 2개만 있으며, 세밀한 permission 단위 ACL이나 관리자 전용 화면은 없습니다.
-- 누가 실행할 수 있는지(Authentication/RBAC)는 통제하지만, 누가 실행했는지를 기존 실행 이력에 기록하는 actor audit은 아직 없습니다.
+- Actor Audit은 Web ETL·Promotion·Rollback 실행 이력에만 적용됩니다. 검수(Inspection) 실행 이력에는 아직 actor 컬럼이 없어 누가 검수를 실행했는지는 기록하지 않습니다.
+- Rollback 실행의 `actor_username`은 실행 직후 POST 응답에서 확인할 수 있지만, rollback 실행 이력만 목록으로 조회하는 전용 GET API는 아직 없습니다.
 - 저장된 검수 이력 삭제 기능은 구현되어 있지 않습니다.
 - 전체 요약 CSV는 목록 API를 반복 조회하므로 다운로드 중 DB 내용이 바뀌는 상황의 완전한 스냅샷 보장은 별도 트랜잭션/내보내기 API가 필요합니다.
 - 실제 외부 공급사 운영 데이터와 연동하지 않았습니다.
@@ -1886,7 +1921,8 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 검수 규칙 변경 시 `inspection_version` 관리 정책 수립
 - 과거 이력 backfill 정책 검토
 - 검수 이력 삭제와 보관 정책
-- Actor Audit: 누가 실행했는지를 기존 실행 이력(검수·ETL·promotion·rollback)에 기록
+- 검수(Inspection) 실행 이력에도 Actor Audit 확장(현재는 Web ETL·Promotion·Rollback에만 적용)
+- Rollback 실행 이력만 목록으로 조회하는 전용 GET API
 - Refresh Token, 회원가입, password reset, OAuth/MFA/SSO, 로그인 rate limit
 - 중복 저장 이벤트 로그 또는 감사 기록 검토
 - 기간별 검수 추세와 파일 간 비교 통계 추가
