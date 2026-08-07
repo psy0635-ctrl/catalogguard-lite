@@ -1,0 +1,41 @@
+# 기존 Dockerfile.aws image를 그대로 재사용해 Alembic migration만 1회 실행하는 Job입니다.
+# FastAPI Deployment(catalogguard-api.yaml)는 이 Job과 분리되어 있으며 migration을
+# 직접 실행하지 않습니다. 여러 API Pod가 동시에 migration을 실행하는 상황을 피하기 위해서입니다.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: catalogguard-migrate
+  namespace: catalogguard
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: catalogguard-migrate
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: migrate
+          image: catalogguard-lite-k8s:local
+          imagePullPolicy: IfNotPresent
+          # Dockerfile.aws의 CMD(alembic upgrade head && uvicorn ...) 전체를 대체합니다.
+          command: ["python", "-m", "alembic", "upgrade", "head"]
+          securityContext:
+            allowPrivilegeEscalation: false
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: catalogguard-secrets
+                  key: DATABASE_URL
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"

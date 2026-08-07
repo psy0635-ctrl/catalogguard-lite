@@ -1,0 +1,82 @@
+# CI/local kind smoke 전용 disposable PostgreSQL입니다.
+# PersistentVolumeClaim이 없으므로 kind cluster를 삭제하면 데이터도 함께 사라집니다.
+# production PostgreSQL 구성이 아닙니다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: catalogguard
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:18
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: catalogguard-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: catalogguard-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: catalogguard-secrets
+                  key: POSTGRES_DB
+          # 컨테이너 자체 환경변수를 셸에서 읽으므로 Kubernetes의 command 필드 $(VAR)
+          # 치환(probe exec에는 적용되지 않음)에 의존하지 않습니다.
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 10
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: catalogguard
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

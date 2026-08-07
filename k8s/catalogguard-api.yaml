@@ -1,0 +1,93 @@
+# 기존 Dockerfile.aws image를 그대로 사용합니다. 새 Kubernetes 전용 Dockerfile은 만들지
+# 않았습니다. Dockerfile의 CMD는 "alembic upgrade head && uvicorn ..."이지만, 이 Pod는
+# command override로 uvicorn만 실행합니다. migration은 별도 migration-job.yaml이 담당하며,
+# 이 Deployment가 replicas를 늘려도 migration이 중복 실행되지 않습니다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalogguard-api
+  namespace: catalogguard
+  labels:
+    app: catalogguard-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: catalogguard-api
+  template:
+    metadata:
+      labels:
+        app: catalogguard-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: catalogguard-api
+          image: catalogguard-lite-k8s:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - uvicorn
+            - api.main:app
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8000"
+            - --no-access-log
+          securityContext:
+            allowPrivilegeEscalation: false
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: catalogguard-secrets
+                  key: DATABASE_URL
+            - name: CATALOGGUARD_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: catalogguard-secrets
+                  key: CATALOGGUARD_JWT_SECRET
+          # 프로세스 생존 여부만 확인합니다. DB 연결 실패로 Pod를 계속 재시작시키지 않도록
+          # DB까지 확인하는 /ready가 아니라 /health를 사용합니다.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # PostgreSQL 연결까지 확인하는 /ready를 사용해, DB에 연결할 수 있을 때만
+          # Service가 이 Pod로 트래픽을 보내도록 합니다.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalogguard-api
+  namespace: catalogguard
+spec:
+  selector:
+    app: catalogguard-api
+  ports:
+    - port: 8000
+      targetPort: 8000

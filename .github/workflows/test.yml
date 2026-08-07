@@ -475,3 +475,124 @@ jobs:
           name: browser-e2e-failure-artifacts
           path: artifacts/browser-e2e
           if-no-files-found: ignore
+
+  kubernetes-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      KIND_CLUSTER_NAME: catalogguard-ci
+      K8S_NAMESPACE: catalogguard
+      APP_IMAGE: catalogguard-lite-k8s:local
+      # 고정 버전입니다. 최신 release를 자동으로 따라가지 않고, 같은 commit이 항상 같은
+      # Kubernetes toolchain으로 재현되도록 kind/kubectl/node image를 명시적으로 pin합니다.
+      KIND_VERSION: "v0.32.0"
+      KIND_NODE_IMAGE: "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5"
+      KUBECTL_VERSION: "v1.36.2"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Install kind
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsSLo ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind version
+      - name: Install kubectl
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsSLo ./kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          curl -fsSLo ./kubectl.sha256 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256"
+          echo "$(cat ./kubectl.sha256)  ./kubectl" | sha256sum --check --status
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+          kubectl version --client
+      - name: Build CatalogGuard image
+        run: docker build --file Dockerfile.aws --tag "${APP_IMAGE}" .
+      - name: Create kind cluster
+        run: kind create cluster --name "${KIND_CLUSTER_NAME}" --image "${KIND_NODE_IMAGE}" --wait 120s
+      - name: Load image into kind
+        run: kind load docker-image "${APP_IMAGE}" --name "${KIND_CLUSTER_NAME}"
+      - name: Create namespace
+        run: kubectl create namespace "${K8S_NAMESPACE}"
+      - name: Create CI disposable secret
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          postgres_password="$(openssl rand -hex 16)"
+          jwt_secret="$(openssl rand -hex 32)"
+          database_url="postgresql+psycopg://catalogguard:${postgres_password}@postgres:5432/catalogguard_k8s_ci"
+          kubectl create secret generic catalogguard-secrets \
+            --namespace "${K8S_NAMESPACE}" \
+            --from-literal=POSTGRES_USER=catalogguard \
+            --from-literal=POSTGRES_PASSWORD="${postgres_password}" \
+            --from-literal=POSTGRES_DB=catalogguard_k8s_ci \
+            --from-literal=DATABASE_URL="${database_url}" \
+            --from-literal=CATALOGGUARD_JWT_SECRET="${jwt_secret}"
+      - name: Deploy dev PostgreSQL
+        run: kubectl apply -n "${K8S_NAMESPACE}" -f k8s/dev-postgres.yaml
+      - name: Wait for PostgreSQL rollout
+        run: kubectl rollout status deployment/postgres -n "${K8S_NAMESPACE}" --timeout=120s
+      - name: Run Alembic migration Job
+        run: kubectl apply -n "${K8S_NAMESPACE}" -f k8s/migration-job.yaml
+      - name: Wait for migration Job to complete
+        run: kubectl wait --for=condition=complete job/catalogguard-migrate -n "${K8S_NAMESPACE}" --timeout=120s
+      - name: Deploy FastAPI
+        run: kubectl apply -n "${K8S_NAMESPACE}" -f k8s/catalogguard-api.yaml
+      - name: Wait for FastAPI rollout
+        run: kubectl rollout status deployment/catalogguard-api -n "${K8S_NAMESPACE}" --timeout=120s
+      - name: Verify /health and /ready through the Service
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          kubectl port-forward -n "${K8S_NAMESPACE}" svc/catalogguard-api 18000:8000 \
+            >"${RUNNER_TEMP}/port-forward.log" 2>&1 &
+          port_forward_pid=$!
+          trap 'kill "${port_forward_pid}" 2>/dev/null || true' EXIT
+
+          ready=false
+          for _ in {1..30}; do
+            if curl --fail --silent --show-error --connect-timeout 1 --max-time 2 http://127.0.0.1:18000/health >/dev/null \
+              && curl --fail --silent --show-error --connect-timeout 1 --max-time 2 http://127.0.0.1:18000/ready >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+
+          if [[ "${ready}" != "true" ]]; then
+            echo "::error::FastAPI Service did not become ready via port-forward."
+            cat "${RUNNER_TEMP}/port-forward.log" || true
+            exit 1
+          fi
+
+          health_body="$(curl --silent http://127.0.0.1:18000/health)"
+          ready_body="$(curl --silent http://127.0.0.1:18000/ready)"
+          echo "GET /health -> ${health_body}"
+          echo "GET /ready  -> ${ready_body}"
+          echo "${health_body}" | grep -q '"status":"ok"'
+          echo "${ready_body}" | grep -q '"database":"ok"'
+      - name: Kubernetes diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          echo "===== kubectl get pods -A ====="
+          kubectl get pods -A || true
+          echo "===== kubectl get events -A ====="
+          kubectl get events -A --sort-by=.lastTimestamp || true
+          echo "===== describe postgres pod ====="
+          kubectl describe pod -n "${K8S_NAMESPACE}" -l app=postgres || true
+          echo "===== describe catalogguard-api pod ====="
+          kubectl describe pod -n "${K8S_NAMESPACE}" -l app=catalogguard-api || true
+          echo "===== catalogguard-api logs ====="
+          kubectl logs -n "${K8S_NAMESPACE}" -l app=catalogguard-api --all-containers --tail=200 || true
+          echo "===== migration Job describe ====="
+          kubectl describe job/catalogguard-migrate -n "${K8S_NAMESPACE}" || true
+          echo "===== migration Job logs ====="
+          kubectl logs -n "${K8S_NAMESPACE}" job/catalogguard-migrate --tail=200 || true
+      - name: Delete kind cluster
+        if: always()
+        run: kind delete cluster --name "${KIND_CLUSTER_NAME}" || true
