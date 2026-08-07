@@ -44,6 +44,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 13. Streamlit 로그인과 FastAPI JWT Access Token 발급, viewer(조회)·operator(운영 데이터 변경) 2개 역할 분리를 구현했습니다. `get_current_user()`가 토큰의 role을 그대로 신뢰하지 않고 매 요청마다 PostgreSQL `users` 테이블에서 role·is_active를 다시 확인하도록 설계해, 계정을 비활성화하면 이미 발급된 토큰도 즉시 차단되게 했습니다. 검수·ETL·Promotion·Rollback 전체 endpoint에 401(인증 실패)/403(권한 부족) 경계를 적용하고 실제 PostgreSQL 사용자·JWT로 검증했습니다.
 14. Authentication 도입 과정에서 인증 dependency가 route와 같은 SQLAlchemy Session을 공유하며 SELECT가 트랜잭션을 암묵적으로 시작(autobegin)시켜 이후 쓰기 트랜잭션과 충돌하는 문제를 실제 Browser E2E로 발견하고, 관련 없는 사전 조회에는 독립된 Session을 쓰도록 최소 범위로 수정했습니다. 같은 원인으로 이미 존재하던 sync inspection API의 PostgreSQL transaction 충돌도 실제 PostgreSQL regression test로 재현·수정하고, 기존 monkeypatch 기반 테스트가 놓친 Session 상호작용 검증 공백을 보완했습니다.
 15. RBAC가 "누가 실행할 수 있는지"만 통제하고 "누가 실행했는지"는 남기지 않는다는 한계를 확인한 뒤, 새 범용 Audit 테이블 대신 기존 `ETLLoadRun`·`CatalogPromotionRun`·`CatalogPromotionRollback` 실행 이력에 `actor_user_id`(`users.id` FK, `ON DELETE SET NULL`)·`actor_username`(snapshot) 컬럼을 추가하는 Actor Audit MVP를 구현했습니다. actor는 request body가 아니라 인증된 JWT `current_user`에서만 가져오도록 해 위조를 원천적으로 차단했고, 실제 PostgreSQL로 JWT actor 기록·401/403·actor 위조 방지·Promotion 실패 시 기록·legacy row 호환을 검증하는 regression test 10개를 추가했습니다.
+16. 로그와 `/health`·`/ready`만으로는 요청 수·응답 시간·오류율·ETL 처리량을 숫자로 비교할 수 없다는 한계를 확인한 뒤, 기존 요청 middleware가 계산하던 duration을 재사용해 Prometheus HTTP metric(요청 수·응답 시간·상태 계열)과 Web ETL metric(신규/중복/실패, 처리 행 수)을 `GET /metrics`로 노출했습니다. 동적 ID 대신 FastAPI route template을 label로 써서 cardinality 폭증을 막고, 동일 배치 재사용 시 행 수를 다시 집계하지 않도록 설계했으며, `CATALOGGUARD_METRICS_ENABLED` 미설정 시 endpoint와 instrumentation 모두 no-op임을 실제 PostgreSQL 포함 32개 테스트로 검증했습니다.
 
 ## 6.2 문제 정의
 
@@ -170,6 +171,7 @@ catalogguard_ready.csv + etl_summary.json
 | 데이터베이스 | PostgreSQL, SQLAlchemy, psycopg |
 | 마이그레이션 | Alembic |
 | 비동기 처리 | Redis, Celery |
+| 관측성 | prometheus-client 0.25.0 (HTTP·Web ETL metric instrumentation MVP, Prometheus 서버는 미구축) |
 | 로컬 실행 | Docker Compose |
 | pytest | 일반 unit·integration 9.1.1 / Chromium E2E 8.4.1 |
 | CI | GitHub Actions `Test` workflow |
@@ -186,9 +188,10 @@ catalogguard_ready.csv + etl_summary.json
 | 샘플 ETL CLI 결과 | 전체 3건, 정상 변환 2건, 오류 행 1건, 종료 코드 0 |
 | Web ETL·Rollback 검증 | `POST /api/v1/etl-loads`·`GET /api/v1/etl-profiles`, rollback preview/실행 API의 PostgreSQL 통합·API·client·UI 테스트 |
 | Actor Audit 검증 | `tests/test_actor_audit.py` 10 scenarios: JWT actor 기록, viewer 403(세 endpoint)·Web ETL anonymous 401, actor 위조 방지, Promotion 실패 기록, legacy row 호환 |
-| 최신 전체 pytest | `1277 passed`, `0 skipped`, `4 deselected`, `0 failed` |
-| 최신 기준 CI | GitHub Actions run `31140000580` success (commit `a1036bc1`) |
-| 최신 Alembic head | `20260806_0010` |
+| Prometheus Metrics 검증 | `tests/test_metrics.py` 32 scenarios: env parsing, `/metrics` disabled=404/no-op, route template cardinality 방지, `unmatched`/`5xx` 집계, 민감정보 미노출, Web ETL created/duplicate/failed와 row 중복 집계 방지, 실제 PostgreSQL 신규+중복 ETL |
+| 최신 전체 pytest | `1309 passed`, `0 skipped`, `4 deselected`, `0 failed` |
+| 최신 기준 CI | GitHub Actions run `31153262085` success (commit `ed564e0e`) |
+| 최신 Alembic head | `20260806_0010`(이번 Observability 기능은 새 migration 없음) |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
 
 ## 6.6 핵심 구현 구조
@@ -201,6 +204,7 @@ catalogguard_ready.csv + etl_summary.json
 | `api/main.py`, `api/routes/` | FastAPI 앱, Health·readiness, 동기 검수·이력·비동기 작업 및 ETL 배치 조회 API |
 | `api/routes/etl_loads.py`, `api/schemas.py` | 웹 ETL 실행·프로필 목록, ETL 조회, promotion·rollback endpoint, 오류 처리와 Pydantic 응답 계약 |
 | `config/settings.py` | 컬럼, 허용 카테고리, 업로드 제한, 금지어 설정 |
+| `config/metrics.py` | Prometheus 전용 `CollectorRegistry`, HTTP·Web ETL metric 4개 정의, `CATALOGGUARD_METRICS_ENABLED` 기반 no-op instrumentation helper |
 | `core/upload_validator.py` | CSV 업로드 사전 검증 |
 | `core/loader.py` | DataFrame을 Product 객체로 변환 |
 | `core/models.py` | Product, ValidationIssue 데이터 모델 |
@@ -355,6 +359,7 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 | `tests/test_api_inspections.py` | ETL 출력과 연동되는 FastAPI CSV 검수·중복 결과 재사용·응답 계약 |
 | `tests/test_api_inspection_jobs.py`, `tests/test_inspection_tasks.py` | 비동기 작업 API, Celery task 상태 전이와 임시 파일 정리 |
 | `tests/test_actor_audit.py` | Web ETL·Promotion·Rollback의 `actor_user_id`·`actor_username`이 JWT `current_user`에서만 기록되는지, viewer 403(세 endpoint)·Web ETL anonymous 401, request body 위조 무시, Promotion 실패 기록, legacy row 호환을 실제 PostgreSQL로 검증(10 scenarios) |
+| `tests/test_metrics.py` | `CATALOGGUARD_METRICS_ENABLED` parsing, `/metrics` disabled=404·instrumentation no-op, HTTP request counter·duration histogram, 동적 ID route template 집계와 `unmatched`/`5xx` 고정 label, 민감정보 미노출, Web ETL created/duplicate/failed와 row 중복 집계 방지를 실제 PostgreSQL 포함해 검증(32 scenarios) |
 
 통계 집계 함수와 서버 응답 적용 helper에는 정렬, 빈 값 처리, 필수 컬럼 검증, 입력 불변성, TOP 5 적용 위치, malformed 응답 차단을 확인하는 테스트를 추가했습니다. 최신 기능은 GitHub Actions의 PostgreSQL 18 서비스에서 migration과 ETL staging 적재까지 실행해 다음 결과를 확인했습니다.
 
@@ -676,7 +681,7 @@ Python·FastAPI와 PostgreSQL을 기반으로 CSV 상품 데이터의 필수 값
 
 ### 포트폴리오용 설명
 
-CatalogGuard Lite는 상품 운영자가 CSV 상품 데이터를 검수하고, ETL staging 결과를 확인한 뒤 운영 상품에 안전하게 반영할 수 있도록 만든 품질 검사 앱입니다. 업로드 검증, 원본 보존형 개인정보 마스킹 미리보기, 중복 상품 탐지, 가격 이상치 탐지, 정상가·할인가 관계 검수, 상품명과 카테고리 불일치 탐지, 필터와 독립된 전체 결과 통계, 결과 필터링, CSV 다운로드를 제공합니다. 합성 공급사 CSV는 JSON 프로필로 표준화한 뒤 PostgreSQL staging에 배치 적재하며, CLI와 Streamlit 웹 업로드가 같은 ETL Pipeline·loader를 공유합니다. Streamlit에서 사용자가 batch를 직접 선택해 promotion preview를 실행하면 insert/update/unchanged와 상품별 변경 전후를 보여 주고, 명시적 승인과 SHA-256 preview hash 재검증을 통과한 경우에만 FastAPI transaction이 운영 상품을 insert/update하며 promotion run과 append-only audit을 저장합니다. succeeded promotion은 이후 발생한 정상 변경을 conflict로 보존하는 rollback으로 되돌릴 수 있습니다. Playwright Chromium E2E는 승인 전 버튼 상태와 실제 UI 선택을 확인한 뒤 브라우저 성공 메시지뿐 아니라 PostgreSQL 최종 상태까지 검증했으며, 별도로 Web ETL이 추가한 UI 접근성 이름 충돌과 AWS 배포 이미지의 package 누락도 이 브라우저 E2E와 CI runtime smoke가 실제로 발견해 수정했습니다. 이 검증은 합성 공급사 fixture와 테스트 PostgreSQL 환경에서 수행했으며, 실제 외부 공급사 운영 데이터나 production catalog에 반영한 것은 아닙니다. 공개 Streamlit 앱의 배포 기능 범위는 로컬 전체 시스템과 다를 수 있습니다. Web ETL·Promotion·Rollback이 실제로 실행되면 그 요청을 처리한 JWT 사용자를 실행 이력에 actor로 함께 기록하는 Actor Audit MVP를 추가했으며, 이 값은 request body가 아니라 인증된 `current_user`에서만 채워집니다.
+CatalogGuard Lite는 상품 운영자가 CSV 상품 데이터를 검수하고, ETL staging 결과를 확인한 뒤 운영 상품에 안전하게 반영할 수 있도록 만든 품질 검사 앱입니다. 업로드 검증, 원본 보존형 개인정보 마스킹 미리보기, 중복 상품 탐지, 가격 이상치 탐지, 정상가·할인가 관계 검수, 상품명과 카테고리 불일치 탐지, 필터와 독립된 전체 결과 통계, 결과 필터링, CSV 다운로드를 제공합니다. 합성 공급사 CSV는 JSON 프로필로 표준화한 뒤 PostgreSQL staging에 배치 적재하며, CLI와 Streamlit 웹 업로드가 같은 ETL Pipeline·loader를 공유합니다. Streamlit에서 사용자가 batch를 직접 선택해 promotion preview를 실행하면 insert/update/unchanged와 상품별 변경 전후를 보여 주고, 명시적 승인과 SHA-256 preview hash 재검증을 통과한 경우에만 FastAPI transaction이 운영 상품을 insert/update하며 promotion run과 append-only audit을 저장합니다. succeeded promotion은 이후 발생한 정상 변경을 conflict로 보존하는 rollback으로 되돌릴 수 있습니다. Playwright Chromium E2E는 승인 전 버튼 상태와 실제 UI 선택을 확인한 뒤 브라우저 성공 메시지뿐 아니라 PostgreSQL 최종 상태까지 검증했으며, 별도로 Web ETL이 추가한 UI 접근성 이름 충돌과 AWS 배포 이미지의 package 누락도 이 브라우저 E2E와 CI runtime smoke가 실제로 발견해 수정했습니다. 이 검증은 합성 공급사 fixture와 테스트 PostgreSQL 환경에서 수행했으며, 실제 외부 공급사 운영 데이터나 production catalog에 반영한 것은 아닙니다. 공개 Streamlit 앱의 배포 기능 범위는 로컬 전체 시스템과 다를 수 있습니다. Web ETL·Promotion·Rollback이 실제로 실행되면 그 요청을 처리한 JWT 사용자를 실행 이력에 actor로 함께 기록하는 Actor Audit MVP를 추가했으며, 이 값은 request body가 아니라 인증된 `current_user`에서만 채워집니다. 기존 요청 middleware의 duration 측정을 재사용해 Prometheus HTTP·Web ETL metric(`GET /metrics`, 기본 비활성)을 노출하는 Observability MVP도 추가했으며, route template 기반 label로 cardinality를 제한하고 동일 ETL 배치 재사용 시 행 수를 다시 집계하지 않도록 설계했습니다.
 
 ### 면접에서 강조할 포인트
 
@@ -689,6 +694,7 @@ CatalogGuard Lite는 상품 운영자가 CSV 상품 데이터를 검수하고, E
 - ETL 실행 인터페이스를 CLI/API/UI마다 따로 만들지 않고 하나의 ETL Core(`run_pipeline()`, `load_standard_csv()`)를 재사용해, 로직 중복과 그로 인한 불일치 위험을 없앴습니다.
 - 승인 없이 되돌리는 rollback이 최신 정상 변경을 지울 수 있다는 위험을 conflict 판정으로 차단했습니다.
 - 테스트는 통과했지만 실제 배포 이미지에서만 재현되는 package 누락과, 신규 UI가 만든 접근성 이름 충돌을 CI runtime smoke와 기존 Browser E2E가 실제로 잡아 재발 방지 기준까지 정리했습니다.
+- Prometheus metric label에 동적 ID 대신 route template을 써서 high-cardinality 문제를 사전에 차단했고, 새 timing middleware를 추가하는 대신 기존 요청 로그가 이미 계산하던 duration을 재사용했습니다.
 - Actor Audit은 새 범용 Audit 테이블 대신 기존 실행 이력 테이블에 컬럼만 추가해 복잡도를 최소화했고, actor 값은 클라이언트 입력이 아니라 인증된 JWT `current_user`에서만 가져오도록 설계해 위조를 원천 차단했습니다.
 
 ## 6.16 PostgreSQL 쿼리·인덱스 성능 검증
@@ -983,3 +989,105 @@ Actor Audit을 위해 새 transaction 구조를 만들지 않았습니다. `acto
 - Promotion 실패 기록: 저장 도중 강제 실패에도 `failed` run에 actor가 정확히 남고 운영 상품은 생성되지 않는지(false success 방지) 확인합니다.
 
 단순히 "테스트 10개를 추가했다"는 숫자보다, 이 테스트들이 "actor가 위조될 수 없다"와 "권한 없는 요청은 이력조차 남기지 않는다"는 보안 속성을 실제 PostgreSQL commit 결과로 증명한다는 점이 중요합니다.
+
+## 6.20 Prometheus Observability
+
+### 기존 상태
+
+Actor Audit까지 구현한 시점에 이미 다음이 있었습니다.
+
+```text
+Request ID
+구조화 로그(요청 완료/실패 이벤트)
+/health, /ready
+```
+
+개별 요청의 상세 기록과 서비스 생존 여부는 확인할 수 있었습니다.
+
+### 문제
+
+로그와 health check만으로는 다음을 숫자로 답할 수 없었습니다.
+
+```text
+요청이 얼마나 들어오는가?
+응답 시간은 어느 정도인가?
+4xx/5xx가 얼마나 발생하는가?
+Web ETL 신규/중복/실패가 얼마나 발생하는가?
+```
+
+로그를 하나씩 세어 집계하는 것은 운영 관측 방법이 아니므로, 요청·응답 시간·ETL 실행 결과를 누적 집계하는 계층이 필요했습니다.
+
+### 설계 선택
+
+새 timing middleware를 추가하지 않고 기존 `log_http_request` middleware가 이미 계산하던 duration을 그대로 재사용해 로그와 Prometheus metric 양쪽에 씁니다.
+
+```text
+기존 FastAPI request middleware
+-> duration 1회 계산
+-> 구조화 로그 기록
+-> Prometheus Counter/Histogram 기록(같은 duration 값 재사용)
+```
+
+Web ETL은 `run_web_etl()`이 성공하거나 특정 예외로 실패를 반환한 뒤, route(`api/routes/etl_loads.py`)에서 metric을 기록합니다.
+
+```text
+Web ETL Service(run_pipeline -> load_standard_csv, transaction 확정)
+-> route가 결과(성공/특정 예외) 수신
+-> created/duplicate/failed metric 기록
+```
+
+`etl/web_service.py`·`etl/db_loader.py`의 transaction 소유 구조는 전혀 건드리지 않았습니다. metric 증가와 DB commit 성공 여부가 어긋나는(metric은 증가했는데 실제 DB 반영은 실패한) 상태를 피하기 위해서입니다. 다만 이는 완전한 distributed transaction이 아니라, "결과가 확정된 뒤에만 기록한다"는 순서 보장일 뿐입니다.
+
+### Cardinality 문제
+
+단순히 Prometheus를 붙이는 것보다 중요했던 설계 결정입니다. 실제 요청 경로를 label로 그대로 쓰면 다음처럼 ID마다 새 time series가 생겨 Prometheus 메모리와 조회 비용이 계속 늘어납니다.
+
+```text
+잘못된 방법: route="/api/v1/catalog-promotions/1", route="/api/v1/catalog-promotions/2", ...
+현재 방법:   route="/api/v1/catalog-promotions/{promotion_run_id}"
+```
+
+`request.scope["route"]`는 Starlette가 라우팅을 마친 뒤(`call_next()` 반환 후) 채워지므로, 이 값의 `.path`(route template)를 label로 사용합니다. 매칭되는 route가 없는 404(예: 존재하지 않는 임의 경로)는 원본 경로 대신 고정 label `unmatched`를 씁니다. `/api/v1/catalog-promotions/1`과 `/api/v1/catalog-promotions/999`를 실제로 요청해 두 요청이 하나의 route template label로 집계되고 원본 경로가 별도 label로 남지 않는지 직접 확인했습니다. 기능을 추가하면서 운영 비용과 metric cardinality까지 함께 고려한 결정입니다.
+
+### Web ETL 중복 집계 방지
+
+CatalogGuard는 이미 동일 CSV 재요청을 기존 배치 재사용(`created=False`)으로 처리합니다. Observability를 붙이면서 이 기존 동작과 metric을 맞춰야 했습니다.
+
+```text
+첫 번째 요청 -> 새 ETLLoadRun -> runs_total{outcome="created"} +1 -> rows_total에 실제 행 수 반영
+두 번째 동일 요청 -> 기존 배치 재사용 -> runs_total{outcome="duplicate"} +1 -> rows_total은 증가하지 않음
+```
+
+`record_web_etl_rows()`는 `outcome.created is True`일 때만 호출합니다. 그렇지 않으면 같은 ETL 결과(같은 `loaded_rows`/`rejected_rows`)가 재요청마다 Prometheus counter에 반복 합산되는 오류가 생깁니다.
+
+### 보안과 Actor Audit·DB History와의 구분
+
+metric label은 `method`, `route`(template 또는 `unmatched`), `status_class`, `outcome`, `result` 5종의 작은 고정 범주만 사용합니다. 사용자명, `actor_username`, `request_id`, JWT, `Authorization` 헤더, 실제 run ID, 상품 ID, 파일명, CSV 내용, `DATABASE_URL`은 label에도 metric 출력에도 넣지 않았습니다. 이 결정은 민감정보 노출 방지와 high-cardinality 방지라는 두 이유를 모두 가집니다. `tests/test_metrics.py::test_metrics_body_never_contains_pii_or_dynamic_ids`가 `/metrics` 응답 본문에 사용자명·요청 ID·동적 ID가 실제로 없는지 확인합니다.
+
+세 개념을 분리해서 문서화했습니다.
+
+```text
+DB History          = 재시작 후에도 유지되는 영구 실행 기록
+Actor Audit         = DB 실행 이력에 누가 작업했는지 기록
+Prometheus Metrics  = 현재 실행 중인 프로세스의 운영 지표(재시작 시 초기화)
+```
+
+Web ETL이 실패하면 `ETLLoadRun` row 자체가 생성되지 않아 Actor Audit 기록은 없지만(6.18·6.19절 참고), Prometheus는 API 실행 시도 자체를 세므로 `catalogguard_web_etl_runs_total{outcome="failed"}`는 증가할 수 있습니다. 이 둘을 같은 개념으로 섞어 쓰지 않았습니다.
+
+### 테스트 전략
+
+`tests/test_metrics.py`는 32개 시나리오입니다. 단순히 metric 이름 문자열이 존재하는지 확인하는 수준이 아니라, 실제 HTTP 요청 전후 값의 차이(delta)로 검증합니다. Prometheus counter는 프로세스 전역 상태라 테스트 실행 순서에 따라 절대값이 달라질 수 있으므로 `counter == 1` 같은 취약한 assertion 대신 before/after delta만 사용했고, 앱 기본 `REGISTRY` 대신 `config/metrics.py` 전용 `CollectorRegistry`를 써서 다른 라이브러리의 collector와 섞이지 않게 했습니다.
+
+- `CATALOGGUARD_METRICS_ENABLED`의 true/false 계열 값 parsing과 미설정 시 기본 비활성.
+- `/metrics` 비활성 시 404, 그리고 비활성 상태에서는 `record_http_request()` 등이 실제로 counter를 증가시키지 않는지(no-op)까지 확인.
+- HTTP request counter·duration histogram이 실제 요청 후 증가하는지, `method`/`route`/`status_class` label이 정확한지.
+- 동적 ID route가 template 하나로 집계되고 원본 경로가 label로 남지 않는지, 매칭되지 않는 경로는 `unmatched`로만 집계되는지.
+- `/health`·`/ready`·`/metrics` 요청이 HTTP metric 집계에서 제외되는지.
+- unhandled exception이 기존 안전한 500 응답·요청 ID·구조화 로그를 그대로 유지하면서 `5xx` metric도 증가시키는지.
+- `/metrics` 응답 본문에 사용자명·요청 ID·동적 ID가 없는지.
+- Web ETL의 created/duplicate/failed 각 outcome과, `duplicate`·`failed`에서 row counter가 증가하지 않는지.
+- 실제 PostgreSQL로 로그인 후 같은 CSV를 두 번 요청해 신규 1회·중복 1회·행 수가 정확히 한 번만 반영되는지(마지막 시나리오).
+
+### 현재 한계
+
+현재 구현은 애플리케이션이 Prometheus가 읽어갈 수 있는 형식으로 값을 노출하는 instrumentation MVP입니다. Prometheus 서버가 주기적으로 scrape하는 운영 환경, Grafana 대시보드, Alertmanager는 구축하지 않았습니다. metric registry가 프로세스 하나 안에서만 유지되므로 여러 Uvicorn worker를 띄우는 환경에서는 worker별로 값이 나뉘며, 이번 MVP는 이를 통합하지 않습니다("multi-worker 완벽 지원"이 아닙니다). Async Inspection/Celery, Redis queue depth, Promotion·Rollback 실행, Actor Audit, DB connection pool 관련 domain metric도 아직 없습니다. Prometheus metric은 DB 실행 이력처럼 영구 저장되지 않으며, 프로세스가 재시작되면 초기화됩니다.
