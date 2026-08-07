@@ -36,3 +36,19 @@ Thumbs.db
 !.env.example
 !.env.local.example
 !.env.aws.example
+
+# Terraform: provider 캐시·state·crash log는 로컬/CI 실행마다 생성되며 commit하지
+# 않습니다. .terraform.lock.hcl은 provider 버전을 고정하므로 commit합니다.
+terraform/.terraform/
+terraform/**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+terraform.tfvars
+*.auto.tfvars

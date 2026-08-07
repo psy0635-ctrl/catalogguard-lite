@@ -596,3 +596,30 @@ jobs:
       - name: Delete kind cluster
         if: always()
         run: kind delete cluster --name "${KIND_CLUSTER_NAME}" || true
+
+  terraform-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      # 고정 버전입니다. 이 job은 실제 AWS 자격 증명을 사용하지 않고 fmt/validate/test
+      # (mock provider)만 실행하며, terraform apply/destroy/import는 수행하지 않습니다.
+      TERRAFORM_VERSION: "1.15.8"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - name: Terraform fmt check
+        run: terraform fmt -check -recursive
+      - name: Terraform init
+        run: terraform init -backend=false -input=false -lockfile=readonly
+      - name: Terraform validate
+        run: terraform validate
+      - name: Terraform test (mock provider, no real AWS credentials or resources)
+        run: terraform test
