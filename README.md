@@ -104,6 +104,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - FastAPI의 모든 보호된 endpoint에서 현재 사용자와 역할을 서버가 최종 검증(Streamlit 버튼 비활성화는 편의 기능일 뿐 실제 보안 경계는 아님)
 - Web ETL·Promotion·Rollback 실행에 성공하면 인증된 JWT `current_user`를 실행 이력에 actor로 기록(Actor Audit MVP). 검수(Inspection) 실행 이력에는 아직 적용하지 않음
 - Prometheus 기반 HTTP·Web ETL Observability MVP: HTTP 요청 수·응답 시간·상태 계열과 Web ETL 신규/중복/실패·처리 행 수를 low-cardinality metric으로 `GET /metrics`에 노출(기본 비활성)
+- Kubernetes Deployment Readiness MVP: 기존 `Dockerfile.aws` image를 그대로 사용해 kind 기반 GitHub Actions에서 PostgreSQL → Alembic Migration Job → FastAPI Deployment → Service → `/health`·`/ready`까지 실제 배포·검증
 
 ## 4. 사용자 기능 흐름
 
@@ -459,6 +460,7 @@ FastAPI (인증·RBAC 통과 후 작업 등록)
 | 인증 | PyJWT `2.10.1`(JWT, HS256), bcrypt `4.2.1`(password hash) |
 | 관측성 | prometheus-client `0.25.0`(HTTP·Web ETL metric instrumentation, `GET /metrics`) |
 | 비동기 처리 | Redis `7.4`, Celery `5.6.3` |
+| Kubernetes(CI 검증) | kind `v0.32.0`, kubectl `v1.36.2`, kind node `kindest/node:v1.36.1`(SHA-256 digest 고정) |
 | 로컬 실행 | Docker Compose |
 | 테스트 | pytest |
 | CI | GitHub Actions |
@@ -471,7 +473,7 @@ python -m pip install -r requirements-e2e.txt
 python -m playwright install chromium
 ```
 
-GitHub Actions는 일반 `test` job에서 PostgreSQL·Redis 서비스, Alembic 마이그레이션, E2E를 제외한 전체 pytest와 비동기 검수 smoke를 실행하고, `Dockerfile.aws` image build·import·UID `10001`·PostgreSQL migration·기본 CMD Uvicorn·`/health` HTTP `200`도 확인합니다. `Dockerfile.aws`는 `api`·`config`·`core`·`db`·`etl`·`services`·`workers` package를 모두 image에 포함하며, import 검증은 `api.main` import 시 연결되는 `api.routes.etl_loads` -> `etl.*` import chain까지 실제로 확인합니다. 별도 `browser-e2e` job에서는 PostgreSQL 서비스와 Chromium을 사용해 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증합니다. AWS runtime smoke는 실제 AWS 배포가 아니며, 배포는 수행하지 않습니다.
+GitHub Actions는 일반 `test` job에서 PostgreSQL·Redis 서비스, Alembic 마이그레이션, E2E를 제외한 전체 pytest와 비동기 검수 smoke를 실행하고, `Dockerfile.aws` image build·import·UID `10001`·PostgreSQL migration·기본 CMD Uvicorn·`/health` HTTP `200`도 확인합니다. `Dockerfile.aws`는 `api`·`config`·`core`·`db`·`etl`·`services`·`workers` package를 모두 image에 포함하며, import 검증은 `api.main` import 시 연결되는 `api.routes.etl_loads` -> `etl.*` import chain까지 실제로 확인합니다. 별도 `browser-e2e` job에서는 PostgreSQL 서비스와 Chromium을 사용해 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증합니다. AWS runtime smoke는 실제 AWS 배포가 아니며, 배포는 수행하지 않습니다. 세 번째 `kubernetes-smoke` job은 같은 `Dockerfile.aws` image를 kind 실제 Kubernetes cluster에 배포해 `/health`·`/ready`까지 확인합니다(자세한 내용은 16장 "Kubernetes Deployment Readiness" 참고).
 
 ## 8. 프로젝트 폴더 구조
 
@@ -606,6 +608,10 @@ catalogguard-lite/
       test_pipeline.py
       test_profile_loader.py
       test_transformer.py
+  k8s/
+    catalogguard-api.yaml
+    dev-postgres.yaml
+    migration-job.yaml
   .env.example
   alembic.ini
   requirements.txt
@@ -667,7 +673,8 @@ catalogguard-lite/
 | `alembic/versions/20260725_0003_create_etl_staging_tables.py` | ETL 배치·상품 staging 테이블, unique index, FK와 CHECK constraint 추가 마이그레이션 |
 | `alembic/versions/20260805_0009_create_users_table.py` | `users` 테이블(`username` unique, `role` CHECK, `is_active`) 생성 마이그레이션 |
 | `alembic/versions/20260806_0010_add_actor_audit_columns.py` | `etl_load_runs`·`catalog_promotion_runs`·`catalog_promotion_rollbacks`에 `actor_user_id`(FK `ON DELETE SET NULL`)·`actor_username` nullable 컬럼 추가 마이그레이션 |
-| `.github/workflows/test.yml` | 일반 테스트와 분리된 `browser-e2e` job을 포함해 PostgreSQL·Chromium 실제 브라우저 흐름까지 실행하는 GitHub Actions workflow |
+| `.github/workflows/test.yml` | 일반 테스트와 분리된 `browser-e2e`·`kubernetes-smoke` job을 포함해 PostgreSQL·Chromium 실제 브라우저 흐름과 kind 실제 Kubernetes 배포까지 실행하는 GitHub Actions workflow |
+| `k8s/dev-postgres.yaml`, `k8s/migration-job.yaml`, `k8s/catalogguard-api.yaml` | kind CI 전용 PostgreSQL, Alembic Migration Job, FastAPI Deployment/Service manifest |
 | `.env.example` | 로컬 PostgreSQL 연결 환경변수 예시 |
 | `requirements.txt` | Streamlit 앱 기본 실행 패키지 |
 | `requirements-api.txt` | FastAPI, PostgreSQL, Alembic 관련 패키지 |
@@ -1166,6 +1173,56 @@ CATALOGGUARD_API_TIMEOUT_SECONDS = "10"
 - Pre-deploy에서 `alembic command not found`가 발생해 `/app/.venv/bin/alembic` 절대 경로를 사용하도록 수정했습니다.
 - Start Command의 `uvicorn`도 같은 이유로 `/app/.venv/bin/uvicorn` 절대 경로를 사용합니다.
 
+### Kubernetes Deployment Readiness(kind 기반 CI 검증)
+
+새 Kubernetes 전용 Dockerfile을 만들지 않고 기존 `Dockerfile.aws` image를 그대로 사용합니다. `k8s/` 아래 manifest 3개가 이 image를 kind(Docker 안에서 실제 Kubernetes node를 실행하는 CI/로컬 도구) cluster에 배포합니다.
+
+```text
+Dockerfile.aws image
+-> kind Kubernetes cluster
+-> catalogguard namespace
+-> CI 런타임 Secret(catalogguard-secrets)
+-> PostgreSQL Deployment + Service (CI disposable, PVC 없음)
+-> Alembic Migration Job (command override로 1회 실행)
+-> FastAPI Deployment (command override로 uvicorn만 실행) + Service
+-> livenessProbe /health, readinessProbe /ready
+```
+
+`Dockerfile.aws`의 기본 CMD는 `alembic upgrade head && uvicorn ...` 순서로 migration과 API 실행을 함께 담당합니다. Kubernetes에서는 API Pod가 여러 개일 수 있어 이 CMD를 그대로 쓰면 각 Pod가 migration을 중복 실행할 수 있으므로, `k8s/migration-job.yaml`이 `command` override로 migration만 실행하는 별도 `Job`을 담당하고 `k8s/catalogguard-api.yaml`은 `command` override로 uvicorn만 실행합니다. `Dockerfile.aws` 자체는 수정하지 않았습니다.
+
+| Manifest | 역할 |
+|---|---|
+| `k8s/dev-postgres.yaml` | CI/kind smoke 전용 disposable `Deployment`+`Service`(`postgres:18`, PVC 없음, `pg_isready` probe) |
+| `k8s/migration-job.yaml` | 기존 image로 `python -m alembic upgrade head`만 실행하는 `Job`(`backoffLimit: 2`) |
+| `k8s/catalogguard-api.yaml` | 기존 image로 uvicorn만 실행하는 `Deployment`(`replicas: 1`)+`Service`(ClusterIP `:8000`) |
+
+liveness와 readiness는 기존 endpoint 의미를 그대로 따릅니다.
+
+```text
+livenessProbe  -> GET /health  (프로세스 생존만 확인, DB 미확인 — DB 장애로 정상 container가 계속 재시작되는 것을 방지)
+readinessProbe -> GET /ready   (PostgreSQL 연결까지 확인 — DB에 연결될 때만 Service가 트래픽을 보냄)
+```
+
+두 endpoint의 Python 로직은 이번 작업에서 변경하지 않았습니다. API·Migration Pod 모두 기존 Dockerfile의 UID와 동일한 `runAsUser: 10001`(non-root), `allowPrivilegeEscalation: false`로 실행됩니다. `catalogguard-secrets`는 manifest에 하드코딩된 값 없이 `secretKeyRef`(name+key)만 참조하며, 실제 값은 GitHub Actions 실행마다 `kubectl create secret generic`으로 새로 생성합니다(YAML 자체는 commit하지 않음).
+
+`.github/workflows/test.yml`의 `kubernetes-smoke` job은 kind와 kubectl을 고정 버전으로 설치한 뒤(`releases/latest`·`stable.txt` 같은 동적 조회 없이 `KIND_VERSION`/`KUBECTL_VERSION`/`KIND_NODE_IMAGE`를 job `env:`에 고정), 실제 cluster에서 위 흐름 전체를 검증합니다.
+
+```text
+kind/kubectl 설치(고정 버전)
+-> Dockerfile.aws image build
+-> kind cluster 생성(node image SHA-256 digest 고정)
+-> kind load docker-image
+-> namespace/Secret 생성
+-> PostgreSQL rollout 대기
+-> Migration Job condition=complete 대기
+-> FastAPI rollout 대기
+-> Service port-forward로 GET /health, GET /ready 확인
+-> 실패 시 kubectl get/describe/logs 진단(Secret 값은 출력하지 않음)
+-> kind cluster 삭제
+```
+
+이번 범위는 FastAPI + PostgreSQL의 Kubernetes 배포 가능성 검증까지입니다. Redis/Celery Async Inspection과 Streamlit은 Kubernetes에 배포하지 않았고, Ingress·TLS·HPA·Helm·Terraform·실제 EKS/GKE/AKS도 이번 범위에 없습니다. 현재 한계는 25장을 참고하세요.
+
 ## 17. Streamlit 실행 방법
 
 Streamlit 화면만 실행하려면 아래 명령을 사용합니다.
@@ -1191,7 +1248,7 @@ python -m streamlit run app.py
 
 ### `GET /health`
 
-FastAPI 서버 상태를 확인합니다. PostgreSQL 연결을 확인하는 엔드포인트는 아닙니다.
+FastAPI 서버 상태를 확인합니다. PostgreSQL 연결을 확인하는 엔드포인트는 아닙니다. Docker `HEALTHCHECK`와 Kubernetes `livenessProbe`(16장 "Kubernetes Deployment Readiness" 참고)가 이 endpoint를 사용해 "프로세스 자체가 살아 있는지"만 확인합니다.
 
 응답 예시는 다음과 같습니다.
 
@@ -1206,7 +1263,7 @@ FastAPI 서버 상태를 확인합니다. PostgreSQL 연결을 확인하는 엔�
 
 FastAPI 프로세스와 PostgreSQL 연결 상태를 함께 확인합니다. 기존 SQLAlchemy 엔진으로 `SELECT 1`을 실행하며, 성공하면 HTTP `200`과 `database: "ok"`를 반환하고 연결 또는 쿼리가 실패하면 내부 오류 내용을 노출하지 않고 HTTP `503`과 `database: "unavailable"`을 반환합니다.
 
-공개 확인 주소는 https://catalogguard-lite-production.up.railway.app/ready 입니다. 운영 배포에서 `/health`와 `/ready`가 HTTP `200`을 반환하고 `/ready`의 `database`가 `"ok"`인지 확인합니다. Railway Healthcheck Path는 `/health`로 유지합니다. `/health`, `/ready`는 `POST /api/v1/auth/login`과 함께 로그인 없이 접근할 수 있는 유일한 endpoint입니다.
+공개 확인 주소는 https://catalogguard-lite-production.up.railway.app/ready 입니다. 운영 배포에서 `/health`와 `/ready`가 HTTP `200`을 반환하고 `/ready`의 `database`가 `"ok"`인지 확인합니다. Railway Healthcheck Path는 `/health`로 유지합니다. `/health`, `/ready`는 `POST /api/v1/auth/login`과 함께 로그인 없이 접근할 수 있는 유일한 endpoint입니다. Kubernetes에서는 이 endpoint를 `readinessProbe`로 사용해, PostgreSQL에 연결할 수 있을 때만 Service가 해당 Pod로 트래픽을 보내도록 합니다.
 
 ### `GET /metrics`
 
@@ -1772,7 +1829,7 @@ python -m pytest -q
 
 ### PostgreSQL persistence 포함 검증 결과
 
-promotion과 rollback 기능은 운영 DB나 Railway DB에 연결하지 않고 저장소의 테스트 PostgreSQL 환경에서 검증했습니다. 문서에는 실행별 전체 테스트 수를 추측해 기록하지 않으며, 아래 수치는 기준 저장소 상태(commit `ed564e0e`)의 GitHub Actions run `31153262085`에서 실제로 확인된 결과입니다.
+promotion과 rollback 기능은 운영 DB나 Railway DB에 연결하지 않고 저장소의 테스트 PostgreSQL 환경에서 검증했습니다. 문서에는 실행별 전체 테스트 수를 추측해 기록하지 않으며, 아래 수치는 Kubernetes 기능 검증 commit(`c5c84d17`)의 GitHub Actions run `31156108895`에서 실제로 확인된 결과입니다. pytest 수치 자체는 Kubernetes 작업이 Python 코드를 변경하지 않아 직전 Observability 검증 commit과 동일합니다.
 
 ```text
 promotion preview·service·API·client·UI·concurrency 테스트 파일과 Playwright Chromium promotion E2E를 포함한 검증 범위를 확인
@@ -1784,6 +1841,7 @@ Chromium promotion E2E: preview·승인 전 버튼 비활성화·실제 반영·
 Authentication/RBAC: 401/403 경계, viewer/operator 권한 분리, sync inspection PostgreSQL transaction regression을 실제 PostgreSQL로 확인
 Actor Audit: Web ETL·Promotion·Rollback의 JWT actor 기록, viewer 403(세 endpoint)과 Web ETL anonymous 401의 run 미생성, actor 위조 방지, Promotion 실패 시 failed run actor 기록, legacy row(actor NULL) 안전 조회를 tests/test_actor_audit.py 10개 시나리오로 실제 PostgreSQL 확인
 Prometheus Metrics: HTTP metric·Web ETL metric·cardinality 방지·민감정보 미노출·실제 PostgreSQL 신규/중복 ETL 집계를 tests/test_metrics.py 32개 시나리오로 확인(이번 run에서 로컬 skip 없이 전체 실행)
+Kubernetes smoke: kind 실제 cluster에서 PostgreSQL rollout·Alembic Migration Job condition=complete·FastAPI rollout·Service를 통한 GET /health·GET /ready HTTP 200을 kubernetes-smoke job으로 확인(pytest 범위 밖, 별도 job)
 Run tests: `1309 passed`, `0 skipped`, `4 deselected`, `0 failed`
 ```
 
@@ -1839,7 +1897,7 @@ python scripts/benchmark_inspection.py --rows 100 1000 5000 10000 --repeat 3 --w
 
 ### GitHub Actions 자동 테스트
 
-`.github/workflows/test.yml`의 `Test` workflow는 `main` 브랜치 push와 `main` 브랜치를 대상으로 한 pull request에서 실행됩니다. 일반 `test` job은 Python 3.11, PostgreSQL 18·Redis 7.4, Alembic, E2E 제외 pytest, 실제 Celery Worker·FastAPI·비동기 CSV 검수 E2E와 Streamlit startup smoke를 실행합니다. 또한 `Dockerfile.aws` image build, `api`·`services`·`workers`와 Celery task import, 실행 UID `10001`, PostgreSQL migration, 기본 CMD의 Uvicorn 시작과 `/health` HTTP `200`을 검증합니다. 이 AWS 검증은 GitHub Actions Ubuntu의 Docker packaging/runtime smoke이며 실제 AWS 배포는 수행하지 않습니다. 별도 `browser-e2e` job은 PostgreSQL 18 service와 Playwright Chromium을 준비하고 `scripts/run_etl_browser_e2e.py`로 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증하며, 실패 시에만 browser artifact를 업로드합니다.
+`.github/workflows/test.yml`의 `Test` workflow는 `main` 브랜치 push와 `main` 브랜치를 대상으로 한 pull request에서 실행됩니다. 일반 `test` job은 Python 3.11, PostgreSQL 18·Redis 7.4, Alembic, E2E 제외 pytest, 실제 Celery Worker·FastAPI·비동기 CSV 검수 E2E와 Streamlit startup smoke를 실행합니다. 또한 `Dockerfile.aws` image build, `api`·`services`·`workers`와 Celery task import, 실행 UID `10001`, PostgreSQL migration, 기본 CMD의 Uvicorn 시작과 `/health` HTTP `200`을 검증합니다. 이 AWS 검증은 GitHub Actions Ubuntu의 Docker packaging/runtime smoke이며 실제 AWS 배포는 수행하지 않습니다. 별도 `browser-e2e` job은 PostgreSQL 18 service와 Playwright Chromium을 준비하고 `scripts/run_etl_browser_e2e.py`로 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증하며, 실패 시에만 browser artifact를 업로드합니다. 세 번째 `kubernetes-smoke` job은 고정 버전 kind/kubectl로 실제 Kubernetes cluster를 만들고, 같은 `Dockerfile.aws` image를 `k8s/` manifest로 배포해 PostgreSQL rollout·Alembic Migration Job·FastAPI rollout·`/health`·`/ready`까지 검증합니다(자세한 흐름은 16장 참고). 이 job도 실패 시에만 `kubectl get/describe/logs` 기반 진단 정보를 출력하며 Secret 값은 출력하지 않습니다.
 
 두 job 모두 `CATALOGGUARD_JWT_SECRET`을 `ci-test-only-jwt-secret-do-not-use-in-production` 같은 CI 전용 값으로 설정하며 운영 secret과 공유하지 않습니다. `test` job은 비동기 E2E 실행 전 `scripts/create_user.py`로 synthetic operator 계정을 만들고, `browser-e2e` job은 Chromium 실행 전 `browser_e2e_operator` 계정을 만들어 로그인 후 기존 흐름을 검증합니다.
 
@@ -1881,7 +1939,7 @@ Streamlit 시작 스모크 테스트는 `python -m streamlit run app.py`로 실�
 
 AppTest는 실제 `app.py` 실행 경로의 CSV 업로드와 검수·필터 위젯을 검증하지만 실제 브라우저의 파일 선택 창이나 픽셀 렌더링까지 자동화하지는 않습니다. GitHub Actions 스모크 테스트도 Railway API 실제 통신, 운영 Secrets 설정, Streamlit Community Cloud 전용 장애나 모든 Segmentation fault를 검증하지 않습니다.
 
-기준 저장소 상태(commit `ed564e0e`)의 GitHub Actions run `31153262085`은 `test`·`browser-e2e` job 모두 성공했습니다. Actions 실행별 전체 테스트 수는 이 문서에 추측해 고정하지 않으며, 위 "PostgreSQL persistence 포함 검증 결과"에 적은 수치는 이 run에서 실제로 확인한 값입니다. AWS Docker runtime smoke(image build·import·UID `10001`·migration·Uvicorn 시작·`/health` HTTP `200`)에서 `prometheus-client`가 `requirements-api.txt`를 통해 `Dockerfile.aws` image에도 정상 설치·import됨을 확인했습니다. promotion E2E와 Streamlit startup smoke의 실제 검증 범위는 위 테스트·workflow 설명을 따릅니다. Actions의 일회성 서비스 컨테이너는 운영 DB·Redis와 분리됩니다.
+Kubernetes 기능 검증 commit(`c5c84d17`)의 GitHub Actions run `31156108895`은 `test`·`browser-e2e`·`kubernetes-smoke` job 모두 성공했습니다. Actions 실행별 전체 테스트 수는 이 문서에 추측해 고정하지 않으며, 위 "PostgreSQL persistence 포함 검증 결과"에 적은 수치는 이 run에서 실제로 확인한 값입니다. AWS Docker runtime smoke(image build·import·UID `10001`·migration·Uvicorn 시작·`/health` HTTP `200`)에서 `prometheus-client`가 `requirements-api.txt`를 통해 `Dockerfile.aws` image에도 정상 설치·import됨을 확인했습니다. `kubernetes-smoke` job 로그에서 `kind v0.32.0`, `kubectl` client `v1.36.2`, node `kindest/node:v1.36.1`(SHA-256 digest 고정)로 실제 cluster가 만들어졌고, `deployment "postgres" successfully rolled out`, `job.batch/catalogguard-migrate condition met`, `deployment "catalogguard-api" successfully rolled out`, `GET /health -> {"status":"ok","service":"catalogguard-lite-api"}`, `GET /ready -> {"status":"ready","service":"catalogguard-lite-api","database":"ok"}`를 확인했습니다. promotion E2E와 Streamlit startup smoke의 실제 검증 범위는 위 테스트·workflow 설명을 따릅니다. Actions의 일회성 서비스 컨테이너·kind cluster는 운영 DB·Redis와 분리되며, kind cluster는 job 종료 시 삭제됩니다.
 
 ## 24. 데이터 저장 범위와 보안
 
@@ -1967,6 +2025,11 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - metric은 process-global 메모리 상태이므로 프로세스가 재시작되면 초기화됩니다. DB 실행 이력(영구)·Actor Audit(DB 이력의 실행자 기록)과는 별개 개념입니다.
 - metric registry가 프로세스 하나 안에서만 유지되므로, 여러 Uvicorn worker를 띄우는 환경에서는 worker별로 값이 나뉘며 이번 MVP는 이를 통합하지 않습니다.
 - Async Inspection/Celery, Redis queue depth, Promotion·Rollback 실행, Actor Audit, DB connection pool 관련 domain metric은 아직 없습니다.
+- Kubernetes 배포는 kind 기반 CI/local smoke 검증까지이며, 실제 EKS/GKE/AKS 등 production 클러스터에는 배포하지 않았습니다.
+- Kubernetes에는 FastAPI·PostgreSQL만 배포했습니다. Redis/Celery Async Inspection과 Streamlit은 Kubernetes에 배포하지 않았습니다.
+- Kubernetes Service는 ClusterIP만 사용하며 Ingress·TLS·외부 노출은 없습니다. `replicas: 1` 고정이며 HorizontalPodAutoscaler·PodDisruptionBudget도 없습니다.
+- Kubernetes의 dev PostgreSQL은 PersistentVolume이 없는 CI 전용 disposable 구성이며, kind cluster를 삭제하면 데이터도 함께 사라집니다. NetworkPolicy와 세분화된 ServiceAccount도 없습니다.
+- Kubernetes manifest의 resource requests/limits는 CI/개발용 초기값이며 실측 production sizing이 아닙니다.
 - 저장된 검수 이력 삭제 기능은 구현되어 있지 않습니다.
 - 전체 요약 CSV는 목록 API를 반복 조회하므로 다운로드 중 DB 내용이 바뀌는 상황의 완전한 스냅샷 보장은 별도 트랜잭션/내보내기 API가 필요합니다.
 - 실제 외부 공급사 운영 데이터와 연동하지 않았습니다.
@@ -1998,6 +2061,9 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - Prometheus 서버 구축과 scrape 설정, Grafana 대시보드
 - 여러 Uvicorn worker 환경을 위한 metric 통합(현재는 프로세스 단일 registry)
 - Async Inspection/Celery, Redis queue depth, Promotion·Rollback, Actor Audit, DB connection pool domain metric 추가
+- Redis/Celery, Streamlit의 Kubernetes 배포
+- Kubernetes Ingress/TLS, HorizontalPodAutoscaler, PodDisruptionBudget, NetworkPolicy
+- 실제 EKS/GKE/AKS 등 production Kubernetes 배포와 managed PostgreSQL(RDS 등) 연동
 - Refresh Token, 회원가입, password reset, OAuth/MFA/SSO, 로그인 rate limit
 - 중복 저장 이벤트 로그 또는 감사 기록 검토
 - 기간별 검수 추세와 파일 간 비교 통계 추가

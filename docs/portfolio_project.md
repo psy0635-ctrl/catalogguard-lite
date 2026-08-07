@@ -45,6 +45,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 14. Authentication 도입 과정에서 인증 dependency가 route와 같은 SQLAlchemy Session을 공유하며 SELECT가 트랜잭션을 암묵적으로 시작(autobegin)시켜 이후 쓰기 트랜잭션과 충돌하는 문제를 실제 Browser E2E로 발견하고, 관련 없는 사전 조회에는 독립된 Session을 쓰도록 최소 범위로 수정했습니다. 같은 원인으로 이미 존재하던 sync inspection API의 PostgreSQL transaction 충돌도 실제 PostgreSQL regression test로 재현·수정하고, 기존 monkeypatch 기반 테스트가 놓친 Session 상호작용 검증 공백을 보완했습니다.
 15. RBAC가 "누가 실행할 수 있는지"만 통제하고 "누가 실행했는지"는 남기지 않는다는 한계를 확인한 뒤, 새 범용 Audit 테이블 대신 기존 `ETLLoadRun`·`CatalogPromotionRun`·`CatalogPromotionRollback` 실행 이력에 `actor_user_id`(`users.id` FK, `ON DELETE SET NULL`)·`actor_username`(snapshot) 컬럼을 추가하는 Actor Audit MVP를 구현했습니다. actor는 request body가 아니라 인증된 JWT `current_user`에서만 가져오도록 해 위조를 원천적으로 차단했고, 실제 PostgreSQL로 JWT actor 기록·401/403·actor 위조 방지·Promotion 실패 시 기록·legacy row 호환을 검증하는 regression test 10개를 추가했습니다.
 16. 로그와 `/health`·`/ready`만으로는 요청 수·응답 시간·오류율·ETL 처리량을 숫자로 비교할 수 없다는 한계를 확인한 뒤, 기존 요청 middleware가 계산하던 duration을 재사용해 Prometheus HTTP metric(요청 수·응답 시간·상태 계열)과 Web ETL metric(신규/중복/실패, 처리 행 수)을 `GET /metrics`로 노출했습니다. 동적 ID 대신 FastAPI route template을 label로 써서 cardinality 폭증을 막고, 동일 배치 재사용 시 행 수를 다시 집계하지 않도록 설계했으며, `CATALOGGUARD_METRICS_ENABLED` 미설정 시 endpoint와 instrumentation 모두 no-op임을 실제 PostgreSQL 포함 32개 테스트로 검증했습니다.
+17. 기존 Dockerfile CMD가 컨테이너 시작마다 Alembic migration과 Uvicorn 실행을 함께 담당해, Kubernetes에서 API Pod가 여러 개면 migration이 중복 실행될 수 있다는 문제를 확인했습니다. 새 Kubernetes 전용 Dockerfile을 만들지 않고 기존 `Dockerfile.aws` image를 재사용하면서, `command` override로 migration 전용 Kubernetes Job과 Uvicorn 전용 Deployment로 책임을 분리했습니다. DB 연결을 확인하지 않는 `/health`는 liveness, PostgreSQL 연결까지 확인하는 `/ready`는 readiness로 연결했고, GitHub Actions에 kind 기반 실제 Kubernetes cluster를 만들어 PostgreSQL rollout·Migration Job 완료·FastAPI rollout·`/health`·`/ready` HTTP 200까지 자동 검증했습니다. kind·kubectl·node image는 최신 버전을 자동 조회하지 않고 SHA-256 digest까지 고정해, 같은 commit이 항상 같은 Kubernetes toolchain으로 재현되도록 했습니다.
 
 ## 6.2 문제 정의
 
@@ -172,11 +173,12 @@ catalogguard_ready.csv + etl_summary.json
 | 마이그레이션 | Alembic |
 | 비동기 처리 | Redis, Celery |
 | 관측성 | prometheus-client 0.25.0 (HTTP·Web ETL metric instrumentation MVP, Prometheus 서버는 미구축) |
+| Kubernetes(CI 검증) | kind v0.32.0, kubectl v1.36.2, node kindest/node:v1.36.1(SHA-256 digest 고정), FastAPI+PostgreSQL만 배포(Redis/Celery/Streamlit 미배포) |
 | 로컬 실행 | Docker Compose |
 | pytest | 일반 unit·integration 9.1.1 / Chromium E2E 8.4.1 |
 | CI | GitHub Actions `Test` workflow |
 | CI 테스트 서비스 | PostgreSQL 18·Redis 7.4 서비스 컨테이너 |
-| CI 검증 범위 | 일반 `test` job의 Alembic·pytest·비동기 E2E·AWS Docker runtime smoke와 별도 `browser-e2e` job의 PostgreSQL·Chromium 실제 브라우저 ETL·promotion E2E |
+| CI 검증 범위 | 일반 `test` job의 Alembic·pytest·비동기 E2E·AWS Docker runtime smoke, `browser-e2e` job의 PostgreSQL·Chromium 실제 브라우저 ETL·promotion E2E, `kubernetes-smoke` job의 kind 실제 Kubernetes 배포·`/health`·`/ready` 검증 |
 | 필수 컬럼 | 9개 |
 | 선택 컬럼 | 3개 (`sale_price` 포함) |
 | 등록된 검수 규칙 함수 | 15개 |
@@ -189,9 +191,10 @@ catalogguard_ready.csv + etl_summary.json
 | Web ETL·Rollback 검증 | `POST /api/v1/etl-loads`·`GET /api/v1/etl-profiles`, rollback preview/실행 API의 PostgreSQL 통합·API·client·UI 테스트 |
 | Actor Audit 검증 | `tests/test_actor_audit.py` 10 scenarios: JWT actor 기록, viewer 403(세 endpoint)·Web ETL anonymous 401, actor 위조 방지, Promotion 실패 기록, legacy row 호환 |
 | Prometheus Metrics 검증 | `tests/test_metrics.py` 32 scenarios: env parsing, `/metrics` disabled=404/no-op, route template cardinality 방지, `unmatched`/`5xx` 집계, 민감정보 미노출, Web ETL created/duplicate/failed와 row 중복 집계 방지, 실제 PostgreSQL 신규+중복 ETL |
+| Kubernetes smoke 검증 | kind 실제 cluster에서 PostgreSQL rollout·Alembic Migration Job condition=complete·FastAPI rollout·Service 경유 `GET /health`·`GET /ready` HTTP 200(pytest 범위 밖, `kubernetes-smoke` job) |
 | 최신 전체 pytest | `1309 passed`, `0 skipped`, `4 deselected`, `0 failed` |
-| 최신 기준 CI | GitHub Actions run `31153262085` success (commit `ed564e0e`) |
-| 최신 Alembic head | `20260806_0010`(이번 Observability 기능은 새 migration 없음) |
+| 최신 기준 CI | GitHub Actions run `31156108895` success (Kubernetes 기능 검증 commit `c5c84d17`) |
+| 최신 Alembic head | `20260806_0010`(이번 Kubernetes 기능은 새 migration 없음) |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
 
 ## 6.6 핵심 구현 구조
@@ -223,6 +226,7 @@ catalogguard_ready.csv + etl_summary.json
 | `workers/` | Celery 앱과 CSV 검수 Worker 작업 |
 | `etl/web_service.py` | 업로드 bytes를 `TemporaryDirectory`로 옮겨 기존 `run_pipeline()`·`load_standard_csv()`를 실행하는 웹 ETL 진입점(`run_web_etl()`) |
 | `etl/` | JSON 프로필 로딩·`profile_id` allowlist, 공급사 행 변환, reject 분리, 파일 변환 CLI와 PostgreSQL staging loader |
+| `k8s/dev-postgres.yaml`, `k8s/migration-job.yaml`, `k8s/catalogguard-api.yaml` | kind CI 전용 PostgreSQL Deployment/Service, Alembic Migration Job, FastAPI Deployment/Service manifest(기존 `Dockerfile.aws` image 재사용, command override) |
 
 ## 6.7 데이터 보호 설계
 
@@ -681,7 +685,7 @@ Python·FastAPI와 PostgreSQL을 기반으로 CSV 상품 데이터의 필수 값
 
 ### 포트폴리오용 설명
 
-CatalogGuard Lite는 상품 운영자가 CSV 상품 데이터를 검수하고, ETL staging 결과를 확인한 뒤 운영 상품에 안전하게 반영할 수 있도록 만든 품질 검사 앱입니다. 업로드 검증, 원본 보존형 개인정보 마스킹 미리보기, 중복 상품 탐지, 가격 이상치 탐지, 정상가·할인가 관계 검수, 상품명과 카테고리 불일치 탐지, 필터와 독립된 전체 결과 통계, 결과 필터링, CSV 다운로드를 제공합니다. 합성 공급사 CSV는 JSON 프로필로 표준화한 뒤 PostgreSQL staging에 배치 적재하며, CLI와 Streamlit 웹 업로드가 같은 ETL Pipeline·loader를 공유합니다. Streamlit에서 사용자가 batch를 직접 선택해 promotion preview를 실행하면 insert/update/unchanged와 상품별 변경 전후를 보여 주고, 명시적 승인과 SHA-256 preview hash 재검증을 통과한 경우에만 FastAPI transaction이 운영 상품을 insert/update하며 promotion run과 append-only audit을 저장합니다. succeeded promotion은 이후 발생한 정상 변경을 conflict로 보존하는 rollback으로 되돌릴 수 있습니다. Playwright Chromium E2E는 승인 전 버튼 상태와 실제 UI 선택을 확인한 뒤 브라우저 성공 메시지뿐 아니라 PostgreSQL 최종 상태까지 검증했으며, 별도로 Web ETL이 추가한 UI 접근성 이름 충돌과 AWS 배포 이미지의 package 누락도 이 브라우저 E2E와 CI runtime smoke가 실제로 발견해 수정했습니다. 이 검증은 합성 공급사 fixture와 테스트 PostgreSQL 환경에서 수행했으며, 실제 외부 공급사 운영 데이터나 production catalog에 반영한 것은 아닙니다. 공개 Streamlit 앱의 배포 기능 범위는 로컬 전체 시스템과 다를 수 있습니다. Web ETL·Promotion·Rollback이 실제로 실행되면 그 요청을 처리한 JWT 사용자를 실행 이력에 actor로 함께 기록하는 Actor Audit MVP를 추가했으며, 이 값은 request body가 아니라 인증된 `current_user`에서만 채워집니다. 기존 요청 middleware의 duration 측정을 재사용해 Prometheus HTTP·Web ETL metric(`GET /metrics`, 기본 비활성)을 노출하는 Observability MVP도 추가했으며, route template 기반 label로 cardinality를 제한하고 동일 ETL 배치 재사용 시 행 수를 다시 집계하지 않도록 설계했습니다.
+CatalogGuard Lite는 상품 운영자가 CSV 상품 데이터를 검수하고, ETL staging 결과를 확인한 뒤 운영 상품에 안전하게 반영할 수 있도록 만든 품질 검사 앱입니다. 업로드 검증, 원본 보존형 개인정보 마스킹 미리보기, 중복 상품 탐지, 가격 이상치 탐지, 정상가·할인가 관계 검수, 상품명과 카테고리 불일치 탐지, 필터와 독립된 전체 결과 통계, 결과 필터링, CSV 다운로드를 제공합니다. 합성 공급사 CSV는 JSON 프로필로 표준화한 뒤 PostgreSQL staging에 배치 적재하며, CLI와 Streamlit 웹 업로드가 같은 ETL Pipeline·loader를 공유합니다. Streamlit에서 사용자가 batch를 직접 선택해 promotion preview를 실행하면 insert/update/unchanged와 상품별 변경 전후를 보여 주고, 명시적 승인과 SHA-256 preview hash 재검증을 통과한 경우에만 FastAPI transaction이 운영 상품을 insert/update하며 promotion run과 append-only audit을 저장합니다. succeeded promotion은 이후 발생한 정상 변경을 conflict로 보존하는 rollback으로 되돌릴 수 있습니다. Playwright Chromium E2E는 승인 전 버튼 상태와 실제 UI 선택을 확인한 뒤 브라우저 성공 메시지뿐 아니라 PostgreSQL 최종 상태까지 검증했으며, 별도로 Web ETL이 추가한 UI 접근성 이름 충돌과 AWS 배포 이미지의 package 누락도 이 브라우저 E2E와 CI runtime smoke가 실제로 발견해 수정했습니다. 이 검증은 합성 공급사 fixture와 테스트 PostgreSQL 환경에서 수행했으며, 실제 외부 공급사 운영 데이터나 production catalog에 반영한 것은 아닙니다. 공개 Streamlit 앱의 배포 기능 범위는 로컬 전체 시스템과 다를 수 있습니다. Web ETL·Promotion·Rollback이 실제로 실행되면 그 요청을 처리한 JWT 사용자를 실행 이력에 actor로 함께 기록하는 Actor Audit MVP를 추가했으며, 이 값은 request body가 아니라 인증된 `current_user`에서만 채워집니다. 기존 요청 middleware의 duration 측정을 재사용해 Prometheus HTTP·Web ETL metric(`GET /metrics`, 기본 비활성)을 노출하는 Observability MVP도 추가했으며, route template 기반 label로 cardinality를 제한하고 동일 ETL 배치 재사용 시 행 수를 다시 집계하지 않도록 설계했습니다. 이후 기존 `Dockerfile.aws` image를 그대로 재사용해 kind 기반 GitHub Actions에서 실제 Kubernetes cluster에 PostgreSQL·Alembic Migration Job·FastAPI Deployment를 배포하고 `/health`(liveness)·`/ready`(readiness)까지 검증하는 Kubernetes Deployment Readiness MVP를 추가했습니다.
 
 ### 면접에서 강조할 포인트
 
@@ -696,6 +700,7 @@ CatalogGuard Lite는 상품 운영자가 CSV 상품 데이터를 검수하고, E
 - 테스트는 통과했지만 실제 배포 이미지에서만 재현되는 package 누락과, 신규 UI가 만든 접근성 이름 충돌을 CI runtime smoke와 기존 Browser E2E가 실제로 잡아 재발 방지 기준까지 정리했습니다.
 - Prometheus metric label에 동적 ID 대신 route template을 써서 high-cardinality 문제를 사전에 차단했고, 새 timing middleware를 추가하는 대신 기존 요청 로그가 이미 계산하던 duration을 재사용했습니다.
 - Actor Audit은 새 범용 Audit 테이블 대신 기존 실행 이력 테이블에 컬럼만 추가해 복잡도를 최소화했고, actor 값은 클라이언트 입력이 아니라 인증된 JWT `current_user`에서만 가져오도록 설계해 위조를 원천 차단했습니다.
+- Docker 이미지가 실행되는 것에서 끝내지 않고, GitHub Actions에 kind로 실제 Kubernetes cluster를 만들어 배포까지 검증했습니다. migration과 API 실행 책임을 Job/Deployment로 분리했고, kind·kubectl·node image 버전을 SHA-256 digest까지 고정해 같은 commit이 항상 같은 toolchain으로 재현되게 했습니다.
 
 ## 6.16 PostgreSQL 쿼리·인덱스 성능 검증
 
@@ -1091,3 +1096,114 @@ Web ETL이 실패하면 `ETLLoadRun` row 자체가 생성되지 않아 Actor Aud
 ### 현재 한계
 
 현재 구현은 애플리케이션이 Prometheus가 읽어갈 수 있는 형식으로 값을 노출하는 instrumentation MVP입니다. Prometheus 서버가 주기적으로 scrape하는 운영 환경, Grafana 대시보드, Alertmanager는 구축하지 않았습니다. metric registry가 프로세스 하나 안에서만 유지되므로 여러 Uvicorn worker를 띄우는 환경에서는 worker별로 값이 나뉘며, 이번 MVP는 이를 통합하지 않습니다("multi-worker 완벽 지원"이 아닙니다). Async Inspection/Celery, Redis queue depth, Promotion·Rollback 실행, Actor Audit, DB connection pool 관련 domain metric도 아직 없습니다. Prometheus metric은 DB 실행 이력처럼 영구 저장되지 않으며, 프로세스가 재시작되면 초기화됩니다.
+
+## 6.21 Kubernetes Deployment Readiness
+
+### 기존 상태
+
+`Dockerfile.aws`와 GitHub Actions AWS Runtime smoke, `/health`·`/ready`까지는 이미 구현·검증되어 있었습니다. 즉 "Docker container가 정상 실행되는가"는 확인했지만, "실제 Kubernetes cluster에 배포할 수 있는가"는 검증하지 않은 상태였습니다.
+
+### 문제
+
+두 가지 문제를 중심으로 작업했습니다.
+
+**문제 1 — migration과 API 실행이 결합**
+
+```text
+Dockerfile.aws CMD
+= alembic upgrade head && uvicorn ...
+```
+
+Kubernetes는 API Pod가 여러 개(replica)일 수 있습니다. 이 CMD를 그대로 쓰면 각 Pod가 시작할 때마다 migration을 실행하게 되어, replica를 늘리는 순간 여러 Pod가 동시에 같은 migration을 실행할 수 있는 구조가 됩니다.
+
+**문제 2 — "Running"과 "요청을 받을 준비"는 다름**
+
+Pod 상태가 `Running`인 것만으로는 실제로 요청을 처리할 수 있는 상태인지 알 수 없습니다. 프로세스 자체는 떠 있어도 PostgreSQL에 아직 연결하지 못했을 수 있습니다.
+
+### 설계 판단
+
+**문제 1 해결**: 새 Kubernetes 전용 Dockerfile을 만들지 않고 기존 `Dockerfile.aws` image를 그대로 재사용했습니다. 대신 Kubernetes manifest의 `command`로 역할을 분리했습니다.
+
+```text
+k8s/migration-job.yaml (Job)
+-> command override: python -m alembic upgrade head만 실행
+
+k8s/catalogguard-api.yaml (Deployment)
+-> command override: uvicorn만 실행
+```
+
+`Dockerfile.aws`의 CMD 자체는 수정하지 않았습니다. Docker/AWS Runtime과 Kubernetes가 같은 image를 공유하면서도, "migration 책임"과 "API 실행 책임"만 manifest 수준에서 분리한 것입니다. 이 분리가 모든 분산 migration race condition을 완벽히 해결한다고 보지는 않습니다 — Job이 `backoffLimit: 2`로 1회 실행되고 API Deployment가 그 뒤에 배포되는 순서를 보장하는 수준의, CI/kind MVP 범위의 책임 분리입니다.
+
+**문제 2 해결**: 기존 `/health`·`/ready`의 의미 차이를 그대로 Kubernetes probe에 연결했습니다.
+
+```text
+GET /health = FastAPI 프로세스 생존 여부만 확인(PostgreSQL 미확인)
+           -> livenessProbe
+
+GET /ready  = FastAPI 실행 중 + PostgreSQL 연결(SELECT 1) 확인
+           -> readinessProbe
+```
+
+`/health`를 readiness에 쓰면 DB 장애 때는 애초에 그 사실을 Kubernetes가 알 수 없고, `/ready`를 liveness에 쓰면 DB가 잠깐 끊겼다는 이유만으로 정상적인 FastAPI 프로세스까지 계속 재시작당할 수 있습니다. 두 endpoint의 Python 로직은 이번 작업에서 변경하지 않았습니다. `catalogguard-api` `Service`(ClusterIP `:8000`)로 Pod를 Kubernetes 내부에 노출했습니다.
+
+### 실제 Kubernetes 검증
+
+manifest 작성에서 끝내지 않고 GitHub Actions에 `kubernetes-smoke` job을 추가해 실제 kind cluster에서 검증했습니다.
+
+```text
+Dockerfile.aws image build
+-> kind cluster 생성(node image SHA-256 digest 고정)
+-> kind load docker-image
+-> catalogguard namespace 생성
+-> kubectl create secret generic으로 CI 런타임 Secret 생성
+-> PostgreSQL Deployment 배포 + rollout 대기
+-> Alembic Migration Job 실행 + condition=complete 대기
+-> FastAPI Deployment 배포 + rollout 대기
+-> Service port-forward로 GET /health, GET /ready 확인
+-> 실패 시 kubectl get/describe/logs 진단(Secret 값 미출력)
+-> kind cluster 삭제
+```
+
+Kubernetes 기능 검증 commit(`c5c84d17`)의 GitHub Actions run `31156108895`에서 실제로 확인한 결과입니다.
+
+```text
+kind v0.32.0, kubectl client v1.36.2, node kindest/node:v1.36.1
+deployment "postgres" successfully rolled out
+job.batch/catalogguard-migrate condition met
+deployment "catalogguard-api" successfully rolled out
+GET /health -> {"status":"ok","service":"catalogguard-lite-api"}
+GET /ready  -> {"status":"ready","service":"catalogguard-lite-api","database":"ok"}
+```
+
+같은 Run에서 기존 `test`(pytest `1309 passed`, AWS Runtime, Async Inspection E2E, Streamlit smoke 포함)·`browser-e2e` job도 모두 성공해, 이번 작업이 기존 API·DB·Celery·Browser E2E·AWS Runtime 검증을 깨뜨리지 않았음을 같은 Run에서 함께 확인했습니다.
+
+### CI 재현성 — toolchain 버전 고정
+
+처음에는 kind를 GitHub API의 `releases/latest`, kubectl을 Kubernetes 공식 `stable.txt`로 실행 시점마다 동적 조회했습니다. 이 방식은 당장은 동작하지만, 나중에 새 kind/Kubernetes 버전이 나오면 저장소 코드 변경 없이 CI 결과가 달라질 수 있다는 문제가 있었습니다. Docker/AWS Runtime에서도 재현성을 중요하게 다뤄 온 프로젝트 방향에 맞춰, Kubernetes toolchain도 다음처럼 고정했습니다.
+
+```text
+KIND_VERSION=v0.32.0
+KIND_NODE_IMAGE=kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+KUBECTL_VERSION=v1.36.2
+```
+
+node image는 tag뿐 아니라 SHA-256 digest까지 고정했습니다. kubectl 바이너리는 공식 `kubectl.sha256`으로 checksum까지 검증합니다. 같은 commit이 미래의 최신 버전 변경과 무관하게 항상 같은 Kubernetes toolchain에서 재현되도록 하는 것이 목적입니다.
+
+### 보안
+
+```text
+Secret YAML 미commit
+-> GitHub Actions 실행마다 openssl rand로 disposable 값 생성
+-> kubectl create secret generic catalogguard-secrets
+-> manifest는 secretKeyRef(name+key)만 참조, 실제 값 없음
+```
+
+API·Migration container 모두 기존 Dockerfile의 UID와 동일한 `runAsNonRoot: true`, `runAsUser/Group: 10001`, `allowPrivilegeEscalation: false`로 실행됩니다. 실패 진단 단계는 `kubectl get/describe/logs`만 사용하고 `kubectl get secret -o yaml`처럼 Secret 값이 노출될 수 있는 명령은 포함하지 않았습니다. External Secrets, Vault, Sealed Secrets, NetworkPolicy, Pod Security Admission 전체 구성은 구현하지 않았습니다.
+
+### 테스트 전략
+
+Kubernetes 작업의 핵심 검증은 Python unit test 추가가 아니라 실제 배포 smoke입니다. YAML 문법(pyyaml parse)과 workflow shell 문법(`bash -n`, 실제 commit될 LF blob 기준)을 로컬에서 정적으로 확인한 뒤, 실제 검증은 GitHub Actions의 `kubernetes-smoke` job이 실제 kind cluster·실제 PostgreSQL·실제 Alembic migration·실제 FastAPI container·실제 Service HTTP 요청으로 수행합니다. YAML 문자열을 Python에서 검색하는 형태의 테스트를 대량으로 추가하지 않았습니다.
+
+### 현재 한계
+
+kind 기반 CI/local smoke 검증까지이며 실제 EKS/GKE/AKS 등 production 클러스터에는 배포하지 않았습니다. Kubernetes에는 FastAPI·PostgreSQL만 배포했고 Redis/Celery Async Inspection과 Streamlit은 배포하지 않았습니다. Service는 ClusterIP만 사용하며 Ingress·TLS는 없고, `replicas: 1` 고정으로 HorizontalPodAutoscaler·PodDisruptionBudget도 없습니다. dev PostgreSQL은 PersistentVolume이 없는 CI 전용 disposable 구성이라 cluster 삭제 시 데이터가 함께 사라지며, NetworkPolicy와 세분화된 ServiceAccount도 없습니다. manifest의 resource requests/limits는 CI/개발용 초기값이며 실측 production sizing이 아닙니다.
