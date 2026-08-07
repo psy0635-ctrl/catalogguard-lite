@@ -44,6 +44,7 @@ from api.schemas import (
     ETLStagingProductResponse,
     ETLWebRunResponse,
 )
+from config.metrics import record_web_etl_run, record_web_etl_rows
 from core.upload_validator import CsvUploadValidationError
 from db.etl_query_service import (
     ETLLoadDetail,
@@ -461,6 +462,7 @@ async def create_etl_load_run(
             actor_username=current_user.username,
         )
     except ETLProfileNotFoundError:
+        record_web_etl_run("failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -469,11 +471,13 @@ async def create_etl_load_run(
             },
         ) from None
     except (CsvUploadValidationError, ETLPipelineError) as error:
+        record_web_etl_run("failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "invalid_upload", "message": str(error)},
         ) from None
     except ETLLoadError:
+        record_web_etl_run("failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
@@ -481,6 +485,12 @@ async def create_etl_load_run(
                 "message": "ETL 처리 중 오류가 발생했습니다.",
             },
         ) from None
+
+    # outcome은 run_web_etl()/load_standard_csv()가 이미 commit까지 마친 뒤의 결과이므로,
+    # 이 시점에 기록하는 metric은 실제 DB 반영 여부와 항상 일치합니다.
+    record_web_etl_run("created" if outcome.created else "duplicate")
+    if outcome.created:
+        record_web_etl_rows(loaded_rows=outcome.loaded_rows, rejected_rows=outcome.rejected_rows)
 
     return _build_web_run_response(outcome)
 

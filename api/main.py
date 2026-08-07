@@ -4,6 +4,7 @@ import time
 import uuid
 
 from fastapi import FastAPI, HTTPException, Request, status
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.responses import PlainTextResponse, Response
 
 from api.routes.auth import router as auth_router
@@ -11,6 +12,13 @@ from api.routes.etl_loads import router as etl_loads_router
 from api.routes.inspections import router as inspections_router
 from api.routes.inspection_jobs import router as inspection_jobs_router
 from config.logging import configure_logging, log_event
+from config.metrics import (
+    EXCLUDED_METRIC_PATHS,
+    REGISTRY as METRICS_REGISTRY,
+    UNMATCHED_ROUTE_LABEL,
+    is_metrics_enabled,
+    record_http_request,
+)
 from db.session import check_database_connection
 
 
@@ -40,17 +48,31 @@ app = FastAPI(
 )
 
 
+def _route_label(request: Request) -> str:
+    """FastAPI route template(e.g. /api/v1/etl-loads/{etl_load_run_id}) if matched,
+    or a fixed low-cardinality label when no route matched (404 on an unknown path)."""
+    route = request.scope.get("route")
+    path = getattr(route, "path", None)
+    return path or UNMATCHED_ROUTE_LABEL
+
+
 @app.middleware("http")
 async def log_http_request(request: Request, call_next) -> Response:
-    """Assign a request ID and log completion or an unhandled failure."""
+    """Assign a request ID and log completion or an unhandled failure.
+
+    Also feeds the Prometheus HTTP metrics from the same duration measurement
+    computed here, instead of adding a second timing middleware.
+    """
     request_id = uuid.uuid4().hex
     request.state.request_id = request_id
     started_at = time.perf_counter()
+    track_metrics = request.url.path not in EXCLUDED_METRIC_PATHS
 
     try:
         response = await call_next(request)
     except Exception as error:
-        duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        duration_seconds = time.perf_counter() - started_at
+        duration_ms = round(duration_seconds * 1000, 2)
         log_event(
             api_logger,
             logging.ERROR,
@@ -62,10 +84,18 @@ async def log_http_request(request: Request, call_next) -> Response:
             duration_ms=duration_ms,
             error_type=type(error).__name__,
         )
+        if track_metrics:
+            record_http_request(
+                method=request.method,
+                route=_route_label(request),
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                duration_seconds=duration_seconds,
+            )
         raise
 
     response.headers[REQUEST_ID_HEADER] = request_id
-    duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+    duration_seconds = time.perf_counter() - started_at
+    duration_ms = round(duration_seconds * 1000, 2)
     log_event(
         api_logger,
         logging.INFO,
@@ -76,6 +106,13 @@ async def log_http_request(request: Request, call_next) -> Response:
         status_code=response.status_code,
         duration_ms=duration_ms,
     )
+    if track_metrics:
+        record_http_request(
+            method=request.method,
+            route=_route_label(request),
+            status_code=response.status_code,
+            duration_seconds=duration_seconds,
+        )
     return response
 
 # CSV 검수 API 묶음을 현재 앱에 연결합니다.
@@ -83,6 +120,17 @@ app.include_router(auth_router)
 app.include_router(inspections_router)
 app.include_router(inspection_jobs_router)
 app.include_router(etl_loads_router)
+
+
+@app.get("/metrics")
+def metrics_endpoint() -> Response:
+    # CATALOGGUARD_METRICS_ENABLED로 명시적으로 켜지 않으면 항상 비공개(404)로 유지합니다.
+    if not is_metrics_enabled():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    return Response(
+        content=generate_latest(METRICS_REGISTRY),
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 
 @app.get("/health")
