@@ -61,6 +61,7 @@ def test_list_catalog_promotions_maps_joined_rows_without_writes():
         started_at=created_at,
         completed_at=created_at + timedelta(seconds=1),
         created_at=created_at,
+        actor_username="operator_user",
     )
     load = SimpleNamespace(
         source_filename="vendor.csv",

@@ -110,6 +110,7 @@ class CatalogPromotionRollbackExecutionResult:
     blocked_reasons: list[RollbackBlockedReason]
     started_at: datetime | None
     completed_at: datetime | None
+    actor_username: str | None = None
 
 
 def _utc_now() -> datetime:
@@ -297,6 +298,7 @@ def _result_from_run(
         blocked_reasons=list(blocked_reasons or []),
         started_at=run.started_at,
         completed_at=run.completed_at,
+        actor_username=run.actor_username,
     )
 
 
@@ -316,6 +318,8 @@ def _create_terminal_run(
     message: str,
     started_at: datetime,
     preview: CatalogPromotionRollbackPreview | None,
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
 ) -> CatalogPromotionRollback:
     run = CatalogPromotionRollback(
         target_promotion_run_id=target_promotion_run_id,
@@ -329,13 +333,23 @@ def _create_terminal_run(
         safe_failure_message=message,
         started_at=started_at,
         completed_at=_utc_now(),
+        actor_user_id=actor_user_id,
+        actor_username=actor_username,
     )
     session.add(run)
     session.flush()
     return run
 
 
-def _record_failed_run(session: Session, *, target_promotion_run_id: int, started_at: datetime, preview: CatalogPromotionRollbackPreview | None) -> int | None:
+def _record_failed_run(
+    session: Session,
+    *,
+    target_promotion_run_id: int,
+    started_at: datetime,
+    preview: CatalogPromotionRollbackPreview | None,
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
+) -> int | None:
     try:
         with session.begin():
             run = _create_terminal_run(
@@ -346,6 +360,8 @@ def _record_failed_run(session: Session, *, target_promotion_run_id: int, starte
                 message=ROLLBACK_FAILED_MESSAGE,
                 started_at=started_at,
                 preview=preview,
+                actor_user_id=actor_user_id,
+                actor_username=actor_username,
             )
             return run.id
     except Exception:
@@ -359,6 +375,8 @@ def execute_catalog_promotion_rollback(
     promotion_run_id: int,
     confirmation: bool,
     expected_preview_hash: str,
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
 ) -> CatalogPromotionRollbackExecutionResult:
     _validate_request(confirmation=confirmation, expected_preview_hash=expected_preview_hash)
     started_at = _utc_now()
@@ -413,6 +431,8 @@ def execute_catalog_promotion_rollback(
                     message=ROLLBACK_CONFLICT_MESSAGE if preview.conflict_count else ROLLBACK_NOT_ELIGIBLE_MESSAGE,
                     started_at=started_at,
                     preview=preview,
+                    actor_user_id=actor_user_id,
+                    actor_username=actor_username,
                 )
                 return _result_from_run(run, created=True, blocked_reasons=preview.blocked_reasons)
             if expected_preview_hash != preview.preview_hash:
@@ -424,6 +444,8 @@ def execute_catalog_promotion_rollback(
                     message=ROLLBACK_PREVIEW_STALE_MESSAGE,
                     started_at=started_at,
                     preview=preview,
+                    actor_user_id=actor_user_id,
+                    actor_username=actor_username,
                 )
                 return _result_from_run(run, created=True)
 
@@ -433,6 +455,8 @@ def execute_catalog_promotion_rollback(
                 preview_hash=preview.preview_hash,
                 preview_schema_version=str(preview.preview_schema_version),
                 started_at=started_at,
+                actor_user_id=actor_user_id,
+                actor_username=actor_username,
             )
             session.add(rollback_run)
             session.flush()
@@ -480,5 +504,7 @@ def execute_catalog_promotion_rollback(
             target_promotion_run_id=promotion_run_id,
             started_at=started_at,
             preview=preview,
+            actor_user_id=actor_user_id,
+            actor_username=actor_username,
         )
         raise CatalogPromotionRollbackExecutionFailedError(failed_run_id) from None

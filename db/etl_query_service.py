@@ -22,6 +22,7 @@ class ETLLoadListItem:
     loaded_rows: int
     rejected_rows: int | None
     created_at: datetime
+    actor_username: str | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,7 @@ class ETLLoadDetail:
     reject_details_stored: bool
     created_at: datetime
     products: ETLStagingProductList
+    actor_username: str | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +144,7 @@ def _to_load_list_item(load_run: ETLLoadRun) -> ETLLoadListItem:
         loaded_rows=load_run.loaded_rows,
         rejected_rows=load_run.rejected_rows,
         created_at=load_run.created_at,
+        actor_username=load_run.actor_username,
     )
 
 
@@ -229,6 +232,7 @@ def get_etl_load_detail(
         error_counts=load_run.error_counts,
         reject_details_stored=load_run.reject_details_stored,
         created_at=load_run.created_at,
+        actor_username=load_run.actor_username,
         products=ETLStagingProductList(
             items=[_to_product(product) for product in products],
             total=total,

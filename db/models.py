@@ -257,6 +257,14 @@ class ETLLoadRun(Base):
         String(64),
         nullable=True,
     )
+    # Actor audit: 이 배치를 실행한 로그인 사용자입니다. 이 컬럼이 생기기 전(migration 이전) row와
+    # CLI(etl.load_cli)로 적재된 row는 로그인 사용자가 없어 둘 다 NULL로 남습니다.
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    actor_username: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -591,6 +599,13 @@ class CatalogPromotionRun(Base):
         nullable=False,
         server_default=func.now(),
     )
+    # Actor audit: 이 promotion을 실행(시도)한 로그인 사용자입니다. migration 이전 row는 NULL입니다.
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    actor_username: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     etl_load_run: Mapped[ETLLoadRun] = relationship(back_populates="promotion_runs")
     changes: Mapped[list[CatalogProductChange]] = relationship(
@@ -710,6 +725,11 @@ class CatalogPromotionRollback(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # Actor audit: 이 rollback을 실행(시도)한 로그인 사용자입니다. migration 이전 row는 NULL입니다.
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    actor_username: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     target_promotion_run: Mapped[CatalogPromotionRun] = relationship(back_populates="rollback_runs")
     changes: Mapped[list[CatalogPromotionRollbackChange]] = relationship(back_populates="rollback_run", passive_deletes=True)

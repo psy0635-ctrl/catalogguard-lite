@@ -52,6 +52,7 @@ def _load(**overrides):
         "total_rows": 30,
         "rejected_rows": 5,
         "created_at": datetime(2026, 7, 25, 12, tzinfo=timezone.utc),
+        "actor_username": "operator_user",
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -76,6 +77,7 @@ def fake_etl_query_service(monkeypatch):
         error_counts={"INVALID_PRICE": 5},
         reject_details_stored=True,
         created_at=load.created_at,
+        actor_username="operator_user",
         products=SimpleNamespace(
             items=[_product(description=None, seller=None, sale_price=None)],
             total=25,
@@ -193,6 +195,7 @@ def test_list_etl_loads_returns_default_page_and_excludes_hashes(
                 "total_rows": 30,
                 "rejected_rows": 5,
                 "created_at": "2026-07-25T12:00:00Z",
+                "actor_username": "operator_user",
             }
         ],
         "total": 1,

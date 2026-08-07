@@ -76,6 +76,7 @@ class CatalogPromotionExecutionResult:
     blocked_reasons: list[PromotionPreviewBlockedReason]
     started_at: datetime | None
     completed_at: datetime | None
+    actor_username: str | None = None
 
 
 def _utc_now() -> datetime:
@@ -125,6 +126,7 @@ def _result_from_run(
         blocked_reasons=list(blocked_reasons or []),
         started_at=run.started_at,
         completed_at=run.completed_at,
+        actor_username=run.actor_username,
     )
 
 
@@ -139,6 +141,8 @@ def _create_terminal_run(
     completed_at: datetime,
     preview: CatalogPromotionPreview | None,
     blocked_count: int,
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
 ) -> CatalogPromotionRun:
     run = CatalogPromotionRun(
         etl_load_run_id=etl_load_run_id,
@@ -160,6 +164,8 @@ def _create_terminal_run(
         safe_failure_message=safe_failure_message,
         started_at=started_at,
         completed_at=completed_at,
+        actor_user_id=actor_user_id,
+        actor_username=actor_username,
     )
     session.add(run)
     session.flush()
@@ -268,6 +274,8 @@ def _record_failed_run(
     etl_load_run_id: int,
     started_at: datetime,
     preview: CatalogPromotionPreview | None,
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
 ) -> int | None:
     try:
         with session.begin():
@@ -281,6 +289,8 @@ def _record_failed_run(
                 completed_at=_utc_now(),
                 preview=preview,
                 blocked_count=0,
+                actor_user_id=actor_user_id,
+                actor_username=actor_username,
             )
             return run.id
     except Exception:
@@ -294,6 +304,8 @@ def execute_catalog_promotion(
     etl_load_run_id: int,
     confirmation: bool,
     expected_preview_hash: str,
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
 ) -> CatalogPromotionExecutionResult:
     _validate_request(
         confirmation=confirmation,
@@ -382,6 +394,8 @@ def execute_catalog_promotion(
                     completed_at=_utc_now(),
                     preview=preview,
                     blocked_count=len(staging_products),
+                    actor_user_id=actor_user_id,
+                    actor_username=actor_username,
                 )
                 return _result_from_run(
                     blocked_run,
@@ -400,6 +414,8 @@ def execute_catalog_promotion(
                     completed_at=_utc_now(),
                     preview=preview,
                     blocked_count=len(staging_products),
+                    actor_user_id=actor_user_id,
+                    actor_username=actor_username,
                 )
                 return _result_from_run(stale_run, created=True)
 
@@ -419,6 +435,8 @@ def execute_catalog_promotion(
                 safe_failure_message=None,
                 started_at=started_at,
                 completed_at=None,
+                actor_user_id=actor_user_id,
+                actor_username=actor_username,
             )
             session.add(promotion_run)
             session.flush()
@@ -475,5 +493,7 @@ def execute_catalog_promotion(
                 etl_load_run_id=locked_load_run_id,
                 started_at=started_at,
                 preview=preview,
+                actor_user_id=actor_user_id,
+                actor_username=actor_username,
             )
         raise CatalogPromotionExecutionFailedError(failed_run_id) from None

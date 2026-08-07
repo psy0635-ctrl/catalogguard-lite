@@ -49,6 +49,7 @@ def _result(**changes):
         "blocked_reasons": [],
         "started_at": now,
         "completed_at": now,
+        "actor_username": "operator_user",
     }
     values.update(changes)
     return SimpleNamespace(**values)
@@ -73,6 +74,8 @@ def promotion_api(monkeypatch):
         etl_load_run_id,
         confirmation,
         expected_preview_hash,
+        actor_user_id=None,
+        actor_username=None,
     ):
         state.calls.append(
             {
@@ -80,6 +83,8 @@ def promotion_api(monkeypatch):
                 "etl_load_run_id": etl_load_run_id,
                 "confirmation": confirmation,
                 "expected_preview_hash": expected_preview_hash,
+                "actor_user_id": actor_user_id,
+                "actor_username": actor_username,
             }
         )
         if state.error is not None:
@@ -125,6 +130,7 @@ def test_success_returns_complete_contract_and_no_store(promotion_api):
         "warning_count": 1,
         "started_at": "2026-07-29T08:00:00Z",
         "completed_at": "2026-07-29T08:00:00Z",
+        "actor_username": "operator_user",
     }
     assert promotion_api.calls[0]["session"] is not None
 

@@ -6,13 +6,16 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 
+from api.dependencies import get_current_user
 from api.main import app
 from api.routes import etl_loads as etl_loads_route
 from conftest import override_current_user
 from config.database import get_optional_database_url
 from config.settings import MAX_UPLOAD_SIZE_BYTES
+from core.security import create_access_token
 from core.upload_validator import CsvUploadValidationError
-from db.models import CatalogProductStaging, ETLLoadRun
+from db.auth_service import create_user
+from db.models import CatalogProductStaging, ETLLoadRun, User
 from db.session import create_database_engine, create_session_factory, get_session
 from etl.db_loader import ETLLoadError
 from etl.pipeline import ETLPipelineError
@@ -35,8 +38,21 @@ def clear_overrides():
     app.dependency_overrides.clear()
 
 
+@pytest.fixture(autouse=True)
+def jwt_secret_env(monkeypatch):
+    monkeypatch.setenv("CATALOGGUARD_JWT_SECRET", "test-only-secret-value")
+
+
 def test_success_returns_etl_web_run_contract(monkeypatch):
-    def fake_run_web_etl(session, *, profile_id, source_filename, input_bytes):
+    def fake_run_web_etl(
+        session,
+        *,
+        profile_id,
+        source_filename,
+        input_bytes,
+        actor_user_id=None,
+        actor_username=None,
+    ):
         assert profile_id == "sample_fashion_vendor_v1"
         assert source_filename == "vendor.csv"
         assert input_bytes == b"header\nvalue\n"
@@ -50,6 +66,7 @@ def test_success_returns_etl_web_run_contract(monkeypatch):
             loaded_rows=2,
             rejected_rows=0,
             error_counts={},
+            actor_username=actor_username,
         )
 
     app.dependency_overrides[get_session] = lambda: iter([object()])
@@ -73,6 +90,7 @@ def test_success_returns_etl_web_run_contract(monkeypatch):
         "loaded_rows": 2,
         "rejected_rows": 0,
         "error_counts": {},
+        "actor_username": "operator_user",
     }
 
 
@@ -225,10 +243,18 @@ def postgres_api():
 
 
 def test_real_endpoint_persists_batch_and_staging_products_in_postgresql(postgres_api):
+    # 실제 users.id를 참조하는 actor_user_id FK가 있으므로, 이 테스트만은 다른 테스트의
+    # 고정 id=1 가짜 current_user override 대신 실제 PostgreSQL에 존재하는 operator
+    # 계정과 실제 JWT로 로그인해 actor가 정확히 기록되는지 확인합니다.
     session_factory = postgres_api
     marker = uuid4().hex
     csv_bytes = build_supplier_csv([valid_row(f"SKU-{marker}-1"), valid_row(f"SKU-{marker}-2")])
     source_filename = f"vendor_{marker}.csv"
+    username = f"etl_actor_{marker[:12]}"
+
+    with session_factory() as user_session:
+        create_user(user_session, username=username, password="synthetic-pw-etl-actor", role="operator")
+    token, _ = create_access_token(subject=username, role="operator")
 
     def override_session():
         session = session_factory()
@@ -238,11 +264,13 @@ def test_real_endpoint_persists_batch_and_staging_products_in_postgresql(postgre
             session.close()
 
     app.dependency_overrides[get_session] = override_session
+    app.dependency_overrides.pop(get_current_user, None)
     try:
         response = client.post(
             ENDPOINT,
             files=_files(content=csv_bytes, filename=source_filename),
             data={"profile_id": "sample_fashion_vendor_v1"},
+            headers={"Authorization": f"Bearer {token}"},
         )
     finally:
         app.dependency_overrides.clear()
@@ -255,10 +283,13 @@ def test_real_endpoint_persists_batch_and_staging_products_in_postgresql(postgre
         assert body["loaded_rows"] == 2
         assert body["rejected_rows"] == 0
         assert body["source_filename"] == source_filename
+        assert body["actor_username"] == username
 
         with session_factory() as verify_session:
             run = verify_session.get(ETLLoadRun, run_id)
             assert run is not None
+            assert run.actor_username == username
+            assert run.actor_user_id is not None
             products = verify_session.scalars(
                 select(CatalogProductStaging).where(
                     CatalogProductStaging.etl_load_run_id == run_id
@@ -268,6 +299,7 @@ def test_real_endpoint_persists_batch_and_staging_products_in_postgresql(postgre
     finally:
         with session_factory() as cleanup:
             cleanup.execute(delete(ETLLoadRun).where(ETLLoadRun.id == run_id))
+            cleanup.execute(delete(User).where(User.username == username))
             cleanup.commit()
 
 

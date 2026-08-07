@@ -32,6 +32,7 @@ class CatalogPromotionRunListItem:
     started_at: datetime | None
     completed_at: datetime | None
     created_at: datetime
+    actor_username: str | None = None
 
 
 @dataclass(frozen=True)
@@ -44,9 +45,9 @@ class CatalogPromotionRunList:
 
 @dataclass(frozen=True)
 class CatalogPromotionRunDetail(CatalogPromotionRunListItem):
-    preview_hash: str | None
-    preview_schema_version: str | None
-    inspection_version: str | None
+    preview_hash: str | None = None
+    preview_schema_version: str | None = None
+    inspection_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,7 @@ def _to_run_list_item(
         started_at=run.started_at,
         completed_at=run.completed_at,
         created_at=run.created_at,
+        actor_username=run.actor_username,
     )
 
 

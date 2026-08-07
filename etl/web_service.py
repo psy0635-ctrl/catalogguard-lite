@@ -22,6 +22,7 @@ class ETLWebRunOutcome:
     loaded_rows: int
     rejected_rows: int | None
     error_counts: dict[str, int] | None
+    actor_username: str | None = None
 
 
 def _leaf_filename(filename: str) -> str:
@@ -37,6 +38,8 @@ def run_web_etl(
     profile_id: str,
     source_filename: str,
     input_bytes: bytes,
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
 ) -> ETLWebRunOutcome:
     # run_pipeline/load_standard_csv are the same functions etl.cli/etl.load_cli call;
     # this only bridges an in-memory upload into their existing file-based contract.
@@ -62,6 +65,8 @@ def run_web_etl(
             standard_csv_filename=output_path.name,
             rejects_csv_bytes=rejects_path.read_bytes(),
             rejects_csv_filename=rejects_path.name,
+            actor_user_id=actor_user_id,
+            actor_username=actor_username,
         )
 
     load_run = session.get(ETLLoadRun, outcome.etl_load_run_id)
@@ -73,6 +78,7 @@ def run_web_etl(
         source_filename=load_run.source_filename,
         total_rows=load_run.total_rows,
         loaded_rows=load_run.loaded_rows,
+        actor_username=load_run.actor_username,
         rejected_rows=load_run.rejected_rows,
         error_counts=load_run.error_counts,
     )

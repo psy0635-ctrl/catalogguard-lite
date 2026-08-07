@@ -66,6 +66,8 @@ class ETLLoadListItemResponse(BaseModel):
     loaded_rows: int
     rejected_rows: int | None
     created_at: datetime
+    # 이 배치를 실행한 로그인 사용자입니다. migration 이전이나 CLI로 적재된 배치는 None입니다.
+    actor_username: str | None
 
 
 class ETLLoadListResponse(BaseModel):
@@ -112,6 +114,7 @@ class ETLLoadDetailResponse(BaseModel):
     error_counts: dict[str, int] | None
     reject_details_stored: bool
     created_at: datetime
+    actor_username: str | None
     products: ETLStagingProductListResponse
 
 
@@ -147,6 +150,7 @@ class ETLWebRunResponse(BaseModel):
     loaded_rows: int
     rejected_rows: int | None
     error_counts: dict[str, int] | None
+    actor_username: str | None
 
 
 class ETLProfileResponse(BaseModel):
@@ -239,6 +243,7 @@ class CatalogPromotionResponse(BaseModel):
     warning_count: int
     started_at: datetime
     completed_at: datetime
+    actor_username: str | None
 
 
 CatalogPromotionRunStatus = Literal["applying", "succeeded", "failed", "blocked"]
@@ -261,6 +266,7 @@ class CatalogPromotionRunListItemResponse(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     created_at: datetime
+    actor_username: str | None
 
 
 class CatalogPromotionRunListResponse(BaseModel):
@@ -366,6 +372,7 @@ class CatalogPromotionRollbackResponse(BaseModel):
     conflict_count: int
     started_at: datetime
     completed_at: datetime
+    actor_username: str | None
 
 
 class LoginRequest(BaseModel):

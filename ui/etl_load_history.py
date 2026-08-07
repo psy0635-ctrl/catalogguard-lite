@@ -35,6 +35,7 @@ ETL_LOAD_DISPLAY_COLUMNS = [
     "전체 행",
     "변환 거부",
     "적재 시간",
+    "실행 사용자",
 ]
 ETL_ERROR_DISPLAY_COLUMNS = ["오류 코드", "발생 건수"]
 ETL_REJECT_DISPLAY_COLUMNS = ["원본 행", "오류 코드", "오류 필드", "오류 메시지"]
@@ -76,6 +77,7 @@ PROMOTION_HISTORY_DISPLAY_COLUMNS = [
     "수정",
     "변경 없음",
     "실행 시각",
+    "실행 사용자",
 ]
 PROMOTION_AUDIT_DISPLAY_COLUMNS = [
     "Audit ID",
@@ -161,6 +163,7 @@ def build_etl_load_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
             "전체 행": _display_nullable(item.get("total_rows")),
             "변환 거부": _display_nullable(item.get("rejected_rows")),
             "적재 시간": format_etl_datetime(item.get("created_at")),
+            "실행 사용자": format_actor_username(item.get("actor_username")),
         }
         for item in items
     ]
@@ -169,6 +172,13 @@ def build_etl_load_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
 
 def _display_nullable(value: object) -> object:
     return "" if value is None else value
+
+
+def format_actor_username(actor_username: object) -> str:
+    # migration 이전 row나 CLI로 적재된 row는 실행 사용자를 알 수 없습니다.
+    if not isinstance(actor_username, str) or not actor_username.strip():
+        return "알 수 없음"
+    return actor_username
 
 
 def format_etl_quality_rate(
@@ -413,6 +423,7 @@ def build_catalog_promotion_history_dataframe(
             "실행 시각": format_etl_datetime(
                 item.get("started_at") or item.get("created_at")
             ),
+            "실행 사용자": format_actor_username(item.get("actor_username")),
         }
         for item in items
     ]
@@ -959,6 +970,7 @@ def _render_etl_load_detail(api_client) -> None:
     st.write(f"프로필 버전: {detail_response.get('profile_version', '')}")
     st.write(f"적재 상품 수: {detail_response.get('loaded_rows', 0)}")
     st.write(f"적재 시간: {format_etl_datetime(detail_response.get('created_at'))}")
+    st.write(f"실행 사용자: {format_actor_username(detail_response.get('actor_username'))}")
     total_rows = detail_response.get("total_rows")
     rejected_rows = detail_response.get("rejected_rows")
     if total_rows is not None and rejected_rows is not None:
@@ -1217,6 +1229,7 @@ def _render_catalog_promotion_history_detail(api_client) -> None:
     st.write(f"ETL 배치: {detail.get('etl_load_run_id', '')}")
     st.write(f"원본 파일명: {detail.get('source_filename', '')}")
     st.write(f"상태: {detail.get('status', '')}")
+    st.write(f"실행 사용자: {format_actor_username(detail.get('actor_username'))}")
     metric_columns = st.columns(3)
     metric_columns[0].metric("신규 상품", detail.get("inserted_count", 0))
     metric_columns[1].metric("수정 상품", detail.get("updated_count", 0))
@@ -1627,7 +1640,10 @@ def _render_catalog_promotion_rollback(api_client, detail: dict[str, Any]) -> No
             response = api_client.create_catalog_promotion_rollback(run_id, confirmation=True, expected_preview_hash=expected_hash)
             st.session_state[result_key] = None
             st.session_state["catalog_promotion_rollback_error"] = None
-            st.success(f"Rollback completed. Rollback run ID: {response.get('rollback_run_id')}")
+            st.success(
+                f"Rollback completed. Rollback run ID: {response.get('rollback_run_id')}. "
+                f"Executed by: {format_actor_username(response.get('actor_username'))}"
+            )
             st.session_state["catalog_promotion_history_response"] = None
         except Exception as error:
             st.error(_rollback_ui_error_message(error))

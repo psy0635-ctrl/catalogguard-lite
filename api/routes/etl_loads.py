@@ -109,6 +109,7 @@ def _build_list_response(result: ETLLoadList) -> ETLLoadListResponse:
                 loaded_rows=item.loaded_rows,
                 rejected_rows=item.rejected_rows,
                 created_at=item.created_at,
+                actor_username=item.actor_username,
             )
             for item in result.items
         ],
@@ -129,6 +130,7 @@ def _build_web_run_response(result: ETLWebRunOutcome) -> ETLWebRunResponse:
         loaded_rows=result.loaded_rows,
         rejected_rows=result.rejected_rows,
         error_counts=result.error_counts,
+        actor_username=result.actor_username,
     )
 
 
@@ -146,6 +148,7 @@ def _build_detail_response(result: ETLLoadDetail) -> ETLLoadDetailResponse:
         error_counts=result.error_counts,
         reject_details_stored=result.reject_details_stored,
         created_at=result.created_at,
+        actor_username=result.actor_username,
         products=ETLStagingProductListResponse(
             items=[
                 ETLStagingProductResponse(
@@ -263,6 +266,7 @@ def _build_promotion_response(
         warning_count=result.warning_count,
         started_at=result.started_at,
         completed_at=result.completed_at,
+        actor_username=result.actor_username,
     )
 
 
@@ -286,6 +290,7 @@ def _build_promotion_run_item_response(
         started_at=item.started_at,
         completed_at=item.completed_at,
         created_at=item.created_at,
+        actor_username=item.actor_username,
     )
 
 
@@ -443,7 +448,7 @@ async def create_etl_load_run(
     file: UploadFile = File(...),
     profile_id: str = Form(...),
     session: Session = Depends(get_session),
-    _current_user=Depends(require_operator),
+    current_user=Depends(require_operator),
 ) -> ETLWebRunResponse:
     file_bytes = await file.read()
     try:
@@ -452,6 +457,8 @@ async def create_etl_load_run(
             profile_id=profile_id,
             source_filename=file.filename or "",
             input_bytes=file_bytes,
+            actor_user_id=current_user.id,
+            actor_username=current_user.username,
         )
     except ETLProfileNotFoundError:
         raise HTTPException(
@@ -586,7 +593,7 @@ def create_catalog_promotion(
     response: Response,
     etl_load_run_id: int = Path(..., ge=1),
     session: Session = Depends(get_session),
-    _current_user=Depends(require_operator),
+    current_user=Depends(require_operator),
 ) -> CatalogPromotionResponse:
     try:
         result = execute_catalog_promotion(
@@ -594,6 +601,8 @@ def create_catalog_promotion(
             etl_load_run_id=etl_load_run_id,
             confirmation=request.confirmation,
             expected_preview_hash=request.expected_preview_hash,
+            actor_user_id=current_user.id,
+            actor_username=current_user.username,
         )
     except CatalogPromotionConfirmationRequiredError:
         raise HTTPException(
@@ -692,6 +701,7 @@ def _build_rollback_response(result: CatalogPromotionRollbackExecutionResult):
         conflict_count=result.conflict_count,
         started_at=result.started_at,
         completed_at=result.completed_at,
+        actor_username=result.actor_username,
     )
 
 
@@ -707,9 +717,16 @@ def create_catalog_promotion_rollback_preview(promotion_run_id: int = Path(..., 
 
 
 @router.post("/api/v1/catalog-promotions/{promotion_run_id}/rollback", response_model=CatalogPromotionRollbackResponse, status_code=status.HTTP_200_OK)
-def create_catalog_promotion_rollback(request: CatalogPromotionRollbackRequest, response: Response, promotion_run_id: int = Path(..., ge=1), session: Session = Depends(get_session), _current_user=Depends(require_operator)):
+def create_catalog_promotion_rollback(request: CatalogPromotionRollbackRequest, response: Response, promotion_run_id: int = Path(..., ge=1), session: Session = Depends(get_session), current_user=Depends(require_operator)):
     try:
-        result = execute_catalog_promotion_rollback(session, promotion_run_id=promotion_run_id, confirmation=request.confirmation, expected_preview_hash=request.expected_preview_hash)
+        result = execute_catalog_promotion_rollback(
+            session,
+            promotion_run_id=promotion_run_id,
+            confirmation=request.confirmation,
+            expected_preview_hash=request.expected_preview_hash,
+            actor_user_id=current_user.id,
+            actor_username=current_user.username,
+        )
     except CatalogPromotionRollbackConfirmationRequiredError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"code": "confirmation_required", "message": "Explicit confirmation is required to execute rollback."}) from None
     except CatalogPromotionRollbackInvalidPreviewHashError:

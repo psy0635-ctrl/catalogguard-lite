@@ -45,6 +45,7 @@ def _run(**overrides):
         "preview_hash": "a" * 64,
         "preview_schema_version": "1",
         "inspection_version": "1",
+        "actor_username": "operator_user",
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -183,6 +184,7 @@ def test_list_catalog_promotions_returns_safe_paged_contract(
                 "started_at": "2026-07-30T12:00:00Z",
                 "completed_at": "2026-07-30T12:00:01Z",
                 "created_at": "2026-07-30T12:00:00Z",
+                "actor_username": "operator_user",
             }
         ],
         "total": 1,

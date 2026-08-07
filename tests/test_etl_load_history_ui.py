@@ -33,6 +33,7 @@ def make_load(run_id=12):
         "total_rows": 30,
         "rejected_rows": 5,
         "created_at": "2026-07-25T12:00:00Z",
+        "actor_username": "operator_user",
     }
 
 
@@ -342,6 +343,7 @@ def test_build_etl_load_dataframe_maps_contract_to_display_columns():
         "전체 행": 30,
         "변환 거부": 5,
         "적재 시간": "2026-07-25 12:00:00",
+        "실행 사용자": "operator_user",
     }
 
 

@@ -249,6 +249,8 @@ def load_standard_csv(
     standard_csv_filename: str = "catalogguard_ready.csv",
     rejects_csv_bytes: bytes | None = None,
     rejects_csv_filename: str = "rejected_rows.csv",
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
 ) -> ETLLoadOutcome:
     """Validate ETL output and atomically add one idempotent staging batch."""
     summary = _normalize_summary(_read_summary(summary_json_bytes))
@@ -327,6 +329,8 @@ def load_standard_csv(
                 error_counts=summary["error_counts"],
                 reject_details_stored=rejects_file_sha256 is not None,
                 rejects_file_sha256=rejects_file_sha256,
+                actor_user_id=actor_user_id,
+                actor_username=actor_username,
             )
             session.add(load_run)
             session.flush()
