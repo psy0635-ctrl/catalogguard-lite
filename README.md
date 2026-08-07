@@ -1252,7 +1252,7 @@ Promotion Preview·Rollback Preview는 DB를 변경하지 않고 "무엇이 바�
 
 ### Actor Audit
 
-Authentication(로그인한 사용자가 누구인지 확인)과 RBAC(그 사용자가 무엇을 할 수 있는지 확인)은 실행 전 통제입니다. Actor Audit은 여기에 실행 후 기록을 더합니다. Web ETL·Promotion·Rollback이 실제로 성공(또는 실패)하면, 그 요청을 처리한 `current_user.id`·`current_user.username`을 `etl_load_runs`·`catalog_promotion_runs`·`catalog_promotion_rollbacks`의 `actor_user_id`·`actor_username`에 함께 저장합니다.
+Authentication(로그인한 사용자가 누구인지 확인)과 RBAC(그 사용자가 무엇을 할 수 있는지 확인)은 실행 전 통제입니다. Actor Audit은 여기에 실행 후 기록을 더하지만, 그 범위는 실제로 DB에 남는 실행 이력 row만큼입니다. Web ETL은 `ETLLoadRun`이 실제로 생성될 때만 그 요청을 처리한 `current_user.id`·`current_user.username`을 `actor_user_id`·`actor_username`으로 저장합니다. 파일 검증이나 `run_pipeline()` 단계에서 실패하면 `etl_load_runs` row 자체가 생성되지 않으므로 actor도 기록되지 않습니다. Promotion·Rollback은 기존 실행 이력 구조상 `succeeded`뿐 아니라 `blocked`(`preview_stale` 포함)·`failed` 같은 종료 상태도 `catalog_promotion_runs`·`catalog_promotion_rollbacks` row로 남기며, 이 상태들에도 actor를 함께 저장합니다.
 
 ```text
 JWT
