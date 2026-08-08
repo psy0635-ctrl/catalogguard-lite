@@ -105,6 +105,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - Web ETL·Promotion·Rollback 실행에 성공하면 인증된 JWT `current_user`를 실행 이력에 actor로 기록(Actor Audit MVP). 검수(Inspection) 실행 이력에는 아직 적용하지 않음
 - Prometheus 기반 HTTP·Web ETL Observability MVP: HTTP 요청 수·응답 시간·상태 계열과 Web ETL 신규/중복/실패·처리 행 수를 low-cardinality metric으로 `GET /metrics`에 노출(기본 비활성)
 - Kubernetes Deployment Readiness MVP: 기존 `Dockerfile.aws` image를 그대로 사용해 kind 기반 GitHub Actions에서 PostgreSQL → Alembic Migration Job → FastAPI Deployment → Service → `/health`·`/ready`까지 실제 배포·검증
+- Terraform AWS Staging IaC Validation MVP: 콘솔에서 수동 구성했던 AWS staging(EC2·RDS·Security Group·SSM)을 `terraform/` 코드로 옮기고, mock provider 기반 보안 정책 테스트와 GitHub Actions `terraform-validate` job으로 자동 검증(실제 `terraform apply`는 수행하지 않음)
 
 ## 4. 사용자 기능 흐름
 
@@ -461,6 +462,7 @@ FastAPI (인증·RBAC 통과 후 작업 등록)
 | 관측성 | prometheus-client `0.25.0`(HTTP·Web ETL metric instrumentation, `GET /metrics`) |
 | 비동기 처리 | Redis `7.4`, Celery `5.6.3` |
 | Kubernetes(CI 검증) | kind `v0.32.0`, kubectl `v1.36.2`, kind node `kindest/node:v1.36.1`(SHA-256 digest 고정) |
+| IaC(CI 검증) | Terraform `1.15.8`, AWS Provider `6.55.0`(`.terraform.lock.hcl` 고정), mock provider 기반 `terraform test` |
 | 로컬 실행 | Docker Compose |
 | 테스트 | pytest |
 | CI | GitHub Actions |
@@ -473,7 +475,7 @@ python -m pip install -r requirements-e2e.txt
 python -m playwright install chromium
 ```
 
-GitHub Actions는 일반 `test` job에서 PostgreSQL·Redis 서비스, Alembic 마이그레이션, E2E를 제외한 전체 pytest와 비동기 검수 smoke를 실행하고, `Dockerfile.aws` image build·import·UID `10001`·PostgreSQL migration·기본 CMD Uvicorn·`/health` HTTP `200`도 확인합니다. `Dockerfile.aws`는 `api`·`config`·`core`·`db`·`etl`·`services`·`workers` package를 모두 image에 포함하며, import 검증은 `api.main` import 시 연결되는 `api.routes.etl_loads` -> `etl.*` import chain까지 실제로 확인합니다. 별도 `browser-e2e` job에서는 PostgreSQL 서비스와 Chromium을 사용해 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증합니다. AWS runtime smoke는 실제 AWS 배포가 아니며, 배포는 수행하지 않습니다. 세 번째 `kubernetes-smoke` job은 같은 `Dockerfile.aws` image를 kind 실제 Kubernetes cluster에 배포해 `/health`·`/ready`까지 확인합니다(자세한 내용은 16장 "Kubernetes Deployment Readiness" 참고).
+GitHub Actions는 일반 `test` job에서 PostgreSQL·Redis 서비스, Alembic 마이그레이션, E2E를 제외한 전체 pytest와 비동기 검수 smoke를 실행하고, `Dockerfile.aws` image build·import·UID `10001`·PostgreSQL migration·기본 CMD Uvicorn·`/health` HTTP `200`도 확인합니다. `Dockerfile.aws`는 `api`·`config`·`core`·`db`·`etl`·`services`·`workers` package를 모두 image에 포함하며, import 검증은 `api.main` import 시 연결되는 `api.routes.etl_loads` -> `etl.*` import chain까지 실제로 확인합니다. 별도 `browser-e2e` job에서는 PostgreSQL 서비스와 Chromium을 사용해 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증합니다. AWS runtime smoke는 실제 AWS 배포가 아니며, 배포는 수행하지 않습니다. 세 번째 `kubernetes-smoke` job은 같은 `Dockerfile.aws` image를 kind 실제 Kubernetes cluster에 배포해 `/health`·`/ready`까지 확인합니다(자세한 내용은 16장 "Kubernetes Deployment Readiness" 참고). 네 번째 `terraform-validate` job은 실제 AWS 자격 증명 없이 `terraform/`의 fmt·init·validate와 mock provider 기반 `terraform test`만 실행하며, `terraform apply`는 수행하지 않습니다(자세한 내용은 16장 "Terraform AWS Staging IaC Validation" 참고).
 
 ## 8. 프로젝트 폴더 구조
 
@@ -612,6 +614,14 @@ catalogguard-lite/
     catalogguard-api.yaml
     dev-postgres.yaml
     migration-job.yaml
+  terraform/
+    .terraform.lock.hcl
+    main.tf
+    outputs.tf
+    variables.tf
+    versions.tf
+    tests/
+      staging.tftest.hcl
   .env.example
   alembic.ini
   requirements.txt
@@ -1221,7 +1231,81 @@ kind/kubectl 설치(고정 버전)
 -> kind cluster 삭제
 ```
 
-이번 범위는 FastAPI + PostgreSQL의 Kubernetes 배포 가능성 검증까지입니다. Redis/Celery Async Inspection과 Streamlit은 Kubernetes에 배포하지 않았고, Ingress·TLS·HPA·Helm·Terraform·실제 EKS/GKE/AKS도 이번 범위에 없습니다. 현재 한계는 25장을 참고하세요.
+이번 범위는 FastAPI + PostgreSQL의 Kubernetes 배포 가능성 검증까지입니다. Redis/Celery Async Inspection과 Streamlit은 Kubernetes에 배포하지 않았고, Ingress·TLS·HPA·Helm·실제 EKS/GKE/AKS도 이번 범위에 없습니다. 아래 Terraform은 AWS EC2·RDS staging 구성을 코드화한 것이며 Kubernetes cluster나 EKS를 만들지 않습니다. 현재 한계는 25장을 참고하세요.
+
+### Terraform AWS Staging IaC Validation(mock provider 기반 CI 검증)
+
+위 "AWS EC2·RDS staging 수동 배포 및 검증"에서 콘솔로 직접 만든 staging 구성을 `terraform/` 아래 코드로 옮긴 IaC Validation MVP입니다. 이 저장소에서는 `terraform apply`·`destroy`·`import`를 실행하지 않으며, 검증은 fmt·validate와 mock provider 기반 `terraform test`까지입니다. 따라서 이 코드로 만들어진 실제 AWS 리소스는 없고, 2026-07-19에 수동으로 만든 기존 staging 리소스도 Terraform state에 들어 있지 않습니다.
+
+```text
+수동 AWS staging 구성(문서 기록)
+-> terraform/ 코드화(data·resource·variable)
+-> mock provider 기반 보안 정책 test
+-> GitHub Actions terraform-validate job 자동 검증
+```
+
+| 파일 | 역할 |
+|---|---|
+| `terraform/versions.tf` | `required_version = "~> 1.15.0"`, AWS provider `~> 6.55.0` 고정(backend 미구성) |
+| `terraform/variables.tf` | region·이름 접두어·인스턴스 타입·RDS 설정 변수. `rds_master_password`는 `default` 없이 `sensitive = true` |
+| `terraform/main.tf` | Default VPC·subnet·AMI 조회와 Security Group·IAM·EC2·RDS 리소스 정의 |
+| `terraform/outputs.tf` | EC2 instance ID, 두 Security Group ID, RDS 식별자만 출력(endpoint·비밀번호 미출력) |
+| `terraform/.terraform.lock.hcl` | 실제 선택된 provider 버전 `6.55.0` 고정(commit 대상) |
+| `terraform/tests/staging.tftest.hcl` | mock provider 기반 보안 정책 test |
+
+조회(data)와 생성(resource) 대상은 다음과 같습니다. custom VPC나 private subnet을 새로 만들지 않고 기존 Default VPC·subnet을 그대로 조회해 사용합니다.
+
+```text
+data  : aws_vpc.default, aws_subnets.default,
+        aws_ami.amazon_linux_2023, aws_iam_policy_document.ec2_assume_role
+resource: aws_security_group.ec2, aws_security_group.rds,
+          aws_iam_role.ec2_ssm, aws_iam_role_policy_attachment.ec2_ssm_core,
+          aws_iam_instance_profile.ec2_ssm, aws_instance.api,
+          aws_db_subnet_group.staging, aws_db_instance.staging
+```
+
+보안 설정은 수동 구성에서 확인한 기준을 그대로 코드로 옮겼습니다.
+
+- EC2 Security Group에는 `ingress` 블록 자체를 두지 않습니다. SSH `22`를 포함해 인터넷에 공개하는 inbound 규칙이 없으며, 접근은 SSM Session Manager로만 합니다.
+- RDS Security Group은 PostgreSQL `5432` 하나만 허용하고, source도 CIDR이 아니라 EC2 Security Group 참조입니다(`cidr_blocks = []`).
+- `aws_db_instance.staging`의 `publicly_accessible`은 변수로 노출하지 않고 `false`로 고정했습니다.
+- `storage_encrypted = true`로 RDS 저장 데이터를 암호화합니다.
+- `rds_master_password`는 기본값이 없고 `sensitive = true`이므로, 실제 사용 시 `TF_VAR_rds_master_password` 같은 외부 경로로 주입해야 하며 저장소에 값을 커밋하지 않습니다.
+- EC2에는 SSM용 IAM Role(`AmazonSSMManagedInstanceCore` 관리형 정책 1개만 연결)과 Instance Profile을 붙이고 `key_name`을 지정하지 않아 SSH key pair를 만들지 않습니다.
+- `metadata_options { http_tokens = "required" }`(IMDSv2)와 루트 볼륨 `encrypted = true`는 2026-07-19 수동 구성에는 없던 값이며, 이번 코드화 시 추가한 표준 보안 기본값입니다. apply하지 않았으므로 실제 인스턴스에는 아직 반영되지 않았습니다.
+
+`terraform/tests/staging.tftest.hcl`은 `mock_provider "aws" {}`와 `override_data` 4개를 사용해 실제 AWS 자격 증명·리소스 없이 계산된 값만 검증합니다. `run` 블록은 2개이며 assertion은 모두 12개입니다.
+
+| run 블록 | assertion | 검증 내용 |
+|---|---:|---|
+| `plan_staging_infrastructure` | 9 | EC2 inbound 규칙 0개, RDS ingress 정확히 1개, 그 규칙이 `5432`·CIDR 0개·Security Group 1개인지, RDS `publicly_accessible=false`·Single-AZ·`storage_encrypted=true`·`skip_final_snapshot=false`, EC2의 SSM instance profile 사용과 `AmazonSSMManagedInstanceCore` 정책 연결 |
+| `no_open_internet_ingress` | 3 | `publicly_accessible`이 계속 `false`로 고정되어 있는지, EC2·RDS Security Group 어느 쪽에도 `0.0.0.0/0` inbound가 없는지 |
+
+두 번째 run 블록은 이후 누군가 `0.0.0.0/0` inbound 규칙을 추가하면 CI가 실패하도록 하는 보안 회귀 방지 test입니다. `key_name` 미설정은 mock provider가 미설정 속성에도 임의 값을 채우기 때문에 test로 검증하지 않고 코드 리뷰로 확인합니다.
+
+`.github/workflows/test.yml`의 `terraform-validate` job은 `terraform` 디렉터리에서 다음 순서로 실행되며, AWS 자격 증명을 사용하지 않습니다.
+
+```text
+hashicorp/setup-terraform (TERRAFORM_VERSION 1.15.8 고정, terraform_wrapper: false)
+-> terraform fmt -check -recursive
+-> terraform init -backend=false -input=false -lockfile=readonly
+-> terraform validate
+-> terraform test (mock provider)
+```
+
+`init`은 `-backend=false`로 실행하므로 remote state를 만들지 않고, `-lockfile=readonly`로 `.terraform.lock.hcl`에 고정된 provider 버전을 CI가 임의로 갱신하지 못하게 합니다. `.gitignore`에는 `.terraform/`, `*.tfstate*`, `*.tfplan`, `terraform.tfvars`, `override.tf` 계열을 추가했고, provider 버전을 고정하는 `.terraform.lock.hcl`만 commit합니다.
+
+commit `38385f0`의 GitHub Actions run `31160915277`에서 확인한 결과는 다음과 같습니다.
+
+```text
+Installed hashicorp/aws v6.55.0 (signed by HashiCorp)
+terraform validate -> Success! The configuration is valid.
+run "plan_staging_infrastructure"... pass
+run "no_open_internet_ingress"... pass
+terraform test -> Success! 2 passed, 0 failed.
+```
+
+같은 run에서 `test`·`browser-e2e`·`kubernetes-smoke` job도 모두 성공했습니다. 이번 범위는 코드화와 정적·mock 검증까지이며, 실제 AWS 리소스 생성·기존 리소스 import·S3 remote state·state locking은 포함하지 않습니다. 현재 한계는 25장을 참고하세요.
 
 ## 17. Streamlit 실행 방법
 
@@ -1829,7 +1913,7 @@ python -m pytest -q
 
 ### PostgreSQL persistence 포함 검증 결과
 
-promotion과 rollback 기능은 운영 DB나 Railway DB에 연결하지 않고 저장소의 테스트 PostgreSQL 환경에서 검증했습니다. 문서에는 실행별 전체 테스트 수를 추측해 기록하지 않으며, 아래 수치는 Kubernetes 기능 검증 commit(`c5c84d17`)의 GitHub Actions run `31156108895`에서 실제로 확인된 결과입니다. pytest 수치 자체는 Kubernetes 작업이 Python 코드를 변경하지 않아 직전 Observability 검증 commit과 동일합니다.
+promotion과 rollback 기능은 운영 DB나 Railway DB에 연결하지 않고 저장소의 테스트 PostgreSQL 환경에서 검증했습니다. 문서에는 실행별 전체 테스트 수를 추측해 기록하지 않으며, 아래 수치는 Terraform 기능 검증 commit(`38385f0`)의 GitHub Actions run `31160915277`에서 실제로 확인된 결과입니다. pytest 수치 자체는 Kubernetes·Terraform 작업이 Python 코드를 변경하지 않아 직전 Observability 검증 commit과 동일합니다.
 
 ```text
 promotion preview·service·API·client·UI·concurrency 테스트 파일과 Playwright Chromium promotion E2E를 포함한 검증 범위를 확인
@@ -1842,6 +1926,7 @@ Authentication/RBAC: 401/403 경계, viewer/operator 권한 분리, sync inspect
 Actor Audit: Web ETL·Promotion·Rollback의 JWT actor 기록, viewer 403(세 endpoint)과 Web ETL anonymous 401의 run 미생성, actor 위조 방지, Promotion 실패 시 failed run actor 기록, legacy row(actor NULL) 안전 조회를 tests/test_actor_audit.py 10개 시나리오로 실제 PostgreSQL 확인
 Prometheus Metrics: HTTP metric·Web ETL metric·cardinality 방지·민감정보 미노출·실제 PostgreSQL 신규/중복 ETL 집계를 tests/test_metrics.py 32개 시나리오로 확인(이번 run에서 로컬 skip 없이 전체 실행)
 Kubernetes smoke: kind 실제 cluster에서 PostgreSQL rollout·Alembic Migration Job condition=complete·FastAPI rollout·Service를 통한 GET /health·GET /ready HTTP 200을 kubernetes-smoke job으로 확인(pytest 범위 밖, 별도 job)
+Terraform validate: terraform fmt·init·validate와 mock provider terraform test `2 passed, 0 failed`를 terraform-validate job으로 확인(pytest 범위 밖, 별도 job. apply 미수행)
 Run tests: `1309 passed`, `0 skipped`, `4 deselected`, `0 failed`
 ```
 
@@ -1897,9 +1982,9 @@ python scripts/benchmark_inspection.py --rows 100 1000 5000 10000 --repeat 3 --w
 
 ### GitHub Actions 자동 테스트
 
-`.github/workflows/test.yml`의 `Test` workflow는 `main` 브랜치 push와 `main` 브랜치를 대상으로 한 pull request에서 실행됩니다. 일반 `test` job은 Python 3.11, PostgreSQL 18·Redis 7.4, Alembic, E2E 제외 pytest, 실제 Celery Worker·FastAPI·비동기 CSV 검수 E2E와 Streamlit startup smoke를 실행합니다. 또한 `Dockerfile.aws` image build, `api`·`services`·`workers`와 Celery task import, 실행 UID `10001`, PostgreSQL migration, 기본 CMD의 Uvicorn 시작과 `/health` HTTP `200`을 검증합니다. 이 AWS 검증은 GitHub Actions Ubuntu의 Docker packaging/runtime smoke이며 실제 AWS 배포는 수행하지 않습니다. 별도 `browser-e2e` job은 PostgreSQL 18 service와 Playwright Chromium을 준비하고 `scripts/run_etl_browser_e2e.py`로 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증하며, 실패 시에만 browser artifact를 업로드합니다. 세 번째 `kubernetes-smoke` job은 고정 버전 kind/kubectl로 실제 Kubernetes cluster를 만들고, 같은 `Dockerfile.aws` image를 `k8s/` manifest로 배포해 PostgreSQL rollout·Alembic Migration Job·FastAPI rollout·`/health`·`/ready`까지 검증합니다(자세한 흐름은 16장 참고). 이 job도 실패 시에만 `kubectl get/describe/logs` 기반 진단 정보를 출력하며 Secret 값은 출력하지 않습니다.
+`.github/workflows/test.yml`의 `Test` workflow는 `main` 브랜치 push와 `main` 브랜치를 대상으로 한 pull request에서 실행됩니다. 일반 `test` job은 Python 3.11, PostgreSQL 18·Redis 7.4, Alembic, E2E 제외 pytest, 실제 Celery Worker·FastAPI·비동기 CSV 검수 E2E와 Streamlit startup smoke를 실행합니다. 또한 `Dockerfile.aws` image build, `api`·`services`·`workers`와 Celery task import, 실행 UID `10001`, PostgreSQL migration, 기본 CMD의 Uvicorn 시작과 `/health` HTTP `200`을 검증합니다. 이 AWS 검증은 GitHub Actions Ubuntu의 Docker packaging/runtime smoke이며 실제 AWS 배포는 수행하지 않습니다. 별도 `browser-e2e` job은 PostgreSQL 18 service와 Playwright Chromium을 준비하고 `scripts/run_etl_browser_e2e.py`로 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증하며, 실패 시에만 browser artifact를 업로드합니다. 세 번째 `kubernetes-smoke` job은 고정 버전 kind/kubectl로 실제 Kubernetes cluster를 만들고, 같은 `Dockerfile.aws` image를 `k8s/` manifest로 배포해 PostgreSQL rollout·Alembic Migration Job·FastAPI rollout·`/health`·`/ready`까지 검증합니다(자세한 흐름은 16장 참고). 이 job도 실패 시에만 `kubectl get/describe/logs` 기반 진단 정보를 출력하며 Secret 값은 출력하지 않습니다. 네 번째 `terraform-validate` job은 고정 버전 Terraform `1.15.8`로 `terraform/`의 `fmt -check -recursive`·`init -backend=false`·`validate`·mock provider `test`를 실행합니다. 실제 AWS 자격 증명을 사용하지 않고 `terraform apply`·`destroy`·`import`도 수행하지 않으므로 AWS 리소스와 비용이 발생하지 않습니다(자세한 흐름은 16장 참고).
 
-두 job 모두 `CATALOGGUARD_JWT_SECRET`을 `ci-test-only-jwt-secret-do-not-use-in-production` 같은 CI 전용 값으로 설정하며 운영 secret과 공유하지 않습니다. `test` job은 비동기 E2E 실행 전 `scripts/create_user.py`로 synthetic operator 계정을 만들고, `browser-e2e` job은 Chromium 실행 전 `browser_e2e_operator` 계정을 만들어 로그인 후 기존 흐름을 검증합니다.
+`test`와 `browser-e2e` job 모두 `CATALOGGUARD_JWT_SECRET`을 `ci-test-only-jwt-secret-do-not-use-in-production` 같은 CI 전용 값으로 설정하며 운영 secret과 공유하지 않습니다. `test` job은 비동기 E2E 실행 전 `scripts/create_user.py`로 synthetic operator 계정을 만들고, `browser-e2e` job은 Chromium 실행 전 `browser_e2e_operator` 계정을 만들어 로그인 후 기존 흐름을 검증합니다.
 
 ```text
 main push 또는 main 대상 pull request
@@ -1939,7 +2024,7 @@ Streamlit 시작 스모크 테스트는 `python -m streamlit run app.py`로 실�
 
 AppTest는 실제 `app.py` 실행 경로의 CSV 업로드와 검수·필터 위젯을 검증하지만 실제 브라우저의 파일 선택 창이나 픽셀 렌더링까지 자동화하지는 않습니다. GitHub Actions 스모크 테스트도 Railway API 실제 통신, 운영 Secrets 설정, Streamlit Community Cloud 전용 장애나 모든 Segmentation fault를 검증하지 않습니다.
 
-Kubernetes 기능 검증 commit(`c5c84d17`)의 GitHub Actions run `31156108895`은 `test`·`browser-e2e`·`kubernetes-smoke` job 모두 성공했습니다. Actions 실행별 전체 테스트 수는 이 문서에 추측해 고정하지 않으며, 위 "PostgreSQL persistence 포함 검증 결과"에 적은 수치는 이 run에서 실제로 확인한 값입니다. AWS Docker runtime smoke(image build·import·UID `10001`·migration·Uvicorn 시작·`/health` HTTP `200`)에서 `prometheus-client`가 `requirements-api.txt`를 통해 `Dockerfile.aws` image에도 정상 설치·import됨을 확인했습니다. `kubernetes-smoke` job 로그에서 `kind v0.32.0`, `kubectl` client `v1.36.2`, node `kindest/node:v1.36.1`(SHA-256 digest 고정)로 실제 cluster가 만들어졌고, `deployment "postgres" successfully rolled out`, `job.batch/catalogguard-migrate condition met`, `deployment "catalogguard-api" successfully rolled out`, `GET /health -> {"status":"ok","service":"catalogguard-lite-api"}`, `GET /ready -> {"status":"ready","service":"catalogguard-lite-api","database":"ok"}`를 확인했습니다. promotion E2E와 Streamlit startup smoke의 실제 검증 범위는 위 테스트·workflow 설명을 따릅니다. Actions의 일회성 서비스 컨테이너·kind cluster는 운영 DB·Redis와 분리되며, kind cluster는 job 종료 시 삭제됩니다.
+Terraform 기능 검증 commit(`38385f0`)의 GitHub Actions run `31160915277`은 `test`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate` job 모두 성공했습니다. Actions 실행별 전체 테스트 수는 이 문서에 추측해 고정하지 않으며, 위 "PostgreSQL persistence 포함 검증 결과"에 적은 수치는 이 run에서 실제로 확인한 값입니다. AWS Docker runtime smoke(image build·import·UID `10001`·migration·Uvicorn 시작·`/health` HTTP `200`)에서 `prometheus-client`가 `requirements-api.txt`를 통해 `Dockerfile.aws` image에도 정상 설치·import됨을 확인했습니다. `kubernetes-smoke` job 로그에서 `kind v0.32.0`, `kubectl` client `v1.36.2`, node `kindest/node:v1.36.1`(SHA-256 digest 고정)로 실제 cluster가 만들어졌고, `deployment "postgres" successfully rolled out`, `job.batch/catalogguard-migrate condition met`, `deployment "catalogguard-api" successfully rolled out`, `GET /health -> {"status":"ok","service":"catalogguard-lite-api"}`, `GET /ready -> {"status":"ready","service":"catalogguard-lite-api","database":"ok"}`를 확인했습니다. `terraform-validate` job 로그에서는 `Installed hashicorp/aws v6.55.0`, `Success! The configuration is valid.`와 mock provider `terraform test`의 `Success! 2 passed, 0 failed.`를 확인했습니다. promotion E2E와 Streamlit startup smoke의 실제 검증 범위는 위 테스트·workflow 설명을 따릅니다. Actions의 일회성 서비스 컨테이너·kind cluster는 운영 DB·Redis와 분리되며, kind cluster는 job 종료 시 삭제됩니다.
 
 ## 24. 데이터 저장 범위와 보안
 
@@ -2030,6 +2115,14 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - Kubernetes Service는 ClusterIP만 사용하며 Ingress·TLS·외부 노출은 없습니다. `replicas: 1` 고정이며 HorizontalPodAutoscaler·PodDisruptionBudget도 없습니다.
 - Kubernetes의 dev PostgreSQL은 PersistentVolume이 없는 CI 전용 disposable 구성이며, kind cluster를 삭제하면 데이터도 함께 사라집니다. NetworkPolicy와 세분화된 ServiceAccount도 없습니다.
 - Kubernetes manifest의 resource requests/limits는 CI/개발용 초기값이며 실측 production sizing이 아닙니다.
+- Terraform은 코드화와 fmt·validate·mock provider test까지이며, 실제 `terraform apply`·`destroy`를 실행하지 않았습니다. 따라서 이 코드로 만들어진 AWS 리소스는 없습니다.
+- 2026-07-19에 콘솔로 만든 기존 EC2·RDS는 Terraform으로 import하지 않았으므로 Terraform state와 실제 AWS 상태가 연결되어 있지 않습니다.
+- Terraform backend를 구성하지 않았습니다. S3 remote state와 state locking(DynamoDB 등)은 없으며, `init`도 `-backend=false`로만 실행합니다.
+- Terraform은 기존 Default VPC·subnet을 조회해 사용하며, custom VPC와 private subnet 기반 네트워크를 새로 구성하지 않습니다.
+- Terraform으로 Kubernetes/EKS 리소스를 만들지 않으며, production(Railway) 환경도 Terraform으로 관리하지 않습니다.
+- `terraform test`는 mock provider 기반이므로 계산된 설정값만 검증합니다. 실제 AWS API 응답, 계정 quota, IAM 권한 부족 같은 문제는 이 test로 확인할 수 없습니다.
+- mock provider는 코드에서 설정하지 않은 속성에도 임의 값을 채우므로, EC2에 `key_name`을 지정하지 않았다는 사실은 test가 아니라 코드 리뷰로 확인합니다.
+- Terraform 코드의 IMDSv2 강제와 루트 볼륨 암호화는 수동 구성에 없던 값이며, apply하지 않았으므로 실제 인스턴스에는 반영되어 있지 않습니다.
 - 저장된 검수 이력 삭제 기능은 구현되어 있지 않습니다.
 - 전체 요약 CSV는 목록 API를 반복 조회하므로 다운로드 중 DB 내용이 바뀌는 상황의 완전한 스냅샷 보장은 별도 트랜잭션/내보내기 API가 필요합니다.
 - 실제 외부 공급사 운영 데이터와 연동하지 않았습니다.
@@ -2064,6 +2157,9 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - Redis/Celery, Streamlit의 Kubernetes 배포
 - Kubernetes Ingress/TLS, HorizontalPodAutoscaler, PodDisruptionBudget, NetworkPolicy
 - 실제 EKS/GKE/AKS 등 production Kubernetes 배포와 managed PostgreSQL(RDS 등) 연동
+- Terraform S3 remote state와 state locking 구성
+- 기존 수동 생성 AWS staging 리소스의 Terraform import와 실제 `apply` 기반 재현
+- custom VPC·private subnet 기반 네트워크 구성의 Terraform 코드화
 - Refresh Token, 회원가입, password reset, OAuth/MFA/SSO, 로그인 rate limit
 - 중복 저장 이벤트 로그 또는 감사 기록 검토
 - 기간별 검수 추세와 파일 간 비교 통계 추가
