@@ -656,6 +656,12 @@ class CatalogProductChange(Base):
             "promotion_run_id",
         ),
         Index(
+            "ix_catalog_product_changes_promotion_run_created_at_id",
+            "promotion_run_id",
+            text("created_at DESC"),
+            text("id DESC"),
+        ),
+        Index(
             "ix_catalog_product_changes_catalog_product_id",
             "catalog_product_id",
         ),

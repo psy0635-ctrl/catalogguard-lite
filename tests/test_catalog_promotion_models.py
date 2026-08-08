@@ -14,8 +14,10 @@ from sqlalchemy import (
     or_,
     select,
 )
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.schema import CreateIndex
 
 from config.database import get_optional_database_url
 from db.models import (
@@ -122,6 +124,17 @@ def test_catalog_product_change_model_limits_actions_and_jsonb_shapes():
         "ck_catalog_product_changes_after_data_object",
         "ck_catalog_product_changes_before_data_matches_action",
     }.issubset(_check_constraint_names(CatalogProductChange.__table__))
+    index = next(
+        index
+        for index in CatalogProductChange.__table__.indexes
+        if index.name == "ix_catalog_product_changes_promotion_run_created_at_id"
+    )
+    compiled_index = str(
+        CreateIndex(index).compile(dialect=postgresql.dialect())
+    )
+    assert "promotion_run_id" in compiled_index
+    assert "created_at DESC" in compiled_index
+    assert "id DESC" in compiled_index
 
 
 @pytest.fixture()
