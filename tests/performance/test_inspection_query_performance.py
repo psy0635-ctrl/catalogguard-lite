@@ -105,17 +105,17 @@ def _seed_benchmark_tables(connection: Connection) -> str:
         SELECT
             i,
             CASE
-                WHEN i % 20 = 0 THEN 'sale_catalog_' || i || '.csv'
-                ELSE 'catalog_' || (i % 250) || '.csv'
+                WHEN i %% 20 = 0 THEN 'sale_catalog_' || i || '.csv'
+                ELSE 'catalog_' || (i %% 250) || '.csv'
             END,
             md5(i::text) || md5('catalog-' || i::text),
-            CASE WHEN i % 10 = 0 THEN '3' ELSE '4' END,
-            100 + (i % 901),
+            CASE WHEN i %% 10 = 0 THEN '3' ELSE '4' END,
+            100 + (i %% 901),
             10,
-            CASE WHEN i % 5 = 0 THEN 2 ELSE 0 END,
-            CASE WHEN i % 5 <> 0 AND i % 3 = 0 THEN 1 ELSE 0 END,
+            CASE WHEN i %% 5 = 0 THEN 2 ELSE 0 END,
+            CASE WHEN i %% 5 <> 0 AND i %% 3 = 0 THEN 1 ELSE 0 END,
             timestamptz '2026-06-01 00:00:00+00'
-                + ((i * 251) % 2592000) * interval '1 second'
+                + ((i * 251) %% 2592000) * interval '1 second'
         FROM generate_series(1, 10000) AS generated(i)
         """
     )
@@ -136,13 +136,13 @@ def _seed_benchmark_tables(connection: Connection) -> str:
         SELECT
             ((run.id - 1) * 10) + result_number,
             run.id,
-            'group-' || (run.id % 500),
+            'group-' || (run.id %% 500),
             'product-' || run.id || '-' || result_number,
-            CASE WHEN result_number % 4 = 0 THEN 'ERROR' ELSE 'WARNING' END,
+            CASE WHEN result_number %% 4 = 0 THEN 'ERROR' ELSE 'WARNING' END,
             'price',
             'benchmark reason',
             'benchmark recommendation',
-            CASE WHEN result_number % 4 = 0 THEN 'HIGH' ELSE 'MEDIUM' END,
+            CASE WHEN result_number %% 4 = 0 THEN 'HIGH' ELSE 'MEDIUM' END,
             run.created_at + result_number * interval '1 millisecond'
         FROM inspection_runs AS run
         CROSS JOIN generate_series(1, 10) AS generated(result_number)
