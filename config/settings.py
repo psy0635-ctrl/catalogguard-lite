@@ -7,6 +7,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 CATALOGGUARD_API_BASE_URL_ENV_VAR = "CATALOGGUARD_API_BASE_URL"
 CATALOGGUARD_API_TIMEOUT_SECONDS_ENV_VAR = "CATALOGGUARD_API_TIMEOUT_SECONDS"
+CATALOGGUARD_ETL_S3_BUCKET_ENV_VAR = "CATALOGGUARD_ETL_S3_BUCKET"
+CATALOGGUARD_ETL_S3_PREFIX_ENV_VAR = "CATALOGGUARD_ETL_S3_PREFIX"
 CATALOGGUARD_API_DEFAULT_TIMEOUT_SECONDS = 5.0
 CELERY_BROKER_URL_ENV_VAR = "CELERY_BROKER_URL"
 REDIS_JOB_URL_ENV_VAR = "REDIS_JOB_URL"
@@ -171,6 +173,16 @@ def get_catalogguard_api_base_url() -> str | None:
 
     normalized_url = api_base_url.rstrip("/")
     return normalized_url or None
+
+
+def get_catalogguard_etl_s3_bucket() -> str | None:
+    value = os.environ.get(CATALOGGUARD_ETL_S3_BUCKET_ENV_VAR, "").strip()
+    return value or None
+
+
+def get_catalogguard_etl_s3_prefix() -> str | None:
+    value = os.environ.get(CATALOGGUARD_ETL_S3_PREFIX_ENV_VAR, "").strip().strip("/")
+    return f"{value}/" if value else None
 
 
 def get_catalogguard_api_timeout_seconds() -> float:

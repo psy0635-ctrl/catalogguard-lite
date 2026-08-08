@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -40,11 +42,13 @@ from api.schemas import (
     ETLRejectErrorResponse,
     ETLRejectedRowListResponse,
     ETLRejectedRowResponse,
+    ETLS3LoadRequest,
     ETLStagingProductListResponse,
     ETLStagingProductResponse,
     ETLWebRunResponse,
 )
 from config.metrics import record_web_etl_run, record_web_etl_rows
+from config.logging import LOGGER_NAME, log_event
 from core.upload_validator import CsvUploadValidationError
 from db.etl_query_service import (
     ETLLoadDetail,
@@ -57,6 +61,13 @@ from db.etl_query_service import (
 from etl.db_loader import ETLLoadError
 from etl.pipeline import ETLPipelineError
 from etl.profile_loader import ETLProfileNotFoundError, list_etl_profiles
+from etl.s3_source import (
+    S3KeyNotAllowedError,
+    S3NotConfiguredError,
+    S3ObjectNotFoundError,
+    S3ReadError,
+    read_s3_csv_object,
+)
 from etl.web_service import ETLWebRunOutcome, run_web_etl
 from db.catalog_promotion_preview_service import (
     CatalogPromotionPreview,
@@ -94,6 +105,7 @@ from db.session import get_session
 
 
 router = APIRouter()
+_LOGGER = logging.getLogger(LOGGER_NAME)
 CATALOG_PROMOTION_NOT_FOUND_MESSAGE = "Promotion run not found."
 ETL_LOAD_NOT_FOUND_MESSAGE = "ETL 적재 배치를 찾을 수 없습니다."
 
@@ -492,6 +504,109 @@ async def create_etl_load_run(
     if outcome.created:
         record_web_etl_rows(loaded_rows=outcome.loaded_rows, rejected_rows=outcome.rejected_rows)
 
+    return _build_web_run_response(outcome)
+
+
+def _raise_s3_source_error(
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+) -> None:
+    """Log a safe, structured S3 source failure without SDK or object details."""
+    log_event(
+        _LOGGER,
+        logging.WARNING,
+        event="s3_etl_source_failed",
+        error_code=code,
+    )
+    raise HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message},
+    )
+
+
+@router.post("/api/v1/etl-loads/s3", response_model=ETLWebRunResponse)
+def create_s3_etl_load_run(
+    request: ETLS3LoadRequest,
+    current_user=Depends(require_operator),
+    session: Session = Depends(get_session),
+) -> ETLWebRunResponse:
+    """Download a configured S3 CSV and pass it to the existing Web ETL service."""
+    try:
+        source = read_s3_csv_object(request.object_key)
+    except S3NotConfiguredError:
+        _raise_s3_source_error(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="s3_not_configured",
+            message="S3 source is not configured.",
+        )
+    except S3ObjectNotFoundError:
+        _raise_s3_source_error(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="s3_object_not_found",
+            message="S3 object was not found.",
+        )
+    except S3KeyNotAllowedError:
+        _raise_s3_source_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="s3_key_not_allowed",
+            message="S3 object key is not allowed.",
+        )
+    except S3ReadError:
+        _raise_s3_source_error(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            code="s3_read_failed",
+            message="S3 source could not be read.",
+        )
+    except CsvUploadValidationError as error:
+        # This happened before run_web_etl(), so it must not affect Web ETL metrics.
+        _raise_s3_source_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="invalid_upload",
+            message=str(error),
+        )
+
+    try:
+        outcome = run_web_etl(
+            session,
+            profile_id=request.profile_id,
+            source_filename=source.source_filename,
+            input_bytes=source.content,
+            actor_user_id=current_user.id,
+            actor_username=current_user.username,
+        )
+    except ETLProfileNotFoundError:
+        record_web_etl_run("failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "unsupported_profile",
+                "message": "Unsupported supplier profile.",
+            },
+        ) from None
+    except (CsvUploadValidationError, ETLPipelineError) as error:
+        record_web_etl_run("failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "invalid_upload", "message": str(error)},
+        ) from None
+    except ETLLoadError:
+        record_web_etl_run("failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "etl_load_failed",
+                "message": "An error occurred while processing ETL.",
+            },
+        ) from None
+
+    record_web_etl_run("created" if outcome.created else "duplicate")
+    if outcome.created:
+        record_web_etl_rows(
+            loaded_rows=outcome.loaded_rows,
+            rejected_rows=outcome.rejected_rows,
+        )
     return _build_web_run_response(outcome)
 
 

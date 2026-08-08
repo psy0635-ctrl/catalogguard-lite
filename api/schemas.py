@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # API가 밖으로 내보낼 JSON 응답 모양을 Pydantic 모델로 고정합니다.
@@ -151,6 +151,13 @@ class ETLWebRunResponse(BaseModel):
     rejected_rows: int | None
     error_counts: dict[str, int] | None
     actor_username: str | None
+
+
+class ETLS3LoadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: str
+    object_key: str
 
 
 class ETLProfileResponse(BaseModel):

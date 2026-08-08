@@ -36,10 +36,15 @@ def validate_csv_filename(filename: str | None) -> None:
 
 def validate_csv_file_size(file_bytes: bytes) -> None:
     """빈 파일과 최대 파일 크기를 검사합니다."""
-    if len(file_bytes) == 0:
+    validate_csv_size_bytes_count(len(file_bytes))
+
+
+def validate_csv_size_bytes_count(size_bytes: int) -> None:
+    """CSV 바이트 수가 기존 업로드 제한 안에 있는지 검사합니다."""
+    if size_bytes == 0:
         raise CsvUploadValidationError("업로드한 파일이 비어 있습니다.")
 
-    if len(file_bytes) > MAX_UPLOAD_SIZE_BYTES:
+    if size_bytes > MAX_UPLOAD_SIZE_BYTES:
         size_limit = format_size_limit(MAX_UPLOAD_SIZE_BYTES)
         raise CsvUploadValidationError(
             f"파일 크기가 너무 큽니다. 최대 {size_limit}까지 업로드할 수 있습니다."

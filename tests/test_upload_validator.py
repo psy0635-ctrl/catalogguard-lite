@@ -8,6 +8,7 @@ from core.upload_validator import (
     validate_and_read_uploaded_csv,
     validate_csv_file_size,
     validate_csv_filename,
+    validate_csv_size_bytes_count,
 )
 
 
@@ -100,6 +101,16 @@ def test_validate_csv_file_size_allows_exact_limit():
 def test_validate_csv_file_size_rejects_over_limit():
     with pytest.raises(CsvUploadValidationError, match="파일 크기가 너무 큽니다"):
         validate_csv_file_size(b"x" * (MAX_UPLOAD_SIZE_BYTES + 1))
+
+
+def test_validate_csv_size_bytes_count_rejects_empty_size():
+    with pytest.raises(CsvUploadValidationError):
+        validate_csv_size_bytes_count(0)
+
+
+def test_validate_csv_size_bytes_count_rejects_size_above_existing_limit():
+    with pytest.raises(CsvUploadValidationError):
+        validate_csv_size_bytes_count(MAX_UPLOAD_SIZE_BYTES + 1)
 
 
 def test_validate_and_read_uploaded_csv_rejects_nul_bytes():
