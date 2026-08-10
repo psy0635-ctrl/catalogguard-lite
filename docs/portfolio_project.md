@@ -47,6 +47,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 16. 로그와 `/health`·`/ready`만으로는 요청 수·응답 시간·오류율·ETL 처리량을 숫자로 비교할 수 없다는 한계를 확인한 뒤, 기존 요청 middleware가 계산하던 duration을 재사용해 Prometheus HTTP metric(요청 수·응답 시간·상태 계열)과 Web ETL metric(신규/중복/실패, 처리 행 수)을 `GET /metrics`로 노출했습니다. 동적 ID 대신 FastAPI route template을 label로 써서 cardinality 폭증을 막고, 동일 배치 재사용 시 행 수를 다시 집계하지 않도록 설계했으며, `CATALOGGUARD_METRICS_ENABLED` 미설정 시 endpoint와 instrumentation 모두 no-op임을 실제 PostgreSQL 포함 32개 테스트로 검증했습니다.
 17. 기존 Dockerfile CMD가 컨테이너 시작마다 Alembic migration과 Uvicorn 실행을 함께 담당해, Kubernetes에서 API Pod가 여러 개면 migration이 중복 실행될 수 있다는 문제를 확인했습니다. 새 Kubernetes 전용 Dockerfile을 만들지 않고 기존 `Dockerfile.aws` image를 재사용하면서, `command` override로 migration 전용 Kubernetes Job과 Uvicorn 전용 Deployment로 책임을 분리했습니다. DB 연결을 확인하지 않는 `/health`는 liveness, PostgreSQL 연결까지 확인하는 `/ready`는 readiness로 연결했고, GitHub Actions에 kind 기반 실제 Kubernetes cluster를 만들어 PostgreSQL rollout·Migration Job 완료·FastAPI rollout·`/health`·`/ready` HTTP 200까지 자동 검증했습니다. kind·kubectl·node image는 최신 버전을 자동 조회하지 않고 SHA-256 digest까지 고정해, 같은 commit이 항상 같은 Kubernetes toolchain으로 재현되도록 했습니다.
 18. 콘솔에서 수동으로 구성했던 AWS staging(EC2·RDS·Security Group·SSM 접근)을 Terraform 코드로 옮겨, 같은 구조를 다시 만들 때 필요한 수동 작업과 설정 누락 위험을 줄였습니다. 새 대규모 인프라를 만드는 대신 이미 검증한 구성의 코드화로 범위를 제한했고, EC2 inbound 규칙 0개·RDS `5432`의 Security Group 참조 전용 허용·`publicly_accessible=false` 고정·저장 암호화·SSM 전용 접근 같은 보안 조건을 mock provider 기반 `terraform test` 12개 assertion으로 고정했습니다. 실제 AWS 자격 증명 없이 동작하는 이 검증을 GitHub Actions `terraform-validate` job으로 자동화해, 누군가 `0.0.0.0/0` inbound를 추가하는 보안 회귀가 생기면 CI가 실패하도록 했습니다. 이번 범위는 코드화와 정적·mock 검증까지이며 실제 `terraform apply`는 수행하지 않았습니다.
+19. 기존 Actor Audit을 Sync·Async Inspection까지 확장했습니다. `inspection_runs`에 nullable `actor_user_id`(`users.id`, `ON DELETE SET NULL`)와 `actor_username` snapshot을 추가하고, actor는 request form이 아니라 인증된 JWT `current_user`에서만 가져오도록 했습니다. 비동기 경로는 ORM 객체나 JWT 대신 두 scalar만 Redis job state와 Celery Worker로 전달했습니다. 동일 CSV·검수 버전의 기존 run을 재사용할 때는 최초 actor를 보존하며, 사용자 삭제 후 FK만 `NULL`이 되고 username snapshot은 남는 동작을 PostgreSQL 18 migration 왕복·Sync 통합 테스트·Redis/Celery/FastAPI E2E로 검증했습니다.
 
 ## 6.2 문제 정의
 
@@ -191,13 +192,13 @@ catalogguard_ready.csv + etl_summary.json
 | Chromium 브라우저 E2E | ETL reject 마스킹과 promotion 승인·반영, 브라우저 오류 및 PostgreSQL 최종 상태 |
 | 샘플 ETL CLI 결과 | 전체 3건, 정상 변환 2건, 오류 행 1건, 종료 코드 0 |
 | Web ETL·Rollback 검증 | `POST /api/v1/etl-loads`·`GET /api/v1/etl-profiles`, rollback preview/실행 API의 PostgreSQL 통합·API·client·UI 테스트 |
-| Actor Audit 검증 | `tests/test_actor_audit.py` 10 scenarios: JWT actor 기록, viewer 403(세 endpoint)·Web ETL anonymous 401, actor 위조 방지, Promotion 실패 기록, legacy row 호환 |
+| Actor Audit 검증 | 기존 `tests/test_actor_audit.py` 10 scenarios에 Inspection migration·Sync actor·위조 방지·dedup 최초 actor·사용자 삭제 snapshot·Redis legacy payload·Celery Worker·실제 Async E2E 검증을 추가 |
 | Prometheus Metrics 검증 | `tests/test_metrics.py` 32 scenarios: env parsing, `/metrics` disabled=404/no-op, route template cardinality 방지, `unmatched`/`5xx` 집계, 민감정보 미노출, Web ETL created/duplicate/failed와 row 중복 집계 방지, 실제 PostgreSQL 신규+중복 ETL |
 | Kubernetes smoke 검증 | kind 실제 cluster에서 PostgreSQL rollout·Alembic Migration Job condition=complete·FastAPI rollout·Service 경유 `GET /health`·`GET /ready` HTTP 200(pytest 범위 밖, `kubernetes-smoke` job) |
 | Terraform 검증 | `terraform fmt -check -recursive`·`init -backend=false -lockfile=readonly`·`validate` 성공과 mock provider `terraform test` `2 passed, 0 failed`(run 2개·assertion 12개, pytest 범위 밖, `terraform-validate` job) |
-| 최신 전체 pytest | `1309 passed`, `0 skipped`, `4 deselected`, `0 failed` |
+| 최신 로컬 전체 pytest | `1359 passed`, `0 skipped`, `4 deselected`, `0 failed`, warnings 0(Inspection Actor Audit 검증, 일회성 PostgreSQL·Redis 환경) |
 | 최신 기준 CI | GitHub Actions run `31160915277` success (Terraform 기능 검증 commit `38385f0`, `test`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate` 4개 job) |
-| 최신 Alembic head | `20260806_0010`(이번 Terraform 기능은 새 migration 없음) |
+| 최신 Alembic head | `20260810_0012`(Inspection Actor Audit, single head) |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
 
 ## 6.6 핵심 구현 구조
@@ -690,7 +691,7 @@ Python·FastAPI와 PostgreSQL을 기반으로 CSV 상품 데이터의 필수 값
 
 ### 포트폴리오용 설명
 
-CatalogGuard Lite는 상품 운영자가 CSV 상품 데이터를 검수하고, ETL staging 결과를 확인한 뒤 운영 상품에 안전하게 반영할 수 있도록 만든 품질 검사 앱입니다. 업로드 검증, 원본 보존형 개인정보 마스킹 미리보기, 중복 상품 탐지, 가격 이상치 탐지, 정상가·할인가 관계 검수, 상품명과 카테고리 불일치 탐지, 필터와 독립된 전체 결과 통계, 결과 필터링, CSV 다운로드를 제공합니다. 합성 공급사 CSV는 JSON 프로필로 표준화한 뒤 PostgreSQL staging에 배치 적재하며, CLI와 Streamlit 웹 업로드가 같은 ETL Pipeline·loader를 공유합니다. Streamlit에서 사용자가 batch를 직접 선택해 promotion preview를 실행하면 insert/update/unchanged와 상품별 변경 전후를 보여 주고, 명시적 승인과 SHA-256 preview hash 재검증을 통과한 경우에만 FastAPI transaction이 운영 상품을 insert/update하며 promotion run과 append-only audit을 저장합니다. succeeded promotion은 이후 발생한 정상 변경을 conflict로 보존하는 rollback으로 되돌릴 수 있습니다. Playwright Chromium E2E는 승인 전 버튼 상태와 실제 UI 선택을 확인한 뒤 브라우저 성공 메시지뿐 아니라 PostgreSQL 최종 상태까지 검증했으며, 별도로 Web ETL이 추가한 UI 접근성 이름 충돌과 AWS 배포 이미지의 package 누락도 이 브라우저 E2E와 CI runtime smoke가 실제로 발견해 수정했습니다. 이 검증은 합성 공급사 fixture와 테스트 PostgreSQL 환경에서 수행했으며, 실제 외부 공급사 운영 데이터나 production catalog에 반영한 것은 아닙니다. 공개 Streamlit 앱의 배포 기능 범위는 로컬 전체 시스템과 다를 수 있습니다. Web ETL·Promotion·Rollback이 실제로 실행되면 그 요청을 처리한 JWT 사용자를 실행 이력에 actor로 함께 기록하는 Actor Audit MVP를 추가했으며, 이 값은 request body가 아니라 인증된 `current_user`에서만 채워집니다. 기존 요청 middleware의 duration 측정을 재사용해 Prometheus HTTP·Web ETL metric(`GET /metrics`, 기본 비활성)을 노출하는 Observability MVP도 추가했으며, route template 기반 label로 cardinality를 제한하고 동일 ETL 배치 재사용 시 행 수를 다시 집계하지 않도록 설계했습니다. 이후 기존 `Dockerfile.aws` image를 그대로 재사용해 kind 기반 GitHub Actions에서 실제 Kubernetes cluster에 PostgreSQL·Alembic Migration Job·FastAPI Deployment를 배포하고 `/health`(liveness)·`/ready`(readiness)까지 검증하는 Kubernetes Deployment Readiness MVP를 추가했습니다. 마지막으로 콘솔에서 수동 구성했던 AWS staging(EC2·RDS·Security Group·SSM 접근)을 Terraform 코드로 옮기고, EC2 inbound 규칙 0개·RDS `5432`의 Security Group 참조 전용 허용·`publicly_accessible=false` 고정 같은 보안 조건을 mock provider 기반 `terraform test`로 고정한 뒤 GitHub Actions `terraform-validate` job으로 자동 검증하는 IaC Validation MVP를 추가했습니다. 이 단계는 코드화와 정적·mock 검증까지이며 실제 `terraform apply`로 AWS 리소스를 만들지는 않았습니다.
+CatalogGuard Lite는 상품 운영자가 CSV 상품 데이터를 검수하고, ETL staging 결과를 확인한 뒤 운영 상품에 안전하게 반영할 수 있도록 만든 품질 검사 앱입니다. 업로드 검증, 원본 보존형 개인정보 마스킹 미리보기, 중복 상품 탐지, 가격 이상치 탐지, 정상가·할인가 관계 검수, 상품명과 카테고리 불일치 탐지, 필터와 독립된 전체 결과 통계, 결과 필터링, CSV 다운로드를 제공합니다. 합성 공급사 CSV는 JSON 프로필로 표준화한 뒤 PostgreSQL staging에 배치 적재하며, CLI와 Streamlit 웹 업로드가 같은 ETL Pipeline·loader를 공유합니다. Streamlit에서 사용자가 batch를 직접 선택해 promotion preview를 실행하면 insert/update/unchanged와 상품별 변경 전후를 보여 주고, 명시적 승인과 SHA-256 preview hash 재검증을 통과한 경우에만 FastAPI transaction이 운영 상품을 insert/update하며 promotion run과 append-only audit을 저장합니다. succeeded promotion은 이후 발생한 정상 변경을 conflict로 보존하는 rollback으로 되돌릴 수 있습니다. Playwright Chromium E2E는 승인 전 버튼 상태와 실제 UI 선택을 확인한 뒤 브라우저 성공 메시지뿐 아니라 PostgreSQL 최종 상태까지 검증했으며, 별도로 Web ETL이 추가한 UI 접근성 이름 충돌과 AWS 배포 이미지의 package 누락도 이 브라우저 E2E와 CI runtime smoke가 실제로 발견해 수정했습니다. 이 검증은 합성 공급사 fixture와 테스트 PostgreSQL 환경에서 수행했으며, 실제 외부 공급사 운영 데이터나 production catalog에 반영한 것은 아닙니다. 공개 Streamlit 앱의 배포 기능 범위는 로컬 전체 시스템과 다를 수 있습니다. Sync·Async Inspection과 Web ETL·Promotion·Rollback이 새 실행 이력 row를 만들면 요청을 처리한 JWT 사용자를 actor로 함께 기록하며, 이 값은 request body가 아니라 인증된 `current_user`에서만 채워집니다. Inspection은 Async 경로에서도 사용자 객체나 JWT가 아니라 actor scalar만 Redis·Celery 경계를 통과시키고, 동일 CSV·검수 버전 재요청에는 최초 실행 row와 최초 actor를 유지합니다. 기존 요청 middleware의 duration 측정을 재사용해 Prometheus HTTP·Web ETL metric(`GET /metrics`, 기본 비활성)을 노출하는 Observability MVP도 추가했으며, route template 기반 label로 cardinality를 제한하고 동일 ETL 배치 재사용 시 행 수를 다시 집계하지 않도록 설계했습니다. 이후 기존 `Dockerfile.aws` image를 그대로 재사용해 kind 기반 GitHub Actions에서 실제 Kubernetes cluster에 PostgreSQL·Alembic Migration Job·FastAPI Deployment를 배포하고 `/health`(liveness)·`/ready`(readiness)까지 검증하는 Kubernetes Deployment Readiness MVP를 추가했습니다. 마지막으로 콘솔에서 수동 구성했던 AWS staging(EC2·RDS·Security Group·SSM 접근)을 Terraform 코드로 옮기고, EC2 inbound 규칙 0개·RDS `5432`의 Security Group 참조 전용 허용·`publicly_accessible=false` 고정 같은 보안 조건을 mock provider 기반 `terraform test`로 고정한 뒤 GitHub Actions `terraform-validate` job으로 자동 검증하는 IaC Validation MVP를 추가했습니다. 이 단계는 코드화와 정적·mock 검증까지이며 실제 `terraform apply`로 AWS 리소스를 만들지는 않았습니다.
 
 ### 면접에서 강조할 포인트
 
@@ -945,6 +946,8 @@ Refresh Token 없음(만료 시 재로그인), 회원가입/password reset/OAuth
 
 ## 6.19 Actor Audit
 
+이 절은 Actor Audit을 Web ETL·Promotion·Rollback에 처음 도입한 단계의 설계와 검증을 기록합니다. 이후 Sync·Async Inspection으로 확장한 결과는 6.23절에서 별도로 다룹니다.
+
 ### 문제 정의
 
 RBAC로 "누가 실행할 수 있는지"는 통제할 수 있었지만, 실제로 Web ETL·Promotion·Rollback을 누가 실행했는지는 실행 이력 어디에도 남지 않았습니다.
@@ -961,7 +964,7 @@ RBAC로 "누가 실행할 수 있는지"는 통제할 수 있었지만, 실제�
 
 - 기존 History 조회 API·Streamlit 화면 구조를 그대로 재사용할 수 있습니다.
 - 별도 Audit 테이블과 새 JOIN, 범용 audit framework를 만들지 않아 복잡도가 늘지 않습니다.
-- 검수(Inspection)는 이번 범위에 포함하지 않아 변경 범위를 Web ETL·Promotion·Rollback 3곳으로 한정했습니다.
+- 이 최초 단계에서는 검수(Inspection)를 제외하고 변경 범위를 Web ETL·Promotion·Rollback 3곳으로 한정했습니다. 이후 Sync·Async Inspection 확장은 6.23절에서 다룹니다.
 
 ### 보안 설계
 
@@ -1297,3 +1300,44 @@ terraform test -> Success! 2 passed, 0 failed.
 이번 범위는 코드화와 정적·mock 검증까지입니다. 실제 `terraform apply`·`destroy`를 실행하지 않았으므로 이 코드로 만들어진 AWS 리소스는 없고, 2026-07-19에 콘솔로 만든 기존 EC2·RDS도 `import`하지 않아 Terraform state와 실제 AWS 상태가 연결되어 있지 않습니다. backend를 구성하지 않았으므로 S3 remote state와 state locking도 없습니다. 기존 Default VPC·subnet을 조회해 쓰므로 custom VPC와 private subnet 기반 네트워크 구성은 코드에 없으며, Kubernetes/EKS 리소스와 production(Railway) 환경도 Terraform으로 관리하지 않습니다. mock provider 기반 test는 계산된 설정값만 검증하므로 실제 AWS API 응답, 계정 quota, IAM 권한 부족 같은 문제는 확인할 수 없습니다.
 
 이 한계는 숨겨야 할 결함이라기보다, 비용과 검증 근거를 함께 고려해 MVP 범위를 의도적으로 제한한 결과입니다. 다음 단계로는 remote state·locking 구성과 기존 리소스 import 후 실제 `apply` 기반 재현이 자연스럽게 이어집니다.
+
+## 6.23 Inspection Actor Audit 확장
+
+### 문제와 범위
+
+6.19절의 최초 Actor Audit은 Web ETL·Promotion·Rollback만 다뤘기 때문에 Sync·Async Inspection 실행 이력에는 실행자가 남지 않았습니다. 이번 확장은 기존 검수 흐름과 dedup 계약을 유지하면서 `inspection_runs`에도 인증된 실행자를 기록하고, API·Streamlit 이력·요약 CSV에서 확인할 수 있게 하는 데 범위를 한정했습니다.
+
+### 설계
+
+- `inspection_runs`에 nullable `actor_user_id`와 `actor_username`을 추가했습니다. `actor_user_id`는 `users.id`를 참조하고 사용자 삭제 시 `ON DELETE SET NULL`이 적용되며, `actor_username` snapshot은 당시 실행자를 보존합니다. 기존 row는 사실과 다른 사용자를 임의로 채우지 않고 `NULL`로 둡니다.
+- actor의 출처는 Sync·Async 모두 인증된 JWT의 `current_user`입니다. 요청 form의 동명 필드는 신뢰하지 않으며, 위조 값을 보내도 저장에 사용하지 않습니다.
+- Sync 경로는 actor scalar를 저장 함수에 직접 전달합니다. Async 경로는 ORM 객체나 JWT 전체가 아니라 `actor_user_id`·`actor_username` scalar만 Redis job state와 Celery worker 경계를 통과시키며, 기존 payload에는 두 필드가 없어도 `None`으로 처리됩니다.
+- 동일 CSV와 검수 버전에 대한 dedup은 기존 실행 row를 재사용하고 최초 actor를 유지합니다. 재요청자별 이벤트를 별도로 쌓는 범용 Audit Event 모델은 이번 MVP 범위가 아닙니다.
+- API는 Sync 생성·목록·상세 응답에 `actor_username`만 노출하고 내부 FK인 `actor_user_id`는 노출하지 않습니다. Async job status 응답에는 actor를 추가하지 않았으며, 완료 후 Inspection 상세에서 확인합니다.
+- Streamlit 실행 이력 목록·상세·요약 CSV에 실행자를 표시하고, migration 이전 row처럼 값이 없으면 `알 수 없음`으로 렌더링합니다.
+
+### 검증
+
+`20260810_0012_add_inspection_actor_audit.py`는 `20260808_0011`을 `down_revision`으로 갖는 single-head migration입니다. 일회성 PostgreSQL 18.4 환경에서 `upgrade -> downgrade -> re-upgrade`를 실행하고 최종 head와 Inspector 기준 컬럼·FK·nullable 계약을 확인했습니다.
+
+Sync 통합 검증은 실제 JWT actor 저장, form 위조 무시, 동일 파일·버전 재요청 시 최초 actor 유지, 사용자 삭제 뒤 FK는 `NULL`이지만 username snapshot은 남는 동작을 실제 PostgreSQL commit 결과로 확인했습니다. Async 검증은 실제 Redis·Celery worker·FastAPI 요청을 연결해 job 완료, 단일 Inspection row 생성, actor 저장과 dedup을 확인했습니다.
+
+최신 전체 검증 결과는 다음과 같습니다.
+
+```text
+1359 passed
+0 failed
+0 skipped
+4 deselected
+warnings 0
+```
+
+이 수치는 일회성 로컬 PostgreSQL·Redis 검증 환경의 결과이며 AWS나 production 환경 검증을 뜻하지 않습니다. 문서 정리 단계에서는 코드·migration·test를 변경하지 않았으므로 전체 suite를 다시 실행하지 않고 이미 완료된 위 결과를 문서에 반영했습니다.
+
+### 현재 한계와 별도 결함
+
+Inspection dedup은 최초 실행자만 보존하므로 같은 결과를 나중에 요청한 사용자의 시도까지 감사 이벤트로 남기지는 않습니다. 또한 Async job status 응답에는 actor가 없고 완료된 Inspection 상세에서만 확인할 수 있습니다.
+
+`TEST_DATABASE_URL` 등 DB 설정이 없는 상태에서 anonymous Sync Inspection 요청은 기대한 `401`보다 먼저 DB 의존성 초기화가 실패해 `500 DatabaseConfigurationError`가 됩니다. DB가 구성된 환경에서는 같은 요청이 `401`을 반환합니다. 이는 기존 의존성 평가 순서에서 발생하던 결함이며 Inspection Actor Audit의 저장·전파 계약을 막는 blocker는 아니어서 이번 문서 단계에서 수정하지 않았습니다.
+
+이번 단계에서는 AWS API를 호출하거나 SSM을 추가 조사하지 않았습니다. 따라서 별도로 기록된 SSM root cause는 계속 **K. INCONCLUSIVE**이며 해결되었다고 판단하지 않습니다.

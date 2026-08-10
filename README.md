@@ -102,7 +102,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - INSERT promotion 상품 삭제, UPDATE promotion 상품 이전 상태 복원과 원본 promotion audit 보존
 - Streamlit 로그인과 JWT Access Token 발급, viewer(조회)·operator(운영 데이터 변경) 역할 분리
 - FastAPI의 모든 보호된 endpoint에서 현재 사용자와 역할을 서버가 최종 검증(Streamlit 버튼 비활성화는 편의 기능일 뿐 실제 보안 경계는 아님)
-- Web ETL·Promotion·Rollback 실행에 성공하면 인증된 JWT `current_user`를 실행 이력에 actor로 기록(Actor Audit MVP). 검수(Inspection) 실행 이력에는 아직 적용하지 않음
+- Sync·Async Inspection과 Web ETL·Promotion·Rollback이 새 실행 이력 row를 만들면 인증된 JWT `current_user`를 actor로 기록(Actor Audit MVP). 동일 CSV·검수 버전의 기존 `inspection_run`을 재사용할 때는 최초 actor를 유지
 - Prometheus 기반 HTTP·Web ETL Observability MVP: HTTP 요청 수·응답 시간·상태 계열과 Web ETL 신규/중복/실패·처리 행 수를 low-cardinality metric으로 `GET /metrics`에 노출(기본 비활성)
 - Kubernetes Deployment Readiness MVP: 기존 `Dockerfile.aws` image를 그대로 사용해 kind 기반 GitHub Actions에서 PostgreSQL → Alembic Migration Job → FastAPI Deployment → Service → `/health`·`/ready`까지 실제 배포·검증
 - Terraform AWS Staging IaC Validation MVP: 콘솔에서 수동 구성했던 AWS staging(EC2·RDS·Security Group·SSM)을 `terraform/` 코드로 옮기고, mock provider 기반 보안 정책 테스트와 GitHub Actions `terraform-validate` job으로 자동 검증(실제 `terraform apply`는 수행하지 않음)
@@ -370,7 +370,7 @@ ETL 적재 이력 탭
 
 상품 그룹 카테고리 일관성 검수는 `core.group_category_consistency_detector`가 기존 `core.category_mismatch_detector.normalize_category()`를 재사용합니다. 이 비교는 원본 category를 고치지 않으며, 표시 계층에는 JSON 구조화 메시지로 값을 전달합니다. JSON이 손상되거나 예상 구조가 아니어도 내부 prefix, 영문 메시지나 JSON 원문 대신 안전한 한글 기본 문구를 표시합니다.
 
-Streamlit에 로그인하면 이후 모든 화면과 API 호출이 JWT Access Token을 거칩니다. FastAPI는 매 요청마다 role/is_active를 PostgreSQL에서 다시 확인한 뒤에만 검수·ETL·Promotion·Rollback 로직에 진입시킵니다. Authentication(로그인한 사용자가 누구인지 확인)과 RBAC(그 사용자가 무엇을 할 수 있는지 확인)은 실행 전 통제이고, Web ETL·Promotion·Rollback이 실제로 성공하면 그 요청의 `current_user`를 실행 이력에 actor로 남기는 Actor Audit(누가 실행했는지 기록)이 이어집니다.
+Streamlit에 로그인하면 이후 모든 화면과 API 호출이 JWT Access Token을 거칩니다. FastAPI는 매 요청마다 role/is_active를 PostgreSQL에서 다시 확인한 뒤에만 검수·ETL·Promotion·Rollback 로직에 진입시킵니다. Authentication(로그인한 사용자가 누구인지 확인)과 RBAC(그 사용자가 무엇을 할 수 있는지 확인)은 실행 전 통제이고, 새 Inspection·Web ETL·Promotion·Rollback 실행 이력 row가 만들어지면 그 요청의 `current_user`를 actor로 남기는 Actor Audit(누가 실행했는지 기록)이 이어집니다.
 
 ```text
 Streamlit
@@ -381,7 +381,7 @@ Streamlit
 -> FastAPI get_current_user(): 토큰 검증 + PostgreSQL users 재조회(role, is_active)
 -> require_viewer / require_operator: 역할 검사
 -> Inspection / ETL / Promotion / Rollback endpoint 진입
--> Web ETL / Promotion / Rollback 성공 시 current_user 기준 actor_user_id·actor_username 저장
+-> 새 Inspection / Web ETL / Promotion / Rollback 실행 이력에 current_user 기준 actor_user_id·actor_username 저장
 -> PostgreSQL
 ```
 
@@ -389,9 +389,9 @@ Streamlit
 
 ```text
 FastAPI (인증·RBAC 통과 후 작업 등록)
--> Redis
--> Celery Worker
--> PostgreSQL
+-> current_user.id·current_user.username scalar를 Redis job state에 저장
+-> Celery Worker가 scalar actor와 검수 결과를 공통 persistence 계층에 전달
+-> PostgreSQL inspection_runs 저장
 ```
 
 로그인하지 않았거나 토큰이 유효하지 않으면 401을, 로그인은 됐지만 역할이 부족하면 403을 반환합니다. 자세한 endpoint별 권한 표는 18장을 참고하세요.
@@ -422,13 +422,13 @@ FastAPI (인증·RBAC 통과 후 작업 등록)
 
 ### 검수 이력 목록과 검색
 
-저장된 검수 실행을 파일명, 날짜 범위와 검수 상태로 검색하고 페이지 단위로 확인할 수 있습니다. 현재 검색 조건에 맞는 전체 검수 이력 요약도 CSV로 준비해 내려받을 수 있습니다.
+저장된 검수 실행을 파일명, 날짜 범위와 검수 상태로 검색하고 페이지 단위로 확인할 수 있습니다. 목록에는 실행 사용자를 표시하며, migration 이전 legacy row처럼 actor가 `NULL`이면 `알 수 없음`으로 표시합니다. 현재 검색 조건에 맞는 전체 검수 이력 요약도 실행 사용자를 포함한 CSV로 준비해 내려받을 수 있습니다.
 
 ![CatalogGuard Lite 검수 이력 목록과 검색 화면](docs/images/04_history_list.png)
 
 ### 검수 이력 상세 결과
 
-선택한 검수 실행의 파일명, 검수 시간과 요약 수치를 확인할 수 있습니다. 각 문제의 오류 이유, 수정 권장사항과 위험 수준을 조회하고 상세 결과를 CSV로 내려받을 수 있습니다.
+선택한 검수 실행의 파일명, 실행 사용자, 검수 시간과 요약 수치를 확인할 수 있습니다. 각 문제의 오류 이유, 수정 권장사항과 위험 수준을 조회하고 상세 결과를 CSV로 내려받을 수 있습니다. legacy `NULL` actor는 `알 수 없음`으로 표시합니다.
 
 ![CatalogGuard Lite 검수 이력 상세 결과 화면](docs/images/05_history_detail.png)
 
@@ -561,6 +561,8 @@ catalogguard-lite/
       20260803_0008_allow_catalog_product_audit_detach.py
       20260805_0009_create_users_table.py
       20260806_0010_add_actor_audit_columns.py
+      20260808_0011_add_promotion_audit_order_index.py
+      20260810_0012_add_inspection_actor_audit.py
   data/
     dev/
       category_mismatch_test.csv
@@ -636,8 +638,8 @@ catalogguard-lite/
 | `clients/catalogguard_api.py` | FastAPI 검수·ETL·promotion API 호출, 응답 schema·SHA-256 검증, HTTP·404·JSON 오류 mapping |
 | `api/main.py` | FastAPI 앱 생성, 라우터 등록, `/health`와 `/ready`, 요청 ID 및 요청 단위 로그 처리 |
 | `api/routes/etl_loads.py` | 웹 ETL 실행(`POST /api/v1/etl-loads`)과 ETL 프로필 목록 조회, ETL 조회와 promotion preview·실행 endpoint, Query·Path 검증, 오류 응답과 응답 변환 |
-| `api/routes/inspections.py` | 검수 생성, 서버 SHA-256 계산, 중복 이력 응답, 검수 이력 목록, 검수 상세 조회 API |
-| `api/schemas.py` | 검수·ETL 조회·promotion API의 응답 Pydantic 모델과 `LoginRequest`/`LoginResponse`/`CurrentUserResponse` |
+| `api/routes/inspections.py` | 검수 생성, JWT `current_user` actor 전달, 서버 SHA-256 계산, 중복 이력 응답, actor를 포함한 검수 이력 목록·상세 조회 API |
+| `api/schemas.py` | `actor_username`을 포함한 검수·ETL 조회·promotion API 응답 Pydantic 모델과 `LoginRequest`/`LoginResponse`/`CurrentUserResponse` |
 | `api/dependencies.py` | `get_current_user()`(JWT 검증 + PostgreSQL 재조회), `require_viewer`/`require_operator` RBAC dependency |
 | `api/routes/auth.py` | `POST /api/v1/auth/login`(Access Token 발급), `GET /api/v1/auth/me` |
 | `config/logging.py` | 중복 handler 없이 한 줄 JSON 운영 로그를 기록하는 표준 라이브러리 유틸리티 |
@@ -655,17 +657,17 @@ catalogguard-lite/
 | `core/product_template.py` | CSV 입력 템플릿 생성 |
 | `core/privacy.py` | 개인정보 정규식과 마스킹 처리 |
 | `core/security.py` | bcrypt 비밀번호 hash·검증, JWT Access Token 발급·검증 |
-| `db/models.py` | `inspection_runs`, `inspection_results`, ETL staging 배치·상품, `users` SQLAlchemy 모델 |
+| `db/models.py` | actor FK·snapshot을 포함한 `inspection_runs`, `inspection_results`, ETL staging 배치·상품, `users` SQLAlchemy 모델 |
 | `db/auth_service.py` | `users` 조회, 로그인 인증(`authenticate_user`), 계정 생성(`create_user`, bootstrap CLI 전용) |
 | `db/etl_query_service.py` | 필터·정렬·count·SQL 페이지네이션을 적용하는 읽기 전용 ETL 배치·상품 조회 Service |
-| `db/repositories.py` | 검수 실행과 상세 결과 저장·조회, 파일 identity 조회 Repository |
-| `db/persistence_service.py` | 검수 결과 저장 트랜잭션, 중복 조회, 경쟁 상태 처리, 목록 조회, 상세 조회 Service |
+| `db/repositories.py` | actor를 포함한 검수 실행과 상세 결과 저장·조회, 파일 identity 조회 Repository |
+| `db/persistence_service.py` | 검수 결과와 최초 actor 저장 트랜잭션, 중복 조회·최초 actor 보존, 경쟁 상태 처리, 목록·상세 조회 Service |
 | `db/session.py` | SQLAlchemy 엔진, 세션 팩토리, DB 연결 확인, FastAPI 세션 의존성 |
 | `ui/auth.py` | Streamlit 로그인·로그아웃 UI, `session_state` 기반 Access Token 저장, 인증된 API Client 생성 |
 | `ui/etl_load_history.py` | ETL 목록·검색·페이지네이션·상세·promotion 승인 UI. viewer는 실행 버튼이 비활성화되지만 실제 차단은 FastAPI가 수행 |
-| `services/redis_job_store.py` | Redis에 비동기 검수 작업 상태와 TTL 저장 |
-| `services/inspection_job_service.py`, `services/job_files.py` | 작업 제출, 서버 생성 job 파일 저장·검증·정리 |
-| `workers/celery_app.py`, `workers/inspection_tasks.py` | Celery Worker 실행과 비동기 CSV 검수·결과 저장 |
+| `services/redis_job_store.py` | Redis에 비동기 검수 작업 상태, optional actor scalar와 TTL 저장. actor 필드가 없는 legacy payload도 `None`으로 복원 |
+| `services/inspection_job_service.py`, `services/job_files.py` | actor scalar를 포함한 작업 제출, 서버 생성 job 파일 저장·검증·정리 |
+| `workers/celery_app.py`, `workers/inspection_tasks.py` | Celery Worker 실행과 Redis actor scalar를 사용한 비동기 CSV 검수·결과 저장 |
 | `etl/profile_loader.py`, `etl/transformer.py`, `etl/pipeline.py` | JSON 프로필 검증, 공급사 행 변환, reject 분리와 원자적 출력 저장. `profile_loader.py`는 웹 ETL이 사용하는 `profile_id` allowlist(`get_profile_path()`)도 함께 제공 |
 | `etl/cli.py` | 공급사 CSV ETL CLI 진입점 |
 | `etl/db_loader.py` | 표준 CSV·summary JSON 검증, 중복 배치 조회와 staging 트랜잭션 적재. CLI(`load_cli.py`)와 웹 ETL(`web_service.py`)이 함께 재사용 |
@@ -683,6 +685,8 @@ catalogguard-lite/
 | `alembic/versions/20260725_0003_create_etl_staging_tables.py` | ETL 배치·상품 staging 테이블, unique index, FK와 CHECK constraint 추가 마이그레이션 |
 | `alembic/versions/20260805_0009_create_users_table.py` | `users` 테이블(`username` unique, `role` CHECK, `is_active`) 생성 마이그레이션 |
 | `alembic/versions/20260806_0010_add_actor_audit_columns.py` | `etl_load_runs`·`catalog_promotion_runs`·`catalog_promotion_rollbacks`에 `actor_user_id`(FK `ON DELETE SET NULL`)·`actor_username` nullable 컬럼 추가 마이그레이션 |
+| `alembic/versions/20260808_0011_add_promotion_audit_order_index.py` | promotion audit 페이지네이션을 위한 `(promotion_run_id, created_at DESC, id DESC)` 정렬 index 추가 마이그레이션 |
+| `alembic/versions/20260810_0012_add_inspection_actor_audit.py` | `inspection_runs`에 `actor_user_id`(FK `ON DELETE SET NULL`)·`actor_username` nullable 컬럼을 추가하는 Inspection Actor Audit 마이그레이션 |
 | `.github/workflows/test.yml` | 일반 테스트와 분리된 `browser-e2e`·`kubernetes-smoke` job을 포함해 PostgreSQL·Chromium 실제 브라우저 흐름과 kind 실제 Kubernetes 배포까지 실행하는 GitHub Actions workflow |
 | `k8s/dev-postgres.yaml`, `k8s/migration-job.yaml`, `k8s/catalogguard-api.yaml` | kind CI 전용 PostgreSQL, Alembic Migration Job, FastAPI Deployment/Service manifest |
 | `.env.example` | 로컬 PostgreSQL 연결 환경변수 예시 |
@@ -916,7 +920,7 @@ python -m alembic upgrade head
 python -m alembic history
 ```
 
-현재 Alembic head는 `20260806_0010`입니다.
+현재 Alembic head는 `20260810_0012`입니다.
 
 `20260703_0001_create_inspection_tables.py`는 다음 테이블을 만듭니다.
 
@@ -959,7 +963,18 @@ python -m alembic history
 - `actor_user_id`(`BigInteger`, `users.id` FK, `ON DELETE SET NULL`)
 - `actor_username`(`VARCHAR(50)`, `users.username`과 같은 길이)
 
-기존 row는 이 migration 실행 전에 만들어졌으므로 실행한 사용자를 알 수 없어 두 컬럼 모두 `NULL`로 유지하며, 임의 사용자로 backfill하지 않습니다. 새로 생성되는 row는 `api/routes/etl_loads.py`가 `require_operator`로 인증된 JWT `current_user.id`·`current_user.username`에서 값을 가져와 채웁니다. `actor_username`은 `users.username`이 나중에 바뀌어도 실행 당시 이름을 보존하는 snapshot이고, `actor_user_id`는 `users` 테이블과의 현재 FK 연결을 위한 값입니다. `actor_user_id`가 가리키는 사용자가 삭제되면 `ON DELETE SET NULL`로 `actor_user_id`만 `NULL`이 되고 `actor_username` snapshot과 실행 이력 행 자체는 그대로 남습니다. downgrade는 FK 제약을 먼저 제거한 뒤 `actor_username`, `actor_user_id` 컬럼을 순서대로 제거합니다. 이번 migration은 검수(`inspection_runs`)에는 actor 컬럼을 추가하지 않았습니다.
+기존 row는 이 migration 실행 전에 만들어졌으므로 실행한 사용자를 알 수 없어 두 컬럼 모두 `NULL`로 유지하며, 임의 사용자로 backfill하지 않습니다. 새로 생성되는 row는 `api/routes/etl_loads.py`가 `require_operator`로 인증된 JWT `current_user.id`·`current_user.username`에서 값을 가져와 채웁니다. `actor_username`은 `users.username`이 나중에 바뀌어도 실행 당시 이름을 보존하는 snapshot이고, `actor_user_id`는 `users` 테이블과의 현재 FK 연결을 위한 값입니다. `actor_user_id`가 가리키는 사용자가 삭제되면 `ON DELETE SET NULL`로 `actor_user_id`만 `NULL`이 되고 `actor_username` snapshot과 실행 이력 행 자체는 그대로 남습니다. downgrade는 FK 제약을 먼저 제거한 뒤 `actor_username`, `actor_user_id` 컬럼을 순서대로 제거합니다. 이 최초 Actor Audit migration은 Web ETL·Promotion·Rollback을 대상으로 했고, Inspection은 아래 `20260810_0012`에서 같은 규칙으로 확장했습니다.
+
+`20260808_0011_add_promotion_audit_order_index.py`는 promotion audit 페이지네이션 쿼리가 사용하는 `(promotion_run_id, created_at DESC, id DESC)` 정렬 index를 추가합니다.
+
+`20260810_0012_add_inspection_actor_audit.py`(`down_revision=20260808_0011`)는 `inspection_runs`에 다음 컬럼을 nullable로 추가합니다.
+
+- `actor_user_id`(`BIGINT`, `users.id` FK, `ON DELETE SET NULL`)
+- `actor_username`(`VARCHAR(50)`, 실행 당시 username snapshot)
+
+기존 검수 이력은 두 actor 컬럼을 `NULL`로 유지하며 임의 backfill하지 않습니다. 새 Sync·Async 검수 row를 만들 때만 인증된 JWT `current_user`의 scalar `id`·`username`을 저장합니다. 사용자가 삭제되면 `actor_user_id`만 `NULL`이 되고 `actor_username`과 검수 이력은 남습니다. 동일한 `file_sha256`·`inspection_version`의 기존 row를 재사용하면 actor를 UPDATE하지 않아 최초 row 생성 사용자를 보존합니다.
+
+격리된 로컬 PostgreSQL 18 테스트 클러스터에서 `upgrade head`, `downgrade 20260808_0011`, 재-upgrade를 실행했습니다. downgrade 시 `inspection_runs`의 actor 컬럼 2개와 해당 FK만 제거되고 다른 테이블·컬럼은 유지됐으며, 재-upgrade 뒤 `20260810_0012` 단일 head와 `ON DELETE SET NULL` FK가 복원되는 것을 SQLAlchemy inspector로 확인했습니다.
 
 upgrade 동작은 다음 순서입니다.
 
@@ -992,7 +1007,7 @@ psql "$env:DATABASE_URL" -c "\d users"
 
 같은 방식으로 로컬 disposable PostgreSQL 18에서 빈 DB의 `upgrade head`, `downgrade 20260803_0007`, `downgrade 20260728_0006`, 재-upgrade와 단일 head도 확인했다. `20260805_0009`도 같은 방식으로 `downgrade 20260803_0008` 뒤 재-upgrade와 단일 head(`20260805_0009`)를 disposable PostgreSQL 18에서 확인했다.
 
-`tests/test_catalog_promotion_migration.py`는 `alembic.script.ScriptDirectory`로 현재 단일 head가 `20260806_0010`인지 확인한다. CI의 `Apply database migrations` step에서 `20260806_0010`까지 `upgrade head`가 매 push마다 실행되며 성공을 확인한다.
+`tests/test_inspection_actor_migration.py`와 `tests/test_catalog_promotion_migration.py`는 `alembic.script.ScriptDirectory`로 현재 단일 head가 `20260810_0012`인지 확인합니다. CI의 `Apply database migrations` step은 고정 revision이 아니라 `upgrade head`를 실행하므로 현재 migration chain 전체를 적용합니다.
 
 ## 16. FastAPI 실행 방법
 
@@ -1403,7 +1418,7 @@ Promotion Preview·Rollback Preview는 DB를 변경하지 않고 "무엇이 바�
 
 ### Actor Audit
 
-Authentication(로그인한 사용자가 누구인지 확인)과 RBAC(그 사용자가 무엇을 할 수 있는지 확인)은 실행 전 통제입니다. Actor Audit은 여기에 실행 후 기록을 더하지만, 그 범위는 실제로 DB에 남는 실행 이력 row만큼입니다. Web ETL은 `ETLLoadRun`이 실제로 생성될 때만 그 요청을 처리한 `current_user.id`·`current_user.username`을 `actor_user_id`·`actor_username`으로 저장합니다. 파일 검증이나 `run_pipeline()` 단계에서 실패하면 `etl_load_runs` row 자체가 생성되지 않으므로 actor도 기록되지 않습니다. Promotion·Rollback은 기존 실행 이력 구조상 `succeeded`뿐 아니라 `blocked`(`preview_stale` 포함)·`failed` 같은 종료 상태도 `catalog_promotion_runs`·`catalog_promotion_rollbacks` row로 남기며, 이 상태들에도 actor를 함께 저장합니다.
+Authentication(로그인한 사용자가 누구인지 확인)과 RBAC(그 사용자가 무엇을 할 수 있는지 확인)은 실행 전 통제입니다. Actor Audit은 여기에 실행 이력 row를 최초로 만든 사용자를 기록합니다. Sync·Async Inspection, Web ETL, Promotion, Rollback이 새 실행 이력을 만들 때 요청을 처리한 `current_user.id`·`current_user.username`을 `actor_user_id`·`actor_username`으로 저장합니다.
 
 ```text
 JWT
@@ -1414,7 +1429,15 @@ JWT
 -> 실행 이력 DB 저장
 ```
 
-`actor_username`은 request body나 form 어디에서도 클라이언트가 값을 지정할 수 있는 필드가 아니며, 항상 인증된 `current_user`에서만 가져옵니다. 예를 들어 `POST /api/v1/etl-loads` 요청에 `actor_username` 필드를 함께 보내도 서버는 이를 받는 필드가 없으므로 무시하고 토큰의 사용자 이름만 기록합니다. 검수(Inspection) 실행 이력에는 이번 범위에서 actor 컬럼을 추가하지 않았습니다. 컬럼·FK 구조는 15장, 저장 범위는 24장을 참고하세요.
+`actor_username`은 request body나 multipart form 어디에서도 클라이언트가 지정하는 값이 아니며 항상 인증된 `current_user`에서만 가져옵니다. `POST /api/v1/inspections`에 위조한 `actor_user_id`·`actor_username` form 값을 함께 보내도 저장된 actor는 토큰의 실제 사용자입니다. `actor_user_id`는 `users.id`와 현재 사용자를 연결하는 FK라 사용자가 삭제되면 `NULL`이 되고, `actor_username`은 실행 당시 이름을 보존하는 snapshot이라 그대로 남습니다.
+
+Inspection actor는 `inspection_runs` row를 최초로 만든 사용자를 뜻합니다. 동일한 `file_sha256`·`inspection_version` 요청은 기존 row를 재사용하므로, 이후 다른 operator가 같은 CSV를 요청해도 actor를 UPDATE하지 않습니다. 이 MVP는 중복 요청을 포함한 모든 요청자를 별도 event로 저장하는 범용 감사 시스템이 아닙니다.
+
+Sync Inspection은 route가 `current_user` scalar를 공통 `save_inspection_report()`에 직접 전달합니다. Async Inspection은 SQLAlchemy `User` 객체나 JWT를 Redis/Celery로 넘기지 않고 `actor_user_id`·`actor_username` scalar만 `InspectionJobState`에 저장한 뒤 Worker가 같은 persistence 계층에 전달합니다. 기존 actor 필드가 없는 Redis payload는 두 값 모두 `None`으로 복원합니다.
+
+API는 내부 FK인 `actor_user_id`를 노출하지 않습니다. `actor_username`만 새 Sync Inspection 응답과 검수 목록·상세 응답에서 확인할 수 있으며, async job status 응답에는 추가하지 않았습니다. Async 완료 뒤 `inspection_run_id`로 상세를 조회하면 actor를 확인할 수 있습니다. Streamlit 검수 이력 목록·전체 요약 CSV·상세는 실행 사용자를 표시하고, legacy `NULL` actor는 `알 수 없음`으로 표시합니다.
+
+Web ETL은 `ETLLoadRun`이 실제로 생성될 때만 actor를 저장합니다. 파일 검증이나 `run_pipeline()` 단계에서 실패해 `etl_load_runs` row가 없으면 actor도 없습니다. Promotion·Rollback은 기존 실행 이력 구조상 `succeeded`뿐 아니라 `blocked`(`preview_stale` 포함)·`failed` 상태도 row로 남기며 이 상태들에도 actor를 함께 저장합니다. 컬럼·FK 구조는 15장, 저장 범위는 24장을 참고하세요.
 
 현재 Access Token만 구현되어 있으며 Refresh Token은 없습니다. 토큰이 만료되면 다시 로그인해야 합니다.
 
@@ -1510,7 +1533,7 @@ CSV 파일을 업로드해 검수하고, 검수 실행과 상세 결과를 Postg
 
 - 요청 형식: `multipart/form-data`
 - 파일 필드명: `file`
-- 정상 응답: `inspection_run_id`, `created`, `summary`, `results`
+- 정상 응답: `inspection_run_id`, `created`, `actor_username`, `summary`, `results`
 - 잘못된 CSV: HTTP `400`
 - 파일 필드 누락: HTTP `422`
 
@@ -1520,6 +1543,7 @@ CSV 파일을 업로드해 검수하고, 검수 실행과 상세 결과를 Postg
 {
   "inspection_run_id": 123,
   "created": true,
+  "actor_username": "operator01",
   "summary": {
     "total_products": 5,
     "total_issues": 6,
@@ -1546,6 +1570,7 @@ CSV 파일을 업로드해 검수하고, 검수 실행과 상세 결과를 Postg
 {
   "inspection_run_id": 123,
   "created": false,
+  "actor_username": "operator01",
   "summary": {
     "total_products": 5,
     "total_issues": 6,
@@ -1556,7 +1581,7 @@ CSV 파일을 업로드해 검수하고, 검수 실행과 상세 결과를 Postg
 }
 ```
 
-`created=false`일 때는 새로 계산한 결과와 기존 ID를 섞지 않고, 기존 DB에 저장된 요약과 상세 결과를 반환합니다. API Client는 구버전 서버 호환을 위해 `created`가 없는 응답은 `true`로 처리하지만, `created`가 존재할 때는 실제 boolean 값만 허용합니다.
+`created=false`일 때는 새로 계산한 결과와 기존 ID를 섞지 않고, 기존 DB에 저장된 요약·상세 결과와 최초 `actor_username`을 반환합니다. 중복 요청을 보낸 현재 사용자로 actor를 덮어쓰지 않습니다. API Client는 구버전 서버 호환을 위해 `created`가 없는 응답은 `true`로 처리하지만, `created`가 존재할 때는 실제 boolean 값만 허용합니다.
 
 ### `GET /api/v1/inspections`
 
@@ -1579,6 +1604,7 @@ CSV 파일을 업로드해 검수하고, 검수 실행과 상세 결과를 Postg
     {
       "inspection_run_id": 11,
       "source_filename": "products_dev.csv",
+      "actor_username": "operator01",
       "created_at": "2026-07-04T13:42:39.495949+09:00",
       "total_products": 5,
       "total_issues": 6,
@@ -1598,7 +1624,7 @@ CSV 파일을 업로드해 검수하고, 검수 실행과 상세 결과를 Postg
 
 - `inspection_run_id`가 없으면 HTTP `404`
 - 숫자가 아닌 ID는 HTTP `422`
-- 응답에는 파일명, 저장 시각, 요약, 상세 결과 목록이 포함됩니다.
+- 응답에는 파일명, `actor_username`, 저장 시각, 요약, 상세 결과 목록이 포함됩니다. migration 이전 legacy row의 actor는 JSON `null`입니다.
 
 ### `GET /api/v1/etl-profiles`
 
@@ -1891,6 +1917,7 @@ python -m alembic upgrade head
 python -m pytest tests/test_inspection_persistence.py -q
 python -m pytest tests/test_api_rbac.py tests/test_api_inspections_transaction_regression.py -q
 python -m pytest tests/test_actor_audit.py -q
+python -m pytest tests/test_inspection_actor_migration.py -q
 ```
 
 전체 테스트는 다음 명령으로 실행합니다.
@@ -1903,9 +1930,25 @@ python -m pytest -q
 
 `tests/test_security.py`는 bcrypt 비밀번호 hash·검증과 JWT 발급·검증(만료, 잘못된 서명, 형식 오류)을 확인합니다. `tests/test_auth_service.py`, `tests/test_create_user_cli.py`는 `users` 조회·로그인 인증·계정 생성 CLI를 실제 PostgreSQL로 검증합니다. `tests/test_api_auth.py`는 로그인·현재 사용자 API 계약을, `tests/test_api_rbac.py`는 실제 PostgreSQL 사용자·JWT로 401(인증 실패)과 403(권한 부족) 경계를 endpoint 단위로 검증합니다. `tests/test_ui_auth.py`는 Streamlit 로그인·로그아웃·역할별 버튼 제한을 AppTest로 검증합니다.
 
-`tests/test_api_inspections_transaction_regression.py`는 `find_existing_inspection_run`·`save_inspection_report`를 monkeypatch하지 않고 실제 PostgreSQL Session으로 `POST /api/v1/inspections`를 검증하는 regression test입니다. 신규 CSV 저장 후 새 Session으로 재조회해 commit을 확인하고, 동일 CSV 재요청이 기존 run을 재사용하는지, 저장 도중 강제 실패가 발생하면 `inspection_runs`·`inspection_results`가 모두 rollback되는지, anonymous(401)·viewer(403)·operator(성공)의 권한 경계를 함께 확인합니다.
+`tests/test_api_inspections_transaction_regression.py`는 `find_existing_inspection_run`·`save_inspection_report`를 monkeypatch하지 않고 실제 PostgreSQL Session으로 `POST /api/v1/inspections`를 검증하는 regression test입니다. 신규 CSV 저장 후 새 Session으로 재조회해 commit과 JWT actor를 확인하고, 동일 CSV를 다른 operator가 재요청해도 기존 run과 최초 actor를 재사용하는지, 위조한 multipart actor 값을 무시하는지, 사용자 삭제 후 `actor_user_id=NULL`·`actor_username` snapshot 보존이 동작하는지 확인합니다. 저장 도중 강제 실패가 발생하면 `inspection_runs`·`inspection_results`가 모두 rollback되는지와 anonymous(401)·viewer(403)·operator(성공)의 권한 경계도 함께 확인합니다.
 
 `tests/test_actor_audit.py`는 Web ETL·Promotion·Rollback 각각에서 `actor_user_id`·`actor_username`이 인증된 JWT `current_user`로부터 기록되는지 실제 PostgreSQL로 검증하는 10개 시나리오입니다. JWT actor 기록(신규 Session으로 재조회해 commit 확인), viewer 요청 차단(403)과 run 미생성(세 endpoint 모두), Web ETL의 anonymous 요청 차단(401)과 run 미생성, request body에 `actor_username`을 함께 보내도 무시되고 토큰의 사용자로만 기록되는지(actor 위조 방지), Promotion 저장 중 강제 실패 시에도 `failed` run에 actor가 정확히 기록되고 운영 상품은 생성되지 않는지(false success 방지), migration 이전 legacy row(actor 컬럼 `NULL`)를 안전하게 조회할 수 있는지를 확인합니다.
+
+### Inspection Actor Audit 검증
+
+격리된 로컬 PostgreSQL 18.4 클러스터에서 `20260810_0012` upgrade·schema/FK inspection·`20260808_0011` downgrade·재-upgrade를 확인했습니다. Sync actor, actor 위조 방지, dedup 최초 actor 보존, 사용자 삭제 후 FK `NULL`과 username snapshot 보존을 실제 PostgreSQL row로 검증했습니다. Async 경로는 Redis state·legacy payload·InspectionJobService·Celery Worker·Async API를 검증하고, 로컬 Redis 7.4·Celery·FastAPI E2E에서 동일 CSV 두 번 실행 후 `inspection_runs` 1건과 최초 actor가 남는 것을 확인했습니다.
+
+문서 갱신 직전의 최신 로컬 전체 pytest 결과는 다음과 같습니다. 운영 DB나 AWS/RDS가 아니라 일회성 로컬 PostgreSQL·Redis 환경에서 실행한 결과입니다.
+
+```text
+1359 passed
+0 failed
+0 skipped
+4 deselected
+warnings 0
+```
+
+이 문서 단계에서는 Python source·migration·test를 변경하지 않았으므로 전체 suite를 다시 실행하지 않았고, 위 수치는 직전 코드 검증의 최종 결과를 그대로 기록했습니다.
 
 ### Prometheus Metrics 테스트
 
@@ -2039,6 +2082,7 @@ PostgreSQL에는 검수 실행 요약·상세 결과, ETL staging 배치·정상
 - 전체 문제 수
 - 오류 수
 - 주의 수
+- 검수 실행자의 `actor_user_id`와 실행 당시 `actor_username` snapshot
 - 검수 실행 생성 시각
 - 상세 결과의 상품 그룹 ID
 - 상세 결과의 상품 ID
@@ -2079,7 +2123,7 @@ API 클라이언트는 연결 실패, timeout, 서버 오류를 사용자용 메
 
 `users` 테이블에는 `username`, `password_hash`(bcrypt hash), `role`, `is_active`, `created_at`만 저장합니다. 비밀번호 원문은 저장하지 않으며, bcrypt hash는 복호화가 아니라 매 로그인마다 재계산해 비교하는 단방향 함수입니다. JWT Access Token의 payload도 `sub`(username), `role`, `iat`, `exp`만 포함하고 `password_hash` 등 민감정보는 넣지 않습니다.
 
-Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니다. `etl_load_runs`, `catalog_promotion_runs`, `catalog_promotion_rollbacks` 3개 실행 이력 테이블에는 "누가 실행했는지"를 기록하는 `actor_user_id`(`users.id` FK, `ON DELETE SET NULL`)·`actor_username`(snapshot) 컬럼이 있습니다. 이 값은 Web ETL·Promotion·Rollback 요청을 처리한 JWT `current_user`에서만 채워지며, request body나 form으로 클라이언트가 다른 사용자 이름을 지정할 수 없습니다. `inspection_runs`에는 이번 범위에서 actor 컬럼을 추가하지 않았습니다.
+Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니다. `inspection_runs`, `etl_load_runs`, `catalog_promotion_runs`, `catalog_promotion_rollbacks` 실행 이력 테이블에는 "누가 실행했는지"를 기록하는 `actor_user_id`(`users.id` FK, `ON DELETE SET NULL`)·`actor_username`(snapshot) 컬럼이 있습니다. 이 값은 요청을 처리한 JWT `current_user`에서만 채워지며, request body나 form으로 클라이언트가 다른 사용자 이름을 지정할 수 없습니다. migration 이전 기존 row는 두 값 모두 `NULL`로 유지합니다.
 
 ## 25. 현재 한계
 
@@ -2104,7 +2148,9 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - OAuth, MFA, SSO 연동은 없습니다.
 - 로그인 시도 rate limit이나 brute-force 방어는 구현되어 있지 않습니다.
 - 역할은 `viewer`·`operator` 2개만 있으며, 세밀한 permission 단위 ACL이나 관리자 전용 화면은 없습니다.
-- Actor Audit은 Web ETL·Promotion·Rollback 실행 이력에만 적용됩니다. 검수(Inspection) 실행 이력에는 아직 actor 컬럼이 없어 누가 검수를 실행했는지는 기록하지 않습니다.
+- Inspection Actor Audit은 `inspection_runs` row를 최초 생성한 사용자만 기록합니다. 동일 CSV·검수 버전의 dedup 요청자를 별도 event로 모두 저장하지는 않습니다.
+- Async job status 응답에는 actor를 노출하지 않습니다. 완료 후 `inspection_run_id`로 검수 상세를 조회하면 `actor_username`을 확인할 수 있습니다.
+- `TEST_DATABASE_URL`과 `DATABASE_URL`이 모두 없는 환경에서 anonymous Sync Inspection 요청은 auth보다 DB dependency가 먼저 평가되어 401 대신 500이 될 수 있습니다. 테스트 DB가 정상 설정된 환경에서는 401을 반환하며, 이 기존 dependency-order 결함은 Inspection Actor Audit의 blocker가 아닙니다.
 - Rollback 실행의 `actor_username`은 실행 직후 POST 응답에서 확인할 수 있지만, rollback 실행 이력만 목록으로 조회하는 전용 GET API는 아직 없습니다.
 - Prometheus metric은 애플리케이션이 값을 노출하는 instrumentation 단계이며, 이를 주기적으로 수집하는 Prometheus 서버나 Grafana 대시보드는 아직 구축하지 않았습니다.
 - metric은 process-global 메모리 상태이므로 프로세스가 재시작되면 초기화됩니다. DB 실행 이력(영구)·Actor Audit(DB 이력의 실행자 기록)과는 별개 개념입니다.
@@ -2149,7 +2195,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 검수 규칙 변경 시 `inspection_version` 관리 정책 수립
 - 과거 이력 backfill 정책 검토
 - 검수 이력 삭제와 보관 정책
-- 검수(Inspection) 실행 이력에도 Actor Audit 확장(현재는 Web ETL·Promotion·Rollback에만 적용)
+- dedup 요청자를 포함한 요청 단위 감사 event가 필요할 경우 별도 audit event 모델 검토
 - Rollback 실행 이력만 목록으로 조회하는 전용 GET API
 - Prometheus 서버 구축과 scrape 설정, Grafana 대시보드
 - 여러 Uvicorn worker 환경을 위한 metric 통합(현재는 프로세스 단일 registry)
