@@ -29,11 +29,16 @@ router = APIRouter()
 async def submit_inspection_job(
     file: UploadFile = File(...),
     service: InspectionJobService = Depends(get_inspection_job_service),
-    _current_user=Depends(require_operator),
+    current_user=Depends(require_operator),
 ) -> InspectionJobSubmissionResponse:
     file_bytes = await file.read()
     try:
-        submission = service.submit(filename=file.filename, file_bytes=file_bytes)
+        submission = service.submit(
+            filename=file.filename,
+            file_bytes=file_bytes,
+            actor_user_id=current_user.id,
+            actor_username=current_user.username,
+        )
     except InspectionJobUploadError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except InspectionJobEnqueueError as error:

@@ -24,9 +24,18 @@ def authenticated_operator():
 
 def test_submit_inspection_job_returns_accepted_queued_job() -> None:
     class FakeService:
-        def submit(self, *, filename: str | None, file_bytes: bytes):
+        def submit(
+            self,
+            *,
+            filename: str | None,
+            file_bytes: bytes,
+            actor_user_id: int | None,
+            actor_username: str | None,
+        ):
             assert filename == "products.csv"
             assert file_bytes == DEV_DATA_PATH.read_bytes()
+            assert actor_user_id == 1
+            assert actor_username == "operator_user"
             return SimpleNamespace(
                 job_id="8d4c3d84-cf1d-4cdb-83a4-4ebf9d6bf5f6",
                 status="queued",
@@ -62,7 +71,14 @@ def test_submit_inspection_job_returns_accepted_queued_job() -> None:
 
 def test_invalid_async_upload_returns_400_without_job_creation() -> None:
     class FakeService:
-        def submit(self, *, filename: str | None, file_bytes: bytes):
+        def submit(
+            self,
+            *,
+            filename: str | None,
+            file_bytes: bytes,
+            actor_user_id: int | None,
+            actor_username: str | None,
+        ):
             from services.inspection_job_service import InspectionJobUploadError
 
             raise InspectionJobUploadError("CSV 파일만 업로드할 수 있습니다.")
@@ -83,7 +99,14 @@ def test_invalid_async_upload_returns_400_without_job_creation() -> None:
 
 def test_enqueue_failure_returns_safe_503() -> None:
     class FakeService:
-        def submit(self, *, filename: str | None, file_bytes: bytes):
+        def submit(
+            self,
+            *,
+            filename: str | None,
+            file_bytes: bytes,
+            actor_user_id: int | None,
+            actor_username: str | None,
+        ):
             from services.inspection_job_service import InspectionJobEnqueueError
 
             raise InspectionJobEnqueueError(

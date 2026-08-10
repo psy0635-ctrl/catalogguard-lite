@@ -66,6 +66,7 @@ def build_inspection_response(
     *,
     inspection_run_id: int,
     created: bool = True,
+    actor_username: str | None = None,
 ) -> InspectionResponse:
     # 공통 검수 서비스가 만든 InspectionReport를 FastAPI 응답 모델로 변환합니다.
     result_items = []
@@ -80,6 +81,7 @@ def build_inspection_response(
     return InspectionResponse(
         inspection_run_id=inspection_run_id,
         created=created,
+        actor_username=actor_username,
         summary=InspectionSummary(
             total_products=report.summary.total_products,
             total_issues=report.summary.total_issues,
@@ -113,6 +115,7 @@ def build_inspection_detail_response(
         created=created,
         source_filename=detail.source_filename,
         created_at=detail.created_at,
+        actor_username=detail.actor_username,
         summary=InspectionSummary(
             total_products=detail.total_products,
             total_issues=detail.total_issues,
@@ -136,6 +139,7 @@ def build_inspection_list_response(
                 total_issues=item.total_issues,
                 error_count=item.error_count,
                 warning_count=item.warning_count,
+                actor_username=item.actor_username,
             )
             for item in inspection_list.items
         ],
@@ -221,7 +225,7 @@ async def create_inspection(
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
     precheck_session: Session = Depends(get_session, use_cache=False),
-    _current_user=Depends(require_operator),
+    current_user=Depends(require_operator),
 ) -> InspectionResponse:
     file_bytes = await file.read()
 
@@ -263,6 +267,8 @@ async def create_inspection(
         report=report,
         file_sha256=file_sha256,
         inspection_version=INSPECTION_VERSION,
+        actor_user_id=current_user.id,
+        actor_username=current_user.username,
     )
 
     if not save_outcome.created:
@@ -283,6 +289,7 @@ async def create_inspection(
         report,
         inspection_run_id=save_outcome.inspection_run_id,
         created=True,
+        actor_username=current_user.username,
     )
 
 

@@ -31,6 +31,8 @@ def test_redis_job_store_round_trips_state_with_ttl() -> None:
         "job-1",
         source_filename="products.csv",
         created_at=created_at,
+        actor_user_id=41,
+        actor_username="operator01",
     )
 
     assert state.status == "queued"
@@ -39,7 +41,29 @@ def test_redis_job_store_round_trips_state_with_ttl() -> None:
     stored_payload = json.loads(redis_client.set_calls[0][1])
     assert stored_payload["job_id"] == "job-1"
     assert stored_payload["status"] == "queued"
+    assert stored_payload["actor_user_id"] == 41
+    assert stored_payload["actor_username"] == "operator01"
     assert store.get_job("job-1") == state
+
+
+def test_redis_job_store_deserializes_legacy_payload_without_actor_fields() -> None:
+    redis_client = FakeRedis()
+    store = RedisJobStore(redis_client, ttl_seconds=900)
+    redis_client.values["catalogguard:inspection-job:legacy-job"] = json.dumps(
+        {
+            "job_id": "legacy-job",
+            "status": "queued",
+            "created_at": "2026-07-21T16:00:00+00:00",
+            "updated_at": "2026-07-21T16:00:00+00:00",
+            "source_filename": "legacy.csv",
+        }
+    )
+
+    state = store.get_job("legacy-job")
+
+    assert state is not None
+    assert state.actor_user_id is None
+    assert state.actor_username is None
 
 
 def test_redis_job_store_updates_status_and_result_fields() -> None:

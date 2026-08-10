@@ -68,6 +68,8 @@ class InspectionJobService:
         *,
         filename: str | None,
         file_bytes: bytes,
+        actor_user_id: int | None = None,
+        actor_username: str | None = None,
     ) -> InspectionJobSubmission:
         validate_async_upload(filename, file_bytes)
         job_id = str(uuid4())
@@ -81,6 +83,8 @@ class InspectionJobService:
                 job_id,
                 source_filename=source_filename,
                 created_at=timestamp,
+                actor_user_id=actor_user_id,
+                actor_username=actor_username,
             )
             self._enqueue(job_id, str(job_file_path))
         except Exception as error:

@@ -120,6 +120,8 @@ def inspect_csv_task(job_id: str, job_file_path: str) -> None:
             report=report,
             file_sha256=file_sha256,
             inspection_version=INSPECTION_VERSION,
+            actor_user_id=state.actor_user_id,
+            actor_username=state.actor_username,
         )
         if save_outcome.created:
             inspection_run_id = save_outcome.inspection_run_id

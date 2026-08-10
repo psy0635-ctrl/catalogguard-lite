@@ -29,6 +29,8 @@ class FakeJobStore:
             safe_error_message=fields.get(
                 "safe_error_message", self.state.safe_error_message
             ),
+            actor_user_id=self.state.actor_user_id,
+            actor_username=self.state.actor_username,
         )
         return self.state
 
@@ -45,7 +47,12 @@ class FakeSession:
         self.close_calls += 1
 
 
-def make_state(job_id: str) -> InspectionJobState:
+def make_state(
+    job_id: str,
+    *,
+    actor_user_id: int | None = 41,
+    actor_username: str | None = "operator01",
+) -> InspectionJobState:
     from datetime import datetime, timezone
 
     timestamp = datetime(2026, 7, 21, 16, 0, tzinfo=timezone.utc)
@@ -55,6 +62,8 @@ def make_state(job_id: str) -> InspectionJobState:
         created_at=timestamp,
         updated_at=timestamp,
         source_filename="products.csv",
+        actor_user_id=actor_user_id,
+        actor_username=actor_username,
     )
 
 
@@ -67,6 +76,7 @@ def test_new_csv_task_runs_inspection_once_and_cleans_up_file(tmp_path, monkeypa
     store = FakeJobStore(make_state(job_id))
     session = FakeSession()
     calls: list[str] = []
+    save_kwargs = []
 
     monkeypatch.setattr(tasks, "get_redis_job_store", lambda: store)
     monkeypatch.setattr(tasks, "is_safe_job_file_path", lambda *_: True)
@@ -94,16 +104,18 @@ def test_new_csv_task_runs_inspection_once_and_cleans_up_file(tmp_path, monkeypa
             )
         ),
     )
-    monkeypatch.setattr(
-        tasks,
-        "save_inspection_report",
-        lambda *args, **kwargs: calls.append("save")
-        or SimpleNamespace(inspection_run_id=123, created=True),
-    )
+    def fake_save_inspection_report(*args, **kwargs):
+        calls.append("save")
+        save_kwargs.append(kwargs)
+        return SimpleNamespace(inspection_run_id=123, created=True)
+
+    monkeypatch.setattr(tasks, "save_inspection_report", fake_save_inspection_report)
 
     tasks.inspect_csv_task.run(job_id, str(job_file))
 
     assert calls == ["validate", "identity", "inspect", "save"]
+    assert save_kwargs[0]["actor_user_id"] == 41
+    assert save_kwargs[0]["actor_username"] == "operator01"
     assert [update["status"] for update in store.updates] == [
         "running",
         "succeeded",

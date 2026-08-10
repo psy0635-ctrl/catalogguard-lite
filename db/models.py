@@ -115,6 +115,12 @@ class InspectionRun(Base):
     total_issues: Mapped[int] = mapped_column(Integer, nullable=False)
     error_count: Mapped[int] = mapped_column(Integer, nullable=False)
     warning_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    actor_username: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # 생성 시각은 애플리케이션이 아니라 DB 서버 시간이 자동으로 채웁니다.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

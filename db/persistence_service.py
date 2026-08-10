@@ -52,6 +52,7 @@ class InspectionDetail:
     error_count: int
     warning_count: int
     results: list[InspectionResultCreate]
+    actor_username: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,7 @@ class InspectionListItem:
     total_issues: int
     error_count: int
     warning_count: int
+    actor_username: str | None = None
 
 
 @dataclass(frozen=True)
@@ -216,6 +218,8 @@ def save_inspection_report(
     report: InspectionReport,
     file_sha256: str | None = None,
     inspection_version: str = INSPECTION_VERSION,
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
 ) -> InspectionSaveOutcome:
     # 이 Service가 하나의 트랜잭션 경계를 맡아 run과 results를 함께 저장합니다.
     source_basename = normalize_source_filename(source_filename)
@@ -252,6 +256,8 @@ def save_inspection_report(
                     warning_count=report.summary.warning_count,
                     file_sha256=normalized_file_sha256,
                     inspection_version=normalized_inspection_version,
+                    actor_user_id=actor_user_id,
+                    actor_username=actor_username,
                 )
                 repositories.create_inspection_results(
                     session,
@@ -317,6 +323,7 @@ def get_inspection_detail(
         error_count=inspection_run.error_count,
         warning_count=inspection_run.warning_count,
         results=result_items,
+        actor_username=inspection_run.actor_username,
     )
 
 
@@ -358,6 +365,7 @@ def list_inspections(
             total_issues=inspection_run.total_issues,
             error_count=inspection_run.error_count,
             warning_count=inspection_run.warning_count,
+            actor_username=inspection_run.actor_username,
         )
         for inspection_run in inspection_runs
     ]

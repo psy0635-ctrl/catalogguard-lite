@@ -87,6 +87,7 @@ def fake_inspection_persistence(monkeypatch):
             SimpleNamespace(
                 inspection_run_id=12,
                 source_filename="template.csv",
+                actor_username=None,
                 created_at=list_created_at,
                 total_products=1,
                 total_issues=0,
@@ -96,6 +97,7 @@ def fake_inspection_persistence(monkeypatch):
             SimpleNamespace(
                 inspection_run_id=11,
                 source_filename="products_dev.csv",
+                actor_username="operator01",
                 created_at=list_created_at,
                 total_products=5,
                 total_issues=2,
@@ -112,6 +114,7 @@ def fake_inspection_persistence(monkeypatch):
             SimpleNamespace(
                 inspection_run_id=3,
                 source_filename="old_products.csv",
+                actor_username="legacy_operator",
                 created_at=list_created_at,
                 total_products=8,
                 total_issues=4,
@@ -127,6 +130,7 @@ def fake_inspection_persistence(monkeypatch):
         11: SimpleNamespace(
             inspection_run_id=11,
             source_filename="products_dev.csv",
+            actor_username="operator01",
             created_at=detail_created_at,
             total_products=5,
             total_issues=2,
@@ -137,6 +141,7 @@ def fake_inspection_persistence(monkeypatch):
         12: SimpleNamespace(
             inspection_run_id=12,
             source_filename="template.csv",
+            actor_username=None,
             created_at=detail_created_at,
             total_products=1,
             total_issues=0,
@@ -156,6 +161,8 @@ def fake_inspection_persistence(monkeypatch):
         report,
         file_sha256=None,
         inspection_version=None,
+        actor_user_id=None,
+        actor_username=None,
     ):
         calls.append(
             {
@@ -164,6 +171,8 @@ def fake_inspection_persistence(monkeypatch):
                 "report": report,
                 "file_sha256": file_sha256,
                 "inspection_version": inspection_version,
+                "actor_user_id": actor_user_id,
+                "actor_username": actor_username,
             }
         )
         if save_state.mode == "duplicate":
@@ -306,6 +315,7 @@ def test_list_inspections_api_returns_default_page(fake_inspection_persistence):
     assert data["items"][0] == {
         "inspection_run_id": 12,
         "source_filename": "template.csv",
+        "actor_username": None,
         "created_at": data["items"][0]["created_at"],
         "total_products": 1,
         "total_issues": 0,
@@ -681,6 +691,7 @@ def test_get_inspection_api_returns_saved_inspection_detail(
     data = response.json()
     assert data["inspection_run_id"] == 11
     assert data["source_filename"] == "products_dev.csv"
+    assert data["actor_username"] == "operator01"
     assert data["created_at"].startswith("2026-07-04T03:30:00")
     assert data["summary"] == {
         "total_products": 5,
@@ -760,6 +771,7 @@ def test_inspection_api_accepts_template_csv_with_no_issues():
     assert response.json() == {
         "inspection_run_id": 123,
         "created": True,
+        "actor_username": "operator_user",
         "summary": {
             "total_products": 1,
             "total_issues": 0,
@@ -787,6 +799,8 @@ def test_inspection_api_persists_report_and_returns_inspection_run_id(
     assert call["source_filename"] == "products_dev.csv"
     assert call["file_sha256"] == hashlib.sha256(DEV_DATA_PATH.read_bytes()).hexdigest()
     assert call["inspection_version"] == INSPECTION_VERSION
+    assert call["actor_user_id"] == 1
+    assert call["actor_username"] == "operator_user"
     assert isinstance(call["report"], InspectionReport)
     assert call["report"].summary.total_products == data["summary"]["total_products"]
     assert call["report"].summary.total_issues == data["summary"]["total_issues"]
@@ -804,6 +818,7 @@ def test_inspection_api_returns_existing_detail_when_duplicate(
     data = response.json()
     assert data["inspection_run_id"] == 11
     assert data["created"] is False
+    assert data["actor_username"] == "operator01"
     assert data["summary"] == {
         "total_products": 5,
         "total_issues": 2,
@@ -945,6 +960,22 @@ def test_inspection_api_validates_and_inspects_new_file_once(
     assert len(inspect_dataframe_calls) == 1
     assert inspect_uploaded_calls == []
     assert len(fake_inspection_persistence.calls) == 1
+
+
+def test_inspection_api_ignores_forged_actor_fields_and_uses_current_user(
+    fake_inspection_persistence,
+):
+    response = client.post(
+        ENDPOINT,
+        files={"file": ("products.csv", DEV_DATA_PATH.read_bytes(), "text/csv")},
+        data={"actor_user_id": "999", "actor_username": "forged-user"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["actor_username"] == "operator_user"
+    [call] = fake_inspection_persistence.calls
+    assert call["actor_user_id"] == 1
+    assert call["actor_username"] == "operator_user"
 
 
 def test_inspection_api_uses_current_version_for_prelookup(

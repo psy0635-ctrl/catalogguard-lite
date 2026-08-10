@@ -93,6 +93,8 @@ def test_inspection_runs_columns_and_types():
         "total_issues",
         "error_count",
         "warning_count",
+        "actor_user_id",
+        "actor_username",
         "created_at",
     }
     assert isinstance(columns.id.type, BigInteger)
@@ -110,6 +112,11 @@ def test_inspection_runs_columns_and_types():
     assert isinstance(columns.total_issues.type, Integer)
     assert isinstance(columns.error_count.type, Integer)
     assert isinstance(columns.warning_count.type, Integer)
+    assert isinstance(columns.actor_user_id.type, BigInteger)
+    assert columns.actor_user_id.nullable is True
+    assert isinstance(columns.actor_username.type, String)
+    assert columns.actor_username.type.length == 50
+    assert columns.actor_username.nullable is True
     assert isinstance(columns.created_at.type, DateTime)
     assert columns.created_at.type.timezone is True
     assert columns.created_at.server_default is not None

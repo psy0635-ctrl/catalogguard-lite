@@ -83,6 +83,34 @@ def operator_token(postgres_session):
 
 
 @pytest.fixture()
+def actor_operators(postgres_session):
+    session, session_factory = postgres_session
+    first_username = _unique_username("inspection_actor_first")
+    second_username = _unique_username("inspection_actor_second")
+    first_user = create_user(
+        session,
+        username=first_username,
+        password="synthetic-pw-actor-first",
+        role="operator",
+    )
+    second_user = create_user(
+        session,
+        username=second_username,
+        password="synthetic-pw-actor-second",
+        role="operator",
+    )
+    first_token, _ = create_access_token(subject=first_username, role="operator")
+    second_token, _ = create_access_token(subject=second_username, role="operator")
+    try:
+        yield (
+            (first_username, first_user.id, first_token),
+            (second_username, second_user.id, second_token),
+        )
+    finally:
+        _cleanup_users(session_factory, [first_username, second_username])
+
+
+@pytest.fixture()
 def viewer_token(postgres_session):
     session, session_factory = postgres_session
     username = _unique_username("txn_viewer")
@@ -194,6 +222,91 @@ def test_operator_duplicate_csv_reuses_existing_run_without_new_rows(
         assert _count_results(session_factory, inspection_run_id=run_id) == 1
     finally:
         _cleanup_inspection_runs(session_factory, [filename])
+
+
+def test_sync_inspection_uses_first_jwt_actor_and_ignores_forged_form_fields(
+    postgres_session,
+    actor_operators,
+):
+    _, session_factory = postgres_session
+    (first_username, first_user_id, first_token), (_, _, second_token) = actor_operators
+    marker = uuid4().hex
+    first_filename = f"inspection_actor_first_{marker}.csv"
+    second_filename = f"inspection_actor_second_{marker}.csv"
+    csv_bytes = _build_valid_csv(marker)
+
+    try:
+        first_response = client.post(
+            "/api/v1/inspections",
+            headers=_auth_headers(first_token),
+            files={"file": (first_filename, csv_bytes, "text/csv")},
+            data={"actor_user_id": "999", "actor_username": "forged-user"},
+        )
+        second_response = _post_csv(
+            second_token,
+            csv_bytes,
+            filename=second_filename,
+        )
+
+        assert first_response.status_code == 200, first_response.text
+        assert second_response.status_code == 200, second_response.text
+        first_body = first_response.json()
+        second_body = second_response.json()
+        assert first_body["created"] is True
+        assert second_body["created"] is False
+        assert second_body["inspection_run_id"] == first_body["inspection_run_id"]
+        assert first_body["actor_username"] == first_username
+        assert second_body["actor_username"] == first_username
+
+        with session_factory() as verify:
+            run = verify.get(InspectionRun, first_body["inspection_run_id"])
+            assert run is not None
+            assert run.actor_user_id == first_user_id
+            assert run.actor_username == first_username
+    finally:
+        _cleanup_inspection_runs(session_factory, [first_filename, second_filename])
+
+
+def test_deleting_actor_user_sets_fk_null_and_keeps_username_snapshot(
+    postgres_session,
+):
+    session, session_factory = postgres_session
+    username = _unique_username("inspection_actor_deleted")
+    source_filename = f"inspection_actor_deleted_{uuid4().hex}.csv"
+    user = create_user(
+        session,
+        username=username,
+        password="synthetic-pw-actor-delete",
+        role="operator",
+    )
+    run = InspectionRun(
+        source_filename=source_filename,
+        file_sha256=None,
+        inspection_version="actor-test",
+        total_products=0,
+        total_issues=0,
+        error_count=0,
+        warning_count=0,
+        actor_user_id=user.id,
+        actor_username=username,
+    )
+    session.add(run)
+    session.commit()
+    run_id = run.id
+
+    try:
+        with session_factory() as delete_session:
+            delete_session.execute(delete(User).where(User.id == user.id))
+            delete_session.commit()
+
+        with session_factory() as verify:
+            persisted_run = verify.get(InspectionRun, run_id)
+            assert persisted_run is not None
+            assert persisted_run.actor_user_id is None
+            assert persisted_run.actor_username == username
+    finally:
+        _cleanup_inspection_runs(session_factory, [source_filename])
+        _cleanup_users(session_factory, [username])
 
 
 def test_operator_save_failure_rolls_back_run_and_results(

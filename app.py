@@ -39,6 +39,7 @@ HISTORY_LIMIT_DEFAULT = 10
 HISTORY_DISPLAY_COLUMNS = [
     "실행 ID",
     "파일명",
+    "실행 사용자",
     "검수 시간",
     "전체 상품",
     "전체 문제",
@@ -287,11 +288,17 @@ def format_history_datetime(value: object) -> str:
     return parsed_datetime.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def format_actor_username(value: object) -> str:
+    username = "" if value is None else str(value).strip()
+    return username or "알 수 없음"
+
+
 def build_history_dataframe(items: list[dict]) -> pd.DataFrame:
     rows = [
         {
             "실행 ID": item.get("inspection_run_id"),
             "파일명": item.get("source_filename"),
+            "실행 사용자": format_actor_username(item.get("actor_username")),
             "검수 시간": format_history_datetime(item.get("created_at")),
             "전체 상품": item.get("total_products"),
             "전체 문제": item.get("total_issues"),
@@ -312,6 +319,7 @@ def build_history_summary_dataframe(items: list[dict]) -> pd.DataFrame:
             {
                 "실행 ID": item.get("inspection_run_id"),
                 "파일명": escape_csv_formula_value(item.get("source_filename")),
+                "실행 사용자": format_actor_username(item.get("actor_username")),
                 "검수 시간": format_history_datetime(item.get("created_at")),
                 "전체 상품": item.get("total_products"),
                 "전체 문제": item.get("total_issues"),
@@ -1608,6 +1616,9 @@ def render_inspection_history_detail(api_client) -> None:
     st.write(f"파일명: {detail_response.get('source_filename', '')}")
     st.write(f"검수 시간: {format_history_datetime(detail_response.get('created_at'))}")
     st.write(f"실행 ID: {detail_response.get('inspection_run_id', '')}")
+    st.write(
+        f"실행 사용자: {format_actor_username(detail_response.get('actor_username'))}"
+    )
 
     summary = detail_response.get("summary") or {}
     product_col, issue_col, error_col, warning_col = st.columns(4)

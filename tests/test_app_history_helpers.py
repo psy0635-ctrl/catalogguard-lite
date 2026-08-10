@@ -176,6 +176,7 @@ def make_history_item(
     return {
         "inspection_run_id": inspection_run_id,
         "source_filename": f"products_{inspection_run_id}.csv",
+        "actor_username": "operator01",
         "created_at": "2026-07-04T13:42:39.495949+09:00",
         "total_products": 5,
         "total_issues": error_count + warning_count,
@@ -323,6 +324,7 @@ def test_build_history_dataframe_maps_items_without_changing_input(app_module):
         {
             "inspection_run_id": 11,
             "source_filename": "products_dev.csv",
+            "actor_username": "operator01",
             "created_at": "2026-07-04T13:42:39.495949+09:00",
             "total_products": 5,
             "total_issues": 6,
@@ -339,6 +341,7 @@ def test_build_history_dataframe_maps_items_without_changing_input(app_module):
     assert dataframe.iloc[0].to_dict() == {
         "실행 ID": 11,
         "파일명": "products_dev.csv",
+        "실행 사용자": "operator01",
         "검수 시간": "2026-07-04 13:42:39",
         "전체 상품": 5,
         "전체 문제": 6,
@@ -346,6 +349,25 @@ def test_build_history_dataframe_maps_items_without_changing_input(app_module):
         "주의": 0,
     }
     assert items == original_items
+
+
+def test_build_history_dataframe_displays_unknown_for_legacy_actor(app_module):
+    dataframe = app_module.build_history_dataframe(
+        [
+            {
+                "inspection_run_id": 12,
+                "source_filename": "legacy.csv",
+                "actor_username": None,
+                "created_at": "2026-07-04T13:42:39.495949+09:00",
+                "total_products": 1,
+                "total_issues": 0,
+                "error_count": 0,
+                "warning_count": 0,
+            }
+        ]
+    )
+
+    assert dataframe.iloc[0]["실행 사용자"] == "알 수 없음"
 
 
 def test_build_history_dataframe_keeps_original_datetime_when_parse_fails(
@@ -1251,6 +1273,7 @@ def test_render_history_detail_passes_complete_dataframe_to_statistics_before_ta
     detail_response = {
         "inspection_run_id": 11,
         "source_filename": "products.csv",
+        "actor_username": "operator01",
         "created_at": "2026-07-04T13:42:39.495949+09:00",
         "summary": {
             "total_products": 2,
@@ -1304,6 +1327,7 @@ def test_render_history_detail_passes_complete_dataframe_to_statistics_before_ta
     assert len(statistics_calls) == 1
     pd.testing.assert_frame_equal(statistics_calls[0][0], expected_dataframe)
     assert statistics_calls[0][1] == 2
+    assert ("write", "실행 사용자: operator01") in fake_st.call_log
     assert fake_st.call_log.index(("statistics",)) < fake_st.call_log.index(
         ("dataframe", None)
     )

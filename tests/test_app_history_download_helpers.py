@@ -41,6 +41,7 @@ def make_summary_item(
     return {
         "inspection_run_id": inspection_run_id,
         "source_filename": f"products_{inspection_run_id}.csv",
+        "actor_username": "operator01",
         "created_at": "2026-07-04T13:42:39.495949+09:00",
         "total_products": 5,
         "total_issues": error_count + warning_count,
@@ -179,6 +180,7 @@ def test_build_history_summary_dataframe_maps_columns_and_status(app_module):
     assert dataframe.iloc[0].to_dict() == {
         "실행 ID": 1,
         "파일명": "products_1.csv",
+        "실행 사용자": "operator01",
         "검수 시간": "2026-07-04 13:42:39",
         "전체 상품": 5,
         "전체 문제": 3,

@@ -30,6 +30,7 @@ class InspectionResponse(BaseModel):
     inspection_run_id: int
     # True면 이번 요청에서 새로 저장했고, False면 같은 파일/버전의 기존 이력을 반환했다는 뜻입니다.
     created: bool = True
+    actor_username: str | None = None
     summary: InspectionSummary
     results: list[InspectionResultItem]
 
@@ -48,6 +49,7 @@ class InspectionListItemResponse(BaseModel):
     total_issues: int
     error_count: int
     warning_count: int
+    actor_username: str | None = None
 
 
 class InspectionListResponse(BaseModel):

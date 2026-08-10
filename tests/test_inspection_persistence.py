@@ -581,6 +581,80 @@ def test_save_inspection_report_allows_same_filename_with_different_hash(
     assert second_outcome.inspection_run_id != first_outcome.inspection_run_id
 
 
+def test_save_inspection_report_sets_actor_only_on_new_run(monkeypatch):
+    session = FakeSession()
+    created_kwargs = []
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "get_inspection_run_by_file_identity",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_create_inspection_run(session_arg, **kwargs):
+        created_kwargs.append(kwargs)
+        return SimpleNamespace(id=91)
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "create_inspection_run",
+        fake_create_inspection_run,
+    )
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "create_inspection_results",
+        lambda *args, **kwargs: [],
+    )
+
+    outcome = save_inspection_report(
+        session,
+        source_filename="actor.csv",
+        report=make_report(),
+        file_sha256=make_file_hash(b"actor-new"),
+        actor_user_id=41,
+        actor_username="operator01",
+    )
+
+    assert outcome == InspectionSaveOutcome(inspection_run_id=91, created=True)
+    assert created_kwargs[0]["actor_user_id"] == 41
+    assert created_kwargs[0]["actor_username"] == "operator01"
+
+
+def test_save_inspection_report_does_not_overwrite_actor_on_dedup(monkeypatch):
+    session = FakeSession()
+    existing_run = SimpleNamespace(
+        id=73,
+        actor_user_id=11,
+        actor_username="operator01",
+    )
+    create_calls = []
+
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "get_inspection_run_by_file_identity",
+        lambda *args, **kwargs: existing_run,
+    )
+    monkeypatch.setattr(
+        persistence_service.repositories,
+        "create_inspection_run",
+        lambda *args, **kwargs: create_calls.append(kwargs),
+    )
+
+    outcome = save_inspection_report(
+        session,
+        source_filename="duplicate.csv",
+        report=make_report(),
+        file_sha256=make_file_hash(b"actor-duplicate"),
+        actor_user_id=22,
+        actor_username="operator02",
+    )
+
+    assert outcome == InspectionSaveOutcome(inspection_run_id=73, created=False)
+    assert create_calls == []
+    assert existing_run.actor_user_id == 11
+    assert existing_run.actor_username == "operator01"
+
+
 def test_save_inspection_report_allows_same_hash_with_different_version(
     database_session,
 ):
@@ -900,6 +974,7 @@ def test_get_inspection_detail_maps_repository_rows(monkeypatch):
     run = SimpleNamespace(
         id=11,
         source_filename="products_dev.csv",
+        actor_username="operator01",
         total_products=5,
         total_issues=2,
         error_count=1,
@@ -961,6 +1036,7 @@ def test_get_inspection_detail_maps_repository_rows(monkeypatch):
     assert detail.total_issues == 2
     assert detail.error_count == 1
     assert detail.warning_count == 1
+    assert detail.actor_username == "operator01"
     assert [item.status for item in detail.results] == ["오류", "주의"]
     assert detail.results[0].error_field == "상품 ID 중복"
     assert calls == [
@@ -974,6 +1050,7 @@ def test_get_inspection_detail_handles_zero_result_run(monkeypatch):
     run = SimpleNamespace(
         id=12,
         source_filename="template.csv",
+        actor_username=None,
         total_products=1,
         total_issues=0,
         error_count=0,
@@ -1012,6 +1089,7 @@ def test_list_inspections_maps_repository_rows_and_total(monkeypatch):
         SimpleNamespace(
             id=12,
             source_filename="template.csv",
+            actor_username=None,
             total_products=1,
             total_issues=0,
             error_count=0,
@@ -1021,6 +1099,7 @@ def test_list_inspections_maps_repository_rows_and_total(monkeypatch):
         SimpleNamespace(
             id=11,
             source_filename="products_dev.csv",
+            actor_username="operator01",
             total_products=5,
             total_issues=2,
             error_count=1,
@@ -1066,6 +1145,7 @@ def test_list_inspections_maps_repository_rows_and_total(monkeypatch):
     assert listing.items[0].source_filename == "template.csv"
     assert listing.items[1].error_count == 1
     assert listing.items[1].warning_count == 1
+    assert listing.items[1].actor_username == "operator01"
     assert calls == [
         ("list", session, 10, 20),
         ("count", session),
@@ -1079,6 +1159,7 @@ def test_list_inspections_passes_filename_to_repository(monkeypatch):
         SimpleNamespace(
             id=11,
             source_filename="products_dev.csv",
+            actor_username=None,
             total_products=5,
             total_issues=2,
             error_count=1,
@@ -1133,6 +1214,7 @@ def test_list_inspections_passes_created_at_bounds_to_repository(monkeypatch):
         SimpleNamespace(
             id=11,
             source_filename="products_dev.csv",
+            actor_username=None,
             total_products=5,
             total_issues=2,
             error_count=1,
@@ -1219,6 +1301,7 @@ def test_list_inspections_passes_status_filter_to_repository(monkeypatch):
         SimpleNamespace(
             id=11,
             source_filename="products_dev.csv",
+            actor_username=None,
             total_products=5,
             total_issues=2,
             error_count=1,

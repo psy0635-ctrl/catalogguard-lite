@@ -53,7 +53,12 @@ def test_submit_writes_server_named_file_and_enqueues_only_job_metadata() -> Non
         enqueue=lambda job_id, file_path: enqueues.append((job_id, file_path)),
     )
 
-    submission = service.submit(filename="C:\\uploads\\renamed.csv", file_bytes=b"csv")
+    submission = service.submit(
+        filename="C:\\uploads\\renamed.csv",
+        file_bytes=b"csv",
+        actor_user_id=41,
+        actor_username="operator01",
+    )
 
     assert submission.status == "queued"
     assert len(writes) == 1
@@ -61,6 +66,8 @@ def test_submit_writes_server_named_file_and_enqueues_only_job_metadata() -> Non
     assert file_bytes == b"csv"
     assert job_id == submission.job_id
     assert store.created[0]["source_filename"] == "renamed.csv"
+    assert store.created[0]["actor_user_id"] == 41
+    assert store.created[0]["actor_username"] == "operator01"
     assert enqueues == [
         (job_id, str(Path(f"C:/inspection-jobs/{job_id}.csv")))
     ]

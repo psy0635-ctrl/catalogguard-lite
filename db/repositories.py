@@ -36,6 +36,8 @@ def create_inspection_run(
     warning_count: int,
     file_sha256: str | None = None,
     inspection_version: str = INSPECTION_VERSION,
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
 ) -> InspectionRun:
     # Repository는 DB 객체 생성과 flush만 담당하고, commit은 Service가 담당합니다.
     inspection_run = InspectionRun(
@@ -46,6 +48,8 @@ def create_inspection_run(
         total_issues=total_issues,
         error_count=error_count,
         warning_count=warning_count,
+        actor_user_id=actor_user_id,
+        actor_username=actor_username,
     )
     session.add(inspection_run)
     # flush를 해야 DB가 만든 id를 commit 전에 확인할 수 있습니다.

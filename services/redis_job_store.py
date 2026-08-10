@@ -24,6 +24,8 @@ class InspectionJobState:
     summary: dict[str, int] | None = None
     error_code: str | None = None
     safe_error_message: str | None = None
+    actor_user_id: int | None = None
+    actor_username: str | None = None
 
 
 def _utc_now() -> datetime:
@@ -70,6 +72,8 @@ class RedisJobStore:
         *,
         source_filename: str,
         created_at: datetime | None = None,
+        actor_user_id: int | None = None,
+        actor_username: str | None = None,
     ) -> InspectionJobState:
         timestamp = created_at or _utc_now()
         state = InspectionJobState(
@@ -78,6 +82,8 @@ class RedisJobStore:
             created_at=timestamp,
             updated_at=timestamp,
             source_filename=source_filename,
+            actor_user_id=actor_user_id,
+            actor_username=actor_username,
         )
         self._save(state)
         return state
@@ -98,6 +104,8 @@ class RedisJobStore:
             summary=payload.get("summary"),
             error_code=payload.get("error_code"),
             safe_error_message=payload.get("safe_error_message"),
+            actor_user_id=payload.get("actor_user_id"),
+            actor_username=payload.get("actor_username"),
         )
 
     def update_job(
