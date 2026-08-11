@@ -367,8 +367,8 @@ def list_catalog_promotion_runs(
     etl_load_run_id: int | None = Query(default=None, ge=1),
     filename: str | None = Query(default=None),
     profile_name: str | None = Query(default=None),
-    session: Session = Depends(get_session),
     _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
 ) -> CatalogPromotionRunListResponse:
     result = list_catalog_promotions(
         session,
@@ -388,8 +388,8 @@ def list_catalog_promotion_runs(
 )
 def get_catalog_promotion_run(
     promotion_run_id: int = Path(..., ge=1),
-    session: Session = Depends(get_session),
     _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
 ) -> CatalogPromotionRunDetailResponse:
     result = get_catalog_promotion_detail(
         session,
@@ -411,8 +411,8 @@ def list_catalog_promotion_run_audits(
     promotion_run_id: int = Path(..., ge=1),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    session: Session = Depends(get_session),
     _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
 ) -> CatalogPromotionAuditListResponse:
     result = list_catalog_promotion_audits(
         session,
@@ -690,8 +690,8 @@ def list_etl_rejected_rows(
 def create_catalog_promotion_preview(
     response: Response,
     etl_load_run_id: int = Path(..., ge=1),
-    session: Session = Depends(get_session),
     _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
 ) -> CatalogPromotionPreviewResponse:
     try:
         result = preview_catalog_promotion(
@@ -717,8 +717,8 @@ def create_catalog_promotion(
     request: CatalogPromotionRequest,
     response: Response,
     etl_load_run_id: int = Path(..., ge=1),
-    session: Session = Depends(get_session),
     current_user=Depends(require_operator),
+    session: Session = Depends(get_session),
 ) -> CatalogPromotionResponse:
     try:
         result = execute_catalog_promotion(
@@ -831,7 +831,7 @@ def _build_rollback_response(result: CatalogPromotionRollbackExecutionResult):
 
 
 @router.post("/api/v1/catalog-promotions/{promotion_run_id}/rollback-preview", response_model=CatalogPromotionRollbackPreviewResponse, status_code=status.HTTP_200_OK)
-def create_catalog_promotion_rollback_preview(promotion_run_id: int = Path(..., ge=1), response: Response = None, session: Session = Depends(get_session), _current_user=Depends(require_viewer)):
+def create_catalog_promotion_rollback_preview(promotion_run_id: int = Path(..., ge=1), response: Response = None, _current_user=Depends(require_viewer), session: Session = Depends(get_session)):
     try:
         result = preview_catalog_promotion_rollback(session, promotion_run_id=promotion_run_id)
     except CatalogPromotionRollbackNotFoundError:
@@ -842,7 +842,7 @@ def create_catalog_promotion_rollback_preview(promotion_run_id: int = Path(..., 
 
 
 @router.post("/api/v1/catalog-promotions/{promotion_run_id}/rollback", response_model=CatalogPromotionRollbackResponse, status_code=status.HTTP_200_OK)
-def create_catalog_promotion_rollback(request: CatalogPromotionRollbackRequest, response: Response, promotion_run_id: int = Path(..., ge=1), session: Session = Depends(get_session), current_user=Depends(require_operator)):
+def create_catalog_promotion_rollback(request: CatalogPromotionRollbackRequest, response: Response, promotion_run_id: int = Path(..., ge=1), current_user=Depends(require_operator), session: Session = Depends(get_session)):
     try:
         result = execute_catalog_promotion_rollback(
             session,

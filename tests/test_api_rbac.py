@@ -149,6 +149,48 @@ def test_no_token_returns_401_on_etl_rejections_before_database(
     assert reject_route_database_dependency() == 0
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "json_body"),
+    [
+        ("GET", "/api/v1/catalog-promotions", None),
+        ("GET", "/api/v1/catalog-promotions/1", None),
+        ("GET", "/api/v1/catalog-promotions/1/audits", None),
+        ("POST", "/api/v1/etl-loads/1/promotion-preview", None),
+        (
+            "POST",
+            "/api/v1/etl-loads/1/promotions",
+            {"confirmation": True, "expected_preview_hash": "a" * 64},
+        ),
+        ("POST", "/api/v1/catalog-promotions/1/rollback-preview", None),
+        (
+            "POST",
+            "/api/v1/catalog-promotions/1/rollback",
+            {"confirmation": True, "expected_preview_hash": "a" * 64},
+        ),
+    ],
+    ids=[
+        "promotion-list",
+        "promotion-detail",
+        "promotion-audits",
+        "promotion-preview",
+        "promotion-run",
+        "rollback-preview",
+        "rollback-run",
+    ],
+)
+def test_no_token_returns_401_before_database_for_promotion_routes(
+    method,
+    path,
+    json_body,
+    reject_route_database_dependency,
+):
+    response = client.request(method, path, json=json_body)
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "authentication_required"
+    assert reject_route_database_dependency() == 0
+
+
 def test_garbage_token_returns_401(reject_route_database_dependency):
     response = client.get(
         "/api/v1/etl-loads",
