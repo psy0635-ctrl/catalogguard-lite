@@ -137,6 +137,19 @@ def _assert_catalog_promotion_persisted(page) -> dict[str, int]:
             )
         )
         assert change_count >= 1
+        insert_change_count = session.scalar(
+            select(func.count()).select_from(CatalogProductChange).where(
+                CatalogProductChange.promotion_run_id == promotion_run.id,
+                CatalogProductChange.action == "insert",
+            )
+        )
+        update_change_count = session.scalar(
+            select(func.count()).select_from(CatalogProductChange).where(
+                CatalogProductChange.promotion_run_id == promotion_run.id,
+                CatalogProductChange.action == "update",
+            )
+        )
+        assert (insert_change_count or 0) + (update_change_count or 0) == change_count
         promotion_run_count = session.scalar(
             select(func.count()).select_from(CatalogPromotionRun).where(
                 CatalogPromotionRun.etl_load_run_id == load_run_id
@@ -147,7 +160,93 @@ def _assert_catalog_promotion_persisted(page) -> dict[str, int]:
             "promotion_run_id": promotion_run.id,
             "promotion_run_count": int(promotion_run_count or 0),
             "change_count": int(change_count or 0),
+            "insert_change_count": int(insert_change_count or 0),
+            "update_change_count": int(update_change_count or 0),
             "catalog_product_count": int(catalog_product_count or 0),
+        }
+
+
+def _assert_catalog_rollback_persisted(
+    promotion_snapshot: dict[str, int],
+) -> dict[str, int]:
+    from sqlalchemy import func, select
+
+    from db.models import (
+        CatalogProduct,
+        CatalogProductChange,
+        CatalogPromotionRollback,
+        CatalogPromotionRollbackChange,
+    )
+    from db.session import create_session_factory
+
+    session_factory = create_session_factory(
+        database_url=os.environ["DATABASE_URL"],
+    )
+    with session_factory() as session:
+        succeeded_rollbacks = list(
+            session.scalars(
+                select(CatalogPromotionRollback).where(
+                    CatalogPromotionRollback.target_promotion_run_id
+                    == promotion_snapshot["promotion_run_id"],
+                    CatalogPromotionRollback.status == "succeeded",
+                )
+            )
+        )
+        assert len(succeeded_rollbacks) == 1
+        rollback_run = succeeded_rollbacks[0]
+        assert rollback_run.preview_hash is not None
+        assert re.fullmatch(r"[0-9a-f]{64}", rollback_run.preview_hash)
+        assert rollback_run.preview_schema_version
+        assert rollback_run.conflict_count == 0
+        assert rollback_run.restored_count == promotion_snapshot["update_change_count"]
+        assert rollback_run.deleted_count == promotion_snapshot["insert_change_count"]
+        assert rollback_run.actor_username == E2E_OPERATOR_USERNAME
+
+        applying_count = session.scalar(
+            select(func.count()).select_from(CatalogPromotionRollback).where(
+                CatalogPromotionRollback.target_promotion_run_id
+                == promotion_snapshot["promotion_run_id"],
+                CatalogPromotionRollback.status == "applying",
+            )
+        )
+        assert applying_count == 0
+
+        rollback_changes = list(
+            session.scalars(
+                select(CatalogPromotionRollbackChange).where(
+                    CatalogPromotionRollbackChange.rollback_run_id == rollback_run.id
+                )
+            )
+        )
+        assert len(rollback_changes) == promotion_snapshot["change_count"]
+        assert sum(change.action == "delete" for change in rollback_changes) == (
+            promotion_snapshot["insert_change_count"]
+        )
+        assert sum(change.action == "restore" for change in rollback_changes) == (
+            promotion_snapshot["update_change_count"]
+        )
+
+        promotion_audit_count = session.scalar(
+            select(func.count()).select_from(CatalogProductChange).where(
+                CatalogProductChange.promotion_run_id
+                == promotion_snapshot["promotion_run_id"]
+            )
+        )
+        assert promotion_audit_count == promotion_snapshot["change_count"]
+
+        catalog_product_count = session.scalar(
+            select(func.count()).select_from(CatalogProduct).where(
+                CatalogProduct.supplier_key == "sample_marketplace_vendor",
+                CatalogProduct.external_product_id.in_(PROMOTION_PRODUCT_IDS),
+            )
+        )
+        assert catalog_product_count == promotion_snapshot["update_change_count"]
+
+        return {
+            "rollback_run_id": rollback_run.id,
+            "restored_count": rollback_run.restored_count,
+            "deleted_count": rollback_run.deleted_count,
+            "conflict_count": rollback_run.conflict_count,
         }
 
 
@@ -264,8 +363,99 @@ def _run_catalog_promotion_success_scenario(page) -> None:
     for product_id in PROMOTION_PRODUCT_IDS:
         expect(page.locator("body")).to_contain_text(product_id)
 
-    after_history_snapshot = _assert_catalog_promotion_persisted(page)
-    assert after_history_snapshot == before_history_snapshot
+    rollback_preview_button = page.get_by_role(
+        "button",
+        name="Rollback Preview",
+        exact=True,
+    )
+    expect(rollback_preview_button).to_be_enabled()
+    rollback_preview_button.click()
+
+    expect(page.locator("body")).to_contain_text("Rollback is available.")
+    expect(page.locator("body")).to_contain_text(
+        re.compile(
+            rf"Restore\s*{before_history_snapshot['update_change_count']}"
+        )
+    )
+    expect(page.locator("body")).to_contain_text(
+        re.compile(
+            rf"Delete\s*{before_history_snapshot['insert_change_count']}"
+        )
+    )
+    expect(page.locator("body")).to_contain_text(re.compile(r"Conflict\s*0"))
+
+    rollback_button = page.get_by_role(
+        "button",
+        name="Execute Rollback",
+        exact=True,
+    )
+    expect(rollback_button).to_be_disabled()
+    rollback_confirmation = page.get_by_label(
+        "I reviewed the rollback preview and confirm execution."
+    )
+    expect(rollback_confirmation).to_be_enabled()
+    rollback_confirmation_label = page.get_by_text(
+        "I reviewed the rollback preview and confirm execution.",
+        exact=True,
+    )
+    expect(rollback_confirmation_label).to_be_visible()
+    rollback_confirmation_label.click()
+    expect(rollback_confirmation).to_be_checked()
+    expect(rollback_button).to_be_enabled()
+    rollback_button.click()
+
+    expect(page.locator("body")).to_contain_text(
+        "Rollback completed. Rollback run ID:"
+    )
+    expect(page.locator("body")).to_contain_text(
+        f"Executed by: {E2E_OPERATOR_USERNAME}"
+    )
+    expect(page.locator("body")).to_contain_text("Rollback 실행 이력")
+
+    rollback_snapshot = _assert_catalog_rollback_persisted(before_history_snapshot)
+    rollback_history_selector = page.get_by_role(
+        "combobox",
+        name="Rollback 실행 선택",
+    )
+    rollback_history_selector.click()
+    page.get_by_role(
+        "option",
+        name=re.compile(
+            rf"{rollback_snapshot['rollback_run_id']} · Promotion "
+            rf"{before_history_snapshot['promotion_run_id']} · succeeded"
+        ),
+    ).click()
+    page.get_by_role(
+        "button",
+        name="Rollback 상세 조회",
+        exact=True,
+    ).click()
+
+    expect(page.locator("body")).to_contain_text("Rollback 실행 상세")
+    expect(page.locator("body")).to_contain_text(
+        f"Rollback ID: {rollback_snapshot['rollback_run_id']}"
+    )
+    expect(page.locator("body")).to_contain_text(
+        f"대상 Promotion ID: {before_history_snapshot['promotion_run_id']}"
+    )
+    expect(page.locator("body")).to_contain_text("상태: succeeded")
+    expect(page.locator("body")).to_contain_text(
+        f"실행 사용자: {E2E_OPERATOR_USERNAME}"
+    )
+    expect(page.locator("body")).to_contain_text(
+        re.compile(rf"복구 상품\s*{rollback_snapshot['restored_count']}")
+    )
+    expect(page.locator("body")).to_contain_text(
+        re.compile(rf"삭제 상품\s*{rollback_snapshot['deleted_count']}")
+    )
+    expect(page.locator("body")).to_contain_text(
+        re.compile(rf"충돌\s*{rollback_snapshot['conflict_count']}")
+    )
+    page.get_by_text("Rollback Preview 정보", exact=True).click()
+    expect(page.locator("body")).to_contain_text("Preview schema version:")
+    expect(page.locator("body")).to_contain_text(
+        re.compile(r"Preview SHA-256:\s*[0-9a-f]{64}")
+    )
 
     assert not console_errors, f"Unexpected browser console errors: {console_errors}"
     assert not page_errors, f"Unexpected browser page errors: {page_errors}"
