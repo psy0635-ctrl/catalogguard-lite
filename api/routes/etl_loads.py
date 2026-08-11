@@ -434,8 +434,8 @@ def list_etl_load_runs(
     offset: int = Query(default=0, ge=0),
     filename: str | None = Query(default=None),
     profile_name: str | None = Query(default=None),
-    session: Session = Depends(get_session),
     _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
 ) -> ETLLoadListResponse:
     result = list_etl_loads(
         session,
@@ -460,8 +460,8 @@ def list_etl_profile_options(
 async def create_etl_load_run(
     file: UploadFile = File(...),
     profile_id: str = Form(...),
-    session: Session = Depends(get_session),
     current_user=Depends(require_operator),
+    session: Session = Depends(get_session),
 ) -> ETLWebRunResponse:
     file_bytes = await file.read()
     try:
@@ -618,8 +618,8 @@ def get_etl_load_run(
     etl_load_run_id: int = Path(..., ge=1),
     product_limit: int = Query(default=50, ge=1, le=100),
     product_offset: int = Query(default=0, ge=0),
-    session: Session = Depends(get_session),
     _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
 ) -> ETLLoadDetailResponse:
     result = get_etl_load_detail(
         session,
@@ -643,8 +643,8 @@ def list_etl_rejected_rows(
     etl_load_run_id: int = Path(..., ge=1),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    session: Session = Depends(get_session),
     _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
 ) -> ETLRejectedRowListResponse:
     result = list_etl_rejections(
         session,

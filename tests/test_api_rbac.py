@@ -1,4 +1,5 @@
 # 역할: 실제 PostgreSQL 사용자·JWT를 사용해 인증(401)과 권한(403) 경계를 endpoint 단위로 검증합니다.
+from contextlib import nullcontext
 from uuid import uuid4
 
 import jwt
@@ -6,13 +7,14 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
 
+from api import dependencies as auth_dependencies
 from api.main import app
 from config.database import get_optional_database_url
 from config.settings import CATALOGGUARD_JWT_ALGORITHM, get_jwt_secret
 from core.security import create_access_token
 from db.auth_service import create_user
 from db.models import User
-from db.session import create_database_engine, create_session_factory
+from db.session import create_database_engine, create_session_factory, get_session
 
 
 client = TestClient(app, raise_server_exceptions=False)
@@ -98,17 +100,56 @@ def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+@pytest.fixture()
+def reject_route_database_dependency():
+    calls = 0
+
+    def fail_if_database_dependency_runs():
+        nonlocal calls
+        calls += 1
+        raise AssertionError("database dependency must not run before authentication")
+
+    app.dependency_overrides[get_session] = fail_if_database_dependency_runs
+    try:
+        yield lambda: calls
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+
 # ---- 401: 인증 자체가 안 된 경우 --------------------------------------------
 
 
-def test_no_token_returns_401_on_protected_read_endpoint():
+def test_no_token_returns_401_on_protected_read_endpoint(
+    reject_route_database_dependency,
+):
     response = client.get("/api/v1/etl-loads")
 
     assert response.status_code == 401
     assert response.json()["detail"]["code"] == "authentication_required"
+    assert reject_route_database_dependency() == 0
 
 
-def test_garbage_token_returns_401():
+def test_no_token_returns_401_on_etl_detail_before_database(
+    reject_route_database_dependency,
+):
+    response = client.get("/api/v1/etl-loads/1")
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "authentication_required"
+    assert reject_route_database_dependency() == 0
+
+
+def test_no_token_returns_401_on_etl_rejections_before_database(
+    reject_route_database_dependency,
+):
+    response = client.get("/api/v1/etl-loads/1/rejections")
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "authentication_required"
+    assert reject_route_database_dependency() == 0
+
+
+def test_garbage_token_returns_401(reject_route_database_dependency):
     response = client.get(
         "/api/v1/etl-loads",
         headers=_auth_headers("this-is-not-a-jwt"),
@@ -116,18 +157,21 @@ def test_garbage_token_returns_401():
 
     assert response.status_code == 401
     assert response.json()["detail"]["code"] == "invalid_token"
+    assert reject_route_database_dependency() == 0
 
 
-def test_malformed_bearer_format_returns_401():
+def test_malformed_bearer_format_returns_401(reject_route_database_dependency):
     response = client.get(
         "/api/v1/etl-loads",
         headers={"Authorization": "Token abc.def.ghi"},
     )
 
     assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "authentication_required"
+    assert reject_route_database_dependency() == 0
 
 
-def test_expired_token_returns_401():
+def test_expired_token_returns_401(reject_route_database_dependency):
     expired_payload_token = jwt.encode(
         {"sub": "someone", "role": "operator", "exp": 1},
         get_jwt_secret(),
@@ -141,15 +185,30 @@ def test_expired_token_returns_401():
 
     assert response.status_code == 401
     assert response.json()["detail"]["code"] == "invalid_token"
+    assert reject_route_database_dependency() == 0
 
 
-def test_token_for_unknown_user_returns_401():
+def test_token_for_unknown_user_returns_401(
+    reject_route_database_dependency,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        auth_dependencies,
+        "get_session_factory",
+        lambda: lambda: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        auth_dependencies,
+        "get_user_by_username",
+        lambda _session, _username: None,
+    )
     token, _ = create_access_token(subject="no-such-user-in-db", role="operator")
 
     response = client.get("/api/v1/etl-loads", headers=_auth_headers(token))
 
     assert response.status_code == 401
     assert response.json()["detail"]["code"] == "invalid_token"
+    assert reject_route_database_dependency() == 0
 
 
 def test_inactive_user_token_returns_401_even_though_signature_is_valid(

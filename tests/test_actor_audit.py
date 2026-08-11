@@ -246,6 +246,14 @@ def test_web_etl_actor_is_recorded_from_jwt_current_user(etl_cleanup, operator_a
 
 def test_anonymous_web_etl_is_blocked_and_creates_no_run():
     csv_bytes = build_supplier_csv([valid_row("SKU-ANON")])
+    database_calls = 0
+
+    def fail_if_database_dependency_runs():
+        nonlocal database_calls
+        database_calls += 1
+        raise AssertionError("database dependency must not run before authentication")
+
+    app.dependency_overrides[get_session] = fail_if_database_dependency_runs
 
     response = client.post(
         "/api/v1/etl-loads",
@@ -254,6 +262,8 @@ def test_anonymous_web_etl_is_blocked_and_creates_no_run():
     )
 
     assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "authentication_required"
+    assert database_calls == 0
 
 
 def test_viewer_web_etl_is_blocked_and_creates_no_run(etl_cleanup, viewer_token):
