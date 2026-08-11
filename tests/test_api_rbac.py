@@ -191,6 +191,25 @@ def test_no_token_returns_401_before_database_for_promotion_routes(
     assert reject_route_database_dependency() == 0
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/catalog-promotion-rollbacks",
+        "/api/v1/catalog-promotion-rollbacks/1",
+    ],
+    ids=["rollback-history-list", "rollback-history-detail"],
+)
+def test_no_token_returns_401_before_database_for_rollback_history_routes(
+    path,
+    reject_route_database_dependency,
+):
+    response = client.get(path)
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "authentication_required"
+    assert reject_route_database_dependency() == 0
+
+
 def test_garbage_token_returns_401(reject_route_database_dependency):
     response = client.get(
         "/api/v1/etl-loads",
@@ -313,6 +332,24 @@ def test_viewer_token_can_read_etl_load_list(viewer_token):
 
 def test_viewer_token_can_read_etl_profiles(viewer_token):
     response = client.get("/api/v1/etl-profiles", headers=_auth_headers(viewer_token))
+
+    assert response.status_code == 200
+
+
+def test_viewer_token_can_read_rollback_history(viewer_token):
+    response = client.get(
+        "/api/v1/catalog-promotion-rollbacks",
+        headers=_auth_headers(viewer_token),
+    )
+
+    assert response.status_code == 200
+
+
+def test_operator_token_can_read_rollback_history(operator_token):
+    response = client.get(
+        "/api/v1/catalog-promotion-rollbacks",
+        headers=_auth_headers(operator_token),
+    )
 
     assert response.status_code == 200
 

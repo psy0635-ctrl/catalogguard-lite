@@ -34,6 +34,10 @@ from api.schemas import (
     CatalogPromotionRollbackPreviewResponse,
     CatalogPromotionRollbackRequest,
     CatalogPromotionRollbackResponse,
+    CatalogPromotionRollbackRunDetailResponse,
+    CatalogPromotionRollbackRunListItemResponse,
+    CatalogPromotionRollbackRunListResponse,
+    CatalogPromotionRollbackRunStatus,
     ETLLoadDetailResponse,
     ETLLoadListItemResponse,
     ETLLoadListResponse,
@@ -101,12 +105,19 @@ from db.catalog_promotion_query_service import (
     list_catalog_promotion_audits,
     list_catalog_promotions,
 )
+from db.catalog_promotion_rollback_query_service import (
+    CatalogPromotionRollbackRunDetail,
+    CatalogPromotionRollbackRunList,
+    get_catalog_promotion_rollback_detail,
+    list_catalog_promotion_rollbacks,
+)
 from db.session import get_session
 
 
 router = APIRouter()
 _LOGGER = logging.getLogger(LOGGER_NAME)
 CATALOG_PROMOTION_NOT_FOUND_MESSAGE = "Promotion run not found."
+CATALOG_PROMOTION_ROLLBACK_NOT_FOUND_MESSAGE = "Rollback run not found."
 ETL_LOAD_NOT_FOUND_MESSAGE = "ETL 적재 배치를 찾을 수 없습니다."
 
 
@@ -330,6 +341,47 @@ def _build_promotion_run_detail_response(
     )
 
 
+def _build_rollback_run_item_response(
+    item,
+) -> CatalogPromotionRollbackRunListItemResponse:
+    return CatalogPromotionRollbackRunListItemResponse(
+        rollback_run_id=item.rollback_run_id,
+        target_promotion_run_id=item.target_promotion_run_id,
+        status=item.status,
+        restored_count=item.restored_count,
+        deleted_count=item.deleted_count,
+        conflict_count=item.conflict_count,
+        failure_code=item.failure_code,
+        safe_failure_message=item.safe_failure_message,
+        started_at=item.started_at,
+        completed_at=item.completed_at,
+        created_at=item.created_at,
+        actor_username=item.actor_username,
+    )
+
+
+def _build_rollback_run_list_response(
+    result: CatalogPromotionRollbackRunList,
+) -> CatalogPromotionRollbackRunListResponse:
+    return CatalogPromotionRollbackRunListResponse(
+        items=[_build_rollback_run_item_response(item) for item in result.items],
+        total=result.total,
+        limit=result.limit,
+        offset=result.offset,
+    )
+
+
+def _build_rollback_run_detail_response(
+    result: CatalogPromotionRollbackRunDetail,
+) -> CatalogPromotionRollbackRunDetailResponse:
+    item = _build_rollback_run_item_response(result)
+    return CatalogPromotionRollbackRunDetailResponse(
+        **item.model_dump(),
+        preview_hash=result.preview_hash,
+        preview_schema_version=result.preview_schema_version,
+    )
+
+
 def _build_promotion_audit_list_response(
     result: CatalogPromotionAuditList,
 ) -> CatalogPromotionAuditListResponse:
@@ -426,6 +478,52 @@ def list_catalog_promotion_run_audits(
             detail=CATALOG_PROMOTION_NOT_FOUND_MESSAGE,
         )
     return _build_promotion_audit_list_response(result)
+
+
+@router.get(
+    "/api/v1/catalog-promotion-rollbacks",
+    response_model=CatalogPromotionRollbackRunListResponse,
+)
+def list_catalog_promotion_rollback_runs(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    rollback_status: CatalogPromotionRollbackRunStatus | None = Query(
+        default=None,
+        alias="status",
+    ),
+    target_promotion_run_id: int | None = Query(default=None, ge=1),
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> CatalogPromotionRollbackRunListResponse:
+    result = list_catalog_promotion_rollbacks(
+        session,
+        limit=limit,
+        offset=offset,
+        status=rollback_status,
+        target_promotion_run_id=target_promotion_run_id,
+    )
+    return _build_rollback_run_list_response(result)
+
+
+@router.get(
+    "/api/v1/catalog-promotion-rollbacks/{rollback_run_id}",
+    response_model=CatalogPromotionRollbackRunDetailResponse,
+)
+def get_catalog_promotion_rollback_run(
+    rollback_run_id: int = Path(..., ge=1),
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> CatalogPromotionRollbackRunDetailResponse:
+    result = get_catalog_promotion_rollback_detail(
+        session,
+        rollback_run_id=rollback_run_id,
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=CATALOG_PROMOTION_ROLLBACK_NOT_FOUND_MESSAGE,
+        )
+    return _build_rollback_run_detail_response(result)
 
 
 @router.get("/api/v1/etl-loads", response_model=ETLLoadListResponse)

@@ -330,6 +330,43 @@ class InspectionJobStatusResponse(BaseModel):
     updated_at: datetime
 
 
+CatalogPromotionRollbackRunStatus = Literal[
+    "applying",
+    "succeeded",
+    "failed",
+    "blocked",
+]
+
+
+class CatalogPromotionRollbackRunListItemResponse(BaseModel):
+    rollback_run_id: int
+    target_promotion_run_id: int
+    status: CatalogPromotionRollbackRunStatus
+    restored_count: int
+    deleted_count: int
+    conflict_count: int
+    failure_code: str | None
+    safe_failure_message: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    actor_username: str | None
+
+
+class CatalogPromotionRollbackRunListResponse(BaseModel):
+    items: list[CatalogPromotionRollbackRunListItemResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class CatalogPromotionRollbackRunDetailResponse(
+    CatalogPromotionRollbackRunListItemResponse
+):
+    preview_hash: str | None
+    preview_schema_version: str | None
+
+
 class CatalogPromotionRollbackBlockedReasonResponse(BaseModel):
     code: str
     message: str
