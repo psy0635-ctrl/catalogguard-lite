@@ -58,6 +58,21 @@ def _preserve_browser_failure_artifacts(page) -> None:
         pass
 
 
+def _read_rollback_change_audit_text(page) -> str:
+    """Return the text of the "상품 Rollback 변경 Audit" section only.
+
+    Promotion Audit renders the same fixture product IDs earlier on the page,
+    so page-wide assertions cannot prove the rollback change grid itself was
+    rendered from the rollback changes API.
+    """
+    heading = "상품 Rollback 변경 Audit"
+    caption_prefix = "Change Audit "
+    body_text = page.locator("body").text_content() or ""
+    start = body_text.index(heading) + len(heading)
+    end = body_text.index(caption_prefix, start)
+    return body_text[start:end]
+
+
 def _assert_catalog_promotion_persisted(page) -> dict[str, int]:
     from sqlalchemy import func, select
 
@@ -226,6 +241,11 @@ def _assert_catalog_rollback_persisted(
             promotion_snapshot["update_change_count"]
         )
 
+        assert {
+            (change.before_data or {}).get("external_product_id")
+            for change in rollback_changes
+        } == set(PROMOTION_PRODUCT_IDS)
+
         promotion_audit_count = session.scalar(
             select(func.count()).select_from(CatalogProductChange).where(
                 CatalogProductChange.promotion_run_id
@@ -233,6 +253,18 @@ def _assert_catalog_rollback_persisted(
             )
         )
         assert promotion_audit_count == promotion_snapshot["change_count"]
+
+        promotion_audit_ids = set(
+            session.scalars(
+                select(CatalogProductChange.id).where(
+                    CatalogProductChange.promotion_run_id
+                    == promotion_snapshot["promotion_run_id"]
+                )
+            )
+        )
+        assert {
+            change.original_audit_id for change in rollback_changes
+        } == promotion_audit_ids
 
         catalog_product_count = session.scalar(
             select(func.count()).select_from(CatalogProduct).where(
@@ -247,6 +279,7 @@ def _assert_catalog_rollback_persisted(
             "restored_count": rollback_run.restored_count,
             "deleted_count": rollback_run.deleted_count,
             "conflict_count": rollback_run.conflict_count,
+            "rollback_change_count": len(rollback_changes),
         }
 
 
@@ -456,6 +489,69 @@ def _run_catalog_promotion_success_scenario(page) -> None:
     expect(page.locator("body")).to_contain_text(
         re.compile(r"Preview SHA-256:\s*[0-9a-f]{64}")
     )
+
+    expect(
+        page.get_by_role("heading", name="상품 Rollback 변경 Audit")
+    ).to_be_visible()
+    expect(page.locator("body")).to_contain_text(
+        "Rollback으로 삭제·복원된 상품의 필드별 변경 이력입니다."
+    )
+    expect(page.locator("body")).to_contain_text(
+        "Change Audit 1 / 1 페이지 · 전체 "
+        f"{rollback_snapshot['rollback_change_count']}건"
+    )
+    expect(
+        page.get_by_role("button", name="Change 이전", exact=True)
+    ).to_be_disabled()
+    expect(
+        page.get_by_role("button", name="Change 다음", exact=True)
+    ).to_be_disabled()
+
+    # 표 헤더와 셀 값은 캡션·버튼보다 늦게 그려지므로 표가 실제로 렌더링될 때까지
+    # 기다린 뒤에 Change Audit 영역 텍스트를 읽습니다.
+    expect(page.locator("body")).to_contain_text("원본 Audit ID")
+    expect(page.locator("body")).to_contain_text("삭제됨")
+
+    change_audit_text = _read_rollback_change_audit_text(page)
+    for column_name in (
+        "원본 Audit ID",
+        "외부 상품 ID",
+        "변경 유형",
+        "변경 필드",
+        "변경 전",
+        "변경 후",
+    ):
+        assert column_name in change_audit_text, (
+            f"Rollback change audit column {column_name!r} is missing: "
+            f"{change_audit_text!r}"
+        )
+    assert "상품 삭제" in change_audit_text, (
+        f"Rollback change audit is missing the delete action label: "
+        f"{change_audit_text!r}"
+    )
+    assert "이전 상태 복원" not in change_audit_text, (
+        f"Rollback change audit unexpectedly reported a restore: "
+        f"{change_audit_text!r}"
+    )
+    assert "삭제됨" in change_audit_text, (
+        f"Rollback change audit is missing the deleted after-value: "
+        f"{change_audit_text!r}"
+    )
+    # st.dataframe은 가상 스크롤이라 접근성 DOM에 첫 화면 행만 노출됩니다. 두 상품이
+    # 모두 Rollback Change로 저장됐다는 검증은 _assert_catalog_rollback_persisted의
+    # PostgreSQL assertion이 담당하고, 여기서는 렌더링 경계에 의존하지 않도록
+    # fixture 상품이 최소 하나 표시되는지만 확인합니다.
+    assert any(
+        product_id in change_audit_text for product_id in PROMOTION_PRODUCT_IDS
+    ), (
+        f"Rollback change audit shows none of {PROMOTION_PRODUCT_IDS}: "
+        f"{change_audit_text!r}"
+    )
+    for field_name in ("category", "color", "product_name"):
+        assert field_name in change_audit_text, (
+            f"Rollback change audit is missing changed field {field_name!r}: "
+            f"{change_audit_text!r}"
+        )
 
     assert not console_errors, f"Unexpected browser console errors: {console_errors}"
     assert not page_errors, f"Unexpected browser page errors: {page_errors}"
