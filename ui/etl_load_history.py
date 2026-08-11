@@ -14,6 +14,7 @@ from clients.catalogguard_api import (
     CatalogPromotionFailedError,
     CatalogPromotionNotFoundError,
     CatalogPromotionPreviewStaleError,
+    CatalogPromotionRollbackNotFoundError,
     ETLInvalidUploadError,
     ETLLoadNotFoundError,
     ETLUnsupportedProfileError,
@@ -26,6 +27,7 @@ ETL_PRODUCT_LIMIT = 20
 ETL_REJECT_LIMIT = 20
 PROMOTION_HISTORY_LIMIT = 10
 PROMOTION_AUDIT_LIMIT = 10
+ROLLBACK_HISTORY_LIMIT = 10
 ETL_LOAD_DISPLAY_COLUMNS = [
     "적재 배치 ID",
     "원본 파일명",
@@ -89,6 +91,16 @@ PROMOTION_AUDIT_DISPLAY_COLUMNS = [
     "변경 후",
     "변경 시각",
 ]
+ROLLBACK_HISTORY_DISPLAY_COLUMNS = [
+    "Rollback ID",
+    "대상 Promotion",
+    "상태",
+    "복구",
+    "삭제",
+    "충돌",
+    "실행 시각",
+    "실행 사용자",
+]
 
 ETL_LOAD_STATE_DEFAULTS = {
     "etl_load_initialized": False,
@@ -126,6 +138,14 @@ ETL_LOAD_STATE_DEFAULTS = {
     "catalog_promotion_audit_offset": 0,
     "catalog_promotion_audit_response": None,
     "catalog_promotion_audit_error": None,
+    "catalog_promotion_rollback_history_status": "전체",
+    "catalog_promotion_rollback_history_offset": 0,
+    "catalog_promotion_rollback_history_response": None,
+    "catalog_promotion_rollback_history_error": None,
+    "catalog_promotion_rollback_history_run_id": None,
+    "catalog_promotion_rollback_history_detail_requested": False,
+    "catalog_promotion_rollback_history_detail_response": None,
+    "catalog_promotion_rollback_history_detail_error": None,
     "etl_web_run_profiles_response": None,
     "etl_web_run_profiles_error": None,
     "etl_web_run_selected_profile_id": None,
@@ -428,6 +448,40 @@ def build_catalog_promotion_history_dataframe(
         for item in items
     ]
     return pd.DataFrame(rows, columns=PROMOTION_HISTORY_DISPLAY_COLUMNS)
+
+
+def build_catalog_promotion_rollback_history_dataframe(
+    items: list[dict[str, Any]],
+) -> pd.DataFrame:
+    rows = [
+        {
+            "Rollback ID": item.get("rollback_run_id"),
+            "대상 Promotion": item.get("target_promotion_run_id"),
+            "상태": item.get("status", ""),
+            "복구": item.get("restored_count", 0),
+            "삭제": item.get("deleted_count", 0),
+            "충돌": item.get("conflict_count", 0),
+            "실행 시각": format_etl_datetime(
+                item.get("started_at") or item.get("created_at")
+            ),
+            "실행 사용자": format_actor_username(item.get("actor_username")),
+        }
+        for item in items
+    ]
+    return pd.DataFrame(rows, columns=ROLLBACK_HISTORY_DISPLAY_COLUMNS)
+
+
+def build_catalog_promotion_rollback_option_label(item: dict[str, Any]) -> str:
+    return (
+        f"{item.get('rollback_run_id')} · "
+        f"Promotion {item.get('target_promotion_run_id')} · "
+        f"{item.get('status', '')}"
+    )
+
+
+def invalidate_catalog_promotion_rollback_history(session_state) -> None:
+    session_state["catalog_promotion_rollback_history_response"] = None
+    session_state["catalog_promotion_rollback_history_error"] = None
 
 
 def build_catalog_promotion_audit_dataframe(
@@ -1352,6 +1406,269 @@ def _render_catalog_promotion_history(api_client) -> None:
     if st.session_state.get("catalog_promotion_history_detail_requested"):
         _render_catalog_promotion_history_detail(api_client)
 
+    _render_catalog_promotion_rollback_history(api_client)
+
+
+def _clear_catalog_promotion_rollback_history_detail(session_state) -> None:
+    session_state["catalog_promotion_rollback_history_detail_requested"] = False
+    session_state["catalog_promotion_rollback_history_detail_response"] = None
+    session_state["catalog_promotion_rollback_history_detail_error"] = None
+
+
+def _on_catalog_promotion_rollback_history_filter_change(session_state) -> None:
+    session_state["catalog_promotion_rollback_history_offset"] = 0
+    invalidate_catalog_promotion_rollback_history(session_state)
+    session_state["catalog_promotion_rollback_history_run_id"] = None
+    _clear_catalog_promotion_rollback_history_detail(session_state)
+
+
+def _on_catalog_promotion_rollback_history_run_change(session_state) -> None:
+    _clear_catalog_promotion_rollback_history_detail(session_state)
+
+
+def _change_catalog_promotion_rollback_history_page(
+    session_state,
+    offset_delta: int,
+) -> None:
+    session_state["catalog_promotion_rollback_history_offset"] = max(
+        0,
+        session_state["catalog_promotion_rollback_history_offset"] + offset_delta,
+    )
+    invalidate_catalog_promotion_rollback_history(session_state)
+    session_state["catalog_promotion_rollback_history_run_id"] = None
+    _clear_catalog_promotion_rollback_history_detail(session_state)
+
+
+def _fetch_catalog_promotion_rollback_history(api_client) -> dict[str, Any] | None:
+    cached = st.session_state.get("catalog_promotion_rollback_history_response")
+    if isinstance(cached, dict):
+        return cached
+    if st.session_state.get("catalog_promotion_rollback_history_error") is not None:
+        return None
+
+    params: dict[str, Any] = {
+        "limit": ROLLBACK_HISTORY_LIMIT,
+        "offset": st.session_state["catalog_promotion_rollback_history_offset"],
+    }
+    selected_status = st.session_state.get(
+        "catalog_promotion_rollback_history_status"
+    )
+    if selected_status and selected_status != "전체":
+        params["status"] = selected_status
+    try:
+        response = api_client.list_catalog_promotion_rollbacks(**params)
+        st.session_state["catalog_promotion_rollback_history_response"] = response
+        st.session_state["catalog_promotion_rollback_history_error"] = None
+        return response
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        st.session_state["catalog_promotion_rollback_history_error"] = error
+        return None
+
+
+def _fetch_catalog_promotion_rollback_history_detail(
+    api_client,
+) -> dict[str, Any] | None:
+    cached = st.session_state.get(
+        "catalog_promotion_rollback_history_detail_response"
+    )
+    if isinstance(cached, dict):
+        return cached
+    if (
+        st.session_state.get("catalog_promotion_rollback_history_detail_error")
+        is not None
+    ):
+        return None
+    rollback_run_id = st.session_state.get(
+        "catalog_promotion_rollback_history_run_id"
+    )
+    if rollback_run_id is None:
+        return None
+    try:
+        response = api_client.get_catalog_promotion_rollback_detail(
+            int(rollback_run_id)
+        )
+        st.session_state[
+            "catalog_promotion_rollback_history_detail_response"
+        ] = response
+        st.session_state["catalog_promotion_rollback_history_detail_error"] = None
+        return response
+    except (
+        CatalogPromotionRollbackNotFoundError,
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        st.session_state["catalog_promotion_rollback_history_detail_error"] = error
+        return None
+
+
+def _render_catalog_promotion_rollback_history_error(
+    message: str,
+    error: Exception,
+) -> None:
+    st.error(build_etl_api_error_display_message(message, error))
+
+
+def _render_catalog_promotion_rollback_history_detail(api_client) -> None:
+    detail = _fetch_catalog_promotion_rollback_history_detail(api_client)
+    if detail is None:
+        error = st.session_state.get(
+            "catalog_promotion_rollback_history_detail_error"
+        )
+        if error is not None:
+            _render_catalog_promotion_rollback_history_error(
+                "Rollback 실행 상세를 불러오지 못했습니다.",
+                error,
+            )
+        return
+
+    st.markdown("#### Rollback 실행 상세")
+    st.write(f"Rollback ID: {detail.get('rollback_run_id', '')}")
+    st.write(
+        f"대상 Promotion ID: {detail.get('target_promotion_run_id', '')}"
+    )
+    st.write(f"상태: {detail.get('status', '')}")
+    st.write(f"실행 사용자: {format_actor_username(detail.get('actor_username'))}")
+    st.write(f"시작 시각: {format_etl_datetime(detail.get('started_at'))}")
+    st.write(f"완료 시각: {format_etl_datetime(detail.get('completed_at'))}")
+    st.write(f"생성 시각: {format_etl_datetime(detail.get('created_at'))}")
+
+    metric_columns = st.columns(3)
+    metric_columns[0].metric("복구 상품", detail.get("restored_count", 0))
+    metric_columns[1].metric("삭제 상품", detail.get("deleted_count", 0))
+    metric_columns[2].metric("충돌", detail.get("conflict_count", 0))
+
+    if detail.get("status") in {"failed", "blocked"}:
+        failure_code = detail.get("failure_code")
+        failure_message = detail.get("safe_failure_message")
+        if failure_code:
+            st.warning(f"실패 코드: {failure_code}")
+        if failure_message:
+            st.warning(f"메시지: {failure_message}")
+
+    preview_hash = detail.get("preview_hash")
+    preview_schema_version = detail.get("preview_schema_version")
+    if preview_hash or preview_schema_version:
+        with st.expander("Rollback Preview 정보"):
+            if preview_schema_version:
+                st.write(f"Preview schema version: {preview_schema_version}")
+            if preview_hash:
+                st.write(f"Preview SHA-256: {preview_hash}")
+
+
+def _render_catalog_promotion_rollback_history(api_client) -> None:
+    st.divider()
+    st.subheader("Rollback 실행 이력")
+    st.write("운영 상품 반영을 되돌린 실행 기록과 결과를 확인합니다.")
+    st.selectbox(
+        "Rollback 상태 필터",
+        options=["전체", "applying", "succeeded", "failed", "blocked"],
+        key="catalog_promotion_rollback_history_status",
+        on_change=_on_catalog_promotion_rollback_history_filter_change,
+        args=(st.session_state,),
+    )
+
+    response = _fetch_catalog_promotion_rollback_history(api_client)
+    if response is None:
+        error = st.session_state.get("catalog_promotion_rollback_history_error")
+        if error is not None:
+            _render_catalog_promotion_rollback_history_error(
+                "Rollback 실행 이력을 불러오지 못했습니다.",
+                error,
+            )
+        return
+
+    items = response.get("items") or []
+    if not items:
+        st.info("아직 Rollback 실행 이력이 없습니다.")
+    else:
+        st.dataframe(
+            build_catalog_promotion_rollback_history_dataframe(items),
+            width="stretch",
+            hide_index=True,
+        )
+        run_ids = [item["rollback_run_id"] for item in items]
+        labels = {
+            item["rollback_run_id"]: build_catalog_promotion_rollback_option_label(
+                item
+            )
+            for item in items
+        }
+        if (
+            st.session_state.get("catalog_promotion_rollback_history_run_id")
+            not in run_ids
+        ):
+            st.session_state["catalog_promotion_rollback_history_run_id"] = None
+            _clear_catalog_promotion_rollback_history_detail(st.session_state)
+        st.selectbox(
+            "Rollback 실행 선택",
+            options=[None, *run_ids],
+            format_func=lambda run_id: (
+                "조회할 Rollback 실행을 선택하세요."
+                if run_id is None
+                else labels.get(run_id, str(run_id))
+            ),
+            key="catalog_promotion_rollback_history_run_id",
+            on_change=_on_catalog_promotion_rollback_history_run_change,
+            args=(st.session_state,),
+        )
+        if st.button(
+            "Rollback 상세 조회",
+            key="catalog_promotion_rollback_history_show_detail",
+            disabled=(
+                st.session_state.get("catalog_promotion_rollback_history_run_id")
+                is None
+            ),
+        ):
+            st.session_state[
+                "catalog_promotion_rollback_history_detail_requested"
+            ] = True
+            st.session_state[
+                "catalog_promotion_rollback_history_detail_response"
+            ] = None
+            st.session_state[
+                "catalog_promotion_rollback_history_detail_error"
+            ] = None
+            st.rerun()
+
+    total = max(0, int(response.get("total", 0)))
+    current_page, total_pages, has_previous, has_next = calculate_etl_pagination(
+        total=total,
+        limit=ROLLBACK_HISTORY_LIMIT,
+        offset=st.session_state["catalog_promotion_rollback_history_offset"],
+    )
+    st.caption(f"{current_page} / {total_pages} 페이지 · 전체 {total}건")
+    previous_col, next_col = st.columns(2)
+    with previous_col:
+        st.button(
+            "Rollback 이전",
+            key="catalog_promotion_rollback_history_previous",
+            disabled=not has_previous,
+            on_click=_change_catalog_promotion_rollback_history_page,
+            args=(st.session_state, -ROLLBACK_HISTORY_LIMIT),
+        )
+    with next_col:
+        st.button(
+            "Rollback 다음",
+            key="catalog_promotion_rollback_history_next",
+            disabled=not has_next,
+            on_click=_change_catalog_promotion_rollback_history_page,
+            args=(st.session_state, ROLLBACK_HISTORY_LIMIT),
+        )
+
+    if st.session_state.get(
+        "catalog_promotion_rollback_history_detail_requested"
+    ):
+        _render_catalog_promotion_rollback_history_detail(api_client)
+
 
 def _fetch_etl_profiles(api_client, session_state) -> list[dict[str, Any]] | None:
     cached = session_state.get("etl_web_run_profiles_response")
@@ -1645,5 +1962,6 @@ def _render_catalog_promotion_rollback(api_client, detail: dict[str, Any]) -> No
                 f"Executed by: {format_actor_username(response.get('actor_username'))}"
             )
             st.session_state["catalog_promotion_history_response"] = None
+            invalidate_catalog_promotion_rollback_history(st.session_state)
         except Exception as error:
             st.error(_rollback_ui_error_message(error))

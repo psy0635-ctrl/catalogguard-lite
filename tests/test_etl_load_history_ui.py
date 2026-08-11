@@ -491,6 +491,8 @@ class FakeEtlApiClient:
         self.promotion_history_calls = []
         self.promotion_history_detail_calls = []
         self.promotion_audit_calls = []
+        self.rollback_history_calls = []
+        self.rollback_detail_calls = []
         self.etl_profiles_calls = []
         self.etl_run_calls = []
         self.etl_profiles = (
@@ -716,6 +718,21 @@ class FakeEtlApiClient:
             "limit": limit,
             "offset": offset,
         }
+
+    def list_catalog_promotion_rollbacks(self, **params):
+        self.rollback_history_calls.append(params)
+        return {
+            "items": [],
+            "total": 0,
+            "limit": params["limit"],
+            "offset": params["offset"],
+        }
+
+    def get_catalog_promotion_rollback_detail(self, rollback_run_id):
+        self.rollback_detail_calls.append(rollback_run_id)
+        raise catalogguard_api.CatalogPromotionRollbackNotFoundError(
+            "Rollback 실행 이력을 찾을 수 없습니다."
+        )
 
 
 def select_etl_batch(app, run_id):

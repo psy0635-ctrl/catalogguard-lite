@@ -2078,6 +2078,170 @@ def test_run_etl_load_preserves_request_id_on_error():
     assert error.value.request_id == "a" * 32
 
 
+CATALOG_PROMOTION_ROLLBACK_RUN_ITEM = {
+    "rollback_run_id": 71,
+    "target_promotion_run_id": 31,
+    "status": "succeeded",
+    "restored_count": 2,
+    "deleted_count": 1,
+    "conflict_count": 0,
+    "failure_code": None,
+    "safe_failure_message": None,
+    "started_at": "2026-08-11T05:20:00Z",
+    "completed_at": "2026-08-11T05:20:01Z",
+    "created_at": "2026-08-11T05:20:00Z",
+    "actor_username": "operator",
+}
+CATALOG_PROMOTION_ROLLBACK_RUN_LIST_RESPONSE = {
+    "items": [CATALOG_PROMOTION_ROLLBACK_RUN_ITEM],
+    "total": 1,
+    "limit": 10,
+    "offset": 0,
+}
+CATALOG_PROMOTION_ROLLBACK_RUN_DETAIL_RESPONSE = {
+    **CATALOG_PROMOTION_ROLLBACK_RUN_ITEM,
+    "preview_hash": "b" * 64,
+    "preview_schema_version": "1",
+}
+
+
+def test_catalog_promotion_rollback_history_calls_default_list_endpoint():
+    client, session = make_client(
+        response=FakeResponse(payload=CATALOG_PROMOTION_ROLLBACK_RUN_LIST_RESPONSE),
+        timeout_seconds=4.0,
+    )
+
+    data = client.list_catalog_promotion_rollbacks()
+
+    assert data == CATALOG_PROMOTION_ROLLBACK_RUN_LIST_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/catalog-promotion-rollbacks",
+            "params": {"limit": 10, "offset": 0},
+            "timeout": 4.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_params"),
+    [
+        (
+            {"status": "succeeded"},
+            {"limit": 10, "offset": 0, "status": "succeeded"},
+        ),
+        (
+            {"target_promotion_run_id": 123},
+            {"limit": 10, "offset": 0, "target_promotion_run_id": 123},
+        ),
+    ],
+)
+def test_catalog_promotion_rollback_history_forwards_supported_filters(
+    kwargs,
+    expected_params,
+):
+    client, session = make_client(
+        response=FakeResponse(payload=CATALOG_PROMOTION_ROLLBACK_RUN_LIST_RESPONSE)
+    )
+
+    client.list_catalog_promotion_rollbacks(**kwargs)
+
+    assert session.calls[0]["params"] == expected_params
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"limit": 0},
+        {"offset": -1},
+        {"status": "unknown"},
+        {"target_promotion_run_id": 0},
+    ],
+)
+def test_catalog_promotion_rollback_history_rejects_invalid_arguments_without_request(
+    kwargs,
+):
+    client, session = make_client(
+        response=FakeResponse(payload=CATALOG_PROMOTION_ROLLBACK_RUN_LIST_RESPONSE)
+    )
+
+    with pytest.raises(ValueError):
+        client.list_catalog_promotion_rollbacks(**kwargs)
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            **CATALOG_PROMOTION_ROLLBACK_RUN_LIST_RESPONSE,
+            "items": [{"rollback_run_id": 71}],
+        },
+        {
+            **CATALOG_PROMOTION_ROLLBACK_RUN_LIST_RESPONSE,
+            "items": [
+                {**CATALOG_PROMOTION_ROLLBACK_RUN_ITEM, "status": "unknown"}
+            ],
+        },
+    ],
+)
+def test_catalog_promotion_rollback_history_rejects_invalid_list_response(payload):
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.list_catalog_promotion_rollbacks()
+
+
+def test_catalog_promotion_rollback_detail_calls_endpoint_and_validates_response():
+    client, session = make_client(
+        response=FakeResponse(payload=CATALOG_PROMOTION_ROLLBACK_RUN_DETAIL_RESPONSE)
+    )
+
+    data = client.get_catalog_promotion_rollback_detail(71)
+
+    assert data == CATALOG_PROMOTION_ROLLBACK_RUN_DETAIL_RESPONSE
+    assert session.calls[0]["url"].endswith(
+        "/api/v1/catalog-promotion-rollbacks/71"
+    )
+
+
+def test_catalog_promotion_rollback_detail_maps_404_to_not_found():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=404,
+            payload={"detail": "postgresql://private"},
+            headers={"X-Request-ID": VALID_REQUEST_ID},
+        )
+    )
+
+    with pytest.raises(
+        client_module.CatalogPromotionRollbackNotFoundError
+    ) as error:
+        client.get_catalog_promotion_rollback_detail(71)
+
+    assert error.value.request_id == VALID_REQUEST_ID
+    assert str(error.value) == "Rollback 실행 이력을 찾을 수 없습니다."
+    assert "postgresql" not in str(error.value).lower()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {**CATALOG_PROMOTION_ROLLBACK_RUN_DETAIL_RESPONSE, "conflict_count": -1},
+        {**CATALOG_PROMOTION_ROLLBACK_RUN_DETAIL_RESPONSE, "preview_hash": "B" * 64},
+    ],
+)
+def test_catalog_promotion_rollback_detail_rejects_invalid_response(payload):
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.get_catalog_promotion_rollback_detail(71)
+
+
 def test_list_etl_profiles_returns_validated_response():
     client, session = make_client(
         response=FakeResponse(payload=ETL_PROFILE_LIST_RESPONSE),

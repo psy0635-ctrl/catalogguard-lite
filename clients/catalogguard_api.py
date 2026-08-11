@@ -177,6 +177,26 @@ CATALOG_PROMOTION_AUDIT_ITEM_KEYS = (
     "after_data",
     "created_at",
 )
+CATALOG_PROMOTION_ROLLBACK_RUN_ITEM_KEYS = (
+    "rollback_run_id",
+    "target_promotion_run_id",
+    "status",
+    "restored_count",
+    "deleted_count",
+    "conflict_count",
+    "failure_code",
+    "safe_failure_message",
+    "started_at",
+    "completed_at",
+    "created_at",
+    "actor_username",
+)
+CATALOG_PROMOTION_ROLLBACK_RUN_LIST_KEYS = ("items", "total", "limit", "offset")
+CATALOG_PROMOTION_ROLLBACK_RUN_DETAIL_KEYS = (
+    *CATALOG_PROMOTION_ROLLBACK_RUN_ITEM_KEYS,
+    "preview_hash",
+    "preview_schema_version",
+)
 ETL_WEB_RUN_RESPONSE_KEYS = (
     "etl_load_run_id",
     "created",
@@ -192,6 +212,9 @@ ETL_PROFILE_LIST_KEYS = ("items",)
 ETL_PROFILE_ITEM_KEYS = ("id", "display_name")
 ETL_UNSUPPORTED_PROFILE_MESSAGE = "지원하지 않는 공급사 프로필입니다."
 CATALOG_PROMOTION_NOT_FOUND_MESSAGE = "Promotion run not found."
+CATALOG_PROMOTION_ROLLBACK_NOT_FOUND_MESSAGE = (
+    "Rollback 실행 이력을 찾을 수 없습니다."
+)
 CATALOG_PROMOTION_STALE_MESSAGE = (
     "미리보기 이후 상품 데이터가 변경되었습니다. 미리보기를 다시 실행하세요."
 )
@@ -726,6 +749,69 @@ def _validate_catalog_promotion_audit_list(data: dict[str, Any]) -> None:
         raise _invalid_etl_response()
 
 
+def _validate_catalog_promotion_rollback_run_item(item: object) -> bool:
+    if not isinstance(item, dict) or any(
+        key not in item for key in CATALOG_PROMOTION_ROLLBACK_RUN_ITEM_KEYS
+    ):
+        return False
+    count_fields = ("restored_count", "deleted_count", "conflict_count")
+    optional_text_fields = (
+        "failure_code",
+        "safe_failure_message",
+        "started_at",
+        "completed_at",
+        "actor_username",
+    )
+    return (
+        type(item["rollback_run_id"]) is int
+        and item["rollback_run_id"] > 0
+        and type(item["target_promotion_run_id"]) is int
+        and item["target_promotion_run_id"] > 0
+        and item["status"] in CATALOG_PROMOTION_RUN_STATUSES
+        and all(type(item[field]) is int and item[field] >= 0 for field in count_fields)
+        and all(
+            item[field] is None or isinstance(item[field], str)
+            for field in optional_text_fields
+        )
+        and isinstance(item["created_at"], str)
+    )
+
+
+def _validate_catalog_promotion_rollback_run_list(data: dict[str, Any]) -> None:
+    if (
+        any(key not in data for key in CATALOG_PROMOTION_ROLLBACK_RUN_LIST_KEYS)
+        or not isinstance(data["items"], list)
+        or not _validate_etl_list_metadata(data["total"], allow_limit_zero=True)
+        or not _validate_etl_list_metadata(data["limit"])
+        or not _validate_etl_list_metadata(data["offset"], allow_limit_zero=True)
+        or any(
+            not _validate_catalog_promotion_rollback_run_item(item)
+            for item in data["items"]
+        )
+    ):
+        raise _invalid_etl_response()
+
+
+def _validate_catalog_promotion_rollback_run_detail(data: dict[str, Any]) -> None:
+    if (
+        any(key not in data for key in CATALOG_PROMOTION_ROLLBACK_RUN_DETAIL_KEYS)
+        or not _validate_catalog_promotion_rollback_run_item(data)
+        or (
+            data["preview_hash"] is not None
+            and (
+                not isinstance(data["preview_hash"], str)
+                or CATALOG_PROMOTION_SHA256_PATTERN.fullmatch(data["preview_hash"])
+                is None
+            )
+        )
+        or (
+            data["preview_schema_version"] is not None
+            and not isinstance(data["preview_schema_version"], str)
+        )
+    ):
+        raise _invalid_etl_response()
+
+
 class CatalogGuardApiError(Exception):
     def __init__(
         self,
@@ -758,6 +844,10 @@ class ETLLoadNotFoundError(CatalogGuardApiError):
 
 
 class CatalogPromotionNotFoundError(CatalogGuardApiError):
+    pass
+
+
+class CatalogPromotionRollbackNotFoundError(CatalogGuardApiError):
     pass
 
 
@@ -1206,6 +1296,53 @@ class CatalogGuardApiClient:
             not_found_message=CATALOG_PROMOTION_NOT_FOUND_MESSAGE,
         )
         _validate_catalog_promotion_audit_list(data)
+        return data
+
+    def list_catalog_promotion_rollbacks(
+        self,
+        *,
+        limit: int = 10,
+        offset: int = 0,
+        status: str | None = None,
+        target_promotion_run_id: int | None = None,
+    ) -> dict[str, Any]:
+        _validate_etl_pagination(limit, offset)
+        params: dict[str, int | str] = {"limit": limit, "offset": offset}
+
+        normalized_status = "" if status is None else str(status).strip()
+        if normalized_status:
+            if normalized_status not in CATALOG_PROMOTION_RUN_STATUSES:
+                raise ValueError(
+                    "status must be one of: applying, succeeded, failed, blocked"
+                )
+            params["status"] = normalized_status
+
+        if target_promotion_run_id is not None:
+            _validate_positive_etl_int(
+                target_promotion_run_id,
+                "target_promotion_run_id",
+            )
+            params["target_promotion_run_id"] = target_promotion_run_id
+
+        data = self._get_json(
+            "/api/v1/catalog-promotion-rollbacks",
+            params=params,
+        )
+        _validate_catalog_promotion_rollback_run_list(data)
+        return data
+
+    def get_catalog_promotion_rollback_detail(
+        self,
+        rollback_run_id: int,
+    ) -> dict[str, Any]:
+        _validate_positive_etl_int(rollback_run_id, "rollback_run_id")
+        data = self._get_json(
+            f"/api/v1/catalog-promotion-rollbacks/{rollback_run_id}",
+            raise_not_found=True,
+            not_found_error=CatalogPromotionRollbackNotFoundError,
+            not_found_message=CATALOG_PROMOTION_ROLLBACK_NOT_FOUND_MESSAGE,
+        )
+        _validate_catalog_promotion_rollback_run_detail(data)
         return data
 
     def get_catalog_promotion_preview(
