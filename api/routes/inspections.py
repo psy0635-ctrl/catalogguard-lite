@@ -197,8 +197,8 @@ def list_inspection_runs(
         default=None,
         alias="status",
     ),
-    session: Session = Depends(get_session),
     _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
 ) -> InspectionListResponse:
     created_at_start, created_at_end_exclusive = build_created_at_bounds(
         start_date=start_date,
@@ -223,9 +223,9 @@ def list_inspection_runs(
 )
 async def create_inspection(
     file: UploadFile = File(...),
+    current_user=Depends(require_operator),
     session: Session = Depends(get_session),
     precheck_session: Session = Depends(get_session, use_cache=False),
-    current_user=Depends(require_operator),
 ) -> InspectionResponse:
     file_bytes = await file.read()
 
@@ -299,8 +299,8 @@ async def create_inspection(
 )
 def get_inspection(
     inspection_run_id: int,
-    session: Session = Depends(get_session),
     _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
 ) -> InspectionDetailResponse:
     detail = get_inspection_detail(
         session,
