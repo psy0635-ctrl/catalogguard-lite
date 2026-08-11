@@ -13,6 +13,7 @@ from db.session import get_session
 client = TestClient(app)
 LIST_ENDPOINT = "/api/v1/catalog-promotion-rollbacks"
 DETAIL_ENDPOINT = f"{LIST_ENDPOINT}/10"
+CHANGES_ENDPOINT = f"{DETAIL_ENDPOINT}/changes"
 
 
 def _rollback(**overrides):
@@ -37,12 +38,32 @@ def _rollback(**overrides):
     return SimpleNamespace(**values)
 
 
+def _rollback_change(**overrides):
+    created_at = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    values = {
+        "rollback_change_id": 100,
+        "rollback_run_id": 10,
+        "original_audit_id": 50,
+        "catalog_product_id": 25,
+        "action": "delete",
+        "changed_fields": {
+            "product_name": {"before": "Product A", "after": None}
+        },
+        "before_data": {"product_name": "Product A"},
+        "after_data": None,
+        "created_at": created_at,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 @pytest.fixture(autouse=True)
 def fake_rollback_history_query_service(monkeypatch):
     fake_session = object()
     calls = []
     state = SimpleNamespace(exists=True)
     rollback = _rollback()
+    change = _rollback_change()
 
     def override_session():
         yield fake_session
@@ -83,6 +104,26 @@ def fake_rollback_history_query_service(monkeypatch):
         )
         return rollback if state.exists else None
 
+    def fake_changes(session, *, rollback_run_id, limit, offset):
+        calls.append(
+            {
+                "operation": "changes",
+                "session": session,
+                "rollback_run_id": rollback_run_id,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
+        if not state.exists:
+            return None
+        items = [change] if state.has_changes else []
+        return SimpleNamespace(
+            items=items,
+            total=len(items),
+            limit=limit,
+            offset=offset,
+        )
+
     override_current_user(role="operator")
     app.dependency_overrides[get_session] = override_session
     monkeypatch.setattr(
@@ -97,6 +138,13 @@ def fake_rollback_history_query_service(monkeypatch):
         fake_detail,
         raising=False,
     )
+    monkeypatch.setattr(
+        etl_loads_route,
+        "list_catalog_promotion_rollback_changes",
+        fake_changes,
+        raising=False,
+    )
+    state.has_changes = True
     try:
         yield SimpleNamespace(calls=calls, state=state)
     finally:
@@ -228,3 +276,103 @@ def test_get_catalog_promotion_rollback_detail_rejects_invalid_id(
 
     assert response.status_code == 422
     assert fake_rollback_history_query_service.calls == []
+
+
+def test_list_catalog_promotion_rollback_changes_returns_safe_default_page(
+    fake_rollback_history_query_service,
+):
+    response = client.get(CHANGES_ENDPOINT)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "rollback_change_id": 100,
+                "rollback_run_id": 10,
+                "original_audit_id": 50,
+                "catalog_product_id": 25,
+                "action": "delete",
+                "changed_fields": {
+                    "product_name": {"before": "Product A", "after": None}
+                },
+                "before_data": {"product_name": "Product A"},
+                "after_data": None,
+                "created_at": "2026-08-11T00:00:00Z",
+            }
+        ],
+        "total": 1,
+        "limit": 20,
+        "offset": 0,
+    }
+    assert "actor_user_id" not in response.text
+    assert fake_rollback_history_query_service.calls[-1] == {
+        "operation": "changes",
+        "session": fake_rollback_history_query_service.calls[-1]["session"],
+        "rollback_run_id": 10,
+        "limit": 20,
+        "offset": 0,
+    }
+
+
+def test_list_catalog_promotion_rollback_changes_forwards_pagination(
+    fake_rollback_history_query_service,
+):
+    response = client.get(
+        CHANGES_ENDPOINT,
+        params={"limit": 10, "offset": 20},
+    )
+
+    assert response.status_code == 200
+    assert fake_rollback_history_query_service.calls[-1] == {
+        "operation": "changes",
+        "session": fake_rollback_history_query_service.calls[-1]["session"],
+        "rollback_run_id": 10,
+        "limit": 10,
+        "offset": 20,
+    }
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        f"{CHANGES_ENDPOINT}?limit=0",
+        f"{CHANGES_ENDPOINT}?limit=101",
+        f"{CHANGES_ENDPOINT}?offset=-1",
+        f"{LIST_ENDPOINT}/0/changes",
+    ],
+)
+def test_list_catalog_promotion_rollback_changes_rejects_invalid_parameters(
+    endpoint,
+    fake_rollback_history_query_service,
+):
+    response = client.get(endpoint)
+
+    assert response.status_code == 422
+    assert fake_rollback_history_query_service.calls == []
+
+
+def test_list_catalog_promotion_rollback_changes_returns_safe_404(
+    fake_rollback_history_query_service,
+):
+    fake_rollback_history_query_service.state.exists = False
+
+    response = client.get(CHANGES_ENDPOINT)
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Rollback run not found."}
+
+
+def test_list_catalog_promotion_rollback_changes_returns_empty_existing_parent(
+    fake_rollback_history_query_service,
+):
+    fake_rollback_history_query_service.state.has_changes = False
+
+    response = client.get(CHANGES_ENDPOINT)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [],
+        "total": 0,
+        "limit": 20,
+        "offset": 0,
+    }

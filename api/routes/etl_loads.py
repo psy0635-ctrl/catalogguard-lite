@@ -30,6 +30,8 @@ from api.schemas import (
     CatalogPromotionRunListResponse,
     CatalogPromotionRunStatus,
     CatalogPromotionRollbackBlockedReasonResponse,
+    CatalogPromotionRollbackChangeListResponse,
+    CatalogPromotionRollbackChangeResponse,
     CatalogPromotionRollbackPreviewItemResponse,
     CatalogPromotionRollbackPreviewResponse,
     CatalogPromotionRollbackRequest,
@@ -106,9 +108,11 @@ from db.catalog_promotion_query_service import (
     list_catalog_promotions,
 )
 from db.catalog_promotion_rollback_query_service import (
+    CatalogPromotionRollbackChangeList,
     CatalogPromotionRollbackRunDetail,
     CatalogPromotionRollbackRunList,
     get_catalog_promotion_rollback_detail,
+    list_catalog_promotion_rollback_changes,
     list_catalog_promotion_rollbacks,
 )
 from db.session import get_session
@@ -382,6 +386,30 @@ def _build_rollback_run_detail_response(
     )
 
 
+def _build_rollback_change_list_response(
+    result: CatalogPromotionRollbackChangeList,
+) -> CatalogPromotionRollbackChangeListResponse:
+    return CatalogPromotionRollbackChangeListResponse(
+        items=[
+            CatalogPromotionRollbackChangeResponse(
+                rollback_change_id=item.rollback_change_id,
+                rollback_run_id=item.rollback_run_id,
+                original_audit_id=item.original_audit_id,
+                catalog_product_id=item.catalog_product_id,
+                action=item.action,
+                changed_fields=item.changed_fields,
+                before_data=item.before_data,
+                after_data=item.after_data,
+                created_at=item.created_at,
+            )
+            for item in result.items
+        ],
+        total=result.total,
+        limit=result.limit,
+        offset=result.offset,
+    )
+
+
 def _build_promotion_audit_list_response(
     result: CatalogPromotionAuditList,
 ) -> CatalogPromotionAuditListResponse:
@@ -503,6 +531,31 @@ def list_catalog_promotion_rollback_runs(
         target_promotion_run_id=target_promotion_run_id,
     )
     return _build_rollback_run_list_response(result)
+
+
+@router.get(
+    "/api/v1/catalog-promotion-rollbacks/{rollback_run_id}/changes",
+    response_model=CatalogPromotionRollbackChangeListResponse,
+)
+def list_catalog_promotion_rollback_run_changes(
+    rollback_run_id: int = Path(..., ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> CatalogPromotionRollbackChangeListResponse:
+    result = list_catalog_promotion_rollback_changes(
+        session,
+        rollback_run_id=rollback_run_id,
+        limit=limit,
+        offset=offset,
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=CATALOG_PROMOTION_ROLLBACK_NOT_FOUND_MESSAGE,
+        )
+    return _build_rollback_change_list_response(result)
 
 
 @router.get(

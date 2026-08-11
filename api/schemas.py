@@ -367,6 +367,28 @@ class CatalogPromotionRollbackRunDetailResponse(
     preview_schema_version: str | None
 
 
+CatalogPromotionRollbackChangeAction = Literal["delete", "restore"]
+
+
+class CatalogPromotionRollbackChangeResponse(BaseModel):
+    rollback_change_id: int
+    rollback_run_id: int
+    original_audit_id: int
+    catalog_product_id: int
+    action: CatalogPromotionRollbackChangeAction
+    changed_fields: dict[str, object]
+    before_data: dict[str, object]
+    after_data: dict[str, object] | None
+    created_at: datetime
+
+
+class CatalogPromotionRollbackChangeListResponse(BaseModel):
+    items: list[CatalogPromotionRollbackChangeResponse]
+    total: int
+    limit: int
+    offset: int
+
+
 class CatalogPromotionRollbackBlockedReasonResponse(BaseModel):
     code: str
     message: str

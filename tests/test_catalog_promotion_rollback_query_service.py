@@ -6,7 +6,13 @@ import pytest
 from sqlalchemy import delete, select
 
 from config.database import get_optional_database_url
-from db.models import CatalogPromotionRollback, CatalogPromotionRun, ETLLoadRun
+from db.models import (
+    CatalogProductChange,
+    CatalogPromotionRollback,
+    CatalogPromotionRollbackChange,
+    CatalogPromotionRun,
+    ETLLoadRun,
+)
 from db.session import create_database_engine, create_session_factory
 
 
@@ -22,9 +28,13 @@ class _Rows:
 
 
 class _ReadOnlySession:
-    def __init__(self, rows):
+    def __init__(self, rows, *, parent_exists=True):
         self.rows = rows
+        self.parent_exists = parent_exists
         self.scalar_calls = 0
+
+    def get(self, _model, _identifier):
+        return object() if self.parent_exists else None
 
     def execute(self, _statement):
         return _Rows(self.rows)
@@ -60,6 +70,25 @@ def _rollback(**overrides):
         "completed_at": created_at + timedelta(seconds=1),
         "created_at": created_at,
         "actor_username": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _rollback_change(**overrides):
+    created_at = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    values = {
+        "id": 100,
+        "rollback_run_id": 10,
+        "original_audit_id": 50,
+        "catalog_product_id": 25,
+        "action": "delete",
+        "changed_fields": {
+            "product_name": {"before": "Product A", "after": None}
+        },
+        "before_data": {"product_name": "Product A"},
+        "after_data": None,
+        "created_at": created_at,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -105,6 +134,58 @@ def test_get_catalog_promotion_rollback_detail_maps_preview_fields_or_none():
         missing_session,
         rollback_run_id=999999,
     ) is None
+
+
+def test_list_catalog_promotion_rollback_changes_maps_rows_without_writes():
+    from db.catalog_promotion_rollback_query_service import (
+        list_catalog_promotion_rollback_changes,
+    )
+
+    session = _ReadOnlySession([_rollback_change()])
+
+    result = list_catalog_promotion_rollback_changes(
+        session,
+        rollback_run_id=10,
+        limit=20,
+        offset=0,
+    )
+
+    assert result is not None
+    assert result.total == 1
+    assert result.limit == 20
+    assert result.offset == 0
+    assert result.items[0].rollback_change_id == 100
+    assert result.items[0].rollback_run_id == 10
+    assert result.items[0].original_audit_id == 50
+    assert result.items[0].catalog_product_id == 25
+    assert result.items[0].action == "delete"
+    assert result.items[0].changed_fields == {
+        "product_name": {"before": "Product A", "after": None}
+    }
+    assert result.items[0].before_data == {"product_name": "Product A"}
+    assert result.items[0].after_data is None
+    assert result.items[0].created_at == datetime(
+        2026,
+        8,
+        11,
+        tzinfo=timezone.utc,
+    )
+    assert session.scalar_calls == 1
+
+
+def test_list_catalog_promotion_rollback_changes_distinguishes_missing_parent():
+    from db.catalog_promotion_rollback_query_service import (
+        list_catalog_promotion_rollback_changes,
+    )
+
+    result = list_catalog_promotion_rollback_changes(
+        _ReadOnlySession([], parent_exists=False),
+        rollback_run_id=999999,
+        limit=20,
+        offset=0,
+    )
+
+    assert result is None
 
 
 @pytest.fixture()
@@ -236,6 +317,80 @@ def seeded_rollbacks():
         engine.dispose()
 
 
+@pytest.fixture()
+def seeded_rollback_changes(seeded_rollbacks):
+    session, _oldest, middle, newest = seeded_rollbacks
+    created_at = datetime(2026, 8, 11, 1, tzinfo=timezone.utc)
+
+    delete_audit = CatalogProductChange(
+        promotion_run_id=newest.target_promotion_run_id,
+        catalog_product_id=900001,
+        action="insert",
+        changed_fields={"product_name": {"before": None, "after": "Product A"}},
+        before_data=None,
+        after_data={"product_name": "Product A"},
+        created_at=created_at,
+    )
+    restore_audit = CatalogProductChange(
+        promotion_run_id=newest.target_promotion_run_id,
+        catalog_product_id=900002,
+        action="update",
+        changed_fields={
+            "product_name": {"before": "Product B", "after": "Product B+"}
+        },
+        before_data={"product_name": "Product B"},
+        after_data={"product_name": "Product B+"},
+        created_at=created_at,
+    )
+    session.add_all([delete_audit, restore_audit])
+    session.flush()
+
+    delete_change = CatalogPromotionRollbackChange(
+        rollback_run_id=newest.id,
+        original_audit_id=delete_audit.id,
+        catalog_product_id=delete_audit.catalog_product_id,
+        action="delete",
+        changed_fields={
+            "product_name": {"before": "Product A", "after": None}
+        },
+        before_data={"product_name": "Product A"},
+        after_data=None,
+        created_at=created_at,
+    )
+    restore_change = CatalogPromotionRollbackChange(
+        rollback_run_id=newest.id,
+        original_audit_id=restore_audit.id,
+        catalog_product_id=restore_audit.catalog_product_id,
+        action="restore",
+        changed_fields={
+            "product_name": {"before": "Product B+", "after": "Product B"}
+        },
+        before_data={"product_name": "Product B+"},
+        after_data={"product_name": "Product B"},
+        created_at=created_at,
+    )
+    session.add_all([delete_change, restore_change])
+    session.commit()
+
+    try:
+        yield session, middle, newest, delete_change, restore_change
+    finally:
+        session.rollback()
+        session.execute(
+            delete(CatalogPromotionRollbackChange).where(
+                CatalogPromotionRollbackChange.id.in_(
+                    [delete_change.id, restore_change.id]
+                )
+            )
+        )
+        session.execute(
+            delete(CatalogProductChange).where(
+                CatalogProductChange.id.in_([delete_audit.id, restore_audit.id])
+            )
+        )
+        session.commit()
+
+
 def test_list_catalog_promotion_rollbacks_sorts_latest_and_paginates(
     seeded_rollbacks,
 ):
@@ -310,4 +465,80 @@ def test_get_catalog_promotion_rollback_detail_returns_existing_or_none(
     assert get_catalog_promotion_rollback_detail(
         session,
         rollback_run_id=999999999,
+    ) is None
+
+
+def test_list_catalog_promotion_rollback_changes_sorts_and_paginates(
+    seeded_rollback_changes,
+):
+    from db.catalog_promotion_rollback_query_service import (
+        list_catalog_promotion_rollback_changes,
+    )
+
+    session, _empty, newest, delete_change, restore_change = seeded_rollback_changes
+
+    first_page = list_catalog_promotion_rollback_changes(
+        session,
+        rollback_run_id=newest.id,
+        limit=1,
+        offset=0,
+    )
+    second_page = list_catalog_promotion_rollback_changes(
+        session,
+        rollback_run_id=newest.id,
+        limit=1,
+        offset=1,
+    )
+
+    assert first_page is not None
+    assert [item.rollback_change_id for item in first_page.items] == [
+        restore_change.id
+    ]
+    assert first_page.total == 2
+    assert first_page.limit == 1
+    assert first_page.offset == 0
+    assert second_page is not None
+    assert [item.rollback_change_id for item in second_page.items] == [
+        delete_change.id
+    ]
+    assert second_page.total == 2
+    assert second_page.limit == 1
+    assert second_page.offset == 1
+
+
+def test_list_catalog_promotion_rollback_changes_returns_empty_for_existing_parent(
+    seeded_rollback_changes,
+):
+    from db.catalog_promotion_rollback_query_service import (
+        list_catalog_promotion_rollback_changes,
+    )
+
+    session, empty, _newest, _delete_change, _restore_change = seeded_rollback_changes
+
+    result = list_catalog_promotion_rollback_changes(
+        session,
+        rollback_run_id=empty.id,
+        limit=20,
+        offset=0,
+    )
+
+    assert result is not None
+    assert result.items == []
+    assert result.total == 0
+
+
+def test_list_catalog_promotion_rollback_changes_returns_none_for_missing_parent(
+    seeded_rollback_changes,
+):
+    from db.catalog_promotion_rollback_query_service import (
+        list_catalog_promotion_rollback_changes,
+    )
+
+    session, _empty, _newest, _delete_change, _restore_change = seeded_rollback_changes
+
+    assert list_catalog_promotion_rollback_changes(
+        session,
+        rollback_run_id=999999999,
+        limit=20,
+        offset=0,
     ) is None

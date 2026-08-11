@@ -1,5 +1,6 @@
 # 역할: 실제 PostgreSQL 사용자·JWT를 사용해 인증(401)과 권한(403) 경계를 endpoint 단위로 검증합니다.
 from contextlib import nullcontext
+from types import SimpleNamespace
 from uuid import uuid4
 
 import jwt
@@ -196,8 +197,13 @@ def test_no_token_returns_401_before_database_for_promotion_routes(
     [
         "/api/v1/catalog-promotion-rollbacks",
         "/api/v1/catalog-promotion-rollbacks/1",
+        "/api/v1/catalog-promotion-rollbacks/1/changes",
     ],
-    ids=["rollback-history-list", "rollback-history-detail"],
+    ids=[
+        "rollback-history-list",
+        "rollback-history-detail",
+        "rollback-change-list",
+    ],
 )
 def test_no_token_returns_401_before_database_for_rollback_history_routes(
     path,
@@ -349,6 +355,49 @@ def test_operator_token_can_read_rollback_history(operator_token):
     response = client.get(
         "/api/v1/catalog-promotion-rollbacks",
         headers=_auth_headers(operator_token),
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.fixture()
+def empty_rollback_changes_route(monkeypatch):
+    fake_session = object()
+
+    def override_session():
+        yield fake_session
+
+    def fake_changes(session, *, rollback_run_id, limit, offset):
+        assert session is fake_session
+        assert rollback_run_id == 1
+        return SimpleNamespace(items=[], total=0, limit=limit, offset=offset)
+
+    from api.routes import etl_loads as etl_loads_route
+
+    app.dependency_overrides[get_session] = override_session
+    monkeypatch.setattr(
+        etl_loads_route,
+        "list_catalog_promotion_rollback_changes",
+        fake_changes,
+        raising=False,
+    )
+    try:
+        yield
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+
+@pytest.mark.parametrize("token_fixture", ["viewer_token", "operator_token"])
+def test_viewer_and_operator_can_read_rollback_changes(
+    token_fixture,
+    request,
+    empty_rollback_changes_route,
+):
+    token = request.getfixturevalue(token_fixture)
+
+    response = client.get(
+        "/api/v1/catalog-promotion-rollbacks/1/changes",
+        headers=_auth_headers(token),
     )
 
     assert response.status_code == 200
