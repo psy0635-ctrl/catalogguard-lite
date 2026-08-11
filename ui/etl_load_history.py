@@ -28,6 +28,7 @@ ETL_REJECT_LIMIT = 20
 PROMOTION_HISTORY_LIMIT = 10
 PROMOTION_AUDIT_LIMIT = 10
 ROLLBACK_HISTORY_LIMIT = 10
+ROLLBACK_CHANGE_AUDIT_LIMIT = 10
 ETL_LOAD_DISPLAY_COLUMNS = [
     "적재 배치 ID",
     "원본 파일명",
@@ -101,6 +102,21 @@ ROLLBACK_HISTORY_DISPLAY_COLUMNS = [
     "실행 시각",
     "실행 사용자",
 ]
+ROLLBACK_CHANGE_AUDIT_DISPLAY_COLUMNS = [
+    "Change ID",
+    "원본 Audit ID",
+    "상품 ID",
+    "외부 상품 ID",
+    "변경 유형",
+    "변경 필드",
+    "변경 전",
+    "변경 후",
+    "변경 시각",
+]
+ROLLBACK_ACTION_LABELS = {
+    "delete": "상품 삭제",
+    "restore": "이전 상태 복원",
+}
 
 ETL_LOAD_STATE_DEFAULTS = {
     "etl_load_initialized": False,
@@ -146,6 +162,9 @@ ETL_LOAD_STATE_DEFAULTS = {
     "catalog_promotion_rollback_history_detail_requested": False,
     "catalog_promotion_rollback_history_detail_response": None,
     "catalog_promotion_rollback_history_detail_error": None,
+    "catalog_promotion_rollback_change_offset": 0,
+    "catalog_promotion_rollback_change_response": None,
+    "catalog_promotion_rollback_change_error": None,
     "etl_web_run_profiles_response": None,
     "etl_web_run_profiles_error": None,
     "etl_web_run_selected_profile_id": None,
@@ -469,6 +488,50 @@ def build_catalog_promotion_rollback_history_dataframe(
         for item in items
     ]
     return pd.DataFrame(rows, columns=ROLLBACK_HISTORY_DISPLAY_COLUMNS)
+
+
+def build_catalog_promotion_rollback_change_dataframe(
+    items: list[dict[str, Any]],
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        after_data = item.get("after_data")
+        before_data = item.get("before_data")
+        safe_after = after_data if isinstance(after_data, dict) else {}
+        safe_before = before_data if isinstance(before_data, dict) else {}
+        external_product_id = (
+            safe_after["external_product_id"]
+            if "external_product_id" in safe_after
+            else safe_before.get("external_product_id", "")
+        )
+        action = str(item.get("action", ""))
+        changed_fields = item.get("changed_fields")
+        safe_changes = changed_fields if isinstance(changed_fields, dict) else {}
+        for field_name in sorted(safe_changes):
+            change = safe_changes.get(field_name)
+            safe_change = change if isinstance(change, dict) else {}
+            after_value = safe_change.get("after")
+            rows.append(
+                {
+                    "Change ID": item.get("rollback_change_id"),
+                    "원본 Audit ID": item.get("original_audit_id"),
+                    "상품 ID": item.get("catalog_product_id"),
+                    "외부 상품 ID": _display_nullable(external_product_id),
+                    "변경 유형": ROLLBACK_ACTION_LABELS.get(
+                        action,
+                        action,
+                    ),
+                    "변경 필드": field_name,
+                    "변경 전": _display_nullable(safe_change.get("before")),
+                    "변경 후": (
+                        "삭제됨"
+                        if action == "delete" and after_value is None
+                        else _display_nullable(after_value)
+                    ),
+                    "변경 시각": format_etl_datetime(item.get("created_at")),
+                }
+            )
+    return pd.DataFrame(rows, columns=ROLLBACK_CHANGE_AUDIT_DISPLAY_COLUMNS)
 
 
 def build_catalog_promotion_rollback_option_label(item: dict[str, Any]) -> str:
@@ -1413,6 +1476,9 @@ def _clear_catalog_promotion_rollback_history_detail(session_state) -> None:
     session_state["catalog_promotion_rollback_history_detail_requested"] = False
     session_state["catalog_promotion_rollback_history_detail_response"] = None
     session_state["catalog_promotion_rollback_history_detail_error"] = None
+    session_state["catalog_promotion_rollback_change_offset"] = 0
+    session_state["catalog_promotion_rollback_change_response"] = None
+    session_state["catalog_promotion_rollback_change_error"] = None
 
 
 def _on_catalog_promotion_rollback_history_filter_change(session_state) -> None:
@@ -1510,11 +1576,104 @@ def _fetch_catalog_promotion_rollback_history_detail(
         return None
 
 
+def _fetch_catalog_promotion_rollback_changes(
+    api_client,
+) -> dict[str, Any] | None:
+    cached = st.session_state.get("catalog_promotion_rollback_change_response")
+    if isinstance(cached, dict):
+        return cached
+    if st.session_state.get("catalog_promotion_rollback_change_error") is not None:
+        return None
+    rollback_run_id = st.session_state.get(
+        "catalog_promotion_rollback_history_run_id"
+    )
+    if rollback_run_id is None:
+        return None
+    try:
+        response = api_client.list_catalog_promotion_rollback_changes(
+            int(rollback_run_id),
+            limit=ROLLBACK_CHANGE_AUDIT_LIMIT,
+            offset=st.session_state["catalog_promotion_rollback_change_offset"],
+        )
+        st.session_state["catalog_promotion_rollback_change_response"] = response
+        st.session_state["catalog_promotion_rollback_change_error"] = None
+        return response
+    except (
+        CatalogPromotionRollbackNotFoundError,
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        st.session_state["catalog_promotion_rollback_change_error"] = error
+        return None
+
+
 def _render_catalog_promotion_rollback_history_error(
     message: str,
     error: Exception,
 ) -> None:
     st.error(build_etl_api_error_display_message(message, error))
+
+
+def _render_catalog_promotion_rollback_changes(api_client) -> None:
+    st.markdown("#### 상품 Rollback 변경 Audit")
+    st.write("Rollback으로 삭제·복원된 상품의 필드별 변경 이력입니다.")
+    response = _fetch_catalog_promotion_rollback_changes(api_client)
+    if response is None:
+        error = st.session_state.get("catalog_promotion_rollback_change_error")
+        if error is not None:
+            _render_catalog_promotion_rollback_history_error(
+                "Rollback 상품 변경 Audit을 불러오지 못했습니다.",
+                error,
+            )
+        return
+
+    items = response.get("items") or []
+    if not items:
+        st.info("이 Rollback 실행에는 상품 변경 Audit이 없습니다.")
+    else:
+        st.dataframe(
+            build_catalog_promotion_rollback_change_dataframe(items),
+            width="stretch",
+            hide_index=True,
+        )
+
+    total = max(0, int(response.get("total", 0)))
+    current_page, total_pages, has_previous, has_next = calculate_etl_pagination(
+        total=total,
+        limit=ROLLBACK_CHANGE_AUDIT_LIMIT,
+        offset=st.session_state["catalog_promotion_rollback_change_offset"],
+    )
+    st.caption(
+        f"Change Audit {current_page} / {total_pages} 페이지 · 전체 {total}건"
+    )
+    previous_col, next_col = st.columns(2)
+    with previous_col:
+        if st.button(
+            "Change 이전",
+            key="catalog_promotion_rollback_change_previous",
+            disabled=not has_previous,
+        ):
+            st.session_state["catalog_promotion_rollback_change_offset"] -= (
+                ROLLBACK_CHANGE_AUDIT_LIMIT
+            )
+            st.session_state["catalog_promotion_rollback_change_response"] = None
+            st.session_state["catalog_promotion_rollback_change_error"] = None
+            st.rerun()
+    with next_col:
+        if st.button(
+            "Change 다음",
+            key="catalog_promotion_rollback_change_next",
+            disabled=not has_next,
+        ):
+            st.session_state["catalog_promotion_rollback_change_offset"] += (
+                ROLLBACK_CHANGE_AUDIT_LIMIT
+            )
+            st.session_state["catalog_promotion_rollback_change_response"] = None
+            st.session_state["catalog_promotion_rollback_change_error"] = None
+            st.rerun()
 
 
 def _render_catalog_promotion_rollback_history_detail(api_client) -> None:
@@ -1562,6 +1721,8 @@ def _render_catalog_promotion_rollback_history_detail(api_client) -> None:
                 st.write(f"Preview schema version: {preview_schema_version}")
             if preview_hash:
                 st.write(f"Preview SHA-256: {preview_hash}")
+
+    _render_catalog_promotion_rollback_changes(api_client)
 
 
 def _render_catalog_promotion_rollback_history(api_client) -> None:
@@ -1637,6 +1798,9 @@ def _render_catalog_promotion_rollback_history(api_client) -> None:
             st.session_state[
                 "catalog_promotion_rollback_history_detail_error"
             ] = None
+            st.session_state["catalog_promotion_rollback_change_offset"] = 0
+            st.session_state["catalog_promotion_rollback_change_response"] = None
+            st.session_state["catalog_promotion_rollback_change_error"] = None
             st.rerun()
 
     total = max(0, int(response.get("total", 0)))

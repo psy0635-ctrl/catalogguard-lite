@@ -197,6 +197,23 @@ CATALOG_PROMOTION_ROLLBACK_RUN_DETAIL_KEYS = (
     "preview_hash",
     "preview_schema_version",
 )
+CATALOG_PROMOTION_ROLLBACK_CHANGE_LIST_KEYS = (
+    "items",
+    "total",
+    "limit",
+    "offset",
+)
+CATALOG_PROMOTION_ROLLBACK_CHANGE_ITEM_KEYS = (
+    "rollback_change_id",
+    "rollback_run_id",
+    "original_audit_id",
+    "catalog_product_id",
+    "action",
+    "changed_fields",
+    "before_data",
+    "after_data",
+    "created_at",
+)
 ETL_WEB_RUN_RESPONSE_KEYS = (
     "etl_load_run_id",
     "created",
@@ -812,6 +829,49 @@ def _validate_catalog_promotion_rollback_run_detail(data: dict[str, Any]) -> Non
         raise _invalid_etl_response()
 
 
+def _validate_catalog_promotion_rollback_change_item(item: object) -> bool:
+    if not isinstance(item, dict) or any(
+        key not in item for key in CATALOG_PROMOTION_ROLLBACK_CHANGE_ITEM_KEYS
+    ):
+        return False
+    action = item["action"]
+    after_data = item["after_data"]
+    return (
+        type(item["rollback_change_id"]) is int
+        and item["rollback_change_id"] > 0
+        and type(item["rollback_run_id"]) is int
+        and item["rollback_run_id"] > 0
+        and type(item["original_audit_id"]) is int
+        and item["original_audit_id"] > 0
+        and type(item["catalog_product_id"]) is int
+        and item["catalog_product_id"] > 0
+        and action in {"delete", "restore"}
+        and isinstance(item["changed_fields"], dict)
+        and bool(item["changed_fields"])
+        and isinstance(item["before_data"], dict)
+        and (
+            (action == "delete" and after_data is None)
+            or (action == "restore" and isinstance(after_data, dict))
+        )
+        and isinstance(item["created_at"], str)
+    )
+
+
+def _validate_catalog_promotion_rollback_change_list(data: dict[str, Any]) -> None:
+    if (
+        any(key not in data for key in CATALOG_PROMOTION_ROLLBACK_CHANGE_LIST_KEYS)
+        or not isinstance(data["items"], list)
+        or not _validate_etl_list_metadata(data["total"], allow_limit_zero=True)
+        or not _validate_etl_list_metadata(data["limit"])
+        or not _validate_etl_list_metadata(data["offset"], allow_limit_zero=True)
+        or any(
+            not _validate_catalog_promotion_rollback_change_item(item)
+            for item in data["items"]
+        )
+    ):
+        raise _invalid_etl_response()
+
+
 class CatalogGuardApiError(Exception):
     def __init__(
         self,
@@ -1343,6 +1403,25 @@ class CatalogGuardApiClient:
             not_found_message=CATALOG_PROMOTION_ROLLBACK_NOT_FOUND_MESSAGE,
         )
         _validate_catalog_promotion_rollback_run_detail(data)
+        return data
+
+    def list_catalog_promotion_rollback_changes(
+        self,
+        rollback_run_id: int,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        _validate_positive_etl_int(rollback_run_id, "rollback_run_id")
+        _validate_etl_pagination(limit, offset)
+        data = self._get_json(
+            f"/api/v1/catalog-promotion-rollbacks/{rollback_run_id}/changes",
+            params={"limit": limit, "offset": offset},
+            raise_not_found=True,
+            not_found_error=CatalogPromotionRollbackNotFoundError,
+            not_found_message=CATALOG_PROMOTION_ROLLBACK_NOT_FOUND_MESSAGE,
+        )
+        _validate_catalog_promotion_rollback_change_list(data)
         return data
 
     def get_catalog_promotion_preview(

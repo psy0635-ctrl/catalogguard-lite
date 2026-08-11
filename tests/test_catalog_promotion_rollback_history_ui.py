@@ -32,6 +32,43 @@ def make_rollback_run(
     }
 
 
+def make_rollback_change(
+    rollback_change_id=101,
+    *,
+    rollback_run_id=71,
+    original_audit_id=41,
+    catalog_product_id=25,
+    action="delete",
+    external_product_id="P-25",
+):
+    restore = action == "restore"
+    before_name = "Product B+" if restore else "Product A"
+    after_name = "Product B" if restore else None
+    return {
+        "rollback_change_id": rollback_change_id,
+        "rollback_run_id": rollback_run_id,
+        "original_audit_id": original_audit_id,
+        "catalog_product_id": catalog_product_id,
+        "action": action,
+        "changed_fields": {
+            "product_name": {"before": before_name, "after": after_name}
+        },
+        "before_data": {
+            "external_product_id": external_product_id,
+            "product_name": before_name,
+        },
+        "after_data": (
+            {
+                "external_product_id": external_product_id,
+                "product_name": after_name,
+            }
+            if restore
+            else None
+        ),
+        "created_at": "2026-08-11T05:20:01Z",
+    }
+
+
 class FakeRollbackHistoryApiClient(FakeEtlApiClient):
     def __init__(
         self,
@@ -41,6 +78,10 @@ class FakeRollbackHistoryApiClient(FakeEtlApiClient):
         rollback_total=None,
         rollback_history_error=None,
         rollback_detail_error=None,
+        rollback_change_items=None,
+        rollback_change_pages=None,
+        rollback_change_total=None,
+        rollback_change_error=None,
     ):
         super().__init__()
         self.rollback_items = (
@@ -54,8 +95,21 @@ class FakeRollbackHistoryApiClient(FakeEtlApiClient):
         )
         self.rollback_history_error = rollback_history_error
         self.rollback_detail_error = rollback_detail_error
+        self.rollback_change_items = (
+            [make_rollback_change(), make_rollback_change(102, action="restore")]
+            if rollback_change_items is None
+            else rollback_change_items
+        )
+        self.rollback_change_pages = rollback_change_pages
+        self.rollback_change_total = (
+            len(self.rollback_change_items)
+            if rollback_change_total is None
+            else rollback_change_total
+        )
+        self.rollback_change_error = rollback_change_error
         self.rollback_history_calls = []
         self.rollback_detail_calls = []
+        self.rollback_change_calls = []
         self.rollback_preview_calls = []
         self.rollback_execution_calls = []
 
@@ -91,6 +145,34 @@ class FakeRollbackHistoryApiClient(FakeEtlApiClient):
             **matching,
             "preview_hash": "b" * 64,
             "preview_schema_version": "1",
+        }
+
+    def list_catalog_promotion_rollback_changes(
+        self,
+        rollback_run_id,
+        *,
+        limit,
+        offset,
+    ):
+        self.rollback_change_calls.append(
+            {
+                "rollback_run_id": rollback_run_id,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
+        if self.rollback_change_error is not None:
+            raise self.rollback_change_error
+        items = (
+            self.rollback_change_pages.get(offset, [])
+            if self.rollback_change_pages is not None
+            else self.rollback_change_items
+        )
+        return {
+            "items": items,
+            "total": self.rollback_change_total,
+            "limit": limit,
+            "offset": offset,
         }
 
     def get_catalog_promotion_rollback_preview(self, promotion_run_id):
@@ -179,6 +261,52 @@ def test_rollback_history_option_label_distinguishes_run_and_target_promotion():
     assert label == "72 · Promotion 32 · blocked"
 
 
+def test_rollback_change_audit_dataframe_expands_delete_fields():
+    change = make_rollback_change()
+    change["changed_fields"]["price"] = {"before": 1200, "after": None}
+
+    frame = etl_load_history.build_catalog_promotion_rollback_change_dataframe(
+        [change]
+    )
+
+    assert frame.columns.tolist() == (
+        etl_load_history.ROLLBACK_CHANGE_AUDIT_DISPLAY_COLUMNS
+    )
+    assert frame["Change ID"].tolist() == [101, 101]
+    assert frame["원본 Audit ID"].tolist() == [41, 41]
+    assert frame["상품 ID"].tolist() == [25, 25]
+    assert frame["외부 상품 ID"].tolist() == ["P-25", "P-25"]
+    assert frame["변경 유형"].tolist() == ["상품 삭제", "상품 삭제"]
+    assert frame["변경 필드"].tolist() == ["price", "product_name"]
+    assert frame["변경 전"].tolist() == [1200, "Product A"]
+    assert frame["변경 후"].tolist() == ["삭제됨", "삭제됨"]
+
+
+def test_rollback_change_audit_dataframe_prefers_restore_after_external_id():
+    change = make_rollback_change(action="restore", external_product_id="P-before")
+    change["after_data"]["external_product_id"] = "P-after"
+
+    frame = etl_load_history.build_catalog_promotion_rollback_change_dataframe(
+        [change]
+    )
+
+    assert frame["외부 상품 ID"].tolist() == ["P-after"]
+    assert frame["변경 유형"].tolist() == ["이전 상태 복원"]
+    assert frame["변경 전"].tolist() == ["Product B+"]
+    assert frame["변경 후"].tolist() == ["Product B"]
+
+
+def test_rollback_change_audit_dataframe_handles_missing_external_id():
+    change = make_rollback_change(external_product_id="")
+    change["before_data"].pop("external_product_id")
+
+    frame = etl_load_history.build_catalog_promotion_rollback_change_dataframe(
+        [change]
+    )
+
+    assert frame["외부 상품 ID"].tolist() == [""]
+
+
 def test_rollback_history_selection_change_clears_stale_detail_state():
     state = {}
     etl_load_history.initialize_etl_load_state(state)
@@ -189,12 +317,18 @@ def test_rollback_history_selection_change_clears_stale_detail_state():
     state["catalog_promotion_rollback_history_detail_error"] = RuntimeError(
         "old detail"
     )
+    state["catalog_promotion_rollback_change_offset"] = 10
+    state["catalog_promotion_rollback_change_response"] = {"items": []}
+    state["catalog_promotion_rollback_change_error"] = RuntimeError("old audit")
 
     etl_load_history._on_catalog_promotion_rollback_history_run_change(state)
 
     assert state["catalog_promotion_rollback_history_detail_requested"] is False
     assert state["catalog_promotion_rollback_history_detail_response"] is None
     assert state["catalog_promotion_rollback_history_detail_error"] is None
+    assert state["catalog_promotion_rollback_change_offset"] == 0
+    assert state["catalog_promotion_rollback_change_response"] is None
+    assert state["catalog_promotion_rollback_change_error"] is None
 
 
 def test_rollback_success_invalidates_history_cache_without_unrelated_state():
@@ -272,6 +406,110 @@ def test_rollback_history_apptest_selects_detail_with_metrics_actor_and_preview(
     assert "대상 Promotion ID: 31" in markdown_values
     assert "실행 사용자: rollback_operator" in markdown_values
     assert any(expander.label == "Rollback Preview 정보" for expander in app.expander)
+
+
+def test_rollback_history_apptest_shows_change_audit_in_detail(monkeypatch):
+    api_client = FakeRollbackHistoryApiClient()
+    _patch_api_client(monkeypatch, api_client)
+    app = run_authenticated_app_test(timeout=10)
+
+    _find_selectbox(
+        app, "catalog_promotion_rollback_history_run_id"
+    ).select(71).run(timeout=10)
+    _find_button(
+        app, "catalog_promotion_rollback_history_show_detail"
+    ).click().run(timeout=10)
+
+    assert "#### 상품 Rollback 변경 Audit" in [
+        markdown.value for markdown in app.markdown
+    ]
+    frame = next(
+        dataframe.value
+        for dataframe in app.dataframe
+        if list(dataframe.value.columns)
+        == etl_load_history.ROLLBACK_CHANGE_AUDIT_DISPLAY_COLUMNS
+    )
+    assert frame["변경 유형"].tolist() == ["상품 삭제", "이전 상태 복원"]
+    assert api_client.rollback_change_calls == [
+        {"rollback_run_id": 71, "limit": 10, "offset": 0}
+    ]
+
+
+def test_rollback_history_apptest_shows_empty_change_audit(monkeypatch):
+    api_client = FakeRollbackHistoryApiClient(rollback_change_items=[])
+    _patch_api_client(monkeypatch, api_client)
+    app = run_authenticated_app_test(timeout=10)
+
+    _find_selectbox(
+        app, "catalog_promotion_rollback_history_run_id"
+    ).select(71).run(timeout=10)
+    _find_button(
+        app, "catalog_promotion_rollback_history_show_detail"
+    ).click().run(timeout=10)
+
+    assert "이 Rollback 실행에는 상품 변경 Audit이 없습니다." in [
+        info.value for info in app.info
+    ]
+
+
+def test_rollback_history_apptest_shows_safe_change_audit_error(monkeypatch):
+    api_client = FakeRollbackHistoryApiClient(
+        rollback_change_error=catalogguard_api.CatalogGuardApiResponseError(
+            "postgresql://private",
+            request_id="a29ae9a1c62f4152bb96f6513c323d96",
+        )
+    )
+    _patch_api_client(monkeypatch, api_client)
+    app = run_authenticated_app_test(timeout=10)
+
+    _find_selectbox(
+        app, "catalog_promotion_rollback_history_run_id"
+    ).select(71).run(timeout=10)
+    _find_button(
+        app, "catalog_promotion_rollback_history_show_detail"
+    ).click().run(timeout=10)
+
+    error_messages = [error.value for error in app.error]
+    assert any(
+        "Rollback 상품 변경 Audit을 불러오지 못했습니다." in value
+        for value in error_messages
+    )
+    assert any(
+        "a29ae9a1c62f4152bb96f6513c323d96" in value
+        for value in error_messages
+    )
+    assert all("postgresql" not in value.lower() for value in error_messages)
+
+
+def test_rollback_history_apptest_paginates_change_audit_without_refetching_detail(
+    monkeypatch,
+):
+    first_page = [make_rollback_change(index) for index in range(101, 111)]
+    second_page = [make_rollback_change(index) for index in range(111, 121)]
+    api_client = FakeRollbackHistoryApiClient(
+        rollback_change_items=[*first_page, *second_page],
+        rollback_change_pages={0: first_page, 10: second_page},
+        rollback_change_total=21,
+    )
+    _patch_api_client(monkeypatch, api_client)
+    app = run_authenticated_app_test(timeout=10)
+
+    _find_selectbox(
+        app, "catalog_promotion_rollback_history_run_id"
+    ).select(71).run(timeout=10)
+    _find_button(
+        app, "catalog_promotion_rollback_history_show_detail"
+    ).click().run(timeout=10)
+    _find_button(
+        app, "catalog_promotion_rollback_change_next"
+    ).click().run(timeout=10)
+
+    assert api_client.rollback_change_calls == [
+        {"rollback_run_id": 71, "limit": 10, "offset": 0},
+        {"rollback_run_id": 71, "limit": 10, "offset": 10},
+    ]
+    assert api_client.rollback_detail_calls == [71]
+    assert app.session_state["catalog_promotion_rollback_change_offset"] == 10
 
 
 def test_rollback_history_apptest_selection_change_removes_stale_detail(monkeypatch):
