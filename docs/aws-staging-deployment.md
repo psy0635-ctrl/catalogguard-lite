@@ -2,7 +2,7 @@
 
 ## 1. 목적과 범위
 
-이 문서는 CatalogGuard Lite FastAPI를 AWS의 별도 staging 환경에 수동 배포한 절차와 2026-07-19 검증 결과를 기록합니다. 실제 내부 경로는 다음과 같습니다.
+이 문서는 CatalogGuard Lite FastAPI를 AWS의 별도 staging 환경에 수동 배포한 절차와 2026-07-19 검증 결과를 기록합니다. 이후 2026-08-12에 같은 staging 환경에서 S3 Supplier CSV ingestion을 실제 AWS 자원으로 검증하고 runtime을 현재 `main` image로 교체했으며, 그 기록은 17절에 있습니다. 실제 내부 경로는 다음과 같습니다.
 
 ```text
 AWS ap-northeast-2 / Default VPC
@@ -10,7 +10,7 @@ AWS ap-northeast-2 / Default VPC
   -> TLSv1.3 / 5432 / RDS PostgreSQL
 ```
 
-배포 기준은 `main` 브랜치의 commit `57a713009c7c063f9abb0c9e8f9e1830a1aa086a`이며 Docker image tag는 앞 12자리인 `57a713009c7c`입니다. 해당 commit의 GitHub Actions가 성공했고 테스트 결과는 `696 passed, 25 skipped`였습니다.
+2026-07-19 배포 기준은 `main` 브랜치의 commit `57a713009c7c063f9abb0c9e8f9e1830a1aa086a`이며 Docker image tag는 앞 12자리인 `57a713009c7c`입니다. 해당 commit의 GitHub Actions가 성공했고 테스트 결과는 `696 passed, 25 skipped`였습니다. 2026-08-12에 이 runtime을 commit `081ae265bc60e67209450c841c94d66f1e3ea310`(image tag `081ae265bc60`)으로 교체했으므로, 아래 2~16절의 image tag와 commit은 2026-07-19 시점 기록으로 읽어야 합니다.
 
 Railway FastAPI·PostgreSQL은 production으로 계속 운영합니다. AWS staging은 Railway를 대체하지 않으며 기존 production Streamlit 설정도 변경하지 않았습니다. Railway 데이터 이전, Redis, Celery, AWS 자동 배포는 이번 수동 배포 범위에 포함하지 않았습니다.
 
@@ -647,3 +647,241 @@ RDS 삭제는 final snapshot과 automated backup 선택에 따라 데이터 손�
 - [ ] custom VPC와 private subnet 재구성
 
 AWS staging은 production이 아니며 Railway production과 기존 production Streamlit 설정은 변경하지 않았습니다. 완료 여부가 확인되지 않은 항목은 완료로 표시하지 않습니다.
+
+## 17. 2026-08-12 S3 Supplier CSV ingestion 실제 E2E 검증
+
+### 17.1 목적과 이전 상태와의 차이
+
+`POST /api/v1/etl-loads/s3`는 commit `e84814c`에서 추가되었지만 그때까지 검증은 fake S3 client 기반 단위·API 테스트뿐이었습니다. 이번 작업은 새 기능을 만들지 않고, 이미 있는 이 기능을 실제 AWS staging 자원에 연결해 다음 경로를 끝까지 확인한 기록입니다.
+
+```text
+private S3 (ap-northeast-2)
+  -> EC2 Instance Role 최소권한 (CatalogGuardEC2SSMRole)
+  -> FastAPI POST /api/v1/etl-loads/s3
+  -> read_s3_csv_object() -> run_web_etl() -> run_pipeline() -> load_standard_csv()
+  -> RDS PostgreSQL staging (ETLLoadRun / staging row / Actor Audit)
+```
+
+작업에는 root가 아닌 IAM user profile 하나만 사용했고, 호스트 작업은 SSM Run Command로 수행했습니다. 애플리케이션 코드·테스트·workflow·Terraform·migration 파일은 수정하지 않았습니다.
+
+### 17.2 S3 bucket과 합성 객체
+
+전용 staging bucket을 `ap-northeast-2`에 두고 실제 CLI로 다음을 확인했습니다.
+
+| 항목 | 확인 결과 |
+|---|---|
+| Block Public Access | `BlockPublicAcls`·`IgnorePublicAcls`·`BlockPublicPolicy`·`RestrictPublicBuckets` 4개 모두 `true` |
+| bucket policy | 존재하지 않음(`NoSuchBucketPolicy`) — public 허용 경로 없음 |
+| 기본 암호화 | SSE-S3 `AES256`, Bucket Key 활성, SSE-C 차단 |
+| region | `ap-northeast-2` |
+
+허용 prefix는 `incoming/catalogguard/`이며, 업로드한 객체는 저장소의 합성 fixture `tests/fixtures/etl/sample_vendor_valid.csv`(236 bytes) 1건뿐입니다. 업로드 전 파일 내용을 직접 읽어 개인정보·자격증명·실제 고객 데이터가 없고 `sample_fashion_vendor_v1` 프로필과 호환되는 것을 확인했습니다.
+
+```text
+s3://<staging-bucket>/incoming/catalogguard/e2e/sample_vendor_valid.csv
+```
+
+### 17.3 EC2 Instance Role 최소권한
+
+기존 EC2 Role `CatalogGuardEC2SSMRole`에 inline policy `CatalogGuardStagingSupplierS3Read` 하나만 추가했습니다. `iam:GetInstanceProfile`로 instance profile이 실제로 이 role을 담고 있는 것을 확인했고, 정책 문서는 실제 IAM API 조회 결과로 검증했습니다.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CatalogGuardStagingSupplierS3Read",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::<staging-bucket>/incoming/catalogguard/*"
+    }
+  ]
+}
+```
+
+`s3:PutObject`, `s3:DeleteObject`, `s3:ListBucket`, `s3:ListAllMyBuckets`, `s3:*`, `Resource: "*"`는 부여하지 않았습니다. 새 access key도 만들지 않았고 컨테이너에 AWS 자격증명을 주입하지 않았습니다. 컨테이너 안에서 확인한 결과는 다음과 같습니다.
+
+| 확인 | 결과 |
+|---|---|
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | 둘 다 컨테이너 환경에 없음 |
+| 컨테이너가 사용하는 principal | `assumed-role/CatalogGuardEC2SSMRole/<instance-id>` |
+| 허용 prefix 객체 | `head_object`·`get_object` 모두 성공(236 bytes) |
+| 허용 prefix 밖 객체 | `AccessDenied` / HTTP `403` |
+| 허용 prefix 안의 없는 key | HTTP `403`(`ListBucket`이 없으므로 `404` 아님) |
+
+### 17.4 네트워크 경계 재확인
+
+| 대상 | 확인 결과 |
+|---|---|
+| EC2 Security Group | inbound 규칙 **0개**(SSH `22` 없음, `8000` 공개 없음, `0.0.0.0/0` 없음) |
+| FastAPI bind | `127.0.0.1:8000`만 사용, public port 추가 없음 |
+| RDS | `publicly_accessible=false`, 저장 암호화 활성 |
+| RDS Security Group | `5432` 1개만 허용하고 source가 CIDR이 아니라 EC2 Security Group 참조 |
+| 호스트 접근 | SSM Session Manager / Run Command만 사용, SSH key pair 없음 |
+
+Security Group은 이번 작업에서 수정하지 않았습니다.
+
+### 17.5 stale runtime 발견과 현재 main 재배포
+
+검증을 시작할 때 EC2에서 실행 중이던 컨테이너는 image `catalogguard-lite-api:57a713009c7c`, checkout commit `57a713009c7c…`였습니다. 실제 `openapi.json`을 조회해 `/api/v1/etl-loads/s3` 경로가 없는 것을 확인했고, 이 runtime이 S3 connector 추가 commit `e84814c`보다 이전(현재 `main` 기준 104 commit 뒤)이라는 것을 git 이력으로 확정했습니다. 문서 추정이 아니라 실제 runtime 조회로 판단했습니다.
+
+재배포는 기존 `Dockerfile.aws`를 그대로 사용했습니다.
+
+- `/opt/catalogguard-lite`가 clean인 것을 먼저 확인하고(dirty면 중단) exact commit `081ae265bc60e67209450c841c94d66f1e3ea310`으로 detached checkout
+- image tag는 commit SHA 앞 12자리인 `081ae265bc60`을 사용하고 `latest`에 의존하지 않음
+- 새 image build와 검증(boto3 포함, `/api/v1/etl-loads/s3` 존재, `alembic heads`)이 끝난 뒤에야 기존 컨테이너를 교체
+- 기존 컨테이너는 삭제하지 않고 `catalogguard-api-staging-57a7130-rollback`으로 이름만 바꿔 보존하고 구 image도 남김
+
+### 17.6 RDS CA bundle 재현성 문제와 구조 개선
+
+재배포 준비 중 발견한 문제입니다. 실행 중이던 컨테이너를 `docker inspect`로 확인하니 **bind mount가 하나도 없었는데**, 컨테이너 안에는 `PGSSLROOTCERT`가 가리키는 `/run/secrets/rds-ca-bundle.pem`이 존재했습니다. 같은 파일이 호스트에는 없었고 `Dockerfile.aws`도 인증서를 복사하지 않습니다.
+
+즉 CA bundle이 **그 컨테이너의 writable layer 안에만** 있었습니다. 이 상태에서 새 컨테이너를 만들면 `PGSSLMODE=verify-full` 연결이 깨지므로, 재배포 자체가 재현 불가능한 구조였습니다.
+
+해결은 다음과 같습니다.
+
+```text
+컨테이너 layer 안에만 있던 CA bundle
+  -> docker cp 로 호스트에 분리 저장
+     /etc/catalogguard/rds-ca-bundle.pem   (root:root 644, 165408 bytes)
+  -> 새 컨테이너에 read-only mount
+     /etc/catalogguard/rds-ca-bundle.pem : /run/secrets/rds-ca-bundle.pem : ro
+```
+
+`PGSSLROOTCERT` 값은 그대로 두고 마운트 경로만 맞췄기 때문에 환경파일은 이 목적으로 바꾸지 않았습니다. 8절의 2026-07-19 기록에 있는 `/etc/catalogguard/rds-ca/global-bundle.pem`도 호스트에 그대로 남아 있습니다.
+
+이것은 애플리케이션 코드 변경이 아니라 AWS staging runtime·배포 구성 개선입니다.
+
+### 17.7 환경변수 추가
+
+`/etc/catalogguard/api.env`는 기존 방식을 유지하고 필요한 key만 멱등적으로 추가했습니다. 파일 전체를 다시 쓰지 않았고 기존 값을 덮어쓰지 않았으며 소유권·권한 `root:root`, `600`을 유지했습니다.
+
+| key | 성격 | 비고 |
+|---|---|---|
+| `CATALOGGUARD_ETL_S3_BUCKET` | 비밀 아님 | staging bucket 이름 |
+| `CATALOGGUARD_ETL_S3_PREFIX` | 비밀 아님 | `incoming/catalogguard/` |
+| `CATALOGGUARD_JWT_SECRET` | **비밀** | 호스트에서 `openssl rand`로 생성, 값은 출력·기록하지 않음 |
+
+`CATALOGGUARD_JWT_SECRET`은 이 staging 환경이 authentication 도입 이전에 만들어져 누락되어 있던 값입니다. 기존 `DATABASE_URL`·`PGSSLMODE`·`PGSSLROOTCERT`는 그대로 보존했습니다.
+
+주의할 점이 하나 있습니다. `docker restart`는 `--env-file`을 다시 읽지 않습니다. 컨테이너 생성 이후에 추가한 환경변수는 반영되지 않으므로 **컨테이너를 재생성해야** 합니다. 이 순서를 지키지 않아 처음에는 로그인이 HTTP `500`으로 실패했고, 컨테이너를 재생성해 해결했습니다. 이때 애플리케이션은 `JWTConfigurationError`로 명확히 실패하고 secret을 노출하지 않았습니다.
+
+### 17.8 Alembic migration
+
+새 image의 head가 기존 DB revision보다 앞서 있었으므로 `upgrade`만 수행했습니다. `downgrade`·`drop`·`truncate`나 수동 파괴적 SQL은 실행하지 않았습니다.
+
+```text
+before : 20260705_0002
+run    : python -m alembic upgrade head   (6개 revision 적용)
+after  : 20260810_0012 (head), single head
+```
+
+### 17.9 실제 E2E 결과
+
+로그인한 operator JWT로 EC2 localhost의 FastAPI를 호출했습니다. 요청 본문은 다음과 같습니다.
+
+```json
+{
+  "profile_id": "sample_fashion_vendor_v1",
+  "object_key": "incoming/catalogguard/e2e/sample_vendor_valid.csv"
+}
+```
+
+첫 요청 응답은 HTTP `200`이며 내용은 다음과 같습니다.
+
+```text
+created         = true
+etl_load_run_id = 1
+profile         = sample_fashion_vendor / v1
+source_filename = sample_vendor_valid.csv
+total_rows      = 1
+loaded_rows     = 1
+rejected_rows   = 0
+actor_username  = staging_e2e_operator
+```
+
+RDS에서 직접 조회한 결과도 응답과 일치했습니다. `etl_load_runs` 1건에 `input_file_sha256`이 64자리로 저장되어 있었고, 해당 run의 staging 상품 1건은 다음과 같습니다.
+
+```text
+product_id = 000123   product_group_id = 000123   category = TOP
+price      = 12000    sale_price = 10000
+color      = BLACK    size = M    stock = 10    seller = Sample Brand
+rejected row 레코드 = 0건
+```
+
+입력 CSV의 가격 문자열 `"12,000"`이 기존 pipeline을 통해 정수 `12000`으로 표준화된 것을 실제 DB 값으로 확인했습니다. 한글 상품명은 SSM 터미널 출력에서만 깨져 보였고 Unicode codepoint로 비교한 결과 원본과 정확히 일치했으므로 데이터 손상이 아닙니다.
+
+### 17.10 Idempotency와 Actor Audit
+
+동일 S3 객체·동일 프로필로 한 번 더 호출했습니다.
+
+```text
+1회차 : created = true    etl_load_run_id = 1
+2회차 : created = false   etl_load_run_id = 1
+DB    : etl_load_runs 총 1건 (새 run 생성 없음)
+```
+
+`input_file_sha256`·`profile_name`·`profile_version` 기반 중복 방지가 실제 AWS staging DB에서 동작하는 것을 확인했습니다.
+
+Actor Audit은 `actor_user_id`가 `users` 테이블의 실제 row를 가리키고 `actor_username` snapshot도 일치했으며, dedup 요청에서도 최초 run의 actor가 그대로 유지되었습니다. actor는 요청 본문이 아니라 인증된 JWT `current_user`에서만 가져옵니다.
+
+### 17.11 인증·권한과 오류 경계
+
+| 시나리오 | 실제 HTTP | code |
+|---|---:|---|
+| anonymous(토큰 없음) | `401` | `authentication_required` |
+| viewer(유효 토큰) | `403` | `insufficient_role` |
+| operator, 허용 prefix 밖 key | `400` | `s3_key_not_allowed` |
+| operator, 허용 prefix 안의 없는 key | `502` | `s3_read_failed` |
+
+마지막 줄이 `404 s3_object_not_found`가 아닌 이유는 최소권한 때문입니다. `s3:ListBucket`이 없는 principal에게 S3는 존재하지 않는 key를 `404`가 아니라 `403 AccessDenied`로 응답하고(키 존재 여부 노출 방지), 애플리케이션은 이를 안전한 `s3_read_failed`로 매핑합니다. `404`를 만들기 위해 `ListBucket`을 추가하지 않기로 했으므로 이는 결함이 아니라 선택의 결과입니다. fake S3 client 테스트는 `NoSuchKey`를 주입하므로 이 차이를 재현하지 못하며, 실제 AWS에서만 확인할 수 있는 동작입니다.
+
+네 시나리오를 모두 실행한 뒤에도 `etl_load_runs`는 1건으로 유지되어, 실패 경로가 실행 이력을 만들지 않는 것도 확인했습니다.
+
+### 17.12 로그 안전성
+
+구조화 로그에서 다음 패턴을 검사한 결과 모두 0건이었습니다.
+
+```text
+Bearer / JWT 형태 / password / AWS access key 형태 / postgresql:// / AWS secret token
+S3 bucket 이름
+```
+
+S3 실패는 `{"event":"etl_s3_source_failed","code":"s3_key_not_allowed"}`처럼 안전한 코드와 request ID만 남기고 SDK 예외 원문·객체 정보·자격증명을 남기지 않습니다.
+
+### 17.13 cold start 재현성 검증
+
+정리 작업에서 EC2를 완전히 `stopped` 상태로 만든 뒤 다시 시작해, 사람이 개입하지 않아도 최신 runtime이 복구되는지 확인했습니다.
+
+| 확인 | 결과 |
+|---|---|
+| 컨테이너 자동 기동 | `restart=unless-stopped`로 자동 시작, `running` / `healthy` |
+| image | `catalogguard-lite-api:081ae265bc60` |
+| `/health`, `/ready` | 모두 `200`(CA read-only mount 기준 TLS 연결 정상) |
+| 필요한 환경변수 6개 | 호스트 파일과 컨테이너 내부 양쪽에서 존재 확인 |
+
+17.6의 CA bundle 구조 개선이 실제로 재현성을 확보했음을 이 단계에서 확인했습니다.
+
+### 17.14 정리와 남은 자산
+
+| 대상 | 처리 |
+|---|---|
+| 임시 E2E credential 파일(`/root/.catalogguard-e2e-creds`) | `shred`로 삭제 |
+| 환경파일 백업(`api.env.bak.*`) | 현재 `api.env` 무결성과 cold start 검증 후 `shred`로 삭제, 잔여 백업 0개 |
+| `/etc/catalogguard/api.env` | `root:root` `600`, 필요한 key 6개 유지 |
+| RDS CA bundle | 유지 |
+| 합성 S3 객체 | 유지(private bucket, 재사용 가능) |
+| rollback 컨테이너·image | 유지 |
+| staging 테스트 계정 2개와 E2E 실행 이력 | 유지(Actor Audit 증거 보존) |
+| EC2 | 최종 `stopped` |
+| RDS | `available` 유지(중지하지 않음) |
+
+E2E 동안 operator에 임시로 부여했던 관리형 정책은 검증이 끝난 뒤 관리자 계정에서 연결 해제했습니다.
+
+### 17.15 이번 검증의 범위 밖
+
+- S3 bucket과 EC2 Role의 S3 read policy는 Console·CLI로 구성했습니다. `terraform apply`·`destroy`·`import`나 state 변경을 하지 않았으므로 **Terraform이 관리하는 자원이 아닙니다.** `terraform/` 코드에는 S3 리소스 자체가 없습니다.
+- S3 event 알림·Lambda·SQS 기반 자동 수집, prefix 일괄 처리, 증분 수집은 구현하지 않았습니다.
+- 이 E2E는 수동 검증이며 GitHub Actions에서 자동 재실행되지 않습니다.
+- 합성 fixture 1건 기준 결과이며 실제 공급사 운영 데이터·production catalog와는 연동하지 않았습니다.
+- Secrets Manager·Parameter Store를 도입하지 않았고 secret은 여전히 호스트 환경파일에 있습니다.

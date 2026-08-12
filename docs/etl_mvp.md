@@ -136,6 +136,52 @@ upload bytes
 -> ETLWebRunOutcome 반환
 ```
 
+### S3 source adapter
+
+`POST /api/v1/etl-loads/s3`는 입력을 업로드 대신 S3에서 가져오는 경로다. 두 번째 ETL pipeline이 아니라 `run_web_etl()` 앞단에 붙는 source adapter이며, 그 뒤 흐름은 업로드 경로와 완전히 같다.
+
+```text
+S3 object
+-> etl/s3_source.py: read_s3_csv_object()
+-> (source_filename, content bytes)
+-> run_web_etl()          <- 업로드 경로와 동일한 함수
+-> run_pipeline()
+-> load_standard_csv()
+```
+
+`read_s3_csv_object()`가 하는 일은 bytes를 안전하게 가져오는 것까지다.
+
+```text
+서버 환경변수에서 bucket/prefix 확인 (요청은 bucket을 고를 수 없음)
+-> object_key가 허용 prefix로 시작하는지 검사 (아니면 S3 호출 전에 차단)
+-> head_object()로 크기를 먼저 확인하고 업로드와 같은 상한으로 검증
+-> get_object() 후 상한+1 bytes까지만 bounded read
+-> 실제 읽은 길이를 다시 검증
+```
+
+호출하는 AWS API는 `head_object()`·`get_object()` 두 개뿐이고 list 계열은 쓰지 않는다. 그래서 필요한 권한도 `s3:GetObject` 하나로 끝난다. 자격증명은 요청이나 환경변수로 받지 않고 boto3 기본 credential chain을 그대로 사용한다.
+
+전환·중복 판단·Actor Audit을 재구현하지 않았으므로, 같은 파일이 업로드로 들어오든 S3에서 들어오든 `input_file_sha256`·`profile_name`·`profile_version` 기준 중복 판단 결과가 같다.
+
+### 실제 AWS staging 검증과 fake client 테스트의 구분
+
+이 기능의 단위·API 테스트(`tests/etl/test_s3_source.py`, `tests/test_api_etl_s3_load.py`)는 fake S3 client를 주입해 응답 계약·오류 매핑·크기 제한을 검증한다. 실제 AWS 자격증명이나 네트워크를 쓰지 않으므로 CI에서 항상 돌지만, 실제 S3의 동작까지 보장하지는 않는다.
+
+2026-08-12에 별도로 실제 AWS staging(private S3 + EC2 Instance Role + RDS PostgreSQL)에 연결해 ETL 관점의 결과를 확인했다.
+
+| 확인 | 실제 결과 |
+|---|---|
+| 합성 fixture 1건(`sample_vendor_valid.csv`) | `created=true`, total 1 / loaded 1 / rejected 0 |
+| 가격 표준화 | 입력 `"12,000"` -> staging `price=12000` |
+| 동일 객체·프로필 재요청 | `created=false`, 같은 `etl_load_run_id`, run 총 1건 유지 |
+| Actor Audit | `actor_user_id`·`actor_username`이 실제 사용자 row와 일치, dedup에서도 최초 actor 유지 |
+| 필요 권한 | `s3:GetObject` + 정확한 prefix만으로 충분 |
+| 허용 prefix 안의 없는 key | `502 s3_read_failed` |
+
+마지막 줄은 fake client 테스트와 실제 AWS가 갈리는 지점이다. fake client는 `NoSuchKey`를 주입하므로 `404 s3_object_not_found`가 나오지만, 실제 S3는 `s3:ListBucket` 권한이 없는 principal에게 없는 key를 `403 AccessDenied`로 응답한다. 애플리케이션은 이를 안전한 `s3_read_failed`로 매핑하며, `404`를 얻기 위해 `ListBucket`을 추가하지는 않았다. 최소권한을 유지한 결과다.
+
+AWS 인프라 구성과 배포 절차는 [AWS staging 배포 런북](aws-staging-deployment.md) 17절에 기록한다.
+
 ### Profile allowlist 설계
 
 `etl.profile_loader.load_profile(profile_path)`는 임의 `Path`를 받는 내부 함수이며, 이를 Web API에 그대로 노출하면 사용자가 보낸 경로로 서버 파일을 읽는 통로가 될 수 있다. Web 경로는 이 함수를 직접 호출하지 않고 `profile_id`만 받는다.
@@ -625,6 +671,10 @@ fix commit(`cb5ed81`) push 후 GitHub Actions run `30969273954`에서 `test`·`b
 - staging 상품 수정·삭제와 상품 변경 이력 조회 API는 지원하지 않는다.
 - promotion은 외부 공급사 운영 데이터나 production catalog가 아닌 합성 fixture·테스트 PostgreSQL 환경에서만 검증했다. reject 행은 별도 `etl_rejected_rows`에 오류 배열과 마스킹된 동적 원본 컬럼으로 저장한다.
 - 증분 ETL과 streaming은 지원하지 않는다.
-- 운영 DB 적재는 검증하지 않았으며, PostgreSQL staging 적재는 임시 테스트 PostgreSQL 환경에서만 검증했다.
+- 운영(production) DB 적재는 검증하지 않았다. PostgreSQL staging 적재는 임시 테스트 PostgreSQL 환경에서 검증했고, S3 source 경로에 한해 2026-08-12에 AWS RDS staging에서 합성 fixture 1건으로 추가 검증했다.
+- S3 ingestion은 호출자가 `object_key` 하나를 지정하는 pull 방식이다. S3 event 알림·Lambda·SQS 기반 자동 수집, prefix 일괄 처리, 증분 수집은 지원하지 않는다.
+- S3 source를 호출하는 Streamlit 화면은 없으며 현재는 API 직접 호출로만 사용한다.
+- S3 source의 bucket과 허용 prefix는 서버 환경변수로 고정되어 있어 한 배포가 동시에 여러 bucket을 대상으로 삼을 수 없다.
+- 실제 AWS staging S3 E2E는 합성 fixture 1건 기준 수동 검증이며 GitHub Actions에서 자동 재실행되지 않는다.
 - 실제 브라우저 E2E는 Chromium 한 종류와 합성 fixture만 검증하며, 운영 환경·모바일 브라우저·외부 공급사는 검증하지 않는다.
 - `sale_price`는 단일 할인 가격만 지원하며 할인율, 기간, 쿠폰·회원 가격, 최저가 추천은 제공하지 않는다.

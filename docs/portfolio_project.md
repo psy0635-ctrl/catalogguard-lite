@@ -48,6 +48,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 17. 기존 Dockerfile CMD가 컨테이너 시작마다 Alembic migration과 Uvicorn 실행을 함께 담당해, Kubernetes에서 API Pod가 여러 개면 migration이 중복 실행될 수 있다는 문제를 확인했습니다. 새 Kubernetes 전용 Dockerfile을 만들지 않고 기존 `Dockerfile.aws` image를 재사용하면서, `command` override로 migration 전용 Kubernetes Job과 Uvicorn 전용 Deployment로 책임을 분리했습니다. DB 연결을 확인하지 않는 `/health`는 liveness, PostgreSQL 연결까지 확인하는 `/ready`는 readiness로 연결했고, GitHub Actions에 kind 기반 실제 Kubernetes cluster를 만들어 PostgreSQL rollout·Migration Job 완료·FastAPI rollout·`/health`·`/ready` HTTP 200까지 자동 검증했습니다. kind·kubectl·node image는 최신 버전을 자동 조회하지 않고 SHA-256 digest까지 고정해, 같은 commit이 항상 같은 Kubernetes toolchain으로 재현되도록 했습니다.
 18. 콘솔에서 수동으로 구성했던 AWS staging(EC2·RDS·Security Group·SSM 접근)을 Terraform 코드로 옮겨, 같은 구조를 다시 만들 때 필요한 수동 작업과 설정 누락 위험을 줄였습니다. 새 대규모 인프라를 만드는 대신 이미 검증한 구성의 코드화로 범위를 제한했고, EC2 inbound 규칙 0개·RDS `5432`의 Security Group 참조 전용 허용·`publicly_accessible=false` 고정·저장 암호화·SSM 전용 접근 같은 보안 조건을 mock provider 기반 `terraform test` 12개 assertion으로 고정했습니다. 실제 AWS 자격 증명 없이 동작하는 이 검증을 GitHub Actions `terraform-validate` job으로 자동화해, 누군가 `0.0.0.0/0` inbound를 추가하는 보안 회귀가 생기면 CI가 실패하도록 했습니다. 이번 범위는 코드화와 정적·mock 검증까지이며 실제 `terraform apply`는 수행하지 않았습니다.
 19. 기존 Actor Audit을 Sync·Async Inspection까지 확장했습니다. `inspection_runs`에 nullable `actor_user_id`(`users.id`, `ON DELETE SET NULL`)와 `actor_username` snapshot을 추가하고, actor는 request form이 아니라 인증된 JWT `current_user`에서만 가져오도록 했습니다. 비동기 경로는 ORM 객체나 JWT 대신 두 scalar만 Redis job state와 Celery Worker로 전달했습니다. 동일 CSV·검수 버전의 기존 run을 재사용할 때는 최초 actor를 보존하며, 사용자 삭제 후 FK만 `NULL`이 되고 username snapshot은 남는 동작을 PostgreSQL 18 migration 왕복·Sync 통합 테스트·Redis/Celery/FastAPI E2E로 검증했습니다.
+20. AWS S3의 합성 공급사 CSV를 EC2 Instance Role의 최소권한 IAM으로 읽고, FastAPI의 기존 ETL Pipeline을 통해 RDS PostgreSQL staging에 적재하는 전체 흐름을 실제 AWS staging 환경에서 검증했습니다. S3 연동을 위해 두 번째 ETL pipeline을 만들지 않고 `run_web_etl()` 앞에 붙는 source adapter로 설계해 변환·중복 판단·Actor Audit 로직을 그대로 재사용했으며, EC2 Role에는 `s3:GetObject` 하나만 그것도 정확한 prefix로 제한해 부여하고 컨테이너에 AWS access key를 주입하지 않아 실제 principal이 `assumed-role/CatalogGuardEC2SSMRole/<instance-id>`로 동작하는 것을 확인했습니다. 동일 S3 객체 재처리 시 SHA-256 기반 idempotency와 Actor Audit이 유지되는 것을 실제 staging DB에서 검증했고, anonymous 401·viewer 403·허용 prefix 밖 400 차단과 함께 `s3:ListBucket`을 주지 않은 최소권한 때문에 없는 key가 404가 아니라 안전한 502로 응답한다는 실제 AWS 동작 차이까지 기록했습니다.
 
 ## 6.2 문제 정의
 
@@ -196,6 +197,7 @@ catalogguard_ready.csv + etl_summary.json
 | Prometheus Metrics 검증 | `tests/test_metrics.py` 32 scenarios: env parsing, `/metrics` disabled=404/no-op, route template cardinality 방지, `unmatched`/`5xx` 집계, 민감정보 미노출, Web ETL created/duplicate/failed와 row 중복 집계 방지, 실제 PostgreSQL 신규+중복 ETL |
 | Kubernetes smoke 검증 | kind 실제 cluster에서 PostgreSQL rollout·Alembic Migration Job condition=complete·FastAPI rollout·Service 경유 `GET /health`·`GET /ready` HTTP 200(pytest 범위 밖, `kubernetes-smoke` job) |
 | Terraform 검증 | `terraform fmt -check -recursive`·`init -backend=false -lockfile=readonly`·`validate` 성공과 mock provider `terraform test` `2 passed, 0 failed`(run 2개·assertion 12개, pytest 범위 밖, `terraform-validate` job) |
+| AWS staging S3 ingestion 실제 E2E 검증 | 실제 private S3 -> EC2 Instance Role(`s3:GetObject` + 정확한 prefix) -> FastAPI `POST /api/v1/etl-loads/s3` -> 기존 ETL pipeline -> RDS PostgreSQL. 합성 fixture 1건 `created=true`/loaded 1/rejected 0, 재요청 `created=false`·동일 run, Actor Audit 일치, 401/403/400/502 경계, EC2 cold start 후 `/health`·`/ready` 200(pytest 범위 밖 수동 검증, CI 자동 재실행 없음) |
 | Rollback Change Audit 기능 완료 commit 기준 전체 pytest | `1451 passed`, `0 skipped`, `4 deselected`, `0 failed`, warnings 0(일회성 PostgreSQL·Redis 서비스 컨테이너. Chromium E2E는 `-m "not e2e"`로 제외되어 별도 job에서 실행) |
 | Rollback Change Audit 기능 완료 commit 기준 CI | commit `abcea748e299009b4889b0daa98ad4c9c97e770b`을 대상으로 한 GitHub Actions run `31487868946` success (`test`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate` 4개 job) |
 | 최신 Alembic head | `20260810_0012`(Inspection Actor Audit, single head) |
@@ -353,6 +355,8 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 | `tests/test_inspection_persistence.py` | 검수 이력 저장·조회 통합 흐름 |
 | `tests/etl/test_web_service.py` | `run_web_etl()`의 정상 적재, 부분/전체 reject, 중복 재사용, profile allowlist 위반, 업로드 검증 실패, 임시 파일 정리 |
 | `tests/test_api_etl_web_run.py` | `POST /api/v1/etl-loads` HTTP 상태·오류 code·응답 계약 |
+| `tests/etl/test_s3_source.py` | fake S3 client로 `read_s3_csv_object()`의 prefix 위반 차단, HeadObject 크기 검증, bounded read, 없는 객체·읽기 실패의 안전한 예외 변환 |
+| `tests/test_api_etl_s3_load.py` | `POST /api/v1/etl-loads/s3`의 요청 계약과 `s3_key_not_allowed`·`s3_object_not_found`·`s3_read_failed`·`s3_not_configured` 오류 매핑 |
 | `tests/test_api_etl_loads.py` | ETL 배치 목록·상세 HTTP 응답과 파라미터·404 계약 |
 | `tests/test_etl_query_service.py` | 실제 PostgreSQL의 ETL 검색·정렬·페이지네이션·NULL·배치 격리 |
 | `tests/test_catalogguard_api_client.py` | ETL·Promotion·Rollback client 전체의 파라미터·pagination validation, 응답 shape·SHA-256·nullable 검증, rollback change의 `delete`/`restore` action 검증과 404/request ID mapping |
@@ -638,6 +642,40 @@ monkeypatch 없이 실제 PostgreSQL Session·실제 route·실제 persistence s
 #### 재발 방지 기준
 
 한 요청 안에서는 하나의 Session에 대해 하나의 트랜잭션 소유자만 두는 것을 원칙으로 합니다. 쓰기 트랜잭션을 시작하기 전에 같은 Session으로 부수적인 조회를 먼저 실행하지 않으며, 필요하면 `Depends(get_session, use_cache=False)`로 완전히 독립된 Session을 사용합니다.
+
+### 컨테이너 안에만 있던 RDS CA bundle과 재배포 재현성
+
+#### 문제
+
+AWS staging에서 S3 ingestion을 실제로 검증하려면 EC2 runtime을 현재 `main` image로 교체해야 했습니다. 교체 전 기존 컨테이너를 `docker inspect`로 확인했더니 **bind mount가 하나도 없었는데**, 컨테이너 안에는 `PGSSLROOTCERT`가 가리키는 RDS CA bundle이 존재했습니다. 같은 파일이 호스트에는 없었고 `Dockerfile.aws`도 인증서를 복사하지 않습니다.
+
+즉 CA bundle이 그 컨테이너의 writable layer 안에만 남아 있었습니다. 이 상태로 새 컨테이너를 만들면 `PGSSLMODE=verify-full` 조건에서 신뢰 앵커를 찾지 못해 RDS 연결이 끊기고, 컨테이너를 지우는 순간 인증서도 함께 사라집니다.
+
+#### 판단
+
+동작 중인 서버만 보면 `/ready`가 200이라 아무 문제가 없어 보였습니다. 하지만 이것은 "지금 돌아간다"와 "다시 만들어도 돌아간다"가 다른 경우였습니다. 재배포·재시작·인스턴스 교체 중 어느 것이든 발생하면 복구가 불가능해지므로, 기능 결함이 아니라 배포 재현성 결함으로 분류했습니다.
+
+`PGSSLMODE=verify-full`을 낮추거나 인증서 검증을 우회하는 선택은 하지 않았습니다. TLS 검증 강도를 줄이는 것은 재현성 문제의 해결이 아니라 보안 후퇴이기 때문입니다.
+
+#### 수정 방법
+
+애플리케이션 코드는 수정하지 않았습니다. CA bundle을 컨테이너에서 호스트로 분리해 저장하고, 새 컨테이너에는 read-only로 마운트했습니다.
+
+```text
+컨테이너 layer 안에만 있던 CA bundle
+-> 호스트로 분리 저장 (/etc/catalogguard/rds-ca-bundle.pem, root:root 644)
+-> 새 컨테이너에 read-only mount (:ro)
+```
+
+`PGSSLROOTCERT` 값은 그대로 두고 마운트 지점을 맞췄기 때문에 환경파일은 이 목적으로 바꾸지 않았고, 인증서 신뢰 설정도 그대로 유지했습니다.
+
+#### 검증
+
+EC2를 완전히 `stopped` 상태로 만든 뒤 다시 시작해, 사람이 개입하지 않아도 최신 컨테이너가 `restart=unless-stopped`로 자동 기동되고 `/health`·`/ready`가 모두 200을 반환하는 것을 확인했습니다. `/ready`는 RDS 연결까지 확인하는 endpoint이므로, 이 200이 곧 read-only 마운트 기반 TLS 연결이 재현된다는 증거입니다.
+
+#### 배운 것
+
+살아 있는 서버의 상태를 곧 재현 가능한 상태로 착각하지 않아야 한다는 점입니다. 배포 산출물(image)과 호스트에 남지 않고 실행 중인 컨테이너에만 존재하는 값이 있으면, 그 값은 다음 배포에서 사라집니다. 이후로는 runtime을 교체하기 전에 컨테이너의 mount와 image 내용을 먼저 대조해, 어디에도 기록되지 않은 상태가 있는지 확인합니다.
 
 ## 6.14 면접 예상 질문과 답변
 

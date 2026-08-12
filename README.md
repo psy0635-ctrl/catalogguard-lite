@@ -90,6 +90,9 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - `POST /api/v1/etl-loads`로 업로드 CSV와 profile_id를 받아 기존 `run_pipeline()`·`load_standard_csv()`를 그대로 실행하고 PostgreSQL staging까지 적재
 - 동일한 원본 파일 해시·프로필 이름·버전의 웹 ETL 요청은 새 배치를 만들지 않고 기존 배치를 `created=false`로 재사용
 - 웹 ETL 성공 후 ETL 적재 이력 캐시만 자동 무효화하고, 운영 상품 반영은 사용자가 이력에서 batch를 선택해 별도로 진행
+- `POST /api/v1/etl-loads/s3`로 서버에 설정된 private S3 bucket의 허용 prefix 객체만 읽어 같은 `run_web_etl()` 흐름으로 staging까지 적재(업로드 대신 S3를 입력원으로 사용하는 source adapter이며 별도 ETL pipeline이 아님)
+- S3 source는 bucket·prefix를 서버 환경변수로 고정하고 요청은 `object_key`만 받으며, prefix 밖 key 차단·HeadObject 기반 크기 제한·bounded read를 적용
+- 실제 AWS staging(ap-northeast-2)에서 private S3 → EC2 Instance Role 최소권한(`s3:GetObject` + 정확한 prefix) → FastAPI → 기존 ETL pipeline → RDS PostgreSQL 적재까지 E2E 검증
 - ETL batch를 명시적으로 선택하는 catalog promotion preview
 - insert/update/unchanged 건수와 상품별 변경 전·후 값 표시
 - 반영 가능 여부·차단 사유·사용자 승인 checkbox·SHA-256 preview hash 재검증
@@ -911,6 +914,8 @@ $env:CATALOGGUARD_JWT_SECRET="로컬에서만 사용할 임의의 긴 문자열"
 | `CATALOGGUARD_JWT_SECRET` | 없음(필수) | JWT Access Token 서명 secret. 서버 설정으로 고정되며 요청에서 선택할 수 없음(알고리즘은 `HS256` 고정) |
 | `CATALOGGUARD_JWT_ACCESS_TOKEN_TTL_SECONDS` | `3600` | Access Token 만료 시간(초). 만료되면 Refresh Token 없이 다시 로그인해야 함 |
 | `CATALOGGUARD_METRICS_ENABLED` | `false` | `GET /metrics` 활성화 여부. `true`/`1`/`yes`(대소문자 무관)일 때만 활성화되며, 그 외 값이나 미설정 시 `/metrics`는 `404`이고 metric instrumentation도 no-op(내부 counter도 증가하지 않음) |
+| `CATALOGGUARD_ETL_S3_BUCKET` | 없음 | `POST /api/v1/etl-loads/s3`가 읽을 S3 bucket. 요청으로 bucket을 지정할 수 없으며, 미설정 시 이 endpoint는 `503`(`s3_not_configured`) |
+| `CATALOGGUARD_ETL_S3_PREFIX` | 없음 | 허용할 object key prefix(예: `incoming/catalogguard/`). 앞뒤 `/`는 정규화하며, 설정 시 이 prefix로 시작하지 않는 `object_key`는 S3 호출 전에 `400`(`s3_key_not_allowed`)으로 차단. 미설정이면 prefix 제한 없이 해당 bucket 전체가 대상이 되므로 설정을 권장 |
 
 실제 `CATALOGGUARD_JWT_SECRET` 값은 저장소에 커밋하지 않으며, 이 문서에도 실제 값을 적지 않습니다.
 
@@ -1160,6 +1165,37 @@ CSV 저장·목록·상세 조회와 동일 CSV 중복 저장 방지를 검증�
 별도 Streamlit AWS 검증 앱에서도 화면 저장과 검수 이력 조회를 확인했습니다.
 상세 배포 절차와 재시작·중지 방법은 [AWS staging 배포 런북](docs/aws-staging-deployment.md)을 참고합니다.
 기존 Railway production과 production Streamlit 설정은 변경하지 않았습니다.
+
+### AWS staging S3 Supplier CSV ingestion 실제 E2E 검증
+
+2026-08-12 서울 리전(`ap-northeast-2`) staging에서 S3 source adapter를 실제 AWS 자원에 연결해 검증했습니다. 이전까지 이 기능은 fake S3 client 기반 단위·API 테스트만 있었고, 이번에 실제 S3 객체·EC2 Instance Role·RDS까지 연결한 것이 차이입니다.
+
+```text
+private S3 (Block Public Access 4개 모두 활성, SSE-S3, bucket policy 없음)
+-> EC2 Instance Role(CatalogGuardEC2SSMRole) 최소권한
+-> FastAPI POST /api/v1/etl-loads/s3
+-> 기존 read_s3_csv_object() -> run_web_etl() -> run_pipeline() -> load_standard_csv()
+-> RDS PostgreSQL staging(ETLLoadRun / staging row / Actor Audit)
+```
+
+IAM은 EC2 Role의 inline policy 하나로 `s3:GetObject`만, 그것도 `arn:aws:s3:::<staging-bucket>/incoming/catalogguard/*` 한 prefix로 제한했습니다. `s3:PutObject`·`s3:DeleteObject`·`s3:ListBucket`·`s3:*`·`Resource: "*"`는 부여하지 않았고, 컨테이너에 AWS access key를 주입하지 않아 실제 principal이 `assumed-role/CatalogGuardEC2SSMRole/<instance-id>`로 확인되었습니다. EC2 Security Group의 inbound 규칙은 0개이고 FastAPI는 `127.0.0.1:8000`에만 bind하며, RDS는 publicly accessible `false`·저장 암호화 활성 상태에서 EC2 Security Group만 5432로 접근합니다. 호출은 SSM Session Manager 경유 localhost로 수행했고 SSH나 public inbound를 열지 않았습니다.
+
+합성 fixture `tests/fixtures/etl/sample_vendor_valid.csv`(236 bytes) 1건만 사용했으며 실제 고객·공급사 데이터는 사용하지 않았습니다. 실제 결과는 다음과 같습니다.
+
+| 검증 | 실제 결과 |
+|---|---|
+| 첫 요청 | HTTP `200`, `created=true`, `etl_load_run_id=1`, total 1 / loaded 1 / rejected 0 |
+| ETL 변환 | 입력 `"12,000"` -> staging `price=12000`(기존 pipeline 그대로) |
+| 동일 객체 재요청 | HTTP `200`, `created=false`, 같은 `etl_load_run_id`, DB `etl_load_runs` 1건 유지 |
+| Actor Audit | `actor_user_id`·`actor_username`이 `users` row와 일치, dedup 요청에서도 최초 actor 유지 |
+| anonymous / viewer | `401 authentication_required` / `403 insufficient_role` |
+| 허용 prefix 밖 key | `400 s3_key_not_allowed` (S3 호출 전 차단) |
+| 허용 prefix 내 없는 key | `502 s3_read_failed` |
+| cold start | EC2 stop 후 재시작 시 최신 container 자동 기동, `/health`·`/ready` 모두 `200` |
+
+"허용 prefix 내 없는 key" 항목은 설명이 필요합니다. `s3:ListBucket`을 주지 않으면 실제 S3는 없는 key에 `404`가 아니라 `403 AccessDenied`를 반환하므로, 애플리케이션은 이를 `s3_object_not_found`가 아니라 `s3_read_failed`로 안전하게 매핑합니다. `404`를 만들기 위해 `ListBucket`을 추가하지 않았고, 최소권한을 유지한 결과로 기록합니다.
+
+이번 검증에서 S3 bucket과 IAM policy는 AWS Console·CLI로 구성했습니다. Terraform으로 만들거나 `import`하지 않았으므로 Terraform이 관리하는 자원이 아닙니다. 애플리케이션 코드는 수정하지 않았고, 변경한 것은 AWS staging runtime 설정(환경변수·RDS CA bundle 배치·최신 image 재배포)뿐입니다.
 
 ### Railway FastAPI 배포 설정
 
@@ -1413,7 +1449,7 @@ FastAPI 프로세스와 PostgreSQL 연결 상태를 함께 확인합니다. 기�
 | `GET /api/v1/inspection-jobs/{job_id}` | 필요 | viewer 이상 |
 | `POST /api/v1/inspection-jobs` | 필요 | operator |
 | `GET /api/v1/etl-profiles`, `GET /api/v1/etl-loads`, `GET /api/v1/etl-loads/{id}` | 필요 | viewer 이상 |
-| `POST /api/v1/etl-loads` | 필요 | operator |
+| `POST /api/v1/etl-loads`, `POST /api/v1/etl-loads/s3` | 필요 | operator |
 | `POST /api/v1/etl-loads/{id}/promotion-preview` | 필요 | viewer 이상 |
 | `POST /api/v1/etl-loads/{id}/promotions` | 필요 | operator |
 | `GET /api/v1/catalog-promotions`, `GET /api/v1/catalog-promotions/{id}`, `GET /api/v1/catalog-promotions/{id}/audits` | 필요 | viewer 이상 |
@@ -1657,6 +1693,31 @@ Streamlit이 웹 ETL 실행 화면에서 사용할 수 있는 ETL 프로필 목�
 - 빈 파일, 크기 초과, ETL 변환 실패 등 잘못된 업로드: HTTP `400` (`invalid_upload`)
 
 동일한 `input_file_sha256`·`profile_name`·`profile_version` 조합으로 다시 요청하면 새 배치를 만들지 않고 기존 배치를 `created: false`로 반환합니다. 내부적으로는 CLI의 `etl.cli`·`etl.load_cli`가 호출하는 `run_pipeline()`·`load_standard_csv()`를 그대로 실행합니다.
+
+### `POST /api/v1/etl-loads/s3`
+
+파일 업로드 대신 서버에 설정된 S3 bucket에서 공급사 CSV를 읽어 같은 웹 ETL 흐름을 실행합니다. 요청 본문은 `profile_id`와 `object_key`만 받습니다.
+
+```json
+{
+  "profile_id": "sample_fashion_vendor_v1",
+  "object_key": "incoming/catalogguard/e2e/sample_vendor_valid.csv"
+}
+```
+
+bucket과 허용 prefix는 요청이 아니라 서버 환경변수 `CATALOGGUARD_ETL_S3_BUCKET`·`CATALOGGUARD_ETL_S3_PREFIX`로만 정합니다. 호출자는 bucket을 고를 수 없고, prefix 밖 `object_key`는 S3를 호출하기 전에 차단합니다. 객체는 HeadObject로 크기를 먼저 확인한 뒤 업로드와 동일한 상한까지만 읽습니다. 내려받은 bytes는 업로드 경로와 같은 `run_web_etl()`에 전달하므로 `run_pipeline()`·`load_standard_csv()`와 중복 방지·Actor Audit 동작이 모두 같습니다.
+
+응답 형식은 `POST /api/v1/etl-loads`와 동일하며, 오류는 다음과 같이 매핑합니다.
+
+| 상황 | HTTP | code |
+|---|---:|---|
+| 허용 prefix 밖 `object_key` | `400` | `s3_key_not_allowed` |
+| 파일명·크기 등 업로드 검증 실패 | `400` | `invalid_upload` |
+| S3가 객체 없음을 알린 경우 | `404` | `s3_object_not_found` |
+| S3 읽기 실패(권한 거부 포함) | `502` | `s3_read_failed` |
+| 서버에 bucket 미설정 | `503` | `s3_not_configured` |
+
+AWS 자격증명은 요청이나 환경변수로 받지 않고 boto3 기본 credential chain을 사용하므로, EC2에서는 Instance Role이 그대로 적용됩니다.
 
 ### `GET /api/v1/etl-loads`
 
@@ -2200,6 +2261,11 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 웹 ETL은 CSV만 지원하며 Excel/XLSX 업로드는 지원하지 않습니다.
 - 웹 ETL의 ETL 프로필은 서버 allowlist(`config/etl/*.json`)로 고정되어 있으며, 사용자가 새 프로필을 업로드하거나 만드는 기능은 없습니다.
 - Web ETL CSV 업로드 자체를 대상으로 하는 전용 Chromium Browser E2E는 아직 없습니다. 웹 ETL 핵심 로직은 API·Client·PostgreSQL 통합 테스트와 Streamlit AppTest로 검증합니다.
+- S3 ingestion은 호출자가 `object_key` 하나를 지정하는 pull 방식입니다. S3 event 알림·Lambda·SQS 기반 자동 수집과 prefix 일괄 처리는 지원하지 않습니다.
+- S3 source를 실제로 호출하는 Streamlit 화면은 없습니다. 현재는 API 직접 호출로만 사용합니다.
+- EC2 Role에 `s3:ListBucket`을 부여하지 않았으므로, 허용 prefix 안에 없는 key는 `404 s3_object_not_found`가 아니라 `502 s3_read_failed`로 응답합니다. 최소권한을 유지하기 위한 의도된 선택입니다.
+- AWS staging의 S3 bucket과 EC2 Role의 S3 read policy는 Console·CLI로 구성했으며 Terraform으로 관리하지 않습니다.
+- AWS staging S3 E2E는 합성 fixture 1건 기준 수동 검증이며, GitHub Actions에서 자동으로 재실행되지 않습니다.
 - Streamlit ETL 적재 이력 화면은 배치·staging 상품 조회는 읽기 전용으로 유지하면서, 선택한 batch에 대해 promotion preview와 승인된 운영 상품 반영을 FastAPI API로 요청합니다. staging 상품 직접 수정·삭제는 지원하지 않습니다.
 - staging 상품을 수정·삭제하는 API는 구현되어 있지 않습니다.
 - promotion은 품질 summary·reject·검수 오류·중복 identity가 없는 선택 batch만 대상으로 하며, 실제 외부 공급사 운영 데이터와 production catalog 반영은 검증하지 않았습니다.
