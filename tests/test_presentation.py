@@ -442,12 +442,15 @@ def test_translate_unknown_duplicate_product_content_message_keeps_original_text
 def test_translate_invalid_category_message_to_korean():
     issue = make_issue(
         rule="invalid_category",
-        message="category 'SHOES' is not one of ['BOTTOM', 'OUTER', 'TOP']",
+        message=(
+            "category 'ACCESSORY' is not one of "
+            "['BAG', 'BOTTOM', 'OUTER', 'SHOES', 'TOP']"
+        ),
     )
 
     message = translate_issue_message(issue)
 
-    assert message == "카테고리 'SHOES'는 허용된 카테고리가 아닙니다."
+    assert message == "카테고리 'ACCESSORY'는 허용된 카테고리가 아닙니다."
 
 
 def test_translate_non_numeric_stock_message_to_korean():

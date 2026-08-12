@@ -9,10 +9,10 @@ from ui import auth as ui_auth
 GROUP_CATEGORY_TEST_CSV = """product_group_id,product_id,product_name,category,color,size,stock,price,image_path
 G001,P001,기본 반팔 티셔츠 블랙,TOP,BLACK,M,10,19900,image1.jpg
 G001,P002,기본 반팔 티셔츠 화이트,TOP,WHITE,M,10,19900,image2.jpg
-G001,P003,기본 반팔 티셔츠 네이비,SHOES,NAVY,M,10,19900,image3.jpg
+G001,P003,기본 반팔 티셔츠 네이비,ACCESSORY,NAVY,M,10,19900,image3.jpg
 G002,P004,데님 팬츠 블랙,BOTTOM,BLACK,28,10,39900,image4.jpg
 G002,P005,데님 팬츠 블루,bottom,BLUE,30,10,39900,image5.jpg
-G003,P006,가죽 가방,BAG,BLACK,FREE,5,79000,image6.jpg
+G003,P006,가죽 가방,ACCESSORY,BLACK,FREE,5,79000,image6.jpg
 """.encode("utf-8")
 VALID_REQUEST_ID = "a29ae9a1c62f4152bb96f6513c323d96"
 JOB_ID = "12345678-1234-5678-1234-567812345678"
@@ -26,7 +26,7 @@ GROUP_CATEGORY_RESULTS = [
         "product_id": product_id,
         "error_field": "상품 그룹 카테고리 불일치",
         "reason": (
-            "상품 그룹 'G001'에 서로 다른 카테고리 'TOP', 'SHOES'가 "
+            "상품 그룹 'G001'에 서로 다른 카테고리 'TOP', 'ACCESSORY'가 "
             "함께 등록되어 있습니다."
         ),
         "recommendation": (
@@ -49,9 +49,9 @@ GROUP_CATEGORY_RESULTS.extend(
             "risk_level": "중간",
         }
         for product_group_id, product_id, reason in (
-            ("G001", "P003", "카테고리 'SHOES'는 허용된 카테고리가 아닙니다."),
+            ("G001", "P003", "카테고리 'ACCESSORY'는 허용된 카테고리가 아닙니다."),
             ("G002", "P005", "카테고리 'bottom'는 허용된 카테고리가 아닙니다."),
-            ("G003", "P006", "카테고리 'BAG'는 허용된 카테고리가 아닙니다."),
+            ("G003", "P006", "카테고리 'ACCESSORY'는 허용된 카테고리가 아닙니다."),
         )
     ]
 )
@@ -63,7 +63,7 @@ GROUP_CATEGORY_RESULTS.append(
         "error_field": "상품명·카테고리 불일치",
         "reason": (
             "상품명에서 '티셔츠'가 확인되어 상의 상품으로 추정되지만 "
-            "현재 카테고리는 '신발'입니다."
+            "현재 카테고리는 'accessory'입니다."
         ),
         "recommendation": (
             "상품명과 카테고리를 확인하고 올바른 카테고리로 수정하십시오."
@@ -342,10 +342,10 @@ def test_app_upload_filters_and_downloads_group_category_results(monkeypatch):
     assert preview["category"].tolist() == [
         "TOP",
         "TOP",
-        "SHOES",
+        "ACCESSORY",
         "BOTTOM",
         "bottom",
-        "BAG",
+        "ACCESSORY",
     ]
 
     results = find_result_dataframe(app)
@@ -356,7 +356,7 @@ def test_app_upload_filters_and_downloads_group_category_results(monkeypatch):
     assert set(category_results["검수 상태"]) == {"오류"}
     assert set(category_results["위험 수준"]) == {"중간"}
     assert all(
-        "'TOP', 'SHOES'" in reason
+        "'TOP', 'ACCESSORY'" in reason
         for reason in category_results["오류 이유"]
     )
     assert all(

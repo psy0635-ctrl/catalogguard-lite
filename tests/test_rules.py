@@ -248,8 +248,8 @@ def test_check_duplicate_product_content_excludes_missing_required_fields(field_
 
 def test_check_duplicate_product_content_excludes_invalid_categories():
     products = [
-        make_product(product_group_id="G001", product_id="P001", category="SHOES"),
-        make_product(product_group_id="G002", product_id="P002", category="SHOES"),
+        make_product(product_group_id="G001", product_id="P001", category="ACCESSORY"),
+        make_product(product_group_id="G002", product_id="P002", category="ACCESSORY"),
     ]
 
     duplicate_issues = check_duplicate_product_content(products)
@@ -356,7 +356,7 @@ def test_check_missing_required_fields_allows_full_product():
 
 
 def test_check_invalid_category_rejects_unknown_category():
-    products = [make_product(category="SHOES")]
+    products = [make_product(category="ACCESSORY")]
 
     issues = check_invalid_category(products)
 
@@ -1181,8 +1181,8 @@ def test_run_all_rules_keeps_missing_category_separate_from_group_mismatch():
 
 def test_run_all_rules_keeps_invalid_and_group_category_issues_distinct():
     products = [
-        make_product(product_id="P001", product_name="상품 A", category="SHOES"),
-        make_product(product_id="P002", product_name="상품 B", category="BAG"),
+        make_product(product_id="P001", product_name="상품 A", category="ACCESSORY"),
+        make_product(product_id="P002", product_name="상품 B", category="STATIONERY"),
     ]
 
     issues = run_all_rules(products)
@@ -1195,6 +1195,207 @@ def test_run_all_rules_keeps_invalid_and_group_category_issues_distinct():
     assert [
         issue.product_id for issue in issues if issue.rule == "invalid_category"
     ] == ["P001", "P002"]
+
+
+def test_run_all_rules_allows_shoes_product_without_category_issues():
+    products = [
+        make_product(
+            product_name="남성 러닝 운동화",
+            category="SHOES",
+            size="270",
+        )
+    ]
+
+    issues = run_all_rules(products)
+
+    assert issues == []
+
+
+def test_run_all_rules_allows_bag_product_with_free_size():
+    products = [
+        make_product(
+            product_name="레더 토트백",
+            category="BAG",
+            color="BLACK",
+            size="FREE",
+        )
+    ]
+
+    issues = run_all_rules(products)
+
+    assert issues == []
+
+
+@pytest.mark.parametrize(
+    ("product_name", "category"),
+    [
+        ("오버핏 반팔 티셔츠", "SHOES"),
+        ("데님 청바지", "BAG"),
+    ],
+)
+def test_run_all_rules_keeps_name_mismatch_for_allowed_shoes_and_bag(
+    product_name,
+    category,
+):
+    # SHOES/BAG는 허용 카테고리지만 상품명과 의미가 다르면 기존 경고는 그대로 나옵니다.
+    products = [make_product(product_name=product_name, category=category)]
+
+    issues = run_all_rules(products)
+
+    assert [issue.rule for issue in issues] == ["product_category_mismatch"]
+    assert issues[0].severity == "warning"
+
+
+@pytest.mark.parametrize("category", ["ACCESSORY", "shoes", "신발", "bag", "가방"])
+def test_check_invalid_category_still_rejects_non_canonical_values(category):
+    # 정식 입력은 대문자 canonical 값뿐이며 alias는 비교용으로만 유지합니다.
+    issues = check_invalid_category([make_product(category=category)])
+
+    assert [issue.rule for issue in issues] == ["invalid_category"]
+    assert issues[0].severity == "error"
+
+
+@pytest.mark.parametrize(
+    ("category", "size"),
+    [("SHOES", "270"), ("BAG", "FREE")],
+)
+def test_check_duplicate_product_content_includes_shoes_and_bag(category, size):
+    products = [
+        make_product(
+            product_group_id="G001",
+            product_id="P001",
+            product_name="공식 지원 상품",
+            category=category,
+            size=size,
+            price=59000,
+        ),
+        make_product(
+            product_group_id="G002",
+            product_id="P002",
+            product_name="공식 지원 상품",
+            category=category,
+            size=size,
+            price=59000,
+        ),
+    ]
+
+    issues = check_duplicate_product_content(products)
+
+    assert [issue.product_id for issue in issues] == ["P002"]
+    assert issues[0].rule == "duplicate_product_content"
+    assert check_invalid_category(products) == []
+
+
+def test_blank_bag_size_keeps_missing_required_field():
+    # BAG 공식 지원이 size optional을 뜻하지는 않습니다.
+    products = [
+        make_product(product_name="레더 토트백", category="BAG", size="")
+    ]
+
+    issues = run_all_rules(products)
+
+    assert [issue.rule for issue in issues] == ["missing_required_field"]
+    assert "size" in issues[0].message
+
+
+def test_run_all_rules_flags_group_category_mismatch_between_allowed_categories():
+    products = [
+        make_product(
+            product_id="P001",
+            product_name="남성 러닝 운동화",
+            category="SHOES",
+            size="270",
+        ),
+        make_product(
+            product_id="P002",
+            product_name="오버핏 반팔 티셔츠",
+            category="TOP",
+            color="NAVY",
+        ),
+    ]
+
+    issues = run_all_rules(products)
+
+    assert [
+        issue.product_id
+        for issue in issues
+        if issue.rule == "inconsistent_group_category"
+    ] == ["P001", "P002"]
+    assert [issue for issue in issues if issue.rule == "invalid_category"] == []
+
+
+def test_group_category_comparison_still_treats_alias_as_same_category():
+    # 그룹 비교는 alias를 같은 값으로 보지만, canonical이 아닌 입력 자체는 오류입니다.
+    products = [
+        make_product(
+            product_id="P001",
+            product_name="남성 러닝 운동화",
+            category="SHOES",
+            size="270",
+        ),
+        make_product(
+            product_id="P002",
+            product_name="남성 러닝 운동화",
+            category="shoes",
+            color="NAVY",
+            size="280",
+        ),
+    ]
+
+    issues = run_all_rules(products)
+
+    assert [
+        issue for issue in issues if issue.rule == "inconsistent_group_category"
+    ] == []
+    assert [
+        issue.product_id for issue in issues if issue.rule == "invalid_category"
+    ] == ["P002"]
+
+
+def test_shoes_group_with_numeric_sizes_only_has_no_size_system_warning():
+    products = [
+        make_product(
+            product_id=f"P00{index}",
+            product_name="남성 러닝 운동화",
+            category="SHOES",
+            color=f"COLOR{index}",
+            size=size,
+        )
+        for index, size in enumerate(["250", "260", "270"], start=1)
+    ]
+
+    issues = run_all_rules(products)
+
+    assert issues == []
+
+
+def test_shoes_group_with_mixed_size_systems_keeps_group_size_warning():
+    # 카테고리별 사이즈 판정은 하지 않으므로 SHOES에서도 체계 혼재는 그대로 경고합니다.
+    products = [
+        make_product(
+            product_id="P001",
+            product_name="남성 러닝 운동화",
+            category="SHOES",
+            color="BLACK",
+            size="M",
+        ),
+        make_product(
+            product_id="P002",
+            product_name="남성 러닝 운동화",
+            category="SHOES",
+            color="WHITE",
+            size="270",
+        ),
+    ]
+
+    issues = run_all_rules(products)
+
+    assert [
+        issue.product_id
+        for issue in issues
+        if issue.rule == "inconsistent_group_size_system"
+    ] == ["P001", "P002"]
+    assert [issue for issue in issues if issue.rule == "invalid_category"] == []
 
 
 def test_run_all_rules_keeps_name_mismatch_and_group_category_issues_distinct():

@@ -27,7 +27,7 @@ CATALOGGUARD_JWT_ACCESS_TOKEN_TTL_SECONDS_ENV_VAR = (
 )
 DEFAULT_JWT_ACCESS_TOKEN_TTL_SECONDS = 60 * 60
 # 검수 규칙 버전입니다. 규칙이 바뀌어 같은 CSV도 다시 저장해야 하면 이 값을 올립니다.
-INSPECTION_VERSION = "6"
+INSPECTION_VERSION = "7"
 
 DATA_DIR = BASE_DIR / "data"
 DEV_DATA_PATH = DATA_DIR / "dev" / "products_dev.csv"
@@ -69,7 +69,7 @@ REQUIRED_FIELDS = [
     "image_path",
 ]
 
-VALID_CATEGORIES = {"TOP", "BOTTOM", "OUTER"}
+VALID_CATEGORIES = {"TOP", "BOTTOM", "OUTER", "SHOES", "BAG"}
 
 CATEGORY_KEYWORDS = {
     "상의": (

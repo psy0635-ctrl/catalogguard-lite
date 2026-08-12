@@ -87,6 +87,30 @@ def test_find_category_mismatches_flags_bottom_item_in_bag_category():
     assert "current category is '가방'" in issues[0].message
 
 
+def test_find_category_mismatches_allows_matching_canonical_shoes_and_bag():
+    # 공식 canonical 입력도 기존 alias 정규화를 거쳐 같은 의미로 비교됩니다.
+    products = [
+        make_product(product_id="P001", product_name="남성 러닝 운동화", category="SHOES"),
+        make_product(product_id="P002", product_name="레더 토트백", category="BAG"),
+    ]
+
+    assert find_category_mismatches(products) == []
+
+
+def test_find_category_mismatches_flags_canonical_shoes_and_bag_mismatch():
+    products = [
+        make_product(product_id="P001", product_name="오버핏 반팔 티셔츠", category="SHOES"),
+        make_product(product_id="P002", product_name="데님 청바지", category="BAG"),
+    ]
+
+    issues = find_category_mismatches(products)
+
+    assert [issue.product_id for issue in issues] == ["P001", "P002"]
+    assert all(issue.rule == "product_category_mismatch" for issue in issues)
+    assert "current category is '신발'" in issues[0].message
+    assert "current category is '가방'" in issues[1].message
+
+
 def test_find_category_mismatches_skips_blank_product_names():
     products = [
         make_product(product_name=None, category="신발"),
