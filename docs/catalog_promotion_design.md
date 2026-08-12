@@ -6,7 +6,7 @@
 
 `catalog_products`, `catalog_promotion_runs`, `catalog_product_changes`의 SQLAlchemy 모델과 Alembic migration은 완료되었고, 현재 저장소에는 promotion preview service/API, 승인형 promotion transaction·upsert, preview hash 계산, promotion run·audit 조회 API, Streamlit UI와 Browser E2E도 구현되어 있다. 아래 5~11절은 설계 당시 정의한 품질 게이트·정책과 현재 구현 결과를 함께 기록한다.
 
-이후 `catalog_promotion_rollbacks`, `catalog_promotion_rollback_changes` 모델과 Alembic migration, rollback preview/실행 service·API, Streamlit rollback UI도 추가되었다. succeeded promotion run을 되돌리는 이 기능은 16~26절에서 다룬다.
+이후 `catalog_promotion_rollbacks`, `catalog_promotion_rollback_changes` 모델과 Alembic migration, rollback preview/실행 service·API, rollback 실행 이력·상품별 change audit 조회 API, Streamlit rollback UI도 추가되었다. succeeded promotion run을 되돌리는 이 기능은 16~27절에서 다룬다.
 
 ## 2. 현재 구조
 
@@ -312,13 +312,13 @@ POST /api/v1/etl-loads/{etl_load_run_id}/promotions
 
 현재 MVP에서는 개별 상품 선택 반영, 자동 삭제·비활성화, hard delete, 예약 반영, 권한 관리, promotion 자체의 Redis/Celery 처리, streaming·증분 ETL, preview 영구 저장을 제외한다. 실제 Railway/운영 DB가 아닌 합성 fixture와 테스트 PostgreSQL에서 promotion을 검증했다.
 
-succeeded promotion run 단위의 되돌리기는 16~26절의 rollback 기능으로 구현했다. 다만 이는 하나의 promotion run을 대상으로 한 사후 되돌리기이며, promotion 실행 자체를 취소하거나 미래 시점에 예약 실행하는 기능, 여러 promotion을 한 번에 되돌리는 일괄 rollback, 임의 시점으로 되돌리는 point-in-time recovery는 여전히 범위 밖이다.
+succeeded promotion run 단위의 되돌리기는 16~27절의 rollback 기능으로 구현했다. 다만 이는 하나의 promotion run을 대상으로 한 사후 되돌리기이며, promotion 실행 자체를 취소하거나 미래 시점에 예약 실행하는 기능, 여러 promotion을 한 번에 되돌리는 일괄 rollback, 임의 시점으로 되돌리는 point-in-time recovery는 여전히 범위 밖이다.
 
 ## 15. 최종 결정
 
 운영 상품 identity는 `(profile_name, product_id)`를 `(supplier_key, external_product_id)`라는 운영 모델 이름으로 표현한다. 이를 보장하는 persistence 모델·migration과 PostgreSQL 제약 검증은 완료했다. 현재 promotion은 품질 summary, reject, empty staging, batch 내부 중복, 재검수 오류를 배치 전체 차단 사유로 사용하고, preview와 실제 반영에서 동일 staging을 재검수하며 canonical preview hash로 stale 상태를 막는다.
 
-promotion 실행 후 잘못된 반영을 되돌려야 하는 문제는 rollback 기능으로 해결했다. rollback도 promotion과 같은 원칙을 따른다. preview 단계에서는 DB를 바꾸지 않고, 실행 직전 서버가 현재 상태를 다시 확인하며, 하나의 transaction으로 전체를 성공시키거나 전혀 반영하지 않는다. 자세한 설계와 검증은 16~26절에 기록한다.
+promotion 실행 후 잘못된 반영을 되돌려야 하는 문제는 rollback 기능으로 해결했다. rollback도 promotion과 같은 원칙을 따른다. preview 단계에서는 DB를 바꾸지 않고, 실행 직전 서버가 현재 상태를 다시 확인하며, 하나의 transaction으로 전체를 성공시키거나 전혀 반영하지 않는다. 자세한 설계와 검증은 16~27절에 기록한다.
 
 ## 16. Rollback 문제 정의
 
@@ -482,12 +482,82 @@ service level 확인은 사용자에게 바로 이해할 수 있는 오류(`alre
 - Transaction atomicity: 강제 실패 시 부분 변경 없음, `failed` run 1건만 기록
 - Alembic upgrade head, `0007`/`0006`으로의 downgrade와 재-upgrade, 단일 head
 
+이후 rollback 실행 이력과 상품별 change audit 조회(27절)를 추가하면서 검증 범위를 다음 계층까지 넓혔다.
+
+| 계층 | 검증 파일 | 확인 내용 |
+| --- | --- | --- |
+| Query service | `tests/test_catalog_promotion_rollback_query_service.py` | 목록·상세·change 조회의 정렬·pagination·읽기 전용(쓰기 없음)과 parent 없음 / change 0건 구분 |
+| API | `tests/test_api_catalog_promotion_rollbacks.py` | 세 GET endpoint의 기본 page·pagination 전달·잘못된 파라미터 `422`·안전한 `404`·parent 존재 시 빈 목록 |
+| API Client | `tests/test_catalogguard_api_client.py` | ID·pagination validation, 응답 shape validation, `delete`/`restore` action validation, `404` -> `CatalogPromotionRollbackNotFoundError` |
+| Streamlit | `tests/test_catalog_promotion_rollback_history_ui.py` | History·Detail·Change Audit 표 구성과 AppTest 렌더링, 빈 상태·안전한 오류, change pagination 시 상세 재조회 없음, 선택 변경 시 stale 상태 제거 |
+| RBAC | `tests/test_api_rbac.py` | 세 조회 endpoint의 `401`/`403` 경계 |
+| Actor Audit | `tests/test_actor_audit.py` | rollback run의 `actor_user_id`·`actor_username`이 JWT `current_user`에서만 기록 |
+| Browser E2E | `tests/e2e/test_etl_browser_e2e.py` | 실제 Chromium에서 Promotion -> Rollback -> History -> Detail -> 상품 Rollback 변경 Audit 렌더링과 PostgreSQL 최종 상태 |
+
 기준 저장소 상태의 GitHub Actions run `30888320849`이 성공했으며, 이 run의 `test` job 로그에서 위 PostgreSQL 통합 테스트가 skip 없이 실제로 실행되고 통과한 것을 확인했다. FastAPI 서버·PostgreSQL·`clients/catalogguard_api.py`를 실제로 연결해 rollback-preview/rollback API의 404·stale·중복 응답도 확인했다.
+
+Rollback 조회 계층까지 포함한 검증은 Rollback Change Audit 기능 완료 commit `abcea748e299009b4889b0daa98ad4c9c97e770b`을 대상으로 한 GitHub Actions run `31487868946`에서 확인했으며, 이 run의 `test`(`1451 passed`, `4 deselected`)·`browser-e2e`·`terraform-validate`·`kubernetes-smoke` 4개 job이 모두 성공했다. Browser E2E의 통과 test 수(2건)는 로컬 verbose 실행에서 확인한 값이고, CI에서는 같은 runner가 exit 0으로 끝나 `browser-e2e` job이 success인 것으로 확인한다. runner가 성공 시 pytest 출력을 보존하지 않기 때문이다.
 
 ## 26. Rollback 현재 한계
 
-- Rollback 전용 Streamlit AppTest와 Browser E2E는 아직 없다. 서비스·API 계층 PostgreSQL 통합 테스트와 실제 서버를 통한 수동 검증으로만 확인했다.
-- `already_rolled_back`, `rollback_not_eligible`, `rollback_failed` 같은 일부 오류 코드는 `clients/catalogguard_api.py`에서 전용 예외가 아닌 일반 오류로 처리된다. `preview_stale`만 전용 예외로 매핑되어 있다.
+- `already_rolled_back`, `rollback_not_eligible`, `rollback_failed` 같은 실행 계열 오류 코드는 `clients/catalogguard_api.py`에서 전용 예외가 아닌 일반 오류로 처리된다. 전용 예외는 `preview_stale`과 조회 계층의 `404`(`CatalogPromotionRollbackNotFoundError`)뿐이다.
 - 여러 promotion을 한 번에 되돌리는 일괄 rollback은 지원하지 않는다.
 - 임의 시점으로 되돌리는 point-in-time recovery는 지원하지 않으며, rollback은 하나의 succeeded promotion run 단위로만 동작한다.
-- rollback 자체에 대한 인증·권한 관리는 구현되어 있지 않다.
+- Change Audit 조회는 `limit`/`offset` pagination만 제공하고, action(`delete`/`restore`)·상품·기간 filter나 검색·export는 지원하지 않는다.
+- Browser E2E fixture는 INSERT promotion 2건을 되돌리는 delete-only 시나리오다. `restore` change가 화면에 표시되는 경로는 AppTest와 service·API 테스트로만 확인했고 실제 브라우저 시나리오는 없다.
+
+## 27. Rollback 실행 이력과 상품별 Change Audit 조회
+
+실행 API만 있을 때는 rollback 직후 응답으로만 결과를 알 수 있었다. 나중에 "언제 누가 무엇을 되돌렸는지"를 다시 확인하려면 DB를 직접 조회해야 했으므로, 읽기 전용 조회 endpoint 3개를 추가했다.
+
+| Endpoint | 권한 | 반환 |
+| --- | --- | --- |
+| `GET /api/v1/catalog-promotion-rollbacks` | viewer 이상 | rollback 실행 목록(상태 filter, `limit`/`offset`) |
+| `GET /api/v1/catalog-promotion-rollbacks/{rollback_run_id}` | viewer 이상 | 단일 rollback 실행 상세와 `preview_hash`·`preview_schema_version` |
+| `GET /api/v1/catalog-promotion-rollbacks/{rollback_run_id}/changes` | viewer 이상 | 그 실행이 상품별로 만든 change audit(`limit` 기본 `20`, 최대 `100`) |
+
+세 endpoint 모두 DB를 변경하지 않으므로 viewer도 조회할 수 있다. 실제 되돌리기(`POST .../rollback`)만 operator로 제한한다.
+
+### 27.1 run-level count와 item-level audit
+
+`restored_count`·`deleted_count`·`conflict_count`는 "몇 건을 되돌렸는가"만 알려준다. `/changes`는 그 아래 단계를 보여준다.
+
+```text
+어떤 catalog product가
+어떤 원본 promotion audit(original_audit_id)을 되돌린 것이고
+delete인지 restore인지
+어떤 필드가 바뀌었고
+그 필드의 변경 전·후 값이 무엇인지
+```
+
+응답 항목은 `rollback_change_id`, `rollback_run_id`, `original_audit_id`, `catalog_product_id`, `action`, `changed_fields`, `before_data`, `after_data`, `created_at`이다. `original_audit_id`가 원본 `catalog_product_changes.id`를 가리키므로, rollback audit에서 원본 promotion audit으로 역추적할 수 있다.
+
+### 27.2 parent 없음과 빈 audit 구분
+
+빈 결과를 오류로 다루지 않는다.
+
+```text
+rollback run 자체가 없음        -> 404
+rollback run은 있고 change 0건  -> 200 + items=[]
+```
+
+`blocked`·`failed` rollback은 상품을 전혀 바꾸지 않으므로 change가 0건인 것이 정상이다. 이를 404로 해석하면 정상 상태를 오류로 표시하게 되므로, query service는 parent가 없을 때만 `None`을 반환하고 route는 그 경우에만 `404`로 변환한다.
+
+### 27.3 정렬과 pagination
+
+`created_at DESC, id DESC`로 정렬한다. 같은 transaction에서 만들어진 change들은 `created_at`이 같을 수 있으므로, `id`를 tie-breaker로 두어 page 사이에 순서가 흔들리거나 같은 행이 중복·누락되지 않게 한다. pagination은 `limit`/`offset` 방식의 MVP다.
+
+### 27.4 Streamlit 표시
+
+Rollback 실행 상세 아래에 `상품 Rollback 변경 Audit` 영역이 있고, 표는 `Change ID`, `원본 Audit ID`, `상품 ID`, `외부 상품 ID`, `변경 유형`, `변경 필드`, `변경 전`, `변경 후`, `변경 시각` 컬럼으로 구성한다. `changed_fields`는 필드마다 한 행으로 펼친다.
+
+action은 사용자 표현으로 바꾼다.
+
+```text
+delete  -> 상품 삭제
+restore -> 이전 상태 복원
+```
+
+`delete`는 `after_data`가 `NULL`이므로 외부 상품 ID를 `before_data`에서 가져오고, 변경 후 값은 빈 칸 대신 `삭제됨`으로 표시한다.
+
+상태 관리에서 중요한 것은 stale 방지다. 선택한 rollback이 바뀌면 이전 실행의 change 응답 cache와 offset을 함께 초기화해 다른 rollback의 audit이 화면에 남지 않게 하고, Change Audit page만 이동할 때는 상세 응답 cache를 재사용해 불필요한 재조회를 하지 않는다.

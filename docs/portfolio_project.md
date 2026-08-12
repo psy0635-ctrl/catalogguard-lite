@@ -40,7 +40,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 9. 운영 상품 persistence를 ETL staging과 분리하고, 공급사별 복합 identity·succeeded partial unique index·append-only JSONB audit·FK RESTRICT를 PostgreSQL 18에서 migration upgrade·downgrade·재-upgrade와 제약 테스트로 검증했습니다.
 10. ETL batch 선택 → promotion preview → 변경 전·후 확인 → 명시적 승인 → preview hash 재검증 → 운영 상품 insert/update를 연결하고, transaction·stale 차단·중복 성공 방지·promotion run·append-only audit을 구현했습니다. Chromium E2E에서는 브라우저 메시지뿐 아니라 PostgreSQL 최종 상태까지 확인했습니다.
 11. CLI 전용이던 ETL 실행을 Streamlit 업로드 화면과 FastAPI `POST /api/v1/etl-loads`로 확장하면서 변환·적재 로직(`run_pipeline()`, `load_standard_csv()`)은 새로 만들지 않고 CLI와 그대로 공유하도록 설계했으며, 배포 이미지에서 새 import 경로가 실제로 깨지는 packaging 결함과 신규 UI가 만든 접근성 이름 충돌을 CI runtime smoke·Browser E2E로 직접 잡아 최소 범위로 수정했습니다.
-12. succeeded promotion을 되돌리는 rollback을 추가하면서 과거 값으로 단순 덮어쓰지 않고, 되돌리기 직전 현재 운영 상품이 해당 promotion이 만든 결과 그대로인지 재확인해 이후 발생한 정상 변경은 conflict로 보존하도록 구현했습니다. preview hash 재계산, confirmation 검증, 단일 transaction 원자성과 중복 rollback 이중 방어(service·DB unique index)를 PostgreSQL 통합 테스트로 검증했습니다.
+12. succeeded promotion을 되돌리는 rollback을 추가하면서 과거 값으로 단순 덮어쓰지 않고, 되돌리기 직전 현재 운영 상품이 해당 promotion이 만든 결과 그대로인지 재확인해 이후 발생한 정상 변경은 conflict로 보존하도록 구현했습니다. preview hash 재계산, confirmation 검증, 단일 transaction 원자성과 중복 rollback 이중 방어(service·DB unique index)를 PostgreSQL 통합 테스트로 검증했습니다. 되돌리기를 실행하는 데서 끝내지 않고 rollback 실행 이력·상세와 상품별 delete/restore change audit 조회 API를 추가해 Streamlit 상세 화면까지 연결했으며, 실제 Chromium E2E에서 Change Audit 화면 표시와 PostgreSQL audit 관계·최종 Catalog 상태를 함께 검증해 run 단위 결과에서 상품 단위 audit까지 검증 깊이를 넓혔습니다.
 13. Streamlit 로그인과 FastAPI JWT Access Token 발급, viewer(조회)·operator(운영 데이터 변경) 2개 역할 분리를 구현했습니다. `get_current_user()`가 토큰의 role을 그대로 신뢰하지 않고 매 요청마다 PostgreSQL `users` 테이블에서 role·is_active를 다시 확인하도록 설계해, 계정을 비활성화하면 이미 발급된 토큰도 즉시 차단되게 했습니다. 검수·ETL·Promotion·Rollback 전체 endpoint에 401(인증 실패)/403(권한 부족) 경계를 적용하고 실제 PostgreSQL 사용자·JWT로 검증했습니다.
 14. Authentication 도입 과정에서 인증 dependency가 route와 같은 SQLAlchemy Session을 공유하며 SELECT가 트랜잭션을 암묵적으로 시작(autobegin)시켜 이후 쓰기 트랜잭션과 충돌하는 문제를 실제 Browser E2E로 발견하고, 관련 없는 사전 조회에는 독립된 Session을 쓰도록 최소 범위로 수정했습니다. 같은 원인으로 이미 존재하던 sync inspection API의 PostgreSQL transaction 충돌도 실제 PostgreSQL regression test로 재현·수정하고, 기존 monkeypatch 기반 테스트가 놓친 Session 상호작용 검증 공백을 보완했습니다.
 15. RBAC가 "누가 실행할 수 있는지"만 통제하고 "누가 실행했는지"는 남기지 않는다는 한계를 확인한 뒤, 새 범용 Audit 테이블 대신 기존 `ETLLoadRun`·`CatalogPromotionRun`·`CatalogPromotionRollback` 실행 이력에 `actor_user_id`(`users.id` FK, `ON DELETE SET NULL`)·`actor_username`(snapshot) 컬럼을 추가하는 Actor Audit MVP를 구현했습니다. actor는 request body가 아니라 인증된 JWT `current_user`에서만 가져오도록 해 위조를 원천적으로 차단했고, 실제 PostgreSQL로 JWT actor 기록·401/403·actor 위조 방지·Promotion 실패 시 기록·legacy row 호환을 검증하는 regression test 10개를 추가했습니다.
@@ -189,15 +189,15 @@ catalogguard_ready.csv + etl_summary.json
 | 샘플 CSV 검수 결과 | 오류 6건, 주의 0건 |
 | ETL API client·UI 검증 | 응답 schema, nullable, request ID, stale 상태와 Streamlit AppTest 범위 |
 | promotion preview·service·API·concurrency 검증 | preview hash, 승인, 차단·stale·failed, transaction, 중복 성공 방지와 audit |
-| Chromium 브라우저 E2E | ETL reject 마스킹과 promotion 승인·반영, 브라우저 오류 및 PostgreSQL 최종 상태 |
+| Chromium 브라우저 E2E | ETL reject 마스킹, promotion 승인·반영·이력·audit, rollback 실행·이력·상세·상품 Rollback 변경 Audit, 브라우저 오류 및 PostgreSQL 최종 상태 |
 | 샘플 ETL CLI 결과 | 전체 3건, 정상 변환 2건, 오류 행 1건, 종료 코드 0 |
-| Web ETL·Rollback 검증 | `POST /api/v1/etl-loads`·`GET /api/v1/etl-profiles`, rollback preview/실행 API의 PostgreSQL 통합·API·client·UI 테스트 |
+| Web ETL·Rollback 검증 | `POST /api/v1/etl-loads`·`GET /api/v1/etl-profiles`, rollback preview/실행 API와 rollback 이력·상세·상품별 change audit 조회 API의 PostgreSQL 통합·API·client·UI 테스트 |
 | Actor Audit 검증 | 기존 `tests/test_actor_audit.py` 10 scenarios에 Inspection migration·Sync actor·위조 방지·dedup 최초 actor·사용자 삭제 snapshot·Redis legacy payload·Celery Worker·실제 Async E2E 검증을 추가 |
 | Prometheus Metrics 검증 | `tests/test_metrics.py` 32 scenarios: env parsing, `/metrics` disabled=404/no-op, route template cardinality 방지, `unmatched`/`5xx` 집계, 민감정보 미노출, Web ETL created/duplicate/failed와 row 중복 집계 방지, 실제 PostgreSQL 신규+중복 ETL |
 | Kubernetes smoke 검증 | kind 실제 cluster에서 PostgreSQL rollout·Alembic Migration Job condition=complete·FastAPI rollout·Service 경유 `GET /health`·`GET /ready` HTTP 200(pytest 범위 밖, `kubernetes-smoke` job) |
 | Terraform 검증 | `terraform fmt -check -recursive`·`init -backend=false -lockfile=readonly`·`validate` 성공과 mock provider `terraform test` `2 passed, 0 failed`(run 2개·assertion 12개, pytest 범위 밖, `terraform-validate` job) |
-| 최신 로컬 전체 pytest | `1359 passed`, `0 skipped`, `4 deselected`, `0 failed`, warnings 0(Inspection Actor Audit 검증, 일회성 PostgreSQL·Redis 환경) |
-| 최신 기준 CI | GitHub Actions run `31160915277` success (Terraform 기능 검증 commit `38385f0`, `test`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate` 4개 job) |
+| Rollback Change Audit 기능 완료 commit 기준 전체 pytest | `1451 passed`, `0 skipped`, `4 deselected`, `0 failed`, warnings 0(일회성 PostgreSQL·Redis 서비스 컨테이너. Chromium E2E는 `-m "not e2e"`로 제외되어 별도 job에서 실행) |
+| Rollback Change Audit 기능 완료 commit 기준 CI | commit `abcea748e299009b4889b0daa98ad4c9c97e770b`을 대상으로 한 GitHub Actions run `31487868946` success (`test`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate` 4개 job) |
 | 최신 Alembic head | `20260810_0012`(Inspection Actor Audit, single head) |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
 
@@ -355,7 +355,7 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 | `tests/test_api_etl_web_run.py` | `POST /api/v1/etl-loads` HTTP 상태·오류 code·응답 계약 |
 | `tests/test_api_etl_loads.py` | ETL 배치 목록·상세 HTTP 응답과 파라미터·404 계약 |
 | `tests/test_etl_query_service.py` | 실제 PostgreSQL의 ETL 검색·정렬·페이지네이션·NULL·배치 격리 |
-| `tests/test_catalogguard_api_client.py` | ETL client 파라미터·응답 shape·SHA-256·nullable·404/request ID 검증 |
+| `tests/test_catalogguard_api_client.py` | ETL·Promotion·Rollback client 전체의 파라미터·pagination validation, 응답 shape·SHA-256·nullable 검증, rollback change의 `delete`/`restore` action 검증과 404/request ID mapping |
 | `tests/test_etl_load_history_ui.py` | ETL 순수 helper와 Streamlit AppTest 검증 |
 | `tests/test_api_catalog_promotion_preview.py` | promotion preview endpoint와 응답·차단 조건 검증 |
 | `tests/test_api_catalog_promotions.py` | 승인·hash·blocked/stale/failed 응답과 promotion endpoint 검증 |
@@ -363,7 +363,10 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 | `tests/test_catalog_promotion_service.py` | transaction upsert, run 상태와 append-only audit 검증 |
 | `tests/test_catalog_promotion_concurrency.py` | 동시 promotion의 lock·중복 성공 방지·안전한 실패 검증 |
 | `tests/test_catalog_promotion_rollback_contract.py` | rollback preview·conflict 판정·실행 transaction·duplicate rollback 방어의 PostgreSQL 통합 검증 |
-| `tests/e2e/test_etl_browser_e2e.py` | 실제 Chromium의 ETL 탭·검색·상세·promotion 승인·반영·reject 마스킹·브라우저 오류와 PostgreSQL 최종 상태 검증 |
+| `tests/test_catalog_promotion_rollback_query_service.py` | rollback 목록·상세·change 조회의 정렬·pagination·읽기 전용 동작과 "parent 없음(`None`)"·"change 0건" 구분을 실제 PostgreSQL로 검증 |
+| `tests/test_api_catalog_promotion_rollbacks.py` | rollback 조회 endpoint 3개의 기본 page·pagination 전달·잘못된 파라미터 422·안전한 404와 parent 존재 시 빈 목록 200 검증 |
+| `tests/test_catalog_promotion_rollback_history_ui.py` | Rollback History·Detail·Change Audit의 표 구성과 Streamlit AppTest 렌더링, 빈 상태·안전한 오류, change page 이동 시 상세 재조회 없음, 선택 변경 시 stale 상태 제거 검증 |
+| `tests/e2e/test_etl_browser_e2e.py` | 실제 Chromium의 ETL 탭·검색·상세, promotion 승인·반영·이력·audit, rollback preview·승인·실행·이력·상세와 상품 Rollback 변경 Audit 표시, reject 마스킹·브라우저 오류와 PostgreSQL 최종 상태 검증 |
 | `scripts/run_etl_browser_e2e.py` | 테스트 DB migration, ETL CLI·Loader, FastAPI·Streamlit readiness, Playwright 실행과 cleanup |
 | `tests/etl/` | 공급사 프로필 검증, 행 변환, 파일 교체, CLI와 기존 검수 흐름 호환성 |
 | `tests/test_api_inspections.py` | ETL 출력과 연동되는 FastAPI CSV 검수·중복 결과 재사용·응답 계약 |
@@ -371,10 +374,10 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 | `tests/test_actor_audit.py` | Web ETL·Promotion·Rollback의 `actor_user_id`·`actor_username`이 JWT `current_user`에서만 기록되는지, viewer 403(세 endpoint)·Web ETL anonymous 401, request body 위조 무시, Promotion 실패 기록, legacy row 호환을 실제 PostgreSQL로 검증(10 scenarios) |
 | `tests/test_metrics.py` | `CATALOGGUARD_METRICS_ENABLED` parsing, `/metrics` disabled=404·instrumentation no-op, HTTP request counter·duration histogram, 동적 ID route template 집계와 `unmatched`/`5xx` 고정 label, 민감정보 미노출, Web ETL created/duplicate/failed와 row 중복 집계 방지를 실제 PostgreSQL 포함해 검증(32 scenarios) |
 
-통계 집계 함수와 서버 응답 적용 helper에는 정렬, 빈 값 처리, 필수 컬럼 검증, 입력 불변성, TOP 5 적용 위치, malformed 응답 차단을 확인하는 테스트를 추가했습니다. 최신 기능은 GitHub Actions의 PostgreSQL 18 서비스에서 migration과 ETL staging 적재까지 실행해 다음 결과를 확인했습니다.
+통계 집계 함수와 서버 응답 적용 helper에는 정렬, 빈 값 처리, 필수 컬럼 검증, 입력 불변성, TOP 5 적용 위치, malformed 응답 차단을 확인하는 테스트를 추가했습니다. Rollback Change Audit 기능 완료 commit 기준 CI 결과는 6.5절 표의 run `31487868946`이며, 아래는 ETL·promotion 기능을 처음 CI에서 연결해 확인하던 시점의 run 기록입니다.
 
 ```text
-기준 저장소의 GitHub Actions run `30972097167`: success
+당시 기준 저장소의 GitHub Actions run `30972097167`: success
 AWS Docker runtime smoke: image build·import(`api`·`services`·`workers`·`etl` 포함)·UID 10001·migration·기본 CMD Uvicorn·`/health` HTTP 200 확인
 Web ETL·promotion·rollback preview·service·API·client·UI·concurrency 검증 파일 포함
 Chromium promotion E2E: 실제 반영 후 PostgreSQL 최종 상태 확인
@@ -383,7 +386,7 @@ Streamlit startup smoke: `/_stcore/health` 범위는 workflow 결과로 확인
 
 ETL 적재에서는 표준 CSV 2행을 최초 적재하고 같은 파일을 재실행해 `created=False`와 중복 상품 미생성을 확인했습니다. promotion에서는 합성 batch를 preview한 뒤 승인과 hash를 함께 보내 운영 상품 insert/update, `succeeded` run, audit 저장을 확인하고, 같은 batch의 두 번째 성공 요청은 기존 결과를 재사용하는지 확인했습니다. stale hash, 검수 오류·reject·중복 identity 차단, transaction rollback, malformed API 응답 거부와 Streamlit 상태 초기화도 검증했습니다. 모든 PostgreSQL 결과는 운영 DB가 아닌 테스트 환경의 결과입니다.
 
-GitHub Actions CI에서는 `main` 브랜치 push 또는 `main` 대상 pull request마다 일회성 PostgreSQL 18·Redis 7.4 서비스 컨테이너를 시작합니다. 두 서비스는 workflow 실행 중에만 사용할 테스트용 구성으로 Railway나 운영 DB·Redis와 분리됩니다. 기준 저장소 상태의 run `30972097167`은 성공했으며, Alembic·pytest·AWS Docker runtime smoke·FastAPI·Celery 비동기 E2E·Streamlit startup과 별도 Chromium promotion E2E의 세부 결과는 workflow 실행 로그를 기준으로 확인합니다.
+GitHub Actions CI에서는 `main` 브랜치 push 또는 `main` 대상 pull request마다 일회성 PostgreSQL 18·Redis 7.4 서비스 컨테이너를 시작합니다. 두 서비스는 workflow 실행 중에만 사용할 테스트용 구성으로 Railway나 운영 DB·Redis와 분리됩니다. 당시 기준이던 run `30972097167`은 성공했으며, Alembic·pytest·AWS Docker runtime smoke·FastAPI·Celery 비동기 E2E·Streamlit startup과 별도 Chromium E2E의 세부 결과는 workflow 실행 로그를 기준으로 확인합니다.
 
 ```text
 main push 또는 main 대상 pull request
@@ -402,7 +405,7 @@ main push 또는 main 대상 pull request
 -> Streamlit 프로세스 종료
 ```
 
-run `30972097167`의 workflow 로그를 직접 확인한 결과 `Run tests` 단계는 `1189 passed, 4 deselected in 32.22s`로 종료되었으며(`0 skipped`, `0 failed`), AWS Docker runtime smoke와 별도 `browser-e2e` job도 모두 success였습니다. 이 숫자는 해당 커밋·run 시점의 실제 실행 결과이며, 이후 커밋에서 테스트가 추가·삭제되면 달라질 수 있으므로 실행마다 실제 CI 로그를 기준으로 확인합니다.
+run `30972097167`의 workflow 로그를 직접 확인한 결과 `Run tests` 단계는 `1189 passed, 4 deselected in 32.22s`로 종료되었으며(`0 skipped`, `0 failed`), AWS Docker runtime smoke와 별도 `browser-e2e` job도 모두 success였습니다. 이 숫자는 해당 커밋·run 시점의 실제 실행 결과이며, 이후 커밋에서 테스트가 추가·삭제되면 달라질 수 있으므로 실행마다 실제 CI 로그를 기준으로 확인합니다. Rollback Change Audit 기능 완료 commit 기준 run `31487868946`의 같은 단계는 `1451 passed, 4 deselected`로 종료되었습니다.
 
 ## 6.12 샘플 데이터 기준 결과
 
@@ -582,6 +585,33 @@ Streamlit이 combobox의 accessible name을 `"Selected {선택값}. {label}"` �
 #### 재발 방지 기준
 
 새 위젯을 추가할 때 기존 label과의 accessible name 중복 여부를 문자열 포함 관계까지 확인합니다. 테스트가 실패하면 selector를 완화하기 전에 UI 쪽 접근성 이름 충돌인지 먼저 확인합니다.
+
+### 가상 스크롤 표에서 Browser 검증과 DB 검증의 책임 분리
+
+#### 문제
+
+Rollback Change Audit을 Chromium E2E에 추가하면서, 되돌린 상품 2개가 모두 화면에 보이는지 확인하려 했습니다. 그런데 Streamlit `st.dataframe`은 가상 스크롤을 사용해 브라우저 DOM에 표의 모든 행이 항상 존재하지는 않습니다. 두 상품의 변경 필드를 행으로 펼치면 22행이 되는데, 첫 화면에 노출되는 것은 그중 앞부분뿐이었고 두 번째 상품은 렌더링 경계에 걸쳐 있었습니다.
+
+#### 판단
+
+두 번째 상품 행에 의존하는 assertion은 로컬에서는 통과하지만 CI의 렌더링 차이로 간헐 실패(flaky)할 수 있고, 실패해도 제품 결함이 아니라 테스트 문제입니다. 그래서 그 assertion을 제거하고 검증 책임을 나눴습니다.
+
+```text
+Browser  -> 사용자가 Change Audit 화면을 실제로 볼 수 있는가
+            (제목, 표 컬럼, 상품 삭제 표시, 삭제됨 표시, 전체 건수, 안정적으로 렌더링되는 상품·필드)
+
+PostgreSQL -> 되돌린 대상 전체가 정확히 기록됐는가
+            (change 2건이 모두 delete, before_data의 상품 ID 집합이 대상 상품 집합과 일치,
+             original_audit_id 집합이 원본 promotion audit ID 집합과 일치)
+```
+
+#### 함께 고친 것
+
+처음에는 표가 그려지기 전에 화면 텍스트를 읽어 간헐 실패가 났습니다. 임의 대기(`time.sleep`)를 넣는 대신, 표 안에만 존재하는 문자열이 나타날 때까지 Playwright의 auto-wait로 기다린 뒤 읽도록 바꿨습니다.
+
+#### 결과
+
+수정 후 로컬에서 7회 연속, Linux CI에서 1회 성공했습니다. "브라우저는 사용자가 보는 것을, DB는 데이터 정합성을 검증한다"는 기준을 세워 두면 UI 렌더링 세부 구현에 테스트가 끌려다니지 않는다는 점을 확인했습니다.
 
 ### SQLAlchemy autobegin과 sync inspection transaction 충돌
 
@@ -823,7 +853,7 @@ promotion과 같은 원칙으로 preview hash(canonical JSON SHA-256)를 계산�
 
 #### 검증
 
-로컬 disposable PostgreSQL에서 상품 하나가 CHECK constraint를 위반하도록 강제해, 두 상품 모두 rollback 시도 전 값을 그대로 유지하고 `catalog_promotion_rollback_changes`가 0건, `failed` run 1건만 남는 all-or-nothing 동작을 확인했습니다. `tests/test_catalog_promotion_rollback_contract.py`는 INSERT 삭제·UPDATE 복원·conflict 차단과 최신 값 유지·stale hash 차단·duplicate rollback을 service 예외와 DB partial unique index 양쪽에서 방어하는지를 실제 PostgreSQL 통합 테스트로 확인했습니다. Rollback 전용 Streamlit AppTest와 Browser E2E는 아직 없으며, 이 부분은 서비스·API 계층 PostgreSQL 통합 테스트와 실제 FastAPI 서버를 통한 수동 검증으로 확인했습니다.
+로컬 disposable PostgreSQL에서 상품 하나가 CHECK constraint를 위반하도록 강제해, 두 상품 모두 rollback 시도 전 값을 그대로 유지하고 `catalog_promotion_rollback_changes`가 0건, `failed` run 1건만 남는 all-or-nothing 동작을 확인했습니다. `tests/test_catalog_promotion_rollback_contract.py`는 INSERT 삭제·UPDATE 복원·conflict 차단과 최신 값 유지·stale hash 차단·duplicate rollback을 service 예외와 DB partial unique index 양쪽에서 방어하는지를 실제 PostgreSQL 통합 테스트로 확인했습니다. 이후 rollback 실행 이력·상세와 상품별 change audit 조회를 추가하면서 검증도 함께 넓혔습니다. `tests/test_catalog_promotion_rollback_query_service.py`와 `tests/test_api_catalog_promotion_rollbacks.py`가 조회 계층의 정렬·pagination과 "rollback run 없음(404)" / "change 0건(200 + 빈 목록)" 구분을 확인하고, `tests/test_catalog_promotion_rollback_history_ui.py`가 Streamlit History·Detail·Change Audit 화면을 AppTest로 확인합니다. 실제 Chromium E2E(`tests/e2e/test_etl_browser_e2e.py`)는 Promotion 반영부터 Rollback 실행, Rollback 이력·상세, `상품 Rollback 변경 Audit` 표시까지 한 흐름으로 진행한 뒤 PostgreSQL에서 rollback change 2건이 모두 `delete`인지, `original_audit_id` 집합이 원본 `catalog_product_changes.id` 집합과 일치하는지, 되돌린 뒤 운영 상품이 0건인지를 확인합니다. 이 수치는 합성 E2E fixture(INSERT promotion 2건) 기준 결과이며 제품이 항상 보장하는 값이 아닙니다.
 
 ### ETL 적재 배치 조회 API
 
@@ -876,7 +906,7 @@ Streamlit은 `CatalogGuardApiClient`를 통해 웹 ETL 실행, 목록·상세 �
 
 로컬 Chromium 실행은 `python scripts/run_etl_browser_e2e.py`로 수행하며 `DATABASE_URL`은 loopback 테스트 PostgreSQL만 허용한다. 실패 시 screenshot·HTML·FastAPI·Streamlit·Playwright 로그를 `artifacts/browser-e2e/`에 보존하고 runner가 시작한 프로세스와 임시 파일을 정리한다. GitHub Actions에는 기존 Redis 기반 일반 테스트와 분리된 PostgreSQL·Chromium `browser-e2e` job을 추가했으며, 실패 artifact만 업로드하도록 구성했다. 운영 DB·실제 공급사·모바일 브라우저는 범위에서 제외했다.
 
-이 E2E는 ETL 검색·상세와 promotion 화면만 다루며, 웹 ETL CSV 업로드 화면 자체를 처음부터 끝까지 조작하는 전용 시나리오는 아직 없다. 다만 웹 ETL selectbox 추가로 이 기존 E2E가 실제 회귀를 잡은 사례가 있다(6.13 "구현 중 해결한 문제" 참고). 웹 ETL 핵심 실행 로직은 이 브라우저 E2E가 아니라 API·client·PostgreSQL 통합 테스트와 Streamlit AppTest로 검증한다.
+이 E2E는 ETL 검색·상세, promotion 화면과 rollback 실행·이력·상세·상품 Rollback 변경 Audit 화면을 다루며, 웹 ETL CSV 업로드 화면 자체를 처음부터 끝까지 조작하는 전용 시나리오는 아직 없다. 다만 웹 ETL selectbox 추가로 이 기존 E2E가 실제 회귀를 잡은 사례가 있다(6.13 "구현 중 해결한 문제" 참고). 웹 ETL 핵심 실행 로직은 이 브라우저 E2E가 아니라 API·client·PostgreSQL 통합 테스트와 Streamlit AppTest로 검증한다.
 
 ### 두 번째 합성 공급사로 검증한 확장성
 
@@ -1322,7 +1352,7 @@ terraform test -> Success! 2 passed, 0 failed.
 
 Sync 통합 검증은 실제 JWT actor 저장, form 위조 무시, 동일 파일·버전 재요청 시 최초 actor 유지, 사용자 삭제 뒤 FK는 `NULL`이지만 username snapshot은 남는 동작을 실제 PostgreSQL commit 결과로 확인했습니다. Async 검증은 실제 Redis·Celery worker·FastAPI 요청을 연결해 job 완료, 단일 Inspection row 생성, actor 저장과 dedup을 확인했습니다.
 
-최신 전체 검증 결과는 다음과 같습니다.
+이 작업 시점의 전체 검증 결과는 다음과 같습니다(Rollback Change Audit 기능 완료 commit 기준 수치는 6.5절 표를 따릅니다).
 
 ```text
 1359 passed

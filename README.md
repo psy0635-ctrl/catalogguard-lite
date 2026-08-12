@@ -100,6 +100,9 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - Promotion Rollback preview로 대상 상품과 현재 Catalog 상태의 conflict 확인
 - Preview hash 재검증과 서버 confirmation을 거치는 transaction 기반 Rollback
 - INSERT promotion 상품 삭제, UPDATE promotion 상품 이전 상태 복원과 원본 promotion audit 보존
+- Rollback 실행 이력 목록·상세 조회와 상품별 Rollback Change Audit(delete/restore, 원본 Audit ID, 변경 필드별 전·후 값) 조회
+- Streamlit에서 Rollback 실행 이력·상세·상품 Rollback 변경 Audit 확인과 reload 없는 이력 갱신
+- 실제 Chromium E2E에서 Rollback Change Audit 화면 표시와 PostgreSQL audit·최종 Catalog 상태까지 검증
 - Streamlit 로그인과 JWT Access Token 발급, viewer(조회)·operator(운영 데이터 변경) 역할 분리
 - FastAPI의 모든 보호된 endpoint에서 현재 사용자와 역할을 서버가 최종 검증(Streamlit 버튼 비활성화는 편의 기능일 뿐 실제 보안 경계는 아님)
 - Sync·Async Inspection과 Web ETL·Promotion·Rollback이 새 실행 이력 row를 만들면 인증된 JWT `current_user`를 actor로 기록(Actor Audit MVP). 동일 CSV·검수 버전의 기존 `inspection_run`을 재사용할 때는 최초 actor를 유지
@@ -178,6 +181,9 @@ API 오류 발생
 -> Promotion 실행 이력 조회
 -> 필요 시 Rollback Preview 확인
 -> conflict 없으면 confirmation 후 Rollback 실행(actor 포함 rollback run 저장)
+-> Rollback 실행 이력 갱신
+-> Rollback 실행 선택 후 상세 조회
+-> 상품별 Rollback 변경 Audit 확인
 ```
 
 웹 ETL 실행 흐름은 다음과 같습니다.
@@ -198,7 +204,7 @@ Streamlit ETL 실행 영역
 
 웹 ETL 성공이 운영 상품 반영을 자동으로 시작하지는 않습니다. 사용자가 ETL 적재 이력에서 새로 생성된 batch를 직접 선택한 뒤 기존 promotion preview·승인 흐름을 그대로 사용합니다. 배치 조회 API가 CatalogGuard 검수나 promotion을 자동으로 실행하는 것도 아닙니다. 생성된 표준 CSV의 검수, staging 적재 이력 조회, 선택한 batch의 promotion preview와 실제 반영은 각각의 API·CLI 호출로 구분합니다. Streamlit은 DB에 직접 쓰지 않고 `CatalogGuardApiClient`를 통해 FastAPI를 호출합니다.
 
-succeeded promotion run은 되돌릴 수 있습니다. Rollback preview는 해당 promotion이 만든 after 상태와 현재 Catalog 상태를 비교해 그 사이에 다른 변경이 있었는지 확인하고, 값이 달라졌으면 conflict로 표시해 실행을 막습니다. 문제가 없으면 사용자 confirmation과 preview hash 재검증을 거쳐 하나의 transaction으로 INSERT promotion 상품은 삭제하고 UPDATE promotion 상품은 이전 상태로 복원합니다. 원본 promotion audit은 상품이 삭제된 뒤에도 삭제하지 않고 별도 rollback audit과 함께 보존합니다.
+succeeded promotion run은 되돌릴 수 있습니다. Rollback preview는 해당 promotion이 만든 after 상태와 현재 Catalog 상태를 비교해 그 사이에 다른 변경이 있었는지 확인하고, 값이 달라졌으면 conflict로 표시해 실행을 막습니다. 문제가 없으면 사용자 confirmation과 preview hash 재검증을 거쳐 하나의 transaction으로 INSERT promotion 상품은 삭제하고 UPDATE promotion 상품은 이전 상태로 복원합니다. 원본 promotion audit은 상품이 삭제된 뒤에도 삭제하지 않고 별도 rollback audit과 함께 보존합니다. 되돌린 뒤에는 Rollback 실행 이력에서 실행을 선택해 상세와 상품별 Rollback 변경 Audit(어떤 상품이 어떤 원본 audit을 되돌렸고, delete인지 restore인지, 어떤 필드가 어떤 값으로 바뀌었는지)을 확인할 수 있습니다.
 
 ## 5. 전체 시스템 구조
 
@@ -1413,6 +1419,7 @@ FastAPI 프로세스와 PostgreSQL 연결 상태를 함께 확인합니다. 기�
 | `GET /api/v1/catalog-promotions`, `GET /api/v1/catalog-promotions/{id}`, `GET /api/v1/catalog-promotions/{id}/audits` | 필요 | viewer 이상 |
 | `POST /api/v1/catalog-promotions/{id}/rollback-preview` | 필요 | viewer 이상 |
 | `POST /api/v1/catalog-promotions/{id}/rollback` | 필요 | operator |
+| `GET /api/v1/catalog-promotion-rollbacks`, `GET /api/v1/catalog-promotion-rollbacks/{id}`, `GET /api/v1/catalog-promotion-rollbacks/{id}/changes` | 필요 | viewer 이상 |
 
 Promotion Preview·Rollback Preview는 DB를 변경하지 않고 "무엇이 바뀔지"만 보여주므로 viewer도 조회할 수 있게 했고, 실제 반영(Promotion 실행)·되돌리기(Rollback 실행)만 operator로 제한했습니다. UI에서 viewer의 실행 버튼을 비활성화하는 것은 편의 기능일 뿐이며, 실제 권한 검사는 항상 FastAPI가 수행합니다.
 
@@ -1709,7 +1716,21 @@ succeeded promotion run 하나를 되돌릴 수 있는지 확인하는 미리보
 }
 ```
 
-서버는 transaction 안에서 대상 promotion run과 관련 상품을 다시 잠그고 rollback preview를 다시 계산합니다. hash가 달라지면 `preview_stale`, 그 사이에 상품이 다시 바뀌었거나 반영 조건이 맞지 않으면 `rollback_conflict`/`rollback_not_eligible`로 `409`를 반환하며 운영 상품을 변경하지 않습니다. 이미 같은 promotion run이 성공적으로 rollback된 경우에도 `409`(`already_rolled_back`)로 차단합니다. 성공 시 INSERT promotion 상품은 삭제하고 UPDATE promotion 상품은 이전 상태로 복원하며, `catalog_promotion_rollbacks`의 `succeeded` 기록(요청한 JWT `current_user` 기준 `actor_user_id`·`actor_username` 포함)과 `catalog_promotion_rollback_changes` append-only audit을 함께 저장합니다. 원본 `catalog_product_changes` audit은 상품이 삭제되어도 삭제하지 않습니다. 응답의 `actor_username`으로 실행 직후에는 누가 되돌렸는지 확인할 수 있지만, rollback 실행 이력만 목록으로 조회하는 전용 GET API는 아직 없습니다.
+서버는 transaction 안에서 대상 promotion run과 관련 상품을 다시 잠그고 rollback preview를 다시 계산합니다. hash가 달라지면 `preview_stale`, 그 사이에 상품이 다시 바뀌었거나 반영 조건이 맞지 않으면 `rollback_conflict`/`rollback_not_eligible`로 `409`를 반환하며 운영 상품을 변경하지 않습니다. 이미 같은 promotion run이 성공적으로 rollback된 경우에도 `409`(`already_rolled_back`)로 차단합니다. 성공 시 INSERT promotion 상품은 삭제하고 UPDATE promotion 상품은 이전 상태로 복원하며, `catalog_promotion_rollbacks`의 `succeeded` 기록(요청한 JWT `current_user` 기준 `actor_user_id`·`actor_username` 포함)과 `catalog_promotion_rollback_changes` append-only audit을 함께 저장합니다. 원본 `catalog_product_changes` audit은 상품이 삭제되어도 삭제하지 않습니다.
+
+### `GET /api/v1/catalog-promotion-rollbacks`
+
+저장된 rollback 실행 이력을 최신순으로 조회합니다. 상태 filter와 `limit`/`offset` pagination을 지원하며, 항목마다 `rollback_run_id`, `target_promotion_run_id`, `status`, `restored_count`, `deleted_count`, `conflict_count`, `failure_code`, `safe_failure_message`, 실행 시각과 `actor_username`을 반환합니다.
+
+### `GET /api/v1/catalog-promotion-rollbacks/{rollback_run_id}`
+
+단일 rollback 실행 상세입니다. 목록 항목과 같은 필드에 `preview_hash`, `preview_schema_version`을 더해 반환하며, 존재하지 않는 ID는 HTTP `404`입니다.
+
+### `GET /api/v1/catalog-promotion-rollbacks/{rollback_run_id}/changes`
+
+해당 rollback 실행이 상품별로 만든 change audit입니다. run 단위 count가 "몇 건을 되돌렸는지"만 알려주는 데 비해, 이 API는 어떤 상품이 어떤 원본 promotion audit을 되돌린 것인지, `delete`인지 `restore`인지, 어떤 필드가 어떤 값에서 어떤 값으로 바뀌었는지까지 보여줍니다. 항목은 `rollback_change_id`, `rollback_run_id`, `original_audit_id`, `catalog_product_id`, `action`, `changed_fields`, `before_data`, `after_data`, `created_at`이며 `created_at DESC, id DESC`로 정렬하고 `limit`(기본 `20`, 최대 `100`)·`offset`으로 나눕니다.
+
+존재하지 않는 `rollback_run_id`는 HTTP `404`이지만, rollback 실행이 존재하고 change가 0건이면 `404`가 아니라 `200`과 빈 `items`를 반환합니다. 상품을 전혀 바꾸지 않은 `blocked`·`failed` 실행은 change가 0건인 것이 정상이기 때문입니다.
 
 ## 19. 검수 이력 검색과 전체 요약 CSV 다운로드
 
@@ -1938,17 +1959,19 @@ python -m pytest -q
 
 격리된 로컬 PostgreSQL 18.4 클러스터에서 `20260810_0012` upgrade·schema/FK inspection·`20260808_0011` downgrade·재-upgrade를 확인했습니다. Sync actor, actor 위조 방지, dedup 최초 actor 보존, 사용자 삭제 후 FK `NULL`과 username snapshot 보존을 실제 PostgreSQL row로 검증했습니다. Async 경로는 Redis state·legacy payload·InspectionJobService·Celery Worker·Async API를 검증하고, 로컬 Redis 7.4·Celery·FastAPI E2E에서 동일 CSV 두 번 실행 후 `inspection_runs` 1건과 최초 actor가 남는 것을 확인했습니다.
 
-문서 갱신 직전의 최신 로컬 전체 pytest 결과는 다음과 같습니다. 운영 DB나 AWS/RDS가 아니라 일회성 로컬 PostgreSQL·Redis 환경에서 실행한 결과입니다.
+Rollback Change Audit 기능 완료 commit `abcea748e299009b4889b0daa98ad4c9c97e770b`을 대상으로 한 GitHub Actions run `31487868946`에서는 `test`·`browser-e2e`·`terraform-validate`·`kubernetes-smoke` 4개 job이 모두 성공했습니다. 이 run의 `test` job 결과는 다음과 같습니다. 운영 DB나 AWS/RDS가 아니라 일회성 PostgreSQL·Redis 서비스 컨테이너에서 실행한 결과입니다.
 
 ```text
-1359 passed
+1451 passed
 0 failed
 0 skipped
 4 deselected
 warnings 0
 ```
 
-이 문서 단계에서는 Python source·migration·test를 변경하지 않았으므로 전체 suite를 다시 실행하지 않았고, 위 수치는 직전 코드 검증의 최종 결과를 그대로 기록했습니다.
+Chromium Browser E2E는 이 수치에 포함되지 않습니다. `pytest.ini`의 `-m "not e2e"`로 제외되어 별도 `browser-e2e` job에서 실행합니다.
+
+이 문서 단계에서는 Python source·migration·test를 변경하지 않았으므로 전체 suite를 다시 실행하지 않았고, 위 수치는 해당 run에서 확인한 결과를 그대로 기록했습니다.
 
 ### Prometheus Metrics 테스트
 
@@ -1973,11 +1996,11 @@ Terraform validate: terraform fmt·init·validate와 mock provider terraform tes
 Run tests: `1309 passed`, `0 skipped`, `4 deselected`, `0 failed`
 ```
 
-promotion preview의 응답 schema와 hash 형식, blocked reason, insert/update/unchanged 계산, confirmation 요구, stale preview, 안전한 오류 mapping, Streamlit 상태 초기화와 중복 제출 방지를 테스트했습니다. promotion E2E는 브라우저 성공 메시지에 의존하지 않고 `catalog_products`, `catalog_promotion_runs`, `catalog_product_changes`의 PostgreSQL 최종 상태와 `applying` 잔존 여부까지 확인합니다. rollback은 아직 전용 Streamlit AppTest와 Browser E2E는 없으며, 서비스·API 계층의 PostgreSQL 통합 테스트와 실제 FastAPI 서버를 통한 수동 검증으로 확인했습니다.
+promotion preview의 응답 schema와 hash 형식, blocked reason, insert/update/unchanged 계산, confirmation 요구, stale preview, 안전한 오류 mapping, Streamlit 상태 초기화와 중복 제출 방지를 테스트했습니다. promotion E2E는 브라우저 성공 메시지에 의존하지 않고 `catalog_products`, `catalog_promotion_runs`, `catalog_product_changes`의 PostgreSQL 최종 상태와 `applying` 잔존 여부까지 확인합니다. rollback은 서비스·API 계층의 PostgreSQL 통합 테스트에 더해, 조회 계층(query service·API·client)과 Streamlit History/Detail/Change Audit AppTest, 실제 Chromium Browser E2E까지 검증합니다.
 
 ### 실제 브라우저 ETL E2E
 
-실제 Chromium 브라우저 E2E는 ETL reject fixture와 promotion fixture를 각각 `etl.cli`·`etl.load_cli`로 처리하고 테스트 PostgreSQL에 적재한 뒤, runner가 FastAPI와 Streamlit을 직접 시작합니다. Authentication 도입 후에는 두 시나리오 모두 시작 시 `browser_e2e_operator` 계정을 `scripts/create_user.py`로 생성하고, Streamlit 로그인 폼에서 실제 로그인한 뒤 기존 흐름을 이어갑니다. promotion 시나리오는 `ETL 적재 이력` 탭에서 파일명·프로필명으로 batch를 검색하고, 실제 combobox 선택, preview, 변경 전·후 표, 승인 checkbox, 반영 버튼 상태, promotion 성공 또는 중복 메시지를 확인합니다. 이후 테스트 코드가 PostgreSQL의 succeeded run 1건, 운영 상품 insert/update, audit 존재, applying run 0건을 직접 확인합니다. reject 시나리오는 별도로 마스킹과 raw 민감정보 미노출, console/page error 0건을 확인합니다. 이 기존 E2E는 ETL 검색·promotion 화면과 로그인 흐름만 다루며, 웹 ETL CSV 업로드 화면 자체를 실제 브라우저에서 검증하는 전용 시나리오는 아직 없습니다. 웹 ETL selectbox를 추가할 때 이 검색 필드와 accessible label(`공급사 프로필`)이 겹쳐 기존 E2E의 `get_by_label()`이 strict-mode violation으로 실패한 적이 있으며, selectbox label을 `ETL 실행 프로필`로 분리해 해결했습니다. 로그인 폼의 `아이디`·`비밀번호` label도 기존 UI label과 겹치지 않도록 새로 붙였습니다.
+실제 Chromium 브라우저 E2E는 ETL reject fixture와 promotion fixture를 각각 `etl.cli`·`etl.load_cli`로 처리하고 테스트 PostgreSQL에 적재한 뒤, runner가 FastAPI와 Streamlit을 직접 시작합니다. Authentication 도입 후에는 두 시나리오 모두 시작 시 `browser_e2e_operator` 계정을 `scripts/create_user.py`로 생성하고, Streamlit 로그인 폼에서 실제 로그인한 뒤 기존 흐름을 이어갑니다. promotion 시나리오는 `ETL 적재 이력` 탭에서 파일명·프로필명으로 batch를 검색하고, 실제 combobox 선택, preview, 변경 전·후 표, 승인 checkbox, 반영 버튼 상태, promotion 성공 또는 중복 메시지를 확인합니다. 이후 테스트 코드가 PostgreSQL의 succeeded run 1건, 운영 상품 insert/update, audit 존재, applying run 0건을 직접 확인합니다. 같은 시나리오는 이어서 Promotion 실행 이력·상품 변경 Audit, Rollback Preview·승인·실행, reload 없이 갱신되는 Rollback 실행 이력, Rollback 실행 상세, 그리고 `상품 Rollback 변경 Audit` 화면까지 진행합니다. Change Audit 영역에서는 표 컬럼(`원본 Audit ID`·`외부 상품 ID`·`변경 유형`·`변경 필드`·`변경 전`·`변경 후`), `상품 삭제` 표시, delete의 `삭제됨` 표시, 실제 변경 필드와 fixture 상품 표시, 전체 change 건수 caption과 pagination 버튼 비활성화를 확인하고, PostgreSQL에서는 rollback change 2건이 모두 `delete`인지, `original_audit_id` 집합이 원본 `catalog_product_changes.id` 집합과 일치하는지, 되돌린 뒤 운영 상품이 0건인지를 함께 확인합니다. reject 시나리오는 별도로 마스킹과 raw 민감정보 미노출, console/page error 0건을 확인합니다. 이 E2E는 로그인·ETL 검색·promotion·rollback 화면을 다루며, 웹 ETL CSV 업로드 화면 자체를 실제 브라우저에서 검증하는 전용 시나리오는 아직 없습니다. 웹 ETL selectbox를 추가할 때 이 검색 필드와 accessible label(`공급사 프로필`)이 겹쳐 기존 E2E의 `get_by_label()`이 strict-mode violation으로 실패한 적이 있으며, selectbox label을 `ETL 실행 프로필`로 분리해 해결했습니다. 로그인 폼의 `아이디`·`비밀번호` label도 기존 UI label과 겹치지 않도록 새로 붙였습니다.
 
 일반 테스트의 `pytest==9.1.1`과 browser plugin의 `pytest<9` 제약을 섞지 않도록 E2E는 전용 가상환경에 설치하는 방식을 권장합니다.
 
@@ -2100,7 +2123,7 @@ ETL staging에는 다음 값을 저장합니다.
 
 ETL 적재는 summary의 필수 필드, 실제 표준 CSV·reject CSV SHA-256, 실제 행 수와 reject CSV의 구조를 확인한 뒤 배치·정상 상품·reject 행을 하나의 트랜잭션으로 저장합니다. `(input_file_sha256, profile_name, profile_version)` unique index로 중복을 판단하며, 실패 시 전체 rollback합니다. reject 원본 값은 마스킹된 문자열만 `etl_rejected_rows`에 저장하고 raw CSV와 개인정보 원문은 저장하지 않습니다.
 
-운영 상품 persistence에는 `catalog_products`의 공급사·외부 상품 ID, 표준 상품 필드와 마지막 ETL 출처, `catalog_promotion_runs`의 상태·count·preview 메타데이터, `catalog_product_changes`의 action·변경 JSONB·전후 값, `catalog_promotion_rollbacks`의 rollback 실행 상태·count·preview 메타데이터, `catalog_promotion_rollback_changes`의 상품별 delete/restore 변경 JSONB를 저장합니다. 승인된 promotion transaction이 운영 상품과 run·audit을 함께 저장하며, 감사 이력은 append-only 제약과 FK RESTRICT로 보호합니다. 다만 `catalog_product_changes`와 `catalog_promotion_rollback_changes`의 `catalog_product_id`에는 FK를 두지 않아, INSERT promotion을 rollback해 상품이 실제로 삭제되어도 두 감사 이력은 삭제되지 않고 남습니다. `GET /api/v1/catalog-promotions`, `GET /api/v1/catalog-promotions/{promotion_run_id}`, `GET /api/v1/catalog-promotions/{promotion_run_id}/audits`로 promotion 실행 이력과 상품별 변경 audit을 조회할 수 있습니다.
+운영 상품 persistence에는 `catalog_products`의 공급사·외부 상품 ID, 표준 상품 필드와 마지막 ETL 출처, `catalog_promotion_runs`의 상태·count·preview 메타데이터, `catalog_product_changes`의 action·변경 JSONB·전후 값, `catalog_promotion_rollbacks`의 rollback 실행 상태·count·preview 메타데이터, `catalog_promotion_rollback_changes`의 상품별 delete/restore 변경 JSONB를 저장합니다. 승인된 promotion transaction이 운영 상품과 run·audit을 함께 저장하며, 감사 이력은 append-only 제약과 FK RESTRICT로 보호합니다. 다만 `catalog_product_changes`와 `catalog_promotion_rollback_changes`의 `catalog_product_id`에는 FK를 두지 않아, INSERT promotion을 rollback해 상품이 실제로 삭제되어도 두 감사 이력은 삭제되지 않고 남습니다. `GET /api/v1/catalog-promotions`, `GET /api/v1/catalog-promotions/{promotion_run_id}`, `GET /api/v1/catalog-promotions/{promotion_run_id}/audits`로 promotion 실행 이력과 상품별 변경 audit을 조회할 수 있고, `GET /api/v1/catalog-promotion-rollbacks`, `GET /api/v1/catalog-promotion-rollbacks/{rollback_run_id}`, `GET /api/v1/catalog-promotion-rollbacks/{rollback_run_id}/changes`로 rollback 실행 이력과 상품별 delete/restore change audit을 조회할 수 있습니다.
 
 저장하지 않는 값은 다음과 같습니다.
 
@@ -2151,7 +2174,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - Inspection Actor Audit은 `inspection_runs` row를 최초 생성한 사용자만 기록합니다. 동일 CSV·검수 버전의 dedup 요청자를 별도 event로 모두 저장하지는 않습니다.
 - Async job status 응답에는 actor를 노출하지 않습니다. 완료 후 `inspection_run_id`로 검수 상세를 조회하면 `actor_username`을 확인할 수 있습니다.
 - `TEST_DATABASE_URL`과 `DATABASE_URL`이 모두 없는 환경에서 anonymous Sync Inspection 요청은 auth보다 DB dependency가 먼저 평가되어 401 대신 500이 될 수 있습니다. 테스트 DB가 정상 설정된 환경에서는 401을 반환하며, 이 기존 dependency-order 결함은 Inspection Actor Audit의 blocker가 아닙니다.
-- Rollback 실행의 `actor_username`은 실행 직후 POST 응답에서 확인할 수 있지만, rollback 실행 이력만 목록으로 조회하는 전용 GET API는 아직 없습니다.
+- Rollback 실행의 `actor_username`은 실행 직후 POST 응답과 `GET /api/v1/catalog-promotion-rollbacks` 이력 조회에서 확인할 수 있습니다. 실행자 기준으로 검색·필터하는 기능은 없습니다.
 - Prometheus metric은 애플리케이션이 값을 노출하는 instrumentation 단계이며, 이를 주기적으로 수집하는 Prometheus 서버나 Grafana 대시보드는 아직 구축하지 않았습니다.
 - metric은 process-global 메모리 상태이므로 프로세스가 재시작되면 초기화됩니다. DB 실행 이력(영구)·Actor Audit(DB 이력의 실행자 기록)과는 별개 개념입니다.
 - metric registry가 프로세스 하나 안에서만 유지되므로, 여러 Uvicorn worker를 띄우는 환경에서는 worker별로 값이 나뉘며 이번 MVP는 이를 통합하지 않습니다.
@@ -2180,8 +2203,9 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - Streamlit ETL 적재 이력 화면은 배치·staging 상품 조회는 읽기 전용으로 유지하면서, 선택한 batch에 대해 promotion preview와 승인된 운영 상품 반영을 FastAPI API로 요청합니다. staging 상품 직접 수정·삭제는 지원하지 않습니다.
 - staging 상품을 수정·삭제하는 API는 구현되어 있지 않습니다.
 - promotion은 품질 summary·reject·검수 오류·중복 identity가 없는 선택 batch만 대상으로 하며, 실제 외부 공급사 운영 데이터와 production catalog 반영은 검증하지 않았습니다.
-- Rollback 전용 Streamlit AppTest와 Browser E2E는 아직 없습니다.
-- 일부 rollback 오류 코드(`already_rolled_back` 등)는 API client에서 전용 예외가 아닌 일반 오류로 처리됩니다.
+- 일부 rollback 실행 오류 코드(`already_rolled_back` 등)는 API client에서 전용 예외가 아닌 일반 오류로 처리됩니다. 전용 예외는 `preview_stale`과 조회 계열 `404`뿐입니다.
+- Rollback Change Audit 조회는 `limit`/`offset` pagination만 제공하며, action·상품·기간 filter나 검색·export는 지원하지 않습니다.
+- Rollback Browser E2E fixture는 INSERT promotion 2건을 되돌리는 delete-only 시나리오입니다. `restore` change의 화면 표시는 Streamlit AppTest와 service·API 테스트로만 확인했습니다.
 - 여러 promotion을 한 번에 되돌리는 일괄 rollback은 지원하지 않습니다.
 - 임의 시점으로 되돌리는 point-in-time recovery는 지원하지 않으며, rollback은 하나의 succeeded promotion run 단위로만 동작합니다.
 - reject 행은 `etl_rejected_rows`에 구조화된 오류와 마스킹된 원본으로 저장하며, 자동 공급사 감지는 지원하지 않습니다.
