@@ -50,6 +50,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 19. 기존 Actor Audit을 Sync·Async Inspection까지 확장했습니다. `inspection_runs`에 nullable `actor_user_id`(`users.id`, `ON DELETE SET NULL`)와 `actor_username` snapshot을 추가하고, actor는 request form이 아니라 인증된 JWT `current_user`에서만 가져오도록 했습니다. 비동기 경로는 ORM 객체나 JWT 대신 두 scalar만 Redis job state와 Celery Worker로 전달했습니다. 동일 CSV·검수 버전의 기존 run을 재사용할 때는 최초 actor를 보존하며, 사용자 삭제 후 FK만 `NULL`이 되고 username snapshot은 남는 동작을 PostgreSQL 18 migration 왕복·Sync 통합 테스트·Redis/Celery/FastAPI E2E로 검증했습니다.
 20. AWS S3의 합성 공급사 CSV를 EC2 Instance Role의 최소권한 IAM으로 읽고, FastAPI의 기존 ETL Pipeline을 통해 RDS PostgreSQL staging에 적재하는 전체 흐름을 실제 AWS staging 환경에서 검증했습니다. S3 연동을 위해 두 번째 ETL pipeline을 만들지 않고 `run_web_etl()` 앞에 붙는 source adapter로 설계해 변환·중복 판단·Actor Audit 로직을 그대로 재사용했으며, EC2 Role에는 `s3:GetObject` 하나만 그것도 정확한 prefix로 제한해 부여하고 컨테이너에 AWS access key를 주입하지 않아 실제 principal이 `assumed-role/CatalogGuardEC2SSMRole/<instance-id>`로 동작하는 것을 확인했습니다. 동일 S3 객체 재처리 시 SHA-256 기반 idempotency와 Actor Audit이 유지되는 것을 실제 staging DB에서 검증했고, anonymous 401·viewer 403·허용 prefix 밖 400 차단과 함께 `s3:ListBucket`을 주지 않은 최소권한 때문에 없는 key가 404가 아니라 안전한 502로 응답한다는 실제 AWS 동작 차이까지 기록했습니다.
 21. 같은 상품 그룹에서 `S/M/L` 같은 문자형 사이즈와 `95/100` 같은 숫자형 사이즈가 함께 쓰이는 사이즈 체계 혼재를 탐지하는 검수 규칙을 추가했습니다. 기존 `SIZE_ALIASES`·`find_standard_size()`를 재사용해 표준화 로직을 새로 만들지 않고 문자형(ALPHA)·숫자형(NUMERIC)만 구분했으며, `95`나 `270`을 특정 카테고리로 단정하지 않고 명확히 판별 가능한 체계 혼합만 탐지하도록 범위를 제한했습니다. FREE·사용자 정의 값·빈 값은 체계 판정에서 제외해 정상 데이터의 오탐을 줄이고, 브랜드 정책상 혼용 가능성을 고려해 오류가 아닌 `warning`으로 설계했습니다. 정상 그룹, 혼재 그룹, FREE·custom·빈 값 제외, 빈 `product_group_id`를 하나의 가짜 그룹으로 묶지 않는 경계까지 단위·통합 회귀 테스트로 검증했습니다.
+22. 상품명 키워드 사전과 카테고리 별칭 사전은 신발·가방을 이미 알고 있는데 공식 허용 카테고리는 `TOP`·`BOTTOM`·`OUTER` 3개뿐이어서, "남성 러닝 운동화 + SHOES"처럼 의미가 정확히 맞는 상품도 `카테고리 오류`가 나던 정합성 문제를 해결했습니다. 새 카테고리 체계를 만드는 대신 공식 허용 목록만 5개로 확장해 기존 matcher·detector·DB·API·ETL 구조를 그대로 두었고, 확장 전 전체 테스트를 확장 상태로 미리 돌려 영향받는 테스트가 3건뿐임을 확인한 뒤 진행했습니다. `shoes`·`신발` 같은 표기는 비교용 별칭으로만 유지하고 정식 입력값으로는 계속 거부해 입력 데이터의 표기를 하나로 관리하도록 했으며, 가방의 "사이즈 없음"은 `size=FREE` 규약으로 표현해 카테고리별 필수 값 정책 변경까지 번지지 않게 범위를 제한했습니다.
 
 ## 6.2 문제 정의
 
@@ -459,6 +460,20 @@ run `30972097167`의 workflow 로그를 직접 확인한 결과 `Run tests` 단�
 `product_group_id`가 비어 있는 상품들을 하나의 그룹으로 묶으면 서로 관계없는 상품이 같은 그룹으로 오인되어 경고가 생깁니다. 그래서 빈 그룹 ID는 비교 대상에서 제외했고, 이 동작을 고정하는 회귀 테스트를 detector 단위와 `run_all_rules()` 통합 양쪽에 두었습니다.
 
 이 규칙은 기존 규칙을 대체하지 않습니다. `사이즈 표기 비표준`은 `medium`을 `M`으로 통일하라는 표기 표준화이고, 새 규칙은 같은 그룹에서 사이즈 체계가 섞였는지를 봅니다. `medium / L / 100` 그룹에서는 두 주의가 각각의 이유로 함께 표시됩니다.
+
+### 카테고리 정책의 내부 모순을 설정 확장으로 해결한 판단
+
+시스템 안에 서로 어긋나는 두 기준이 있었습니다. 상품명 키워드 사전과 카테고리 별칭 사전은 신발·가방을 이미 알고 있어서 "남성 러닝 운동화 + SHOES"를 의미상 맞는 조합으로 판단하는데, 공식 허용 카테고리 목록에는 `TOP`·`BOTTOM`·`OUTER` 3개뿐이라 같은 상품에 `카테고리 오류`가 함께 붙었습니다. 신발·가방 상품은 그 오류 때문에 promotion preview의 검수 오류 차단 조건에도 걸렸습니다.
+
+새 카테고리 체계를 만드는 대신 공식 허용 목록을 5개로 확장하는 쪽을 택했습니다. 판단 근거를 만들기 위해 구현 전에 허용 목록을 확장한 상태로 전체 테스트를 한 번 돌려, 영향을 받는 테스트가 3건뿐이고 모두 "SHOES를 미허용 표본으로 쓰던" 테스트임을 먼저 확인했습니다. 실제 production 변경은 설정 두 줄이었고 matcher·detector·DB·API·ETL 코드는 그대로 두었습니다.
+
+`shoes`, `신발`, `bag`, `가방` 같은 표기를 정식 입력값으로 함께 열어 주지는 않았습니다. 비교 과정에서는 기존처럼 같은 의미로 다루되 CSV 입력값은 대문자 canonical 하나로 유지해, 같은 상품이 여러 표기로 저장되는 것을 막는 편이 데이터 품질 관리에 낫다고 판단했습니다.
+
+가방은 일반 의류 사이즈가 없을 수 있지만 `size`를 카테고리별 선택 값으로 바꾸면 loader, 검수 규칙, ETL, DB `nullable` 정의까지 영향이 번집니다. 이번 범위에서는 `size=FREE`를 "별도 사이즈 없음"의 표현으로 유지하고, 카테고리별 필수 값 정책은 후속 과제로 분리했습니다. `BAG` + 빈 `size`는 여전히 필수 값 누락 오류입니다.
+
+허용 목록이 넓어지면서 기존 완전 중복 검사가 신발·가방에도 적용되기 시작했습니다. 완전 중복 판정은 category가 허용 목록 안에 있을 때만 수행하기 때문인데, 새 중복 탐지 방식을 만든 것이 아니라 기존 규칙의 적용 범위가 넓어진 것입니다. 검수 결과가 실제로 달라지므로 `INSPECTION_VERSION`을 올려 같은 CSV도 새 기준으로 다시 검수할 수 있게 했습니다.
+
+경계는 테스트로 고정했습니다. `SHOES` 정상 입력, `BAG` + `FREE` 정상 입력, "티셔츠 + SHOES"와 "청바지 + BAG"의 상품명 의미 불일치 경고 유지, `ACCESSORY` 같은 미등록 값의 오류 유지, lowercase·한글 표기의 정식 입력 거부 유지, 신발·가방 완전 중복 활성화, `BAG` 빈 사이즈 오류 유지, `SHOES` 그룹의 숫자 사이즈 정상 판정과 문자·숫자 혼재 경고를 각각 검증했습니다.
 
 ### 다운로드 CSV 안전 처리
 
