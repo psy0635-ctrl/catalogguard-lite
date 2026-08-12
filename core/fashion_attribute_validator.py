@@ -93,6 +93,14 @@ SIZE_ALIASES = {
 }
 
 
+# 사이즈 체계 이름입니다. 문자형(ALPHA)과 숫자형(NUMERIC)만 구분합니다.
+SIZE_SYSTEM_ALPHA = "ALPHA"
+SIZE_SYSTEM_NUMERIC = "NUMERIC"
+
+# FREE는 어느 체계에도 속하지 않으므로 문자형 표준 사이즈에서 제외합니다.
+ALPHA_STANDARD_SIZES = frozenset(SIZE_ALIASES.values()) - {"FREE"}
+
+
 def _find_standard_value(
     value: object,
     aliases: dict[str, str],
@@ -113,6 +121,22 @@ def find_standard_color(value: object) -> str | None:
 
 def find_standard_size(value: object) -> str | None:
     return _find_standard_value(value, SIZE_ALIASES)
+
+
+def find_size_system(value: object) -> str | None:
+    """사이즈 값이 문자형인지 숫자형인지 알려 주고, 판단할 수 없으면 None을 돌려줍니다."""
+    if not isinstance(value, str):
+        return None
+
+    if find_standard_size(value) in ALPHA_STANDARD_SIZES:
+        return SIZE_SYSTEM_ALPHA
+
+    # 공백을 없앤 값이 아스키 숫자로만 되어 있을 때만 숫자형으로 봅니다.
+    digits_only_value = "".join(value.split())
+    if digits_only_value.isascii() and digits_only_value.isdigit():
+        return SIZE_SYSTEM_NUMERIC
+
+    return None
 
 
 def _build_comparison_key(

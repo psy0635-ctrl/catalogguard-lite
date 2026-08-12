@@ -4,6 +4,7 @@ import pytest
 
 from core import presentation
 from core.group_category_consistency_detector import build_group_category_message
+from core.group_size_consistency_detector import GROUP_SIZE_SYSTEM_MESSAGE
 from core.models import ValidationIssue
 from core.presentation import (
     FIELD_LABELS,
@@ -1184,6 +1185,63 @@ def test_build_result_dataframe_presents_group_category_issue_in_korean():
     }
     assert "inconsistent_group_category" not in result.iloc[0]["오류 이유"]
     assert "product_ids" not in result.iloc[0]["오류 이유"]
+
+
+def test_build_result_dataframe_presents_group_size_system_issue_in_korean():
+    issue = make_issue(
+        rule="inconsistent_group_size_system",
+        severity="warning",
+        product_group_id='G"한글, 001',
+        product_id="P'001",
+        message=GROUP_SIZE_SYSTEM_MESSAGE,
+    )
+
+    result = build_result_dataframe([issue])
+
+    assert result.iloc[0].to_dict() == {
+        "검수 상태": "주의",
+        "오류 항목": "상품 그룹 사이즈 체계 불일치",
+        "상품 그룹 ID": 'G"한글, 001',
+        "상품 ID": "P'001",
+        "오류 이유": (
+            "상품 그룹 'G\"한글, 001'에서 문자형 사이즈와 숫자형 사이즈가 "
+            "함께 사용되고 있습니다."
+        ),
+        "수정 권장사항": (
+            "같은 상품의 사이즈 옵션이 동일한 사이즈 체계를 사용하는지 확인하세요."
+        ),
+        "위험 수준": "중간",
+    }
+    assert "inconsistent_group_size_system" not in result.iloc[0]["오류 이유"]
+    assert "ALPHA" not in result.iloc[0]["오류 이유"]
+
+
+def test_translate_group_size_system_message_keeps_unknown_message_unchanged():
+    issue = make_issue(
+        rule="inconsistent_group_size_system",
+        severity="warning",
+        message="unexpected internal message",
+    )
+
+    assert translate_issue_message(issue) == "unexpected internal message"
+
+
+def test_filter_result_dataframe_filters_group_size_system_rule_label():
+    issue = make_issue(
+        rule="inconsistent_group_size_system",
+        severity="warning",
+        message=GROUP_SIZE_SYSTEM_MESSAGE,
+    )
+    result = build_result_dataframe([issue])
+
+    filtered = filter_result_dataframe(
+        result,
+        status_filter="주의",
+        rule_filter="상품 그룹 사이즈 체계 불일치",
+        product_id_query="p001",
+    )
+
+    assert len(filtered) == 1
 
 
 def test_translate_group_category_message_uses_safe_korean_fallback_for_bad_json():

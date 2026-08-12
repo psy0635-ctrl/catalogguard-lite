@@ -11,6 +11,7 @@ from core.rules import (
     check_duplicate_product_content,
     check_duplicate_product_id,
     check_inconsistent_group_category,
+    check_inconsistent_group_size_system,
     check_invalid_category,
     check_missing_required_fields,
     check_non_standard_color,
@@ -1020,14 +1021,129 @@ def test_group_category_rule_is_registered_once_after_duplicate_product_id():
     )
 
 
-def test_duplicate_variant_rule_is_registered_once_after_group_category_rule():
+def test_group_size_system_rule_is_registered_once_after_group_category_rule():
+    assert RULES.count(check_inconsistent_group_size_system) == 1
+    assert (
+        RULES.index(check_inconsistent_group_size_system)
+        == RULES.index(check_inconsistent_group_category) + 1
+    )
+
+
+def test_duplicate_variant_rule_is_registered_once_after_group_size_system_rule():
     duplicate_variant_rule = rules.check_duplicate_variant_combination
 
     assert RULES.count(duplicate_variant_rule) == 1
     assert (
         RULES.index(duplicate_variant_rule)
-        == RULES.index(check_inconsistent_group_category) + 1
+        == RULES.index(check_inconsistent_group_size_system) + 1
     )
+
+
+def test_check_inconsistent_group_size_system_flags_mixed_size_systems():
+    products = [
+        make_product(product_id="P001", size="M"),
+        make_product(product_id="P002", size="L"),
+        make_product(product_id="P003", size="100"),
+    ]
+
+    issues = check_inconsistent_group_size_system(products)
+
+    assert [issue.product_id for issue in issues] == ["P001", "P002", "P003"]
+    assert all(issue.rule == "inconsistent_group_size_system" for issue in issues)
+    assert all(issue.severity == "warning" for issue in issues)
+
+
+@pytest.mark.parametrize(
+    "sizes",
+    [
+        ["S", "M", "L", "XL"],
+        ["95", "100", "105"],
+        ["M", "L", "FREE"],
+        ["M", "L", "custom size"],
+    ],
+)
+def test_run_all_rules_allows_consistent_or_unclassified_size_groups(sizes):
+    products = [
+        make_product(product_id=f"P{index:03d}", color=f"COLOR{index}", size=size)
+        for index, size in enumerate(sizes, start=1)
+    ]
+
+    issues = run_all_rules(products)
+
+    assert [
+        issue for issue in issues if issue.rule == "inconsistent_group_size_system"
+    ] == []
+
+
+def test_run_all_rules_creates_group_size_warning_with_alias_size_once():
+    products = [
+        make_product(product_id="P001", size="medium"),
+        make_product(product_id="P002", size="L"),
+        make_product(product_id="P003", size="100"),
+    ]
+
+    issues = run_all_rules(products)
+
+    assert [
+        issue.product_id
+        for issue in issues
+        if issue.rule == "inconsistent_group_size_system"
+    ] == ["P001", "P002", "P003"]
+    assert sum(issue.rule == "non_standard_size" for issue in issues) == 1
+
+
+def test_blank_size_keeps_missing_required_field_without_group_size_warning():
+    products = [
+        make_product(product_id="P001", size="M"),
+        make_product(product_id="P002", size="L"),
+        make_product(product_id="P003", size=""),
+    ]
+
+    issues = run_all_rules(products)
+    relevant_issues = [
+        issue
+        for issue in issues
+        if issue.rule in {"missing_required_field", "inconsistent_group_size_system"}
+    ]
+
+    assert [issue.rule for issue in relevant_issues] == ["missing_required_field"]
+    assert relevant_issues[0].product_id == "P003"
+    assert "size" in relevant_issues[0].message
+
+
+def test_blank_group_id_products_are_not_grouped_into_one_size_system_group():
+    # product_group_id가 비어 있는 상품들을 같은 그룹으로 묶어 경고하면 안 됩니다.
+    products = [
+        make_product(product_group_id="", product_id="P001", size="M"),
+        make_product(product_group_id="", product_id="P002", size="100"),
+    ]
+
+    issues = run_all_rules(products)
+    group_id_issues = [
+        issue
+        for issue in issues
+        if issue.rule == "missing_required_field" and "product_group_id" in issue.message
+    ]
+
+    assert [
+        issue for issue in issues if issue.rule == "inconsistent_group_size_system"
+    ] == []
+    assert [issue.product_id for issue in group_id_issues] == ["P001", "P002"]
+
+
+def test_run_all_rules_keeps_group_size_warning_separate_from_other_group_rules():
+    products = [
+        make_product(product_id="P001", size="M"),
+        make_product(product_id="P002", size="100"),
+    ]
+
+    issues = run_all_rules(products)
+    issue_rules = [issue.rule for issue in issues]
+
+    assert issue_rules.count("inconsistent_group_size_system") == 2
+    assert "inconsistent_group_category" not in issue_rules
+    assert "duplicate_variant_combination" not in issue_rules
+    assert "duplicate_product_content" not in issue_rules
 
 
 def test_check_inconsistent_group_category_returns_all_participating_products():

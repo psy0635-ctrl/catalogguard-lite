@@ -5,6 +5,7 @@ import pandas as pd
 
 from core.duplicate_detector import parse_duplicate_variant_message
 from core.group_category_consistency_detector import parse_group_category_message
+from core.group_size_consistency_detector import GROUP_SIZE_SYSTEM_MESSAGE
 from core.models import ValidationIssue
 
 
@@ -12,6 +13,7 @@ from core.models import ValidationIssue
 RULE_LABELS = {
     "duplicate_product_id": "상품 ID 중복",
     "inconsistent_group_category": "상품 그룹 카테고리 불일치",
+    "inconsistent_group_size_system": "상품 그룹 사이즈 체계 불일치",
     "duplicate_variant_combination": "상품 옵션 조합 중복",
     "duplicate_product_name": "상품명 중복",
     "missing_required_field": "필수 값 누락",
@@ -45,6 +47,9 @@ RECOMMENDATIONS = {
     "inconsistent_group_category": (
         "같은 상품 그룹의 상품이 동일한 카테고리를 사용하도록 "
         "product_group_id 또는 category 값을 확인하세요."
+    ),
+    "inconsistent_group_size_system": (
+        "같은 상품의 사이즈 옵션이 동일한 사이즈 체계를 사용하는지 확인하세요."
     ),
     "duplicate_variant_combination": (
         "같은 상품 그룹 안에서 색상과 사이즈 조합이 한 번만 사용되도록 "
@@ -94,6 +99,7 @@ RECOMMENDATIONS = {
 RISK_LEVELS = {
     "duplicate_product_id": "높음",
     "inconsistent_group_category": "중간",
+    "inconsistent_group_size_system": "중간",
     "duplicate_variant_combination": "중간",
     "duplicate_product_name": "중간",
     "duplicate_product_content": "높음",
@@ -237,6 +243,16 @@ def translate_issue_message(issue: ValidationIssue) -> str:
         return (
             f"상품 그룹 '{product_group_id}'에 서로 다른 카테고리 "
             f"{categories}가 함께 등록되어 있습니다."
+        )
+
+    if (
+        issue.rule == "inconsistent_group_size_system"
+        and message == GROUP_SIZE_SYSTEM_MESSAGE
+    ):
+        # 그룹 ID는 문제 데이터에 이미 들어 있으므로 메시지에서 다시 꺼내지 않습니다.
+        return (
+            f"상품 그룹 '{issue.product_group_id}'에서 문자형 사이즈와 "
+            "숫자형 사이즈가 함께 사용되고 있습니다."
         )
 
     if issue.rule == "duplicate_variant_combination":
