@@ -44,6 +44,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - 상품 ID, 상품명, 상품 내용 중복 탐지
 - 상품 그룹 내 색상·사이즈 옵션 조합 중복 탐지
 - 상품 그룹 내 카테고리 일관성 검수
+- 상품 그룹 내 사이즈 체계 일관성 검수
 - 가격 오류와 카테고리별 가격 이상치 탐지
 - 상품명과 카테고리 불일치 탐지
 - 알려진 색상 별칭을 권장 표준 색상으로 안내
@@ -224,6 +225,7 @@ CSV 업로드
 -> core.rules
    -> core.fashion_attribute_validator
    -> core.group_category_consistency_detector
+   -> core.group_size_consistency_detector
 -> PostgreSQL 저장
 -> FastAPI GET /api/v1/inspections/{inspection_run_id}
 -> Streamlit이 상세 응답을 DataFrame으로 변환·표시
@@ -267,6 +269,7 @@ FastAPI POST /api/v1/inspections
 -> core.rules
    -> core.fashion_attribute_validator
    -> core.group_category_consistency_detector
+   -> core.group_size_consistency_detector
 -> core.presentation
 -> API 응답의 요약·상세 결과
 ```
@@ -378,6 +381,8 @@ ETL 적재 이력 탭
 패션 색상·사이즈 검수는 `core.rules`가 현재 입력값을 `core.fashion_attribute_validator`의 별칭 사전과 비교해 주의 항목을 만듭니다. 중복 옵션 검수는 같은 비교 함수를 재사용해 `product_group_id`, 색상 비교 키, 사이즈 비교 키가 같은 상품을 찾습니다. 권장 표준값과 비교 키는 검수에만 사용하며 원본 DataFrame, 마스킹 미리보기의 색상·사이즈, `Product.color`, `Product.size`는 변경하지 않습니다.
 
 상품 그룹 카테고리 일관성 검수는 `core.group_category_consistency_detector`가 기존 `core.category_mismatch_detector.normalize_category()`를 재사용합니다. 이 비교는 원본 category를 고치지 않으며, 표시 계층에는 JSON 구조화 메시지로 값을 전달합니다. JSON이 손상되거나 예상 구조가 아니어도 내부 prefix, 영문 메시지나 JSON 원문 대신 안전한 한글 기본 문구를 표시합니다.
+
+상품 그룹 사이즈 체계 일관성 검수는 `core.group_size_consistency_detector`가 기존 `core.fashion_attribute_validator.find_standard_size()`와 `SIZE_ALIASES`를 재사용하는 `find_size_system()`으로 각 사이즈를 문자형(ALPHA)·숫자형(NUMERIC)으로만 분류합니다. 판정할 수 없는 값은 비교에서 제외하며, 이 규칙도 원본 사이즈 값을 고치지 않습니다.
 
 Streamlit에 로그인하면 이후 모든 화면과 API 호출이 JWT Access Token을 거칩니다. FastAPI는 매 요청마다 role/is_active를 PostgreSQL에서 다시 확인한 뒤에만 검수·ETL·Promotion·Rollback 로직에 진입시킵니다. Authentication(로그인한 사용자가 누구인지 확인)과 RBAC(그 사용자가 무엇을 할 수 있는지 확인)은 실행 전 통제이고, 새 Inspection·Web ETL·Promotion·Rollback 실행 이력 row가 만들어지면 그 요청의 `current_user`를 actor로 남기는 Actor Audit(누가 실행했는지 기록)이 이어집니다.
 
@@ -521,6 +526,8 @@ catalogguard-lite/
     category_mismatch_detector.py
     duplicate_detector.py
     fashion_attribute_validator.py
+    group_category_consistency_detector.py
+    group_size_consistency_detector.py
     inspection_service.py
     loader.py
     models.py
@@ -605,6 +612,8 @@ catalogguard-lite/
     test_duplicate_detector.py
     test_etl_query_service.py
     test_fashion_attribute_validator.py
+    test_group_category_consistency_detector.py
+    test_group_size_consistency_detector.py
     test_inspection_persistence.py
     test_inspection_service.py
     test_loader.py
@@ -660,6 +669,7 @@ catalogguard-lite/
 | `core/rules.py` | 전체 검수 규칙 실행 |
 | `core/duplicate_detector.py` | 상품 ID·상품명과 상품 그룹 내 색상·사이즈 옵션 조합 중복 탐지 |
 | `core/group_category_consistency_detector.py` | 상품 그룹별 카테고리 정규화 비교, 입력 순서 유지와 안전한 JSON 메시지 생성·검증 |
+| `core/group_size_consistency_detector.py` | 상품 그룹별 사이즈 체계(ALPHA·NUMERIC) 비교와 혼재 그룹의 주의 항목 생성 |
 | `core/fashion_attribute_validator.py` | 패션 색상·사이즈 별칭을 권장 표준값으로 찾고 원본을 바꾸지 않는 비교 키를 만드는 순수 함수 |
 | `core/presentation.py` | 내부 검수 문제를 화면용 한글 결과표로 변환하고 전체 검수 결과 통계를 집계 |
 | `core/result_exporter.py` | 검수 결과 CSV 다운로드 데이터와 파일명 생성 |
@@ -798,6 +808,49 @@ medium, m -> M
 어느 category가 정답인지 다수결이나 상품명 추론으로 결정하지 않습니다. 불일치 그룹에서 비어 있지 않은 비교에 참여한 모든 상품에 결과를 연결하고 전체 입력 순서를 유지합니다. 따라서 그룹 한 곳의 카테고리 문제 하나가 참여 상품 수만큼 결과 행으로 생성될 수 있습니다. 이 방식은 특정 상품만 자동으로 잘못됐다고 단정하지 않고 그룹 전체를 함께 점검하게 하기 위한 정책입니다.
 
 비교용 정규화는 원본 category를 자동 수정하지 않습니다. 입력 DataFrame과 `report.source_dataframe`은 업로드 원본을 보존하고, 탐지기에 직접 전달한 `Product`도 변경하지 않습니다. 단, `report.products`는 기존 loader 계약에 따라 문자열 앞뒤 공백이 제거된 상태입니다. 구조화 JSON에는 그룹, 최초 대표 category와 상품 ID를 저장하므로 작은따옴표, 큰따옴표, 쉼표, 한글과 공백이 있어도 문자열 정규식 파싱 없이 안전하게 표시할 수 있습니다.
+
+### 상품 그룹 내 사이즈 체계 일관성 기준
+
+같은 `product_group_id` 안에서 문자형 사이즈와 숫자형 사이즈가 함께 사용되면 `상품 그룹 사이즈 체계 불일치` 주의로 표시합니다.
+
+```text
+G001: S / M / L      -> 정상
+G002: 95 / 100 / 105 -> 정상
+G003: M / L / 100    -> 사이즈 체계 혼재 주의
+```
+
+사이즈 체계는 다음 두 가지만 분류합니다.
+
+| 체계 | 판정 기준 | 예 |
+|---|---|---|
+| ALPHA | 기존 `find_standard_size()`가 `XXS`, `XS`, `S`, `M`, `L`, `XL`, `XXL`, `XXXL` 중 하나로 정규화할 수 있는 값 | `M`, `m`, `medium`, `2XL`, `xx-large` |
+| NUMERIC | 공백을 제거한 뒤 ASCII 숫자로만 이루어진 값 | `95`, `100`, `105`, `270`, `30` |
+
+다음 값은 이번 체계 혼재 판정에서 제외합니다.
+
+- `FREE`, `free`, `F`, `one size`, `프리`, `프리사이즈` 같은 FREE 계열
+- `OS`, `1호`, `여성용`, `custom size`, `M-L`, `95-100` 같은 사용자 정의·범위 표기
+- 빈 값. 빈 사이즈는 기존 `필수 값 누락` 오류가 처리합니다.
+
+판정 방식은 다음과 같습니다.
+
+- ALPHA와 NUMERIC이 동시에 있는 그룹에서만 주의 항목을 만듭니다. 한 체계만 쓰는 그룹은 정상입니다.
+- 실제로 ALPHA 또는 NUMERIC으로 분류된 상품에만 결과를 연결합니다. 같은 그룹의 FREE·사용자 정의·빈 사이즈 상품에는 이 주의를 붙이지 않습니다.
+- `product_group_id`가 비어 있는 상품은 하나의 그룹으로 묶지 않습니다. 이 경우도 기존 `필수 값 누락` 오류가 처리합니다.
+- 다른 상품 그룹의 사이즈는 서로 비교하지 않습니다.
+- 확정 오류가 아니라 `주의`(`warning`)입니다. 브랜드나 운영 정책상 서로 다른 사이즈 체계를 함께 쓸 가능성을 배제할 수 없기 때문입니다.
+- 원본 CSV, 원본 DataFrame과 `Product.size`를 자동으로 수정하지 않습니다.
+
+이 규칙은 숫자 사이즈에서 카테고리를 추정하지 않습니다. `95`를 상의, `270`을 신발, `30`을 하의로 단정하지 않으며 KR·US·UK·EU 사이즈 변환, 성별·브랜드별 사이즈 차트, 카테고리별 허용 사이즈 범위도 사용하지 않습니다. 명확히 판정 가능한 ALPHA와 NUMERIC의 혼재만 탐지하고 FREE와 사용자 정의 값은 비교에서 제외해, 정상 데이터를 잘못 경고할 가능성을 줄였습니다.
+
+기존 규칙과는 다음과 같이 역할이 나뉘며 서로를 대체하지 않습니다.
+
+| 규칙 | 보는 대상 |
+|---|---|
+| `사이즈 표기 비표준` | `medium`을 `M`으로 통일하는 사이즈 표기 표준화 |
+| `상품 그룹 사이즈 체계 불일치` | 같은 그룹에서 `M`과 `100`처럼 서로 다른 사이즈 체계가 섞였는지 |
+| `상품 옵션 조합 중복` | 같은 그룹에서 색상과 사이즈 조합이 중복되는지 |
+| `상품 그룹 카테고리 불일치` | 같은 그룹에서 category가 서로 다른지 |
 
 ## 11. CSV 업로드 검증 기준
 
@@ -1829,7 +1882,7 @@ curl.exe "http://127.0.0.1:8001/api/v1/inspections?limit=10&offset=0&filename=pr
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
 | `file_sha256` | `String(64)`, nullable | CSV bytes의 SHA-256 hex 문자열입니다. migration 이전 기존 이력은 NULL입니다. |
-| `inspection_version` | `String(20)`, nullable 아님 | 검수 규칙 버전입니다. 현재 `INSPECTION_VERSION` 값은 `"5"`입니다. DB `server_default`는 없습니다. |
+| `inspection_version` | `String(20)`, nullable 아님 | 검수 규칙 버전입니다. 현재 `INSPECTION_VERSION` 값은 `"6"`입니다. DB `server_default`는 없습니다. |
 
 중복 판단 기준은 같은 `file_sha256`과 같은 `inspection_version`입니다.
 
@@ -1837,7 +1890,7 @@ curl.exe "http://127.0.0.1:8001/api/v1/inspections?limit=10&offset=0&filename=pr
 - 파일명이 같아도 CSV bytes가 다르면 새로운 이력으로 저장합니다.
 - 같은 CSV라도 검수 규칙 버전이 달라지면 다시 검수하고 새 이력으로 저장할 수 있습니다.
 
-상품 그룹 내 중복 색상·사이즈 옵션 규칙을 추가할 때 검수 버전을 `"3"`으로 올렸고, 상품 그룹 카테고리 일관성 규칙을 추가하면서 `"4"`로 올렸습니다. 이번에 선택적 `sale_price`와 정상가·할인가 관계 규칙을 추가하면서 현재 `INSPECTION_VERSION`을 `"5"`로 올렸습니다. 동일 CSV라도 버전 4와 버전 5는 별도 검수 결과로 저장할 수 있습니다. 파일 해시와 검수 버전을 함께 사용하는 기존 중복 저장 방지 기준은 그대로 유지됩니다. DB 스키마 변경은 없어 이 기능을 위한 Alembic migration은 추가하지 않았으며, 과거 이력과 기존 migration의 `"1"` backfill 값은 그대로 유지합니다.
+상품 그룹 내 중복 색상·사이즈 옵션 규칙을 추가할 때 검수 버전을 `"3"`으로 올렸고, 상품 그룹 카테고리 일관성 규칙을 추가하면서 `"4"`로 올렸습니다. 선택적 `sale_price`와 정상가·할인가 관계 규칙을 추가하면서 `"5"`로 올렸습니다. 이번에 상품 그룹 사이즈 체계 일관성 규칙을 추가하면서 현재 `INSPECTION_VERSION`을 `"6"`으로 올렸습니다. 같은 CSV라도 새 검수 규칙으로 다시 검사할 수 있도록 inspection identity에 사용하는 규칙 버전을 올린 것이며, 동일 CSV라도 버전 5와 버전 6은 별도 검수 결과로 저장할 수 있습니다. 파일 해시와 검수 버전을 함께 사용하는 기존 중복 저장 방지 기준은 그대로 유지됩니다. DB 스키마 변경은 없어 이 기능을 위한 Alembic migration은 추가하지 않았으며, 과거 이력과 기존 migration의 `"1"` backfill 값은 그대로 유지합니다.
 
 PostgreSQL에는 다음 partial unique index가 있습니다.
 
@@ -1965,6 +2018,31 @@ G001,P002,기본 반팔 티셔츠 B,TOP,black,medium,10,19900,image2.jpg
 ```
 
 검수 후에도 P002의 원본 `color=black`, `size=medium` 값은 그대로 유지됩니다.
+
+### 상품 그룹 내 사이즈 체계 일관성 검수 예시
+
+다음 상품 그룹은 문자형 사이즈와 숫자형 사이즈를 함께 사용합니다.
+
+```csv
+product_group_id,product_id,product_name,category,color,size,stock,price,image_path
+G001,P001,베이직 셔츠,TOP,BLACK,medium,10,29900,image1.jpg
+G001,P002,베이직 셔츠,TOP,NAVY,L,10,29900,image2.jpg
+G001,P003,베이직 셔츠,TOP,WHITE,100,10,29900,image3.jpg
+```
+
+세 상품 모두 다음 주의 결과에 연결됩니다.
+
+```text
+검수 상태: 주의
+오류 항목: 상품 그룹 사이즈 체계 불일치
+오류 이유: 상품 그룹 'G001'에서 문자형 사이즈와 숫자형 사이즈가 함께 사용되고 있습니다.
+수정 권장사항: 같은 상품의 사이즈 옵션이 동일한 사이즈 체계를 사용하는지 확인하세요.
+위험 수준: 중간
+```
+
+P001의 `medium`은 기존 사이즈 표기 표준화 규칙에도 해당하므로 `사이즈 표기 비표준` 주의가 함께 한 번 표시됩니다. 두 규칙은 보는 대상이 다르며 서로를 대체하지 않습니다.
+
+같은 그룹에 `FREE`나 `custom size` 상품이 있어도 그 상품에는 사이즈 체계 주의를 붙이지 않습니다.
 
 ## 23. 테스트 실행 방법
 
@@ -2220,6 +2298,11 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 누락된 색상·사이즈 옵션 조합을 추론하지 않습니다.
 - 중복 옵션별 재고를 합산하지 않습니다.
 - 상품명과 상품 그룹의 일치 여부를 판단하지 않습니다.
+- 사이즈 체계 일관성 검수는 ALPHA와 NUMERIC만 구분합니다. FREE 계열과 `1호`, `M-L` 같은 사용자 정의·범위 표기는 체계 판정에서 제외하므로, 이런 값이 섞인 혼재는 탐지하지 않습니다.
+- 숫자 사이즈로 카테고리를 추정하지 않으며 카테고리별 허용 사이즈 범위는 구현되어 있지 않습니다.
+- KR·US·UK·EU 사이즈 변환과 성별·브랜드별 사이즈 차트는 구현되어 있지 않습니다.
+- 사이즈 체계가 혼재해도 어느 쪽이 정답인지 자동으로 선택하거나 사이즈 값을 자동 수정하지 않습니다.
+- 사이즈 체계 일관성 검수는 CSV 검수(Inspection) 규칙이며, 공급사 ETL의 변환 reject 조건에는 적용되지 않습니다.
 - 그룹에서 정답 category를 자동 선택하거나 category 값을 자동 수정하지 않습니다.
 - 상품명에서 그룹의 category를 자동 추론하지 않습니다.
 - category 계층 관계를 비교하거나 상품 그룹을 자동 분리하지 않습니다.

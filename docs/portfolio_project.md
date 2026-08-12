@@ -49,6 +49,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 18. 콘솔에서 수동으로 구성했던 AWS staging(EC2·RDS·Security Group·SSM 접근)을 Terraform 코드로 옮겨, 같은 구조를 다시 만들 때 필요한 수동 작업과 설정 누락 위험을 줄였습니다. 새 대규모 인프라를 만드는 대신 이미 검증한 구성의 코드화로 범위를 제한했고, EC2 inbound 규칙 0개·RDS `5432`의 Security Group 참조 전용 허용·`publicly_accessible=false` 고정·저장 암호화·SSM 전용 접근 같은 보안 조건을 mock provider 기반 `terraform test` 12개 assertion으로 고정했습니다. 실제 AWS 자격 증명 없이 동작하는 이 검증을 GitHub Actions `terraform-validate` job으로 자동화해, 누군가 `0.0.0.0/0` inbound를 추가하는 보안 회귀가 생기면 CI가 실패하도록 했습니다. 이번 범위는 코드화와 정적·mock 검증까지이며 실제 `terraform apply`는 수행하지 않았습니다.
 19. 기존 Actor Audit을 Sync·Async Inspection까지 확장했습니다. `inspection_runs`에 nullable `actor_user_id`(`users.id`, `ON DELETE SET NULL`)와 `actor_username` snapshot을 추가하고, actor는 request form이 아니라 인증된 JWT `current_user`에서만 가져오도록 했습니다. 비동기 경로는 ORM 객체나 JWT 대신 두 scalar만 Redis job state와 Celery Worker로 전달했습니다. 동일 CSV·검수 버전의 기존 run을 재사용할 때는 최초 actor를 보존하며, 사용자 삭제 후 FK만 `NULL`이 되고 username snapshot은 남는 동작을 PostgreSQL 18 migration 왕복·Sync 통합 테스트·Redis/Celery/FastAPI E2E로 검증했습니다.
 20. AWS S3의 합성 공급사 CSV를 EC2 Instance Role의 최소권한 IAM으로 읽고, FastAPI의 기존 ETL Pipeline을 통해 RDS PostgreSQL staging에 적재하는 전체 흐름을 실제 AWS staging 환경에서 검증했습니다. S3 연동을 위해 두 번째 ETL pipeline을 만들지 않고 `run_web_etl()` 앞에 붙는 source adapter로 설계해 변환·중복 판단·Actor Audit 로직을 그대로 재사용했으며, EC2 Role에는 `s3:GetObject` 하나만 그것도 정확한 prefix로 제한해 부여하고 컨테이너에 AWS access key를 주입하지 않아 실제 principal이 `assumed-role/CatalogGuardEC2SSMRole/<instance-id>`로 동작하는 것을 확인했습니다. 동일 S3 객체 재처리 시 SHA-256 기반 idempotency와 Actor Audit이 유지되는 것을 실제 staging DB에서 검증했고, anonymous 401·viewer 403·허용 prefix 밖 400 차단과 함께 `s3:ListBucket`을 주지 않은 최소권한 때문에 없는 key가 404가 아니라 안전한 502로 응답한다는 실제 AWS 동작 차이까지 기록했습니다.
+21. 같은 상품 그룹에서 `S/M/L` 같은 문자형 사이즈와 `95/100` 같은 숫자형 사이즈가 함께 쓰이는 사이즈 체계 혼재를 탐지하는 검수 규칙을 추가했습니다. 기존 `SIZE_ALIASES`·`find_standard_size()`를 재사용해 표준화 로직을 새로 만들지 않고 문자형(ALPHA)·숫자형(NUMERIC)만 구분했으며, `95`나 `270`을 특정 카테고리로 단정하지 않고 명확히 판별 가능한 체계 혼합만 탐지하도록 범위를 제한했습니다. FREE·사용자 정의 값·빈 값은 체계 판정에서 제외해 정상 데이터의 오탐을 줄이고, 브랜드 정책상 혼용 가능성을 고려해 오류가 아닌 `warning`으로 설계했습니다. 정상 그룹, 혼재 그룹, FREE·custom·빈 값 제외, 빈 `product_group_id`를 하나의 가짜 그룹으로 묶지 않는 경계까지 단위·통합 회귀 테스트로 검증했습니다.
 
 ## 6.2 문제 정의
 
@@ -265,12 +266,16 @@ sample@test.com -> sa****@test.com
 현재 검수 규칙은 `core/rules.py`의 `RULES` 리스트에 등록된 함수 순서대로 실행됩니다.
 
 - 상품 ID 중복
+- 상품 그룹 카테고리 불일치
+- 상품 그룹 사이즈 체계 불일치
+- 상품 옵션 조합 중복
 - 상품명 중복 후보
 - 완전 중복 상품
 - 필수 값 누락
+- 색상·사이즈 표기 비표준
 - 카테고리 오류
 - 재고 오류와 품절 상품
-- 가격 오류
+- 가격 오류와 할인가 오류
 - 카테고리별 가격 이상치
 - 상품명과 카테고리 불일치
 - 금지어와 개인정보 형태
@@ -344,6 +349,7 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 | `tests/test_duplicate_detector.py` | 중복 상품 탐지 |
 | `tests/test_price_anomaly_detector.py` | 가격 이상치 탐지 |
 | `tests/test_category_mismatch_detector.py` | 상품명과 카테고리 불일치 탐지 |
+| `tests/test_group_size_consistency_detector.py` | 상품 그룹 사이즈 체계 혼재 탐지와 FREE·사용자 정의·빈 값·빈 그룹 ID 제외 |
 | `tests/test_privacy.py` | 개인정보 마스킹과 원본 보존 |
 | `tests/test_presentation.py` | 결과 표시, 필터링, 한글 메시지, 통계 집계 |
 | `tests/test_result_exporter.py` | 결과 CSV 다운로드 |
@@ -441,6 +447,18 @@ run `30972097167`의 workflow 로그를 직접 확인한 결과 `Run tests` 단�
 ### 같은 상품 그룹의 정상 옵션 처리
 
 같은 상품명이라도 같은 그룹 안에서 색상이나 사이즈가 다른 상품은 정상 옵션일 수 있습니다. `core/duplicate_detector.py`는 같은 그룹의 다른 상품 ID이고 색상 또는 사이즈가 명확히 다르면 상품명 중복 후보에서 제외합니다.
+
+### 사이즈 체계 혼재 판정에서 오탐을 줄인 기준
+
+패션 카탈로그에서 같은 상품의 옵션은 보통 하나의 사이즈 체계를 사용하지만, 공급사나 운영 데이터 입력 과정에서 `M`과 `100`처럼 서로 다른 체계가 한 그룹에 섞이는 경우가 있습니다. 다만 브랜드나 운영 정책에 따라 서로 다른 체계를 함께 쓸 가능성을 완전히 배제할 수는 없다고 판단해, 확정 오류가 아니라 `warning`으로 구현했습니다.
+
+여기서 가장 중요한 판단은 무엇을 탐지하지 않을지였습니다. 숫자 사이즈를 보고 `95`는 상의, `270`은 신발, `30`은 하의처럼 카테고리를 단정하면 오탐이 크게 늘어납니다. 그래서 카테고리 추정, KR·US·UK·EU 변환, 성별·브랜드별 사이즈 차트는 구현하지 않고, 명확히 판별 가능한 사이즈 체계 혼합만 탐지했습니다.
+
+`core/group_size_consistency_detector.py`는 기존 `SIZE_ALIASES`와 `find_standard_size()`를 재사용하는 `find_size_system()`으로 각 값을 문자형(ALPHA)·숫자형(NUMERIC)으로만 분류합니다. `medium`, `2XL` 같은 별칭은 기존 표준화 로직을 그대로 써서 ALPHA로 인식하므로 사이즈 표준화 규칙을 새로 구현하지 않았습니다. `FREE` 계열과 `1호`, `custom size`, `M-L` 같은 사용자 정의·범위 표기, 빈 값은 체계를 단정할 수 없으므로 비교에서 제외하고, 그 상품에는 이 주의를 붙이지 않습니다. 빈 값은 기존 `필수 값 누락` 규칙이 그대로 담당합니다.
+
+`product_group_id`가 비어 있는 상품들을 하나의 그룹으로 묶으면 서로 관계없는 상품이 같은 그룹으로 오인되어 경고가 생깁니다. 그래서 빈 그룹 ID는 비교 대상에서 제외했고, 이 동작을 고정하는 회귀 테스트를 detector 단위와 `run_all_rules()` 통합 양쪽에 두었습니다.
+
+이 규칙은 기존 규칙을 대체하지 않습니다. `사이즈 표기 비표준`은 `medium`을 `M`으로 통일하라는 표기 표준화이고, 새 규칙은 같은 그룹에서 사이즈 체계가 섞였는지를 봅니다. `medium / L / 100` 그룹에서는 두 주의가 각각의 이유로 함께 표시됩니다.
 
 ### 다운로드 CSV 안전 처리
 
