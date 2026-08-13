@@ -421,6 +421,54 @@ DB 적재 완료
 거부 행: 0
 ```
 
+## 배치 출처(source lineage) 기록
+
+`etl_load_runs`는 "이 배치를 **최초로** 만든 입력 경로"를 두 컬럼에 기록한다.
+
+| 컬럼 | 값 | 설명 |
+|---|---|---|
+| `initial_source_type` | `unknown` / `upload` / `s3` / `http_feed` / `cli` | NOT NULL. DB CheckConstraint `ck_etl_load_runs_initial_source_type`로 값을 고정한다. |
+| `initial_source_ref` | 비밀이 없는 최소 locator | NULL 허용. |
+
+source별 정책은 다음과 같다.
+
+| 입력 경로 | `initial_source_type` | `initial_source_ref` |
+|---|---|---|
+| 웹 업로드 `POST /api/v1/etl-loads` | `upload` | 업로드 파일의 leaf 이름. 사용자 PC의 디렉터리 경로는 저장하지 않는다. |
+| S3 `POST /api/v1/etl-loads/s3` | `s3` | 허용 prefix를 제거한 상대 object key. bucket 이름은 저장하지 않는다. |
+| HTTP feed `POST /api/v1/etl-loads/http` | `http_feed` | 고정 식별자 `configured_http_feed`. |
+| CLI `etl.load_cli` | `cli` | `NULL`. `--input`은 원본 공급사 파일이 아니라 표준 CSV라, 저장하면 출처를 오해하게 만든다. |
+| migration 이전 기존 배치 | `unknown` | `NULL` |
+
+### 왜 "initial"인가
+
+중복 배치 판정(dedup) 기준은 지금도 `(input_file_sha256, profile_name, profile_version)`이며 이번 변경으로 바뀌지 않았다.
+따라서 같은 bytes를 같은 프로필로 다시 넣으면 **입력 경로가 달라도** 새 배치를 만들지 않고 기존 배치를 그대로 돌려준다.
+
+```text
+1일차  사용자가 A.csv 업로드
+      -> etl_load_runs #42 생성 (created=true)
+      -> initial_source_type = "upload"
+
+2일차  HTTP feed가 완전히 동일한 bytes를 제공
+      -> dedup으로 기존 #42 반환 (created=false)
+      -> initial_source_type은 "upload" 그대로
+```
+
+즉 이 값은 "마지막으로 들어온 경로"가 아니라 "이 배치를 처음 만든 경로"다.
+API 응답도 이번 요청의 경로가 아니라 DB에 저장된 최초 경로를 돌려주므로,
+`created=false`인 응답에서 `initial_source_type`이 이번에 호출한 경로와 다를 수 있다.
+
+### 저장하지 않는 것
+
+- **원본 CSV bytes**: 이번 범위가 아니다. 지금도 SHA-256 해시만 남고 원본은 보존하지 않는다.
+- **HTTP feed URL 원문**: `CATALOGGUARD_ETL_HTTP_FEED_URL`에는 token이나 signed query가 들어갈 수 있어 host·path·query 어느 것도 저장하지 않는다. 기존 로그 정책과 같은 판단이다.
+- **S3 bucket 이름과 허용 prefix**: 서버 설정이지 배치별 출처 정보가 아니다.
+- **재유입 이력**: dedup으로 재사용된 배치에 대해 "두 번째로 어느 경로로 또 들어왔는지"는 기록하지 않는다. 이를 남기려면 배치와 수집 사건을 분리하는 별도 구조가 필요한데, 실제 요구가 관측되기 전에는 만들지 않는다.
+
+조회는 `GET /api/v1/etl-loads` 목록과 `GET /api/v1/etl-loads/{id}` 상세 응답에서 두 필드로 확인한다.
+출처 기준 검색·필터는 제공하지 않는다.
+
 ## 적재 배치 실행·조회 API
 
 ETL 실행은 CLI 또는 FastAPI의 `POST /api/v1/etl-loads`(웹 ETL, 위 "웹 ETL 실행" 절 참고)로 할 수 있으며, 배치·상품 조회는 아래 `GET` API로 읽기 전용으로 제공한다.
@@ -719,6 +767,9 @@ fix commit(`cb5ed81`) push 후 GitHub Actions run `30969273954`에서 `test`·`b
 - 웹 ETL CSV 업로드 화면 자체를 다루는 전용 Chromium Browser E2E는 아직 없다. 기존 Browser E2E는 ETL 적재 이력 검색과 promotion 화면만 검증하며, 웹 ETL 핵심 실행 로직은 `tests/etl/test_web_service.py`, `tests/test_api_etl_web_run.py`, `tests/test_catalogguard_api_client.py`, `tests/test_etl_load_history_ui.py`의 API·client·PostgreSQL 통합·Streamlit AppTest로 검증한다.
 - staging 상품 수정·삭제와 상품 변경 이력 조회 API는 지원하지 않는다.
 - promotion은 외부 공급사 운영 데이터나 production catalog가 아닌 합성 fixture·테스트 PostgreSQL 환경에서만 검증했다. reject 행은 별도 `etl_rejected_rows`에 오류 배열과 마스킹된 동적 원본 컬럼으로 저장한다.
+- 배치 출처는 최초 입력 경로 하나만 기록한다. dedup으로 재사용된 배치에 대해 이후 어떤 경로로 다시 들어왔는지는 기록하지 않으며, 수집 사건 단위 이력(ingestion event)은 지원하지 않는다.
+- 원본 공급사 CSV bytes는 보존하지 않는다. `input_file_sha256`으로 동일성 검증만 가능하고 원본 복원이나 과거 배치 재처리는 지원하지 않는다.
+- migration 이전 기존 배치의 출처는 실제 정보가 없어 `unknown`으로 남으며, 소급 복원할 수 없다.
 - 증분 ETL과 streaming은 지원하지 않는다.
 - 운영(production) DB 적재는 검증하지 않았다. PostgreSQL staging 적재는 임시 테스트 PostgreSQL 환경에서 검증했고, S3 source 경로에 한해 2026-08-12에 AWS RDS staging에서 합성 fixture 1건으로 추가 검증했다.
 - S3 ingestion은 호출자가 `object_key` 하나를 지정하는 pull 방식이다. S3 event 알림·Lambda·SQS 기반 자동 수집, prefix 일괄 처리, 증분 수집은 지원하지 않는다.
