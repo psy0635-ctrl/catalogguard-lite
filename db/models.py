@@ -18,6 +18,13 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, foreign, mapped_column, relationship
 
+from config.settings import (
+    ETL_INITIAL_SOURCE_REF_MAX_LENGTH,
+    ETL_INITIAL_SOURCE_TYPE_MAX_LENGTH,
+    ETL_INITIAL_SOURCE_TYPE_UNKNOWN,
+    ETL_INITIAL_SOURCE_TYPES,
+)
+
 from db.base import Base
 
 
@@ -229,6 +236,12 @@ class ETLLoadRun(Base):
             """,
             name="ck_etl_load_runs_reject_details_state",
         ),
+        CheckConstraint(
+            "initial_source_type IN ("
+            + ", ".join(f"'{value}'" for value in ETL_INITIAL_SOURCE_TYPES)
+            + ")",
+            name="ck_etl_load_runs_initial_source_type",
+        ),
         Index(
             "ux_etl_load_runs_input_profile_version",
             "input_file_sha256",
@@ -261,6 +274,22 @@ class ETLLoadRun(Base):
     )
     rejects_file_sha256: Mapped[str | None] = mapped_column(
         String(64),
+        nullable=True,
+    )
+    # Source lineage: 이 배치를 "최초로" 만든 입력 경로입니다. actor(누가 실행했는가)와는 다른 개념이라,
+    # 예를 들어 CLI 적재는 actor가 NULL이면서 initial_source_type은 'cli'가 됩니다.
+    # server_default를 영구로 두지 않는 이유는, 새 유입 경로가 값을 넘기는 것을 잊었을 때
+    # 조용히 'unknown'으로 저장되지 않고 드러나게 하기 위해서입니다.
+    initial_source_type: Mapped[str] = mapped_column(
+        String(ETL_INITIAL_SOURCE_TYPE_MAX_LENGTH),
+        nullable=False,
+        # ORM 기본값만 두고 DB server_default는 두지 않습니다. 실제 유입 경로는 모두 값을 명시하고,
+        # 값을 주지 않는 쪽(과거 row를 흉내 내는 테스트 등)은 정직하게 unknown이 됩니다.
+        default=ETL_INITIAL_SOURCE_TYPE_UNKNOWN,
+    )
+    # 비밀이 없는 최소 locator입니다. HTTP feed URL 원문·query·token은 절대 저장하지 않습니다.
+    initial_source_ref: Mapped[str | None] = mapped_column(
+        String(ETL_INITIAL_SOURCE_REF_MAX_LENGTH),
         nullable=True,
     )
     # Actor audit: 이 배치를 실행한 로그인 사용자입니다. 이 컬럼이 생기기 전(migration 이전) row와

@@ -35,6 +35,9 @@ def main(argv: list[str] | None = None) -> int:
                     if arguments.rejects is not None
                     else "rejected_rows.csv"
                 ),
+                # CLI는 로그인 actor가 없지만 출처는 분명합니다. 두 개념은 별개입니다.
+                # --input은 원본 공급사 파일이 아니라 표준 CSV라 ref로 쓰면 오해를 부르므로 남기지 않습니다.
+                initial_source_type="cli",
             )
     except ETLLoadError as error:
         print(f"DB 적재 실패: {error}", file=sys.stderr)

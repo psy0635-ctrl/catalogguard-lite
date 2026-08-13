@@ -73,12 +73,14 @@ from etl.http_source import (
 )
 from etl.pipeline import ETLPipelineError
 from etl.profile_loader import ETLProfileNotFoundError, list_etl_profiles
+from config.settings import ETL_HTTP_FEED_SOURCE_REF
 from etl.s3_source import (
     S3KeyNotAllowedError,
     S3NotConfiguredError,
     S3ObjectNotFoundError,
     S3ReadError,
     read_s3_csv_object,
+    sanitized_object_ref,
 )
 from etl.web_service import ETLWebRunOutcome, run_web_etl
 from db.catalog_promotion_preview_service import (
@@ -144,6 +146,8 @@ def _build_list_response(result: ETLLoadList) -> ETLLoadListResponse:
                 rejected_rows=item.rejected_rows,
                 created_at=item.created_at,
                 actor_username=item.actor_username,
+                initial_source_type=item.initial_source_type,
+                initial_source_ref=item.initial_source_ref,
             )
             for item in result.items
         ],
@@ -165,6 +169,8 @@ def _build_web_run_response(result: ETLWebRunOutcome) -> ETLWebRunResponse:
         rejected_rows=result.rejected_rows,
         error_counts=result.error_counts,
         actor_username=result.actor_username,
+        initial_source_type=result.initial_source_type,
+        initial_source_ref=result.initial_source_ref,
     )
 
 
@@ -183,6 +189,8 @@ def _build_detail_response(result: ETLLoadDetail) -> ETLLoadDetailResponse:
         reject_details_stored=result.reject_details_stored,
         created_at=result.created_at,
         actor_username=result.actor_username,
+        initial_source_type=result.initial_source_type,
+        initial_source_ref=result.initial_source_ref,
         products=ETLStagingProductListResponse(
             items=[
                 ETLStagingProductResponse(
@@ -629,6 +637,9 @@ async def create_etl_load_run(
             input_bytes=file_bytes,
             actor_user_id=current_user.id,
             actor_username=current_user.username,
+            initial_source_type="upload",
+            # 업로드는 파일명이 곧 locator입니다. 디렉터리 경로는 넘기지 않습니다.
+            initial_source_ref=_upload_source_ref(file.filename),
         )
     except ETLProfileNotFoundError:
         record_web_etl_run("failed")
@@ -664,6 +675,12 @@ async def create_etl_load_run(
     return _build_web_run_response(outcome)
 
 
+def _upload_source_ref(filename: str | None) -> str | None:
+    # 사용자 PC의 경로 원문은 저장하지 않고 leaf 파일명만 남깁니다.
+    leaf = str(filename or "").replace("\\", "/").split("/")[-1].strip()
+    return leaf or None
+
+
 def _run_server_side_source_etl(
     session: Session,
     *,
@@ -671,6 +688,8 @@ def _run_server_side_source_etl(
     source_filename: str,
     input_bytes: bytes,
     current_user,
+    initial_source_type: str,
+    initial_source_ref: str | None,
 ) -> ETLWebRunResponse:
     """Run the existing Web ETL service for a server-side fetched source.
 
@@ -685,6 +704,8 @@ def _run_server_side_source_etl(
             input_bytes=input_bytes,
             actor_user_id=current_user.id,
             actor_username=current_user.username,
+            initial_source_type=initial_source_type,
+            initial_source_ref=initial_source_ref,
         )
     except ETLProfileNotFoundError:
         record_web_etl_run("failed")
@@ -786,6 +807,9 @@ def create_s3_etl_load_run(
         source_filename=source.source_filename,
         input_bytes=source.content,
         current_user=current_user,
+        initial_source_type="s3",
+        # bucket은 저장하지 않고, 허용 prefix를 제거한 상대 key만 남깁니다.
+        initial_source_ref=sanitized_object_ref(request.object_key),
     )
 
 
@@ -847,6 +871,9 @@ def create_http_feed_etl_load_run(
         source_filename=source.source_filename,
         input_bytes=source.content,
         current_user=current_user,
+        initial_source_type="http_feed",
+        # feed URL/query/token은 저장하지 않습니다. 비밀 없는 고정 식별자만 남깁니다.
+        initial_source_ref=ETL_HTTP_FEED_SOURCE_REF,
     )
 
 

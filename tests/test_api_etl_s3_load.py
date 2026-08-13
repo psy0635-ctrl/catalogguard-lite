@@ -65,7 +65,13 @@ def captured_api_logs(caplog):
         logger.removeHandler(caplog.handler)
 
 
-def _fake_outcome(*, source_filename: str, actor_username: str | None) -> ETLWebRunOutcome:
+def _fake_outcome(
+    *,
+    source_filename: str,
+    actor_username: str | None,
+    initial_source_type: str = "s3",
+    initial_source_ref: str | None = None,
+) -> ETLWebRunOutcome:
     return ETLWebRunOutcome(
         etl_load_run_id=42,
         created=True,
@@ -89,15 +95,22 @@ def test_s3_endpoint_passes_downloaded_leaf_and_authenticated_actor_to_web_etl(m
         input_bytes,
         actor_user_id=None,
         actor_username=None,
+        initial_source_type=None,
+        initial_source_ref=None,
     ):
         assert profile_id == REQUEST["profile_id"]
         assert source_filename == "products.csv"
         assert input_bytes == b"supplier,csv\n"
         assert actor_user_id == 1
         assert actor_username == "operator_user"
+        # S3 배치는 bucket이 아니라 허용 prefix를 제거한 상대 key만 locator로 남깁니다.
+        assert initial_source_type == "s3"
+        assert initial_source_ref == "incoming/vendor/products.csv"
         return _fake_outcome(
             source_filename=source_filename,
             actor_username=actor_username,
+            initial_source_type=initial_source_type,
+            initial_source_ref=initial_source_ref,
         )
 
     app.dependency_overrides[get_session] = lambda: iter([object()])
@@ -423,6 +436,9 @@ def test_s3_endpoint_persists_staging_actor_and_reuses_duplicate_identity(
 
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides.pop(get_current_user, None)
+    # 허용 prefix를 설정해 두면 저장되는 locator에서 그 prefix가 실제로 제거되는지 확인할 수 있습니다.
+    monkeypatch.setenv("CATALOGGUARD_ETL_S3_BUCKET", "catalogguard-source")
+    monkeypatch.setenv("CATALOGGUARD_ETL_S3_PREFIX", "incoming/")
     monkeypatch.setattr(
         etl_loads_route,
         "read_s3_csv_object",
@@ -458,6 +474,12 @@ def test_s3_endpoint_persists_staging_actor_and_reuses_duplicate_identity(
             assert run.id == run_id
             assert run.actor_user_id == user.id
             assert run.actor_username == username
+            # 최초 유입 경로가 s3로 기록되고, locator는 허용 prefix를 제거한 상대 key입니다.
+            assert run.initial_source_type == "s3"
+            assert run.initial_source_ref == "vendor/products.csv"
+            # bucket 이름은 provenance에 필요하지 않으므로 저장하지 않습니다.
+            assert "catalogguard-source" not in (run.initial_source_ref or "")
+            assert not (run.initial_source_ref or "").startswith("s3://")
             products = verify_session.scalars(
                 select(CatalogProductStaging).where(
                     CatalogProductStaging.etl_load_run_id == run_id

@@ -9,7 +9,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from config.settings import REQUIRED_FIELDS
+from config.settings import (
+    ETL_INITIAL_SOURCE_REF_MAX_LENGTH,
+    ETL_INITIAL_SOURCE_TYPE_UNKNOWN,
+    ETL_INITIAL_SOURCE_TYPES,
+    REQUIRED_FIELDS,
+)
 from core.upload_validator import CsvUploadValidationError, validate_and_read_uploaded_csv
 from db.models import CatalogProductStaging, ETLLoadRun, ETLRejectedRow
 from etl.reject_parser import ParsedRejectedRow, parse_reject_csv
@@ -29,6 +34,10 @@ class ETLLoadOutcome:
     error_counts: dict[str, int] | None
     reject_details_stored: bool
     rejects_file_sha256: str | None
+    # 이 배치를 최초로 만든 입력 경로입니다. duplicate일 때는 이번 요청의 source가 아니라
+    # 이미 저장돼 있는 최초 source를 그대로 돌려줍니다.
+    initial_source_type: str = ETL_INITIAL_SOURCE_TYPE_UNKNOWN
+    initial_source_ref: str | None = None
 
 
 ETLLoadResult = ETLLoadOutcome
@@ -152,6 +161,23 @@ def _normalize_summary(summary: dict[str, object]) -> dict[str, object]:
     return normalized_summary
 
 
+def _validated_source_type(value: str) -> str:
+    # DB CheckConstraint가 마지막 방어선이지만, 여기서 먼저 막아야 안전한 ETLLoadError로 실패합니다.
+    if value not in ETL_INITIAL_SOURCE_TYPES:
+        raise ETLLoadError("허용하지 않는 ETL source type입니다")
+    return value
+
+
+def _normalized_source_ref(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    # source_filename과 같은 방식으로, 너무 긴 값은 driver 오류 대신 잘라서 저장합니다.
+    return normalized[:ETL_INITIAL_SOURCE_REF_MAX_LENGTH]
+
+
 def _clean_cell(value: object) -> str:
     if value is None or pd.isna(value):
         return ""
@@ -251,8 +277,12 @@ def load_standard_csv(
     rejects_csv_filename: str = "rejected_rows.csv",
     actor_user_id: int | None = None,
     actor_username: str | None = None,
+    initial_source_type: str = ETL_INITIAL_SOURCE_TYPE_UNKNOWN,
+    initial_source_ref: str | None = None,
 ) -> ETLLoadOutcome:
     """Validate ETL output and atomically add one idempotent staging batch."""
+    source_type = _validated_source_type(initial_source_type)
+    source_ref = _normalized_source_ref(initial_source_ref)
     summary = _normalize_summary(_read_summary(summary_json_bytes))
     actual_output_hash = _sha256_bytes(standard_csv_bytes)
     if actual_output_hash != summary["output_file_sha256"]:
@@ -306,6 +336,8 @@ def load_standard_csv(
                 )
             )
             if existing is not None:
+                # duplicate입니다. 이번 요청의 source로 기존 배치를 덮어쓰지 않고,
+                # 저장돼 있는 최초 source를 그대로 돌려줍니다.
                 return ETLLoadOutcome(
                     existing.id,
                     False,
@@ -315,6 +347,8 @@ def load_standard_csv(
                     existing.error_counts,
                     existing.reject_details_stored,
                     existing.rejects_file_sha256,
+                    initial_source_type=existing.initial_source_type,
+                    initial_source_ref=existing.initial_source_ref,
                 )
 
             load_run = ETLLoadRun(
@@ -331,6 +365,8 @@ def load_standard_csv(
                 rejects_file_sha256=rejects_file_sha256,
                 actor_user_id=actor_user_id,
                 actor_username=actor_username,
+                initial_source_type=source_type,
+                initial_source_ref=source_ref,
             )
             session.add(load_run)
             session.flush()
@@ -353,6 +389,8 @@ def load_standard_csv(
                 load_run.error_counts,
                 load_run.reject_details_stored,
                 load_run.rejects_file_sha256,
+                initial_source_type=load_run.initial_source_type,
+                initial_source_ref=load_run.initial_source_ref,
             )
     except IntegrityError:
         # A concurrent caller may have won the unique identity race.
@@ -365,6 +403,7 @@ def load_standard_csv(
             )
         )
         if existing is not None:
+            # unique identity 경쟁에서 진 요청입니다. 여기서도 기존 row를 update하지 않습니다.
             return ETLLoadOutcome(
                 existing.id,
                 False,
@@ -374,6 +413,8 @@ def load_standard_csv(
                 existing.error_counts,
                 existing.reject_details_stored,
                 existing.rejects_file_sha256,
+                initial_source_type=existing.initial_source_type,
+                initial_source_ref=existing.initial_source_ref,
             )
         raise
 

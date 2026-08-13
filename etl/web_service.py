@@ -4,6 +4,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from config.settings import ETL_INITIAL_SOURCE_TYPE_UNKNOWN
 from core.upload_validator import validate_csv_file_size, validate_csv_filename
 from db.models import ETLLoadRun
 from etl.db_loader import load_standard_csv
@@ -23,6 +24,10 @@ class ETLWebRunOutcome:
     rejected_rows: int | None
     error_counts: dict[str, int] | None
     actor_username: str | None = None
+    # 이번 요청의 source가 아니라, DB에 저장된 이 배치의 최초 source입니다.
+    # duplicate(created=False)면 다른 경로로 처음 만들어졌을 수 있습니다.
+    initial_source_type: str = ETL_INITIAL_SOURCE_TYPE_UNKNOWN
+    initial_source_ref: str | None = None
 
 
 def _leaf_filename(filename: str) -> str:
@@ -40,6 +45,8 @@ def run_web_etl(
     input_bytes: bytes,
     actor_user_id: int | None = None,
     actor_username: str | None = None,
+    initial_source_type: str = ETL_INITIAL_SOURCE_TYPE_UNKNOWN,
+    initial_source_ref: str | None = None,
 ) -> ETLWebRunOutcome:
     # run_pipeline/load_standard_csv are the same functions etl.cli/etl.load_cli call;
     # this only bridges an in-memory upload into their existing file-based contract.
@@ -67,6 +74,8 @@ def run_web_etl(
             rejects_csv_filename=rejects_path.name,
             actor_user_id=actor_user_id,
             actor_username=actor_username,
+            initial_source_type=initial_source_type,
+            initial_source_ref=initial_source_ref,
         )
 
     load_run = session.get(ETLLoadRun, outcome.etl_load_run_id)
@@ -81,4 +90,6 @@ def run_web_etl(
         actor_username=load_run.actor_username,
         rejected_rows=load_run.rejected_rows,
         error_counts=load_run.error_counts,
+        initial_source_type=load_run.initial_source_type,
+        initial_source_ref=load_run.initial_source_ref,
     )

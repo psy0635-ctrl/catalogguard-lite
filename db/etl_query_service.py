@@ -23,6 +23,9 @@ class ETLLoadListItem:
     rejected_rows: int | None
     created_at: datetime
     actor_username: str | None = None
+    # 이 배치를 최초로 만든 입력 경로입니다.
+    initial_source_type: str = "unknown"
+    initial_source_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,8 @@ class ETLLoadDetail:
     created_at: datetime
     products: ETLStagingProductList
     actor_username: str | None = None
+    initial_source_type: str = "unknown"
+    initial_source_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -145,6 +150,8 @@ def _to_load_list_item(load_run: ETLLoadRun) -> ETLLoadListItem:
         rejected_rows=load_run.rejected_rows,
         created_at=load_run.created_at,
         actor_username=load_run.actor_username,
+        initial_source_type=load_run.initial_source_type,
+        initial_source_ref=load_run.initial_source_ref,
     )
 
 
@@ -233,6 +240,8 @@ def get_etl_load_detail(
         reject_details_stored=load_run.reject_details_stored,
         created_at=load_run.created_at,
         actor_username=load_run.actor_username,
+        initial_source_type=load_run.initial_source_type,
+        initial_source_ref=load_run.initial_source_ref,
         products=ETLStagingProductList(
             items=[_to_product(product) for product in products],
             total=total,
