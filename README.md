@@ -72,6 +72,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - ETL 적재 배치 목록의 파일명·프로필명 검색과 페이지네이션
 - ETL 적재 목록·상세의 전체 행·정상 적재·변환 거부 수와 상세 오류 코드 통계
 - ETL 적재 상세의 input/output SHA-256 및 배치별 staging 상품 페이지네이션
+- ETL 적재 목록·상세에서 배치를 최초로 만든 입력 경로(업로드/S3/HTTP feed/CLI) 확인. 중복으로 재사용된 배치는 최초 경로를 유지하며, HTTP feed URL 원문이나 S3 bucket 이름은 저장하지 않습니다.
 - Streamlit `ETL 적재 이력` 탭에서 목록·검색·배치 상세·품질 지표·오류 코드·SHA-256·staging 상품·reject 상세 조회
 - Playwright Chromium 실제 브라우저에서 ETL 검색·상세·상품·reject 마스킹과 raw 민감정보 미노출 검증
 - ETL 목록의 빈 결과 안내, 404와 검증된 `X-Request-ID` 표시
