@@ -9,6 +9,9 @@ CATALOGGUARD_API_BASE_URL_ENV_VAR = "CATALOGGUARD_API_BASE_URL"
 CATALOGGUARD_API_TIMEOUT_SECONDS_ENV_VAR = "CATALOGGUARD_API_TIMEOUT_SECONDS"
 CATALOGGUARD_ETL_S3_BUCKET_ENV_VAR = "CATALOGGUARD_ETL_S3_BUCKET"
 CATALOGGUARD_ETL_S3_PREFIX_ENV_VAR = "CATALOGGUARD_ETL_S3_PREFIX"
+# 서버 운영자가 지정하는 신뢰 공급사 HTTP feed입니다. API 사용자는 URL을 선택할 수 없습니다.
+CATALOGGUARD_ETL_HTTP_FEED_URL_ENV_VAR = "CATALOGGUARD_ETL_HTTP_FEED_URL"
+CATALOGGUARD_ETL_HTTP_FEED_FILENAME_ENV_VAR = "CATALOGGUARD_ETL_HTTP_FEED_FILENAME"
 CATALOGGUARD_API_DEFAULT_TIMEOUT_SECONDS = 5.0
 CELERY_BROKER_URL_ENV_VAR = "CELERY_BROKER_URL"
 REDIS_JOB_URL_ENV_VAR = "REDIS_JOB_URL"
@@ -18,6 +21,8 @@ DEFAULT_CELERY_BROKER_URL = "redis://localhost:6379/0"
 DEFAULT_REDIS_JOB_URL = "redis://localhost:6379/1"
 DEFAULT_INSPECTION_JOB_DIR = BASE_DIR / "var" / "inspection_jobs"
 DEFAULT_INSPECTION_JOB_TTL_SECONDS = 24 * 60 * 60
+# HTTP feed에서 받은 CSV를 기존 ETL에 넘길 때 사용할 안전한 기본 파일명입니다.
+DEFAULT_ETL_HTTP_FEED_FILENAME = "supplier_feed.csv"
 
 # JWT access token 서명 키입니다. 서버 설정으로 고정하며 요청에서 선택할 수 없습니다.
 CATALOGGUARD_JWT_SECRET_ENV_VAR = "CATALOGGUARD_JWT_SECRET"
@@ -183,6 +188,17 @@ def get_catalogguard_etl_s3_bucket() -> str | None:
 def get_catalogguard_etl_s3_prefix() -> str | None:
     value = os.environ.get(CATALOGGUARD_ETL_S3_PREFIX_ENV_VAR, "").strip().strip("/")
     return f"{value}/" if value else None
+
+
+def get_catalogguard_etl_http_feed_url() -> str | None:
+    value = os.environ.get(CATALOGGUARD_ETL_HTTP_FEED_URL_ENV_VAR, "").strip()
+    return value or None
+
+
+def get_catalogguard_etl_http_feed_filename() -> str:
+    # 파일명을 응답 헤더에서 추출하지 않고 서버 설정으로만 정합니다.
+    value = os.environ.get(CATALOGGUARD_ETL_HTTP_FEED_FILENAME_ENV_VAR, "").strip()
+    return value or DEFAULT_ETL_HTTP_FEED_FILENAME
 
 
 def get_catalogguard_api_timeout_seconds() -> float:

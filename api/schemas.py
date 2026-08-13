@@ -162,6 +162,13 @@ class ETLS3LoadRequest(BaseModel):
     object_key: str
 
 
+class ETLHTTPFeedLoadRequest(BaseModel):
+    # feed URL은 서버 설정으로만 정합니다. extra="forbid"가 클라이언트의 url 지정을 막습니다.
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: str
+
+
 class ETLProfileResponse(BaseModel):
     id: str
     display_name: str

@@ -40,6 +40,7 @@ from api.schemas import (
     CatalogPromotionRollbackRunListItemResponse,
     CatalogPromotionRollbackRunListResponse,
     CatalogPromotionRollbackRunStatus,
+    ETLHTTPFeedLoadRequest,
     ETLLoadDetailResponse,
     ETLLoadListItemResponse,
     ETLLoadListResponse,
@@ -65,6 +66,11 @@ from db.etl_query_service import (
     normalize_etl_filter,
 )
 from etl.db_loader import ETLLoadError
+from etl.http_source import (
+    HTTPFeedNotConfiguredError,
+    HTTPFeedReadError,
+    read_http_feed_csv,
+)
 from etl.pipeline import ETLPipelineError
 from etl.profile_loader import ETLProfileNotFoundError, list_etl_profiles
 from etl.s3_source import (
@@ -658,6 +664,62 @@ async def create_etl_load_run(
     return _build_web_run_response(outcome)
 
 
+def _run_server_side_source_etl(
+    session: Session,
+    *,
+    profile_id: str,
+    source_filename: str,
+    input_bytes: bytes,
+    current_user,
+) -> ETLWebRunResponse:
+    """Run the existing Web ETL service for a server-side fetched source.
+
+    S3 and HTTP feed sources only differ in how the CSV bytes arrive, so they share
+    the same downstream orchestration, error mapping, and Web ETL metrics.
+    """
+    try:
+        outcome = run_web_etl(
+            session,
+            profile_id=profile_id,
+            source_filename=source_filename,
+            input_bytes=input_bytes,
+            actor_user_id=current_user.id,
+            actor_username=current_user.username,
+        )
+    except ETLProfileNotFoundError:
+        record_web_etl_run("failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "unsupported_profile",
+                "message": "Unsupported supplier profile.",
+            },
+        ) from None
+    except (CsvUploadValidationError, ETLPipelineError) as error:
+        record_web_etl_run("failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "invalid_upload", "message": str(error)},
+        ) from None
+    except ETLLoadError:
+        record_web_etl_run("failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "etl_load_failed",
+                "message": "An error occurred while processing ETL.",
+            },
+        ) from None
+
+    record_web_etl_run("created" if outcome.created else "duplicate")
+    if outcome.created:
+        record_web_etl_rows(
+            loaded_rows=outcome.loaded_rows,
+            rejected_rows=outcome.rejected_rows,
+        )
+    return _build_web_run_response(outcome)
+
+
 def _raise_s3_source_error(
     *,
     status_code: int,
@@ -718,47 +780,74 @@ def create_s3_etl_load_run(
             message=str(error),
         )
 
-    try:
-        outcome = run_web_etl(
-            session,
-            profile_id=request.profile_id,
-            source_filename=source.source_filename,
-            input_bytes=source.content,
-            actor_user_id=current_user.id,
-            actor_username=current_user.username,
-        )
-    except ETLProfileNotFoundError:
-        record_web_etl_run("failed")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "unsupported_profile",
-                "message": "Unsupported supplier profile.",
-            },
-        ) from None
-    except (CsvUploadValidationError, ETLPipelineError) as error:
-        record_web_etl_run("failed")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "invalid_upload", "message": str(error)},
-        ) from None
-    except ETLLoadError:
-        record_web_etl_run("failed")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "code": "etl_load_failed",
-                "message": "An error occurred while processing ETL.",
-            },
-        ) from None
+    return _run_server_side_source_etl(
+        session,
+        profile_id=request.profile_id,
+        source_filename=source.source_filename,
+        input_bytes=source.content,
+        current_user=current_user,
+    )
 
-    record_web_etl_run("created" if outcome.created else "duplicate")
-    if outcome.created:
-        record_web_etl_rows(
-            loaded_rows=outcome.loaded_rows,
-            rejected_rows=outcome.rejected_rows,
+
+def _raise_http_feed_source_error(
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+) -> None:
+    """Log a safe, structured HTTP feed failure without the URL or response body."""
+    log_event(
+        _LOGGER,
+        logging.WARNING,
+        event="http_etl_source_failed",
+        error_code=code,
+    )
+    raise HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message},
+    )
+
+
+@router.post("/api/v1/etl-loads/http", response_model=ETLWebRunResponse)
+def create_http_feed_etl_load_run(
+    request: ETLHTTPFeedLoadRequest,
+    current_user=Depends(require_operator),
+    session: Session = Depends(get_session),
+) -> ETLWebRunResponse:
+    """Download the configured trusted HTTP feed CSV and reuse the Web ETL service.
+
+    The feed URL comes from server configuration only. Clients choose the supplier
+    profile, never the host, so this endpoint cannot be turned into an SSRF probe.
+    """
+    try:
+        source = read_http_feed_csv()
+    except HTTPFeedNotConfiguredError:
+        _raise_http_feed_source_error(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="http_feed_not_configured",
+            message="HTTP feed source is not configured.",
         )
-    return _build_web_run_response(outcome)
+    except HTTPFeedReadError:
+        _raise_http_feed_source_error(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            code="http_feed_read_failed",
+            message="HTTP feed source could not be read.",
+        )
+    except CsvUploadValidationError as error:
+        # This happened before run_web_etl(), so it must not affect Web ETL metrics.
+        _raise_http_feed_source_error(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="invalid_upload",
+            message=str(error),
+        )
+
+    return _run_server_side_source_etl(
+        session,
+        profile_id=request.profile_id,
+        source_filename=source.source_filename,
+        input_bytes=source.content,
+        current_user=current_user,
+    )
 
 
 @router.get(
