@@ -93,6 +93,8 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - 웹 ETL 성공 후 ETL 적재 이력 캐시만 자동 무효화하고, 운영 상품 반영은 사용자가 이력에서 batch를 선택해 별도로 진행
 - `POST /api/v1/etl-loads/s3`로 서버에 설정된 private S3 bucket의 허용 prefix 객체만 읽어 같은 `run_web_etl()` 흐름으로 staging까지 적재(업로드 대신 S3를 입력원으로 사용하는 source adapter이며 별도 ETL pipeline이 아님)
 - S3 source는 bucket·prefix를 서버 환경변수로 고정하고 요청은 `object_key`만 받으며, prefix 밖 key 차단·HeadObject 기반 크기 제한·bounded read를 적용
+- `POST /api/v1/etl-loads/http`로 서버에 설정된 신뢰 공급사 HTTP feed의 CSV를 읽어 같은 `run_web_etl()` 흐름으로 staging까지 적재(세 번째 ETL pipeline이 아니라 세 번째 source adapter)
+- HTTP feed source는 URL을 서버 환경변수로 고정하고 요청은 `profile_id`만 받으며, 외부 host는 `https`만 허용·redirect 비허용·bounded timeout·bounded read를 적용해 SSRF와 과대 응답을 차단
 - 실제 AWS staging(ap-northeast-2)에서 private S3 → EC2 Instance Role 최소권한(`s3:GetObject` + 정확한 prefix) → FastAPI → 기존 ETL pipeline → RDS PostgreSQL 적재까지 E2E 검증
 - ETL batch를 명시적으로 선택하는 catalog promotion preview
 - insert/update/unchanged 건수와 상품별 변경 전·후 값 표시
@@ -1032,6 +1034,8 @@ $env:CATALOGGUARD_JWT_SECRET="로컬에서만 사용할 임의의 긴 문자열"
 | `CATALOGGUARD_METRICS_ENABLED` | `false` | `GET /metrics` 활성화 여부. `true`/`1`/`yes`(대소문자 무관)일 때만 활성화되며, 그 외 값이나 미설정 시 `/metrics`는 `404`이고 metric instrumentation도 no-op(내부 counter도 증가하지 않음) |
 | `CATALOGGUARD_ETL_S3_BUCKET` | 없음 | `POST /api/v1/etl-loads/s3`가 읽을 S3 bucket. 요청으로 bucket을 지정할 수 없으며, 미설정 시 이 endpoint는 `503`(`s3_not_configured`) |
 | `CATALOGGUARD_ETL_S3_PREFIX` | 없음 | 허용할 object key prefix(예: `incoming/catalogguard/`). 앞뒤 `/`는 정규화하며, 설정 시 이 prefix로 시작하지 않는 `object_key`는 S3 호출 전에 `400`(`s3_key_not_allowed`)으로 차단. 미설정이면 prefix 제한 없이 해당 bucket 전체가 대상이 되므로 설정을 권장 |
+| `CATALOGGUARD_ETL_HTTP_FEED_URL` | 없음 | `POST /api/v1/etl-loads/http`가 읽을 신뢰 공급사 CSV feed URL(예: `https://supplier.example.invalid/catalog.csv`). 요청으로 URL을 지정할 수 없으며, 미설정 시 이 endpoint는 `503`(`http_feed_not_configured`). 외부 host는 `https`만 허용하고 평문 `http`는 loopback host에서만 허용 |
+| `CATALOGGUARD_ETL_HTTP_FEED_FILENAME` | `supplier_feed.csv` | HTTP feed로 받은 CSV를 기존 ETL에 넘길 때 사용할 `source_filename`. 응답 헤더에서 추출하지 않고 서버 설정으로만 정하며, `.csv`가 아니면 `400`(`invalid_upload`) |
 
 실제 `CATALOGGUARD_JWT_SECRET` 값은 저장소에 커밋하지 않으며, 이 문서에도 실제 값을 적지 않습니다.
 

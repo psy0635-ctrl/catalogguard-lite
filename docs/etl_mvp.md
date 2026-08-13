@@ -163,6 +163,55 @@ S3 object
 
 전환·중복 판단·Actor Audit을 재구현하지 않았으므로, 같은 파일이 업로드로 들어오든 S3에서 들어오든 `input_file_sha256`·`profile_name`·`profile_version` 기준 중복 판단 결과가 같다.
 
+### HTTP feed source adapter
+
+`POST /api/v1/etl-loads/http`는 입력을 신뢰 공급사 HTTP feed에서 가져오는 경로다. S3와 마찬가지로 두 번째 ETL pipeline이 아니라 `run_web_etl()` 앞단에 붙는 source adapter이며, 그 뒤 흐름은 업로드·S3 경로와 완전히 같다.
+
+```text
+Trusted HTTP Supplier Feed
+-> etl/http_source.py: read_http_feed_csv()
+-> (source_filename, content bytes)
+-> run_web_etl()          <- 업로드·S3 경로와 동일한 함수
+-> run_pipeline()
+-> load_standard_csv()
+```
+
+세 source는 bytes를 가져오는 방법만 다르고 core ETL은 하나다.
+
+| source | 입력 경로 | 클라이언트가 정하는 것 | 서버가 정하는 것 |
+|---|---|---|---|
+| Upload | multipart 업로드 | 파일, `profile_id` | 없음 |
+| S3 | `read_s3_csv_object()` | `object_key`, `profile_id` | bucket, 허용 prefix |
+| HTTP Feed | `read_http_feed_csv()` | `profile_id`만 | feed URL, 저장할 파일명 |
+
+`read_http_feed_csv()`가 하는 일도 bytes를 안전하게 가져오는 것까지다.
+
+```text
+서버 환경변수에서 feed URL 확인 (요청은 URL을 고를 수 없음)
+-> 허용 scheme 검사 (https, 또는 loopback host의 http)
+-> 설정 파일명을 기존 CSV 파일명 규칙으로 검증
+-> redirect를 따르지 않는 opener로 bounded timeout 요청
+-> Content-Length가 있으면 본문을 읽기 전에 먼저 크기 검증
+-> 상한+1 bytes까지만 bounded read
+-> 실제 읽은 길이를 다시 검증
+```
+
+가장 중요한 설계 결정은 **클라이언트가 URL을 고를 수 없다는 것**이다. 요청 본문은 `profile_id` 하나뿐이고 schema가 `extra="forbid"`이므로 `url` 같은 필드를 넣으면 `422`가 된다. 사용자가 내부망 주소나 cloud metadata 주소를 서버에 요청시키는 SSRF 구조를 만들지 않기 위해서다.
+
+redirect는 따라가지 않는다. 신뢰 URL이 다른 host로 redirect되면 결국 그 host를 사용자가 아닌 공급사가 고르게 되는 셈이라, MVP에서는 가장 단순한 "따라가지 않음"을 택했다. 평문 `http`는 서버를 떠나지 않는 loopback host에서만 허용하고, 외부 host는 `https`만 허용한다.
+
+feed URL과 응답 본문은 credential을 담을 수 있으므로 오류 메시지와 구조화 로그에는 코드만 남긴다.
+
+새 HTTP 라이브러리는 추가하지 않았다. Python 표준 라이브러리 `urllib.request`로 timeout, bounded read, redirect 차단이 모두 가능하다.
+
+전환·중복 판단·Actor Audit을 재구현하지 않았으므로, 같은 CSV가 업로드로 들어오든 S3나 HTTP feed로 들어오든 `input_file_sha256`·`profile_name`·`profile_version` 기준 중복 판단 결과가 같다. 같은 feed를 두 번 가져오면 두 번째 요청은 `created=false`와 같은 `etl_load_run_id`를 돌려준다.
+
+### HTTP feed 테스트 구조
+
+단위 테스트(`tests/etl/test_http_source.py`)는 fake opener를 주입해 응답 계약·오류 매핑·크기 제한·URL 허용 정책을 검증하고, API 테스트(`tests/test_api_etl_http_load.py`)는 source adapter를 대체해 권한·오류 매핑·metric·중복 계약을 검증한다. 어느 테스트도 실제 인터넷에 접속하지 않으므로 CI 결과는 외부 사이트 상태에 영향을 받지 않는다.
+
+실제 소켓 통신은 저장소 밖 임시 스크립트에서 로컬 `http.server`를 띄워 별도로 확인했다.
+
 ### 실제 AWS staging 검증과 fake client 테스트의 구분
 
 이 기능의 단위·API 테스트(`tests/etl/test_s3_source.py`, `tests/test_api_etl_s3_load.py`)는 fake S3 client를 주입해 응답 계약·오류 매핑·크기 제한을 검증한다. 실제 AWS 자격증명이나 네트워크를 쓰지 않으므로 CI에서 항상 돌지만, 실제 S3의 동작까지 보장하지는 않는다.
