@@ -199,12 +199,19 @@ def _make_load_run(profile_name: str, *, suffix: str = "") -> ETLLoadRun:
     )
 
 
+# 검수 대상 상품명은 고정합니다. 테스트 구분용 랜덤 marker(uuid4)를 product_name에 넣으면
+# 우연히 전화번호 형태(예: 01012345678)가 만들어져 개인정보 검수가 error를 내고
+# promotion이 409(inspection_errors_present)로 막히는 flaky 실패가 생깁니다.
+# 랜덤 marker는 row 식별용 필드(product_id 등)에만 남기고 검수 데이터와 분리합니다.
+STAGING_PRODUCT_NAME = "Actor Audit Test Product"
+
+
 def _make_staging(load_run_id: int, product_id: str) -> CatalogProductStaging:
     return CatalogProductStaging(
         etl_load_run_id=load_run_id,
         product_group_id=f"G-{product_id}",
         product_id=product_id,
-        product_name=f"Product {product_id}",
+        product_name=STAGING_PRODUCT_NAME,
         category="TOP",
         color="BLACK",
         size="M",
