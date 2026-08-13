@@ -93,6 +93,20 @@ def _validate_configured_prefix(object_key: str) -> None:
         raise S3KeyNotAllowedError("S3 object key is not allowed")
 
 
+def sanitized_object_ref(object_key: str) -> str:
+    """Return a lineage-safe locator for one S3 object key.
+
+    The bucket name is never included, and the configured prefix is removed because it is
+    server configuration rather than per-batch provenance. What remains is the object's
+    position inside the allowed area, which is what identifies the batch later.
+    """
+    key = str(object_key).replace("\\", "/").strip()
+    prefix = get_catalogguard_etl_s3_prefix()
+    if prefix is not None and key.startswith(prefix):
+        key = key[len(prefix) :]
+    return key.lstrip("/")
+
+
 def _content_length(response: object) -> int:
     if not isinstance(response, dict):
         _log_s3_failure("s3_read_failed")

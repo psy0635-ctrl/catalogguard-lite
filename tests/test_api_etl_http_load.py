@@ -61,7 +61,13 @@ def captured_api_logs(caplog):
         logger.removeHandler(caplog.handler)
 
 
-def _fake_outcome(*, source_filename: str, actor_username: str | None) -> ETLWebRunOutcome:
+def _fake_outcome(
+    *,
+    source_filename: str,
+    actor_username: str | None,
+    initial_source_type: str = "http_feed",
+    initial_source_ref: str | None = None,
+) -> ETLWebRunOutcome:
     return ETLWebRunOutcome(
         etl_load_run_id=42,
         created=True,
@@ -89,6 +95,8 @@ def test_http_endpoint_passes_configured_filename_and_authenticated_actor_to_web
         input_bytes,
         actor_user_id=None,
         actor_username=None,
+        initial_source_type=None,
+        initial_source_ref=None,
     ):
         calls.append(
             {
@@ -97,11 +105,15 @@ def test_http_endpoint_passes_configured_filename_and_authenticated_actor_to_web
                 "input_bytes": input_bytes,
                 "actor_user_id": actor_user_id,
                 "actor_username": actor_username,
+                "initial_source_type": initial_source_type,
+                "initial_source_ref": initial_source_ref,
             }
         )
         return _fake_outcome(
             source_filename=source_filename,
             actor_username=actor_username,
+            initial_source_type=initial_source_type,
+            initial_source_ref=initial_source_ref,
         )
 
     app.dependency_overrides[get_session] = lambda: iter([object()])
@@ -122,6 +134,9 @@ def test_http_endpoint_passes_configured_filename_and_authenticated_actor_to_web
             "input_bytes": b"supplier,csv\n",
             "actor_user_id": 1,
             "actor_username": "operator_user",
+            "initial_source_type": "http_feed",
+            # feed URL이 아니라 비밀 없는 고정 식별자입니다.
+            "initial_source_ref": "configured_http_feed",
         }
     ]
     assert response.json()["source_filename"] == "supplier_feed.csv"
@@ -445,6 +460,11 @@ def test_http_endpoint_persists_staging_actor_and_reuses_duplicate_identity(
 
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides.pop(get_current_user, None)
+    # 실제 운영처럼 credential이 붙은 feed URL을 설정해 두고, 그것이 저장되지 않는지 확인합니다.
+    monkeypatch.setenv(
+        "CATALOGGUARD_ETL_HTTP_FEED_URL",
+        "https://supplier.example.test/catalog.csv?token=secret-feed-token",
+    )
     monkeypatch.setattr(
         etl_loads_route,
         "read_http_feed_csv",
@@ -487,6 +507,20 @@ def test_http_endpoint_persists_staging_actor_and_reuses_duplicate_identity(
             # Actor Audit은 새 source adapter가 아니라 기존 실행 경로가 기록합니다.
             assert run.actor_user_id == user.id
             assert run.actor_username == username
+            # 최초 유입 경로는 http_feed이고, locator는 비밀 없는 고정 식별자입니다.
+            assert run.initial_source_type == "http_feed"
+            assert run.initial_source_ref == "configured_http_feed"
+            # feed URL 원문, host, query, token 중 어느 것도 DB에 남지 않아야 합니다.
+            stored = f"{run.initial_source_ref} {run.source_filename}"
+            assert "secret-feed-token" not in stored
+            assert "token=" not in stored
+            assert "https://" not in stored
+            assert "supplier.example.test" not in stored
+            # API 응답에서도 마찬가지입니다(DB 저장 전에 이미 안전한 값이어야 합니다).
+            assert "secret-feed-token" not in first.text
+            assert "supplier.example.test" not in first.text
+            assert first.json()["initial_source_type"] == "http_feed"
+            assert first.json()["initial_source_ref"] == "configured_http_feed"
             products = verify_session.scalars(
                 select(CatalogProductStaging).where(
                     CatalogProductStaging.etl_load_run_id == run_id

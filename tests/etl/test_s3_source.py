@@ -17,6 +17,7 @@ from etl.s3_source import (
     S3ObjectNotFoundError,
     S3ReadError,
     read_s3_csv_object,
+    sanitized_object_ref,
 )
 
 
@@ -286,3 +287,32 @@ def test_body_read_failure_is_translated_and_body_is_closed(monkeypatch):
 
     assert "network details" not in str(exc_info.value)
     assert body.closed is True
+
+
+def test_sanitized_object_ref_drops_the_configured_prefix(monkeypatch):
+    monkeypatch.setenv("CATALOGGUARD_ETL_S3_PREFIX", "incoming/catalogguard/")
+
+    ref = sanitized_object_ref("incoming/catalogguard/vendor-a/20260813.csv")
+
+    # 허용 prefix는 서버 설정이라 배치별 provenance가 아닙니다. 남는 것은 허용 구역 안의 위치뿐입니다.
+    assert ref == "vendor-a/20260813.csv"
+
+
+def test_sanitized_object_ref_never_contains_the_bucket(monkeypatch):
+    monkeypatch.setenv("CATALOGGUARD_ETL_S3_BUCKET", "catalogguard-source")
+    monkeypatch.setenv("CATALOGGUARD_ETL_S3_PREFIX", "incoming/catalogguard/")
+
+    ref = sanitized_object_ref("incoming/catalogguard/vendor-a/products.csv")
+
+    assert "catalogguard-source" not in ref
+    assert not ref.startswith("s3://")
+
+
+def test_sanitized_object_ref_without_configured_prefix_keeps_the_relative_key(
+    monkeypatch,
+):
+    monkeypatch.delenv("CATALOGGUARD_ETL_S3_PREFIX", raising=False)
+
+    assert sanitized_object_ref("vendor-a/products.csv") == "vendor-a/products.csv"
+    # 앞의 구분자는 bucket root를 뜻하므로 저장하지 않습니다.
+    assert sanitized_object_ref("/vendor-a/products.csv") == "vendor-a/products.csv"

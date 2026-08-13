@@ -70,6 +70,10 @@ class ETLLoadListItemResponse(BaseModel):
     created_at: datetime
     # 이 배치를 실행한 로그인 사용자입니다. migration 이전이나 CLI로 적재된 배치는 None입니다.
     actor_username: str | None
+    # 이 배치를 최초로 만든 입력 경로입니다. dedup으로 재사용된 배치는 최초 값을 유지하므로,
+    # 같은 배치가 나중에 다른 경로로 다시 들어왔더라도 이 값은 바뀌지 않습니다.
+    initial_source_type: str
+    initial_source_ref: str | None
 
 
 class ETLLoadListResponse(BaseModel):
@@ -117,6 +121,8 @@ class ETLLoadDetailResponse(BaseModel):
     reject_details_stored: bool
     created_at: datetime
     actor_username: str | None
+    initial_source_type: str
+    initial_source_ref: str | None
     products: ETLStagingProductListResponse
 
 
@@ -153,6 +159,8 @@ class ETLWebRunResponse(BaseModel):
     rejected_rows: int | None
     error_counts: dict[str, int] | None
     actor_username: str | None
+    initial_source_type: str
+    initial_source_ref: str | None
 
 
 class ETLS3LoadRequest(BaseModel):

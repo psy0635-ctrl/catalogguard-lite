@@ -53,6 +53,8 @@ def _load(**overrides):
         "rejected_rows": 5,
         "created_at": datetime(2026, 7, 25, 12, tzinfo=timezone.utc),
         "actor_username": "operator_user",
+        "initial_source_type": "upload",
+        "initial_source_ref": "vendor_products.csv",
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -78,6 +80,8 @@ def fake_etl_query_service(monkeypatch):
         reject_details_stored=True,
         created_at=load.created_at,
         actor_username="operator_user",
+        initial_source_type="upload",
+        initial_source_ref="vendor_products.csv",
         products=SimpleNamespace(
             items=[_product(description=None, seller=None, sale_price=None)],
             total=25,
@@ -196,6 +200,9 @@ def test_list_etl_loads_returns_default_page_and_excludes_hashes(
                 "rejected_rows": 5,
                 "created_at": "2026-07-25T12:00:00Z",
                 "actor_username": "operator_user",
+                # 목록에서도 배치의 최초 유입 경로를 확인할 수 있어야 합니다.
+                "initial_source_type": "upload",
+                "initial_source_ref": "vendor_products.csv",
             }
         ],
         "total": 1,

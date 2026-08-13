@@ -52,10 +52,15 @@ def test_success_returns_etl_web_run_contract(monkeypatch):
         input_bytes,
         actor_user_id=None,
         actor_username=None,
+        initial_source_type=None,
+        initial_source_ref=None,
     ):
         assert profile_id == "sample_fashion_vendor_v1"
         assert source_filename == "vendor.csv"
         assert input_bytes == b"header\nvalue\n"
+        # 업로드 배치는 출처가 upload로, locator는 leaf 파일명으로 기록돼야 합니다.
+        assert initial_source_type == "upload"
+        assert initial_source_ref == "vendor.csv"
         return ETLWebRunOutcome(
             etl_load_run_id=42,
             created=True,
@@ -67,6 +72,8 @@ def test_success_returns_etl_web_run_contract(monkeypatch):
             rejected_rows=0,
             error_counts={},
             actor_username=actor_username,
+            initial_source_type=initial_source_type,
+            initial_source_ref=initial_source_ref,
         )
 
     app.dependency_overrides[get_session] = lambda: iter([object()])
@@ -86,6 +93,8 @@ def test_success_returns_etl_web_run_contract(monkeypatch):
         "profile_name": "sample_fashion_vendor",
         "profile_version": "1",
         "source_filename": "vendor.csv",
+        "initial_source_type": "upload",
+        "initial_source_ref": "vendor.csv",
         "total_rows": 2,
         "loaded_rows": 2,
         "rejected_rows": 0,
@@ -284,12 +293,17 @@ def test_real_endpoint_persists_batch_and_staging_products_in_postgresql(postgre
         assert body["rejected_rows"] == 0
         assert body["source_filename"] == source_filename
         assert body["actor_username"] == username
+        assert body["initial_source_type"] == "upload"
+        assert body["initial_source_ref"] == source_filename
 
         with session_factory() as verify_session:
             run = verify_session.get(ETLLoadRun, run_id)
             assert run is not None
             assert run.actor_username == username
             assert run.actor_user_id is not None
+            # actor(누가 실행했는가)와 source(어디서 들어왔는가)는 별개로 기록됩니다.
+            assert run.initial_source_type == "upload"
+            assert run.initial_source_ref == source_filename
             products = verify_session.scalars(
                 select(CatalogProductStaging).where(
                     CatalogProductStaging.etl_load_run_id == run_id

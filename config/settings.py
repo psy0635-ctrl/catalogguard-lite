@@ -24,6 +24,25 @@ DEFAULT_INSPECTION_JOB_TTL_SECONDS = 24 * 60 * 60
 # HTTP feed에서 받은 CSV를 기존 ETL에 넘길 때 사용할 안전한 기본 파일명입니다.
 DEFAULT_ETL_HTTP_FEED_FILENAME = "supplier_feed.csv"
 
+# ETL 배치를 "최초로" 만든 입력 경로입니다. dedup identity는
+# (input_file_sha256, profile_name, profile_version)이므로 같은 bytes가 다른 경로로 다시 들어오면
+# 기존 배치를 재사용합니다. 따라서 한 배치가 기록할 수 있는 것은 모든 유입 경로가 아니라
+# 최초 경로 하나뿐이고, 그래서 이름이 initial_* 입니다.
+ETL_INITIAL_SOURCE_TYPE_UNKNOWN = "unknown"
+ETL_INITIAL_SOURCE_TYPES = (
+    # migration 이전 row입니다. 과거 출처를 추측하지 않고 정직하게 unknown으로 둡니다.
+    ETL_INITIAL_SOURCE_TYPE_UNKNOWN,
+    "upload",
+    "s3",
+    "http_feed",
+    "cli",
+)
+ETL_INITIAL_SOURCE_TYPE_MAX_LENGTH = 20
+ETL_INITIAL_SOURCE_REF_MAX_LENGTH = 255
+# HTTP feed는 URL 원문에 token/credential이 들어갈 수 있으므로 저장하지 않고,
+# 비밀이 없는 고정 식별자만 남깁니다.
+ETL_HTTP_FEED_SOURCE_REF = "configured_http_feed"
+
 # JWT access token 서명 키입니다. 서버 설정으로 고정하며 요청에서 선택할 수 없습니다.
 CATALOGGUARD_JWT_SECRET_ENV_VAR = "CATALOGGUARD_JWT_SECRET"
 CATALOGGUARD_JWT_ALGORITHM = "HS256"
