@@ -89,17 +89,18 @@ jobs:
           assert inspect_csv_task.name
           print("AWS image imports passed.")
           '
-      - name: Verify AWS container health
+      - name: Verify AWS container health and readiness
         shell: bash
         run: |
           set -Eeuo pipefail
 
           container_name="catalogguard-aws-runtime"
           health_check_passed=false
+          verification_passed=false
           health_timeout_seconds=30
 
           cleanup() {
-            if [[ "${health_check_passed}" != "true" ]]; then
+            if [[ "${verification_passed}" != "true" ]]; then
               echo "===== AWS runtime container logs ====="
               docker logs "${container_name}" || true
             fi
@@ -135,14 +136,26 @@ jobs:
               http://127.0.0.1:8000/health >/dev/null; then
               health_check_passed=true
               echo "AWS runtime /health check passed."
-              exit 0
+              break
             fi
 
             sleep 1
           done
 
-          echo "AWS runtime /health check did not pass within ${health_timeout_seconds} seconds."
-          exit 1
+          if [[ "${health_check_passed}" != "true" ]]; then
+            echo "AWS runtime /health check did not pass within ${health_timeout_seconds} seconds."
+            exit 1
+          fi
+
+          # /health가 열렸다는 것은 컨테이너 CMD의 alembic upgrade head가 이미 끝나고
+          # uvicorn이 떴다는 뜻이므로, DATABASE_URL로 연결하는 /ready는 한 번만 확인합니다.
+          ready_body="$(curl --fail --silent --show-error --connect-timeout 2 --max-time 5 \
+            http://127.0.0.1:8000/ready)"
+          echo "GET /ready -> ${ready_body}"
+          echo "${ready_body}" | grep -q '"database":"ok"'
+          echo "AWS runtime /ready check passed."
+
+          verification_passed=true
       - name: Run tests
         run: python -m pytest -q
       - name: Configure async inspection job directory
