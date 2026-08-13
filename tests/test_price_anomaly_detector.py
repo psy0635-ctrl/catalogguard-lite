@@ -81,7 +81,7 @@ def test_calculate_category_price_medians_handles_odd_count():
 
     medians = calculate_category_price_medians(products)
 
-    assert medians["top"] == 15000
+    assert medians["상의"] == 15000
 
 
 def test_calculate_category_price_medians_handles_even_count():
@@ -96,7 +96,7 @@ def test_calculate_category_price_medians_handles_even_count():
 
     medians = calculate_category_price_medians(products)
 
-    assert medians["top"] == 19000
+    assert medians["상의"] == 19000
 
 
 def test_calculate_category_price_medians_excludes_non_positive_prices():
@@ -112,7 +112,7 @@ def test_calculate_category_price_medians_excludes_non_positive_prices():
 
     medians = calculate_category_price_medians(products)
 
-    assert medians["top"] == 15000
+    assert medians["상의"] == 15000
 
 
 def test_get_valid_price_excludes_invalid_values():
@@ -138,14 +138,76 @@ def test_calculate_category_price_medians_excludes_blank_categories():
     medians = calculate_category_price_medians(products)
 
     assert "" not in medians
-    assert medians["top"] == 15000
+    assert medians["상의"] == 15000
 
 
-def test_normalize_category_strips_spaces_and_casefolds_english():
-    assert normalize_category(" TOP ") == "top"
-    assert normalize_category("shoes") == "shoes"
-    assert normalize_category("SHOES") == "shoes"
+def test_normalize_category_strips_spaces_casefolds_and_resolves_alias():
+    # 비교 기준이 casefold-only에서 기존 별칭 정규화 재사용으로 바뀌었습니다.
+    assert normalize_category(" TOP ") == "상의"
+    assert normalize_category("shoes") == "신발"
+    assert normalize_category("SHOES") == "신발"
     assert normalize_category("") == ""
+
+
+def test_normalize_category_maps_canonical_alias_and_korean_to_same_key():
+    # 공식 canonical, 영문 소문자 별칭, 한국어 표기는 모두 같은 비교 키가 되어야 합니다.
+    same_meaning_groups = [
+        ("TOP", "top", "상의"),
+        ("BOTTOM", "bottom", "하의"),
+        ("OUTER", "outer", "아우터"),
+        ("SHOES", "shoes", "신발"),
+        ("BAG", "bag", "가방"),
+    ]
+
+    semantic_keys = []
+    for canonical, english_alias, korean_alias in same_meaning_groups:
+        canonical_key = normalize_category(canonical)
+        assert canonical_key
+        assert normalize_category(english_alias) == canonical_key
+        assert normalize_category(korean_alias) == canonical_key
+        semantic_keys.append(canonical_key)
+
+    # 서로 다른 카테고리끼리는 같은 키로 합쳐지면 안 됩니다.
+    assert len(set(semantic_keys)) == len(same_meaning_groups)
+
+
+def test_calculate_category_price_medians_merges_alias_categories():
+    products = [
+        make_product(product_id="P001", category="TOP", price=10000),
+        make_product(product_id="P002", category="top", price=12000),
+        make_product(product_id="P003", category="상의", price=15000),
+        make_product(product_id="P004", category=" TOP ", price=18000),
+        make_product(product_id="P005", category="상의", price=20000),
+    ]
+
+    medians = calculate_category_price_medians(products)
+
+    # 표기가 섞여도 하나의 의미 카테고리로 묶여 전체 값 기준 중앙값을 계산해야 합니다.
+    assert len(medians) == 1
+    assert medians[normalize_category("TOP")] == 15000
+
+
+def test_find_category_price_anomalies_groups_korean_alias_with_canonical():
+    # canonical SHOES 행의 가격 이상치가 형제 행의 한국어 표기 때문에 누락되면 안 됩니다.
+    products = [
+        make_product(product_id="P001", category="SHOES", price=10000),
+        make_product(product_id="P002", category="SHOES", price=10000),
+        make_product(product_id="P003", category="SHOES", price=10000),
+        make_product(product_id="P004", category="SHOES", price=100000),
+        make_product(product_id="P005", category="신발", price=10000),
+        make_product(product_id="P006", category="신발", price=10000),
+        make_product(product_id="P007", category="신발", price=10000),
+    ]
+
+    medians = calculate_category_price_medians(products)
+    issues = find_category_price_anomalies(products)
+
+    assert len(medians) == 1
+    assert medians[normalize_category("SHOES")] == 10000
+    assert [issue.product_id for issue in issues] == ["P004"]
+    assert issues[0].rule == "category_price_anomaly"
+    # 사용자에게 보이는 메시지는 정규화 키가 아니라 원본 표기를 유지해야 합니다.
+    assert "category 'SHOES'" in issues[0].message
 
 
 def test_find_category_price_anomalies_flags_low_price_below_ratio():

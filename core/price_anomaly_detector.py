@@ -1,19 +1,16 @@
 # 역할: 카테고리별 가격 분포를 기준으로 지나치게 낮거나 높은 가격을 찾습니다.
 from statistics import median
 
+# 가격 그룹 비교도 상품명·카테고리 불일치 검수와 같은 의미 기준을 써야 하므로
+# 기존 카테고리 별칭 정규화를 그대로 재사용합니다. 공식 입력값 검증은 별개이며
+# 여전히 config.settings.VALID_CATEGORIES 직접 비교로만 수행합니다.
+from core.category_mismatch_detector import normalize_category
 from core.models import Product, ValidationIssue
 
 
 MIN_CATEGORY_SAMPLE_SIZE = 5
 LOW_PRICE_RATIO = 0.25
 HIGH_PRICE_RATIO = 4.0
-
-
-def normalize_category(category: str) -> str:
-    """카테고리 비교용 문자열을 정리합니다."""
-    if not isinstance(category, str):
-        return ""
-    return category.strip().casefold()
 
 
 def get_valid_price(price) -> int | None:
