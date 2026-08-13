@@ -7,6 +7,7 @@
 - 동일 CSV 조회는 기존 partial unique 복합 인덱스, 목록 조회는 기존 `created_at` 인덱스, 상세 조회는 PK와 기존 FK 조회 인덱스를 실제 planner가 사용했다.
 - 상세 API는 결과 수와 무관하게 SELECT 2회로 끝나며 N+1이 발생하지 않는다.
 - 목록 정렬용 복합 인덱스 후보는 정렬 노드를 없앴지만 10,000건에서 중앙값 차이가 0.022ms에 불과했다. 상세 결과용 복합 인덱스 후보는 planner가 선택하지 않았고 더 느리며 더 컸다.
+- 이후 추가 측정에서 깊은 OFFSET의 비용 증가를 실험 환경에서 확인했다. 현재 10,000건 규모에서는 절대 시간이 작아 production 변경을 보류했고, 대신 이 비용 특성을 opt-in 회귀 테스트로 고정했다(11절).
 
 ## 2. 분석 대상과 호출 위치
 
@@ -88,7 +89,7 @@ PostgreSQL `pg_indexes`에서 model과 migration에 선언된 인덱스가 실�
 | 목록의 Incremental Sort | 정렬 tie-breaker인 `id`가 기존 인덱스에 없음 | 중앙값 약 0.022ms 추가 | 현재 불필요 |
 | 상세 결과의 10행 Sort | 기존 인덱스가 `inspection_run_id`만 포함 | 중앙값 0.029ms 전체 | 현재 불필요 |
 | 전체 건수 Seq Scan | 정확한 조건 없는 `count(*)` | 10,000건에서 0.872ms | 현재 불필요 |
-| 큰 OFFSET 가능성 | OFFSET 이전 행을 건너뛰어야 함 | 깊은 페이지에서 증가 가능 | MVP 이후 cursor pagination 검토 |
+| 큰 OFFSET | OFFSET 이전 행을 실제로 읽고 버려야 함 | 10,000건 기준 OFFSET 5,000에서 buffer 약 28배 증가(11절) | 현재 규모에서는 불필요, 회귀 테스트로 고정 |
 | filename `%...%` 검색 | 선행 wildcard ILIKE는 일반 btree 사용 곤란 | 데이터 증가 시 Seq Scan 가능 | 운영 검색 빈도 확인 후 trigram 검토 |
 
 쿼리나 migration을 바꾸지 않은 대신 다음 회귀 방지 장치를 추가했다.
@@ -97,6 +98,7 @@ PostgreSQL `pg_indexes`에서 model과 migration에 선언된 인덱스가 실�
 - 실제 migration 테이블을 격리 schema로 복제하는 10,000/100,000행 성능 테스트
 - 핵심 쿼리의 `EXPLAIN ANALYZE BUFFERS` 계획 검증과 JSON 측정 출력
 - 상세 조회가 결과 수와 무관하게 SELECT 2회인지 확인하는 SQL 횟수 테스트
+- 깊은 OFFSET의 buffer 증가를 고정하는 회귀 테스트(11절)
 
 ## 8. 재현 명령
 
@@ -126,9 +128,40 @@ ORDER BY tablename, indexname;
 - 합성 데이터 분포는 운영 분포와 다를 수 있다.
 - 모든 read가 shared buffer hit인 warm-cache 측정이며 디스크 cold-cache 성능을 대표하지 않는다.
 - 동시 사용자, connection pool 경쟁, 네트워크 왕복, 운영 PostgreSQL 통계는 측정하지 않았다.
-- 큰 OFFSET과 filename 부분 문자열 검색은 기능은 유지했지만 대규모 운영 데이터에서 별도 측정이 필요하다.
+- 큰 OFFSET은 11절에서 측정했지만 filename 부분 문자열 검색은 여전히 대규모 운영 데이터에서 별도 측정이 필요하다.
+- 11절의 배수는 이 합성 데이터와 이 실험 환경에서 관찰한 값이며, 운영 하드웨어와 데이터 분포에서는 달라진다.
 - 운영 DB에는 `EXPLAIN ANALYZE`를 실행하지 않았고 운영 데이터를 복사하지 않았다.
 
 ## 10. 다음 권장 작업
 
 다음 한 단계로는 데이터 수집·ETL MVP를 권장한다. 실제 유입 파일 크기, 실행당 결과 수, filename/status/date 필터 사용 빈도, 페이지 깊이를 개인정보 없이 집계하면 다음 인덱스 판단을 합성 데이터가 아니라 운영 분포에 근거해 다시 내릴 수 있다.
+
+## 11. 깊은 OFFSET 비용 측정과 회귀 테스트
+
+9절이 남긴 "큰 OFFSET" 항목을 별도로 측정했다. 측정 조건은 4절과 같고, 목록 조회만 보므로 `inspection_results`는 만들지 않았다.
+
+`inspection_runs` 10,000건, `ORDER BY created_at DESC, id DESC LIMIT 20` 기준이다.
+
+| OFFSET | Plan | 사용 인덱스 | 실행 중앙값 | Shared hit | 첫 페이지 대비 buffer |
+|---:|---|---|---:|---:|---:|
+| 0 | `Limit → Incremental Sort → Index Scan` | `created_at` | 0.025ms | 4 | 1배 |
+| 1,000 | 동일 | `created_at` | 0.331ms | 26 | 6.5배 |
+| 5,000 | 동일 | `created_at` | 1.522ms | 114 | 28.5배 |
+
+세 구간의 실행 계획은 같다. 느려지는 원인은 planner의 계획 선택이나 인덱스 부족이 아니라, `Limit` 노드가 버릴 행을 인덱스로 실제로 읽어야 하는 OFFSET pagination 자체의 구조다. buffer 수가 OFFSET에 거의 비례해 증가하는 것이 그 직접 근거다.
+
+별도 실험에서 같은 페이지 위치를 `WHERE (created_at, id) < (?, ?)` 형태의 keyset 조건으로 조회하면 기존 `created_at` 인덱스만으로 첫 페이지 수준의 buffer만 읽었다. 즉 cursor/keyset pagination이 구조적 해결책이고 새 인덱스는 필요하지 않다.
+
+그럼에도 production 변경은 보류했다.
+
+- 현재 10,000건 규모에서 OFFSET 5,000은 페이지 251에 해당하고 절대 시간은 1.5ms 수준이다. 사람이 도달하는 페이지 깊이가 아니다.
+- cursor pagination은 API contract, Streamlit pagination UI, 전체 건수 표시 방식까지 함께 바꿔야 하고 "N페이지로 점프" 기능을 잃는다.
+- 실제 운영에서 깊은 페이지 요청이 존재하는지에 대한 근거가 아직 없다.
+
+대신 이 비용 특성을 `test_inspection_history_deep_offset_cost_growth`로 고정했다. 실행 시간은 CPU, 캐시 상태, PostgreSQL 버전에 흔들리므로 보고용으로만 출력하고, 계약은 buffer 사용량으로 검증한다.
+
+- 세 OFFSET 모두 요청한 20행을 정상 반환한다.
+- buffer 사용량이 OFFSET 순서대로 단조 증가한다.
+- 가장 깊은 페이지가 첫 페이지의 10배를 넘는 buffer를 읽는다. 실측은 28.5배이며, 환경 차이로 깨지지 않도록 하한을 낮게 잡았다.
+
+특정 plan node를 계약으로 고정하지는 않았다. `Seq Scan`과 `Index Scan` 중 무엇을 고르는지는 PostgreSQL 버전, 통계, 데이터 분포에 따라 정상적으로 달라질 수 있고, 이 테스트가 지키려는 것은 노드 이름이 아니라 페이지 깊이에 따른 처리량 증가이기 때문이다. 같은 이유로 filename 부분 문자열 검색은 측정값만 report에 남기고 계획을 단언하지 않는다.
