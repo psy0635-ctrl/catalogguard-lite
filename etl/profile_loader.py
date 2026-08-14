@@ -15,15 +15,19 @@ class ETLProfileNotFoundError(ValueError):
 
 # 웹 ETL 실행은 이 allowlist에 있는 profile_id만 받습니다.
 # 사용자가 보낸 파일 경로를 그대로 신뢰하지 않기 위한 유일한 진입점입니다.
+#
+# profile_id와 파일명의 '_v1'은 기존 API 클라이언트 호환을 위해 고정된 식별자이며,
+# 실제 검수/적재에 쓰이는 버전이 아닙니다. 실제 버전은 프로필 JSON의 profile_version이고
+# ETLLoadRun에도 그 값이 기록되므로, display_name에는 버전을 넣지 않습니다.
 ETL_PROFILE_DIR = BASE_DIR / "config" / "etl"
 _ETL_PROFILE_REGISTRY: dict[str, dict[str, str]] = {
     "sample_fashion_vendor_v1": {
         "filename": "sample_fashion_vendor_v1.json",
-        "display_name": "패션 공급사 샘플 v1",
+        "display_name": "패션 공급사 샘플",
     },
     "sample_marketplace_vendor_v1": {
         "filename": "sample_marketplace_vendor_v1.json",
-        "display_name": "마켓플레이스 공급사 샘플 v1",
+        "display_name": "마켓플레이스 공급사 샘플",
     },
 }
 

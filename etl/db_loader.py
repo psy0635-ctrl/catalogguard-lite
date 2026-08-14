@@ -15,6 +15,7 @@ from config.settings import (
     ETL_INITIAL_SOURCE_TYPES,
     REQUIRED_FIELDS,
 )
+from core.fashion_attribute_validator import is_field_required_for_category
 from core.upload_validator import CsvUploadValidationError, validate_and_read_uploaded_csv
 from db.models import CatalogProductStaging, ETLLoadRun, ETLRejectedRow
 from etl.reject_parser import ParsedRejectedRow, parse_reject_csv
@@ -199,7 +200,14 @@ def _build_staging_rows(dataframe: pd.DataFrame) -> list[dict[str, object]]:
     staging_rows: list[dict[str, object]] = []
     for row in dataframe.to_dict(orient="records"):
         cleaned = {field: _clean_cell(row.get(field)) for field in dataframe.columns}
-        missing_fields = [field for field in REQUIRED_FIELDS if not cleaned.get(field)]
+        # REQUIRED_FIELDS는 그대로 두고, 검수와 같은 카테고리별 정책으로 예외만 판단합니다.
+        # 정책에 없는 카테고리(빈 값, 허용 목록에 없는 값)는 기존처럼 모두 필수입니다.
+        missing_fields = [
+            field
+            for field in REQUIRED_FIELDS
+            if not cleaned.get(field)
+            and is_field_required_for_category(cleaned.get("category", ""), field)
+        ]
         if missing_fields:
             raise ETLLoadError("표준 CSV의 필수 상품 값이 비어 있습니다")
         sale_price_text = cleaned.get("sale_price", "")

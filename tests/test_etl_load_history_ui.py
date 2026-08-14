@@ -497,8 +497,8 @@ class FakeEtlApiClient:
         self.etl_run_calls = []
         self.etl_profiles = (
             [
-                {"id": "sample_fashion_vendor_v1", "display_name": "패션 공급사 샘플 v1"},
-                {"id": "sample_marketplace_vendor_v1", "display_name": "마켓플레이스 공급사 샘플 v1"},
+                {"id": "sample_fashion_vendor_v1", "display_name": "패션 공급사 샘플"},
+                {"id": "sample_marketplace_vendor_v1", "display_name": "마켓플레이스 공급사 샘플"},
             ]
             if etl_profiles is None
             else etl_profiles
@@ -1216,8 +1216,8 @@ def test_etl_web_run_profile_dropdown_lists_allowlisted_profiles(monkeypatch):
         if widget.key == "etl_web_run_selected_profile_id"
     )
     assert profile_select.options == [
-        "패션 공급사 샘플 v1",
-        "마켓플레이스 공급사 샘플 v1",
+        "패션 공급사 샘플",
+        "마켓플레이스 공급사 샘플",
     ]
     assert api_client.etl_profiles_calls == [1]
 

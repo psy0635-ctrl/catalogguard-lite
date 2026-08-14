@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from etl.models import ETLProfile
 from etl.transformer import transform_rows
 
@@ -156,3 +158,144 @@ def test_transform_rows_rejects_negative_price_and_stock_without_rejecting_sale_
         "NEGATIVE_STOCK",
     ]
     assert result.loaded_rows[0]["price"] == "12000"
+
+
+# 아래는 카테고리별 필수 속성 정책(category-aware validation)을 ETL에 적용한 뒤의 동작입니다.
+# 정책의 단일 기준은 검수와 같은 config.settings.FASHION_CATEGORY_ATTRIBUTE_RULES입니다.
+MARKETPLACE_PROFILE = ETLProfile(
+    name="sample_marketplace_vendor",
+    version="2",
+    source_columns={
+        "style_id": "product_group_id",
+        "sku_code": "product_id",
+        "title": "product_name",
+        "category_code": "category",
+        "tone": "color",
+        "fit_size": "size",
+        "regular_price": "price",
+        "photo": "image_path",
+    },
+    required_source_columns=(
+        "style_id",
+        "sku_code",
+        "title",
+        "category_code",
+        "tone",
+        "fit_size",
+        "photo",
+    ),
+    defaults={"stock": "0"},
+)
+
+MARKETPLACE_VALID_ROW = {
+    "style_id": "G001",
+    "sku_code": "SKU-1",
+    "title": "레더 토트백",
+    "category_code": "BAG",
+    "tone": "BLACK",
+    "fit_size": "FREE",
+    "regular_price": "59000",
+    "photo": "https://example.test/bag.jpg",
+}
+
+
+@pytest.mark.parametrize("category", ["TOP", "BOTTOM", "OUTER", "SHOES"])
+def test_transform_rows_still_rejects_blank_size_for_apparel_categories(category):
+    row = {**VALID_ROW, "main_category": category, "size_name": ""}
+
+    result = transform_rows([row], PROFILE)
+
+    assert result.loaded_rows == []
+    assert json.loads(result.rejected_rows[0]["error_code"]) == ["MISSING_SOURCE_VALUE"]
+    assert "size_name" in json.loads(result.rejected_rows[0]["error_message"])[0]
+
+
+def test_transform_rows_allows_blank_size_for_bag():
+    row = {**VALID_ROW, "main_category": "BAG", "item_name": "레더 토트백", "size_name": ""}
+
+    result = transform_rows([row], PROFILE)
+
+    assert result.rejected_rows == []
+    assert len(result.loaded_rows) == 1
+    assert result.loaded_rows[0]["category"] == "BAG"
+    assert result.loaded_rows[0]["size"] == ""
+
+
+def test_transform_rows_allows_blank_size_for_bag_on_marketplace_profile():
+    row = {**MARKETPLACE_VALID_ROW, "fit_size": ""}
+
+    result = transform_rows([row], MARKETPLACE_PROFILE)
+
+    assert result.rejected_rows == []
+    assert result.loaded_rows[0]["size"] == ""
+    assert result.loaded_rows[0]["category"] == "BAG"
+
+
+@pytest.mark.parametrize("blank_column", ["colour", "image_link", "item_name"])
+def test_transform_rows_still_rejects_other_blank_required_values_for_bag(blank_column):
+    # size만 선택 값이며, BAG에서도 나머지 필수 공급사 값 정책은 그대로입니다.
+    row = {**VALID_ROW, "main_category": "BAG", blank_column: ""}
+
+    result = transform_rows([row], PROFILE)
+
+    assert result.loaded_rows == []
+    assert blank_column in json.loads(result.rejected_rows[0]["error_message"])[0]
+
+
+def test_transform_rows_rejects_blank_size_for_invalid_category():
+    # 허용 목록에 없는 카테고리는 BAG로 추정하지 않고 기존 정책을 유지합니다.
+    row = {**VALID_ROW, "main_category": "ACCESSORY", "size_name": ""}
+
+    result = transform_rows([row], PROFILE)
+
+    assert result.loaded_rows == []
+    assert "size_name" in json.loads(result.rejected_rows[0]["error_message"])[0]
+
+
+def test_transform_rows_rejects_blank_size_for_lowercase_bag():
+    # canonical 표기가 아닌 값은 별칭으로 정규화하지 않으므로 size가 계속 필수입니다.
+    row = {**VALID_ROW, "main_category": "bag", "size_name": ""}
+
+    result = transform_rows([row], PROFILE)
+
+    assert result.loaded_rows == []
+    assert "size_name" in json.loads(result.rejected_rows[0]["error_message"])[0]
+
+
+def test_transform_rows_rejects_blank_size_when_category_is_also_blank():
+    row = {**VALID_ROW, "main_category": "", "size_name": ""}
+
+    result = transform_rows([row], PROFILE)
+
+    assert result.loaded_rows == []
+    messages = json.loads(result.rejected_rows[0]["error_message"])
+    assert any("main_category" in message for message in messages)
+    assert any("size_name" in message for message in messages)
+
+
+def test_transform_rows_applies_bag_policy_after_existing_whitespace_trimming():
+    # 기존 표준 행 생성이 모든 값을 trim하므로 ' BAG '는 검수와 동일하게 canonical BAG가 됩니다.
+    # 별칭 정규화를 새로 추가한 것이 아니라, 원래 있던 trim 결과에 정책을 적용하는 것입니다.
+    row = {**VALID_ROW, "main_category": " BAG ", "size_name": ""}
+
+    result = transform_rows([row], PROFILE)
+
+    assert result.rejected_rows == []
+    assert result.loaded_rows[0]["category"] == "BAG"
+
+
+def test_transform_rows_keeps_unmapped_required_source_column_always_required():
+    # 표준 컬럼에 매핑되지 않은 필수 컬럼은 카테고리 정책과 무관하게 필수로 남습니다.
+    profile = ETLProfile(
+        name="unmapped_required",
+        version="1",
+        source_columns=PROFILE.source_columns,
+        required_source_columns=(*PROFILE.required_source_columns, "audit_note"),
+        defaults=PROFILE.defaults,
+    )
+    row = {**VALID_ROW, "main_category": "BAG", "audit_note": ""}
+
+    result = transform_rows([row], profile)
+
+    assert result.loaded_rows == []
+    assert "audit_note" in json.loads(result.rejected_rows[0]["error_message"])[0]

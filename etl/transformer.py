@@ -2,6 +2,7 @@ import json
 from dataclasses import dataclass
 
 from config.settings import CSV_TEMPLATE_COLUMNS
+from core.fashion_attribute_validator import is_field_required_for_category
 from etl.models import ETLProfile, ETLRowError
 
 
@@ -74,6 +75,39 @@ def _build_standard_row(
     return row
 
 
+def _target_columns_for_source(
+    source_column: str,
+    profile: ETLProfile,
+) -> tuple[str, ...]:
+    target_columns = profile.source_columns.get(source_column, ())
+    if isinstance(target_columns, str):
+        return (target_columns,)
+    return tuple(target_columns)
+
+
+def _is_required_source_value(
+    source_column: str,
+    standard_row: dict[str, str],
+    profile: ETLProfile,
+) -> bool:
+    """카테고리별 정책에서 이 공급사 값이 이 행에 필요한지 판단합니다.
+
+    정책의 단일 기준은 검수와 같은 config.settings.FASHION_CATEGORY_ATTRIBUTE_RULES이며,
+    여기서는 공급사 컬럼을 표준 컬럼으로 바꿔 그 정책을 그대로 물어보기만 합니다.
+    """
+    target_columns = _target_columns_for_source(source_column, profile)
+    if not target_columns:
+        # 표준 컬럼에 매핑되지 않은 필수 컬럼은 카테고리와 무관하게 기존처럼 필수입니다.
+        return True
+
+    # 한 공급사 컬럼이 여러 표준 컬럼에 매핑될 수 있으므로,
+    # 그중 하나라도 이 카테고리에서 필수면 공급사 값도 있어야 합니다.
+    return any(
+        is_field_required_for_category(standard_row["category"], target_column)
+        for target_column in target_columns
+    )
+
+
 def _build_rejection(
     source_row_number: int,
     source_row: dict[str, object],
@@ -104,6 +138,9 @@ def transform_rows(
 
     row_numbers = source_row_numbers or list(range(2, len(source_rows) + 2))
     for source_row_number, source_row in zip(row_numbers, source_rows, strict=True):
+        # 카테고리별 필수 속성 정책을 물어보려면 표준 카테고리 값이 먼저 필요하므로
+        # 표준 행을 만든 뒤에 필수 공급사 값을 검사합니다.
+        row = _build_standard_row(source_row, profile)
         errors = [
             ETLRowError(
                 code="MISSING_SOURCE_VALUE",
@@ -112,8 +149,8 @@ def transform_rows(
             )
             for column in profile.required_source_columns
             if not _clean_text(source_row.get(column, ""))
+            and _is_required_source_value(column, row, profile)
         ]
-        row = _build_standard_row(source_row, profile)
 
         if not row["product_id"]:
             errors.append(

@@ -280,7 +280,8 @@ def test_repository_marketplace_profile_preserves_group_and_sku_relationships(tm
 
     profile = load_profile(profile_path)
     assert profile.name == "sample_marketplace_vendor"
-    assert profile.version == "1"
+    # 카테고리별 필수 속성 정책 적용으로 같은 입력의 변환 결과가 달라질 수 있어 v2로 올렸습니다.
+    assert profile.version == "2"
     assert profile.source_columns["style_id"] == ("product_group_id",)
     assert profile.source_columns["sku_code"] == ("product_id",)
     assert profile.defaults == {"stock": "0"}
@@ -333,3 +334,112 @@ def test_repository_marketplace_profile_preserves_group_and_sku_relationships(tm
         issue for issue in report.issues if issue.rule == "sale_price_greater_than_price"
     ]
     assert [issue.product_id for issue in sale_price_issues] == ["SKU-100-WHT-L"]
+
+
+# 아래는 공급사 CSV -> 표준 CSV 전체 경로에서 카테고리별 필수 속성 정책을 확인합니다.
+def write_category_source(tmp_path, rows: list[list[str]]):
+    input_path = tmp_path / "supplier.csv"
+    with input_path.open("w", encoding="utf-8", newline="") as source_file:
+        writer = csv.writer(source_file)
+        writer.writerow(SOURCE_COLUMNS)
+        writer.writerows(rows)
+    return input_path
+
+
+def category_row(category: str, size_name: str, vendor_sku: str = "000900") -> list[str]:
+    return [
+        vendor_sku,
+        "레더 토트백" if category == "BAG" else "기본 티셔츠",
+        category,
+        "Sample Brand",
+        "59000",
+        "",
+        "BLACK",
+        size_name,
+        "5",
+        "",
+        "https://example.test/item.jpg",
+    ]
+
+
+def read_output_rows(output_path):
+    with output_path.open(encoding="utf-8", newline="") as output_file:
+        return list(csv.DictReader(output_file))
+
+
+def test_repository_profile_loads_bag_row_without_size_end_to_end(tmp_path):
+    input_path = write_category_source(tmp_path, [category_row("BAG", "")])
+    output_path, rejects_path, summary_path = output_paths(tmp_path)
+
+    result = run_pipeline(
+        input_path,
+        BASE_DIR / "config" / "etl" / "sample_fashion_vendor_v1.json",
+        output_path,
+        rejects_path,
+        summary_path,
+    )
+
+    assert (result.total_rows, result.loaded_rows, result.rejected_rows) == (1, 1, 0)
+    output_rows = read_output_rows(output_path)
+    assert output_rows[0]["category"] == "BAG"
+    assert output_rows[0]["size"] == ""
+    # 표준 CSV가 그대로 검수를 통과해야 ETL과 검수 정책이 일치한 것입니다.
+    dataframe = validate_and_read_uploaded_csv(
+        "catalogguard_ready.csv",
+        output_path.read_bytes(),
+    )
+    assert inspect_dataframe(dataframe).issues == []
+
+
+def test_repository_profile_still_rejects_apparel_row_without_size_end_to_end(tmp_path):
+    input_path = write_category_source(tmp_path, [category_row("TOP", "")])
+    output_path, rejects_path, summary_path = output_paths(tmp_path)
+
+    result = run_pipeline(
+        input_path,
+        BASE_DIR / "config" / "etl" / "sample_fashion_vendor_v1.json",
+        output_path,
+        rejects_path,
+        summary_path,
+    )
+
+    assert (result.total_rows, result.loaded_rows, result.rejected_rows) == (1, 0, 1)
+    with rejects_path.open(encoding="utf-8", newline="") as rejects_file:
+        rejected_rows = list(csv.DictReader(rejects_file))
+    assert json.loads(rejected_rows[0]["error_code"]) == ["MISSING_SOURCE_VALUE"]
+    assert json.loads(rejected_rows[0]["error_field"]) == ["size_name"]
+
+
+def test_repository_profile_keeps_existing_result_for_rows_with_size(tmp_path):
+    # 기존 정상 상품의 변환 결과는 이번 변경으로 달라지지 않아야 합니다.
+    input_path = write_category_source(
+        tmp_path,
+        [category_row("TOP", "M", "000901"), category_row("BAG", "FREE", "000902")],
+    )
+    output_path, rejects_path, summary_path = output_paths(tmp_path)
+
+    result = run_pipeline(
+        input_path,
+        BASE_DIR / "config" / "etl" / "sample_fashion_vendor_v1.json",
+        output_path,
+        rejects_path,
+        summary_path,
+    )
+
+    assert (result.total_rows, result.loaded_rows, result.rejected_rows) == (2, 2, 0)
+    assert [row["size"] for row in read_output_rows(output_path)] == ["M", "FREE"]
+
+
+def test_repository_profiles_declare_category_aware_version(tmp_path):
+    # 같은 공급사 CSV가 예전 결과를 재사용하지 않도록 두 샘플 프로필 모두 버전을 올렸습니다.
+    for filename in ("sample_fashion_vendor_v1.json", "sample_marketplace_vendor_v1.json"):
+        profile = load_profile(BASE_DIR / "config" / "etl" / filename)
+        assert profile.version == "2"
+        # size 원본 컬럼은 헤더 존재 검사를 위해 필수 목록에 그대로 남아 있어야 합니다.
+        size_source_columns = [
+            source
+            for source, targets in profile.source_columns.items()
+            if "size" in targets
+        ]
+        assert size_source_columns
+        assert set(size_source_columns).issubset(set(profile.required_source_columns))

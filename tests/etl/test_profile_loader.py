@@ -128,6 +128,28 @@ def test_list_etl_profiles_returns_known_allowlisted_profiles():
         assert isinstance(profile["display_name"], str) and profile["display_name"]
 
 
+def test_list_etl_profiles_display_names_do_not_claim_a_profile_version():
+    # profile_id의 '_v1'은 고정된 API 식별자이고 실제 버전은 profile_version입니다.
+    # display_name이 실제 버전과 다른 값을 주장하지 않도록 고정합니다.
+    for profile in list_etl_profiles():
+        assert "v1" not in profile["display_name"]
+        assert "v2" not in profile["display_name"]
+
+
+def test_allowlisted_profile_ids_keep_loading_their_current_profile_version():
+    # id와 파일명은 그대로 두고 실제 profile_version만 올렸는지 확인합니다.
+    expected_names = {
+        "sample_fashion_vendor_v1": "sample_fashion_vendor",
+        "sample_marketplace_vendor_v1": "sample_marketplace_vendor",
+    }
+
+    for profile_id, expected_name in expected_names.items():
+        profile = load_profile(get_profile_path(profile_id))
+
+        assert profile.name == expected_name
+        assert profile.version == "2"
+
+
 def test_get_profile_path_resolves_known_id_to_a_loadable_profile():
     path = get_profile_path("sample_fashion_vendor_v1")
 

@@ -101,7 +101,7 @@ def test_run_web_etl_persists_batch_and_staging_products(postgres_session):
     try:
         assert result.created is True
         assert result.profile_name == "sample_fashion_vendor"
-        assert result.profile_version == "1"
+        assert result.profile_version == "2"
         assert result.source_filename == "vendor_products.csv"
         assert result.total_rows == 2
         assert result.loaded_rows == 2
