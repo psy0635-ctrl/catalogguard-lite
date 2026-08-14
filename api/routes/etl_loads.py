@@ -8,6 +8,7 @@ from fastapi import (
     HTTPException,
     Path,
     Query,
+    Request,
     Response,
     UploadFile,
     status,
@@ -621,13 +622,54 @@ def list_etl_profile_options(
     )
 
 
+def _log_duplicate_ingestion(
+    http_request: Request,
+    outcome: ETLWebRunOutcome,
+    *,
+    request_source_type: str,
+) -> None:
+    """Record one structured event when a request reuses an existing batch.
+
+    ETLLoadRun stores only the source that first created a batch, so the path this
+    request actually arrived on is otherwise lost the moment dedup returns. Both
+    duplicate paths in etl.db_loader (the plain SELECT hit and the IntegrityError
+    retry after losing the unique-identity race) return created=False here, so
+    logging once in the route covers them both without touching the loader.
+
+    Deliberately excluded: initial_source_ref, source_filename, hashes and
+    actor_username. The first two can leak supplier paths, and actor_username on a
+    duplicate is the original loader rather than the caller who re-sent the file.
+    Everything needed later is reachable from etl_load_run_id.
+    """
+    if outcome.created:
+        return
+    log_event(
+        _LOGGER,
+        logging.INFO,
+        event="etl_duplicate_ingestion",
+        etl_load_run_id=outcome.etl_load_run_id,
+        initial_source_type=outcome.initial_source_type,
+        request_source_type=request_source_type,
+        # log_event only accepts scalars, so this stays a readable string, not a bool.
+        same_source=(
+            "true" if outcome.initial_source_type == request_source_type else "false"
+        ),
+        # 미들웨어가 만든 요청 ID를 그대로 씁니다. 여기서 새로 만들면
+        # http_request_completed 로그와 이어지지 않습니다.
+        request_id=getattr(http_request.state, "request_id", None),
+    )
+
+
 @router.post("/api/v1/etl-loads", response_model=ETLWebRunResponse)
 async def create_etl_load_run(
+    http_request: Request,
     file: UploadFile = File(...),
     profile_id: str = Form(...),
     current_user=Depends(require_operator),
     session: Session = Depends(get_session),
 ) -> ETLWebRunResponse:
+    # run_web_etl()에 넘기는 값과 로그에 남기는 값이 갈라지지 않도록 한 곳에서 정합니다.
+    request_source_type = "upload"
     file_bytes = await file.read()
     try:
         outcome = run_web_etl(
@@ -637,7 +679,7 @@ async def create_etl_load_run(
             input_bytes=file_bytes,
             actor_user_id=current_user.id,
             actor_username=current_user.username,
-            initial_source_type="upload",
+            initial_source_type=request_source_type,
             # 업로드는 파일명이 곧 locator입니다. 디렉터리 경로는 넘기지 않습니다.
             initial_source_ref=_upload_source_ref(file.filename),
         )
@@ -671,6 +713,11 @@ async def create_etl_load_run(
     record_web_etl_run("created" if outcome.created else "duplicate")
     if outcome.created:
         record_web_etl_rows(loaded_rows=outcome.loaded_rows, rejected_rows=outcome.rejected_rows)
+    _log_duplicate_ingestion(
+        http_request,
+        outcome,
+        request_source_type=request_source_type,
+    )
 
     return _build_web_run_response(outcome)
 
@@ -684,6 +731,7 @@ def _upload_source_ref(filename: str | None) -> str | None:
 def _run_server_side_source_etl(
     session: Session,
     *,
+    http_request: Request,
     profile_id: str,
     source_filename: str,
     input_bytes: bytes,
@@ -738,6 +786,12 @@ def _run_server_side_source_etl(
             loaded_rows=outcome.loaded_rows,
             rejected_rows=outcome.rejected_rows,
         )
+    # 이번 요청 source는 run_web_etl()에 넘긴 값과 같은 변수라 서로 어긋날 수 없습니다.
+    _log_duplicate_ingestion(
+        http_request,
+        outcome,
+        request_source_type=initial_source_type,
+    )
     return _build_web_run_response(outcome)
 
 
@@ -763,6 +817,7 @@ def _raise_s3_source_error(
 @router.post("/api/v1/etl-loads/s3", response_model=ETLWebRunResponse)
 def create_s3_etl_load_run(
     request: ETLS3LoadRequest,
+    http_request: Request,
     current_user=Depends(require_operator),
     session: Session = Depends(get_session),
 ) -> ETLWebRunResponse:
@@ -803,6 +858,7 @@ def create_s3_etl_load_run(
 
     return _run_server_side_source_etl(
         session,
+        http_request=http_request,
         profile_id=request.profile_id,
         source_filename=source.source_filename,
         input_bytes=source.content,
@@ -835,6 +891,7 @@ def _raise_http_feed_source_error(
 @router.post("/api/v1/etl-loads/http", response_model=ETLWebRunResponse)
 def create_http_feed_etl_load_run(
     request: ETLHTTPFeedLoadRequest,
+    http_request: Request,
     current_user=Depends(require_operator),
     session: Session = Depends(get_session),
 ) -> ETLWebRunResponse:
@@ -867,6 +924,7 @@ def create_http_feed_etl_load_run(
 
     return _run_server_side_source_etl(
         session,
+        http_request=http_request,
         profile_id=request.profile_id,
         source_filename=source.source_filename,
         input_bytes=source.content,

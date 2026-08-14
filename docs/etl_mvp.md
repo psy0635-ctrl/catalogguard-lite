@@ -464,10 +464,49 @@ API 응답도 이번 요청의 경로가 아니라 DB에 저장된 최초 경로
 - **원본 CSV bytes**: 이번 범위가 아니다. 지금도 SHA-256 해시만 남고 원본은 보존하지 않는다.
 - **HTTP feed URL 원문**: `CATALOGGUARD_ETL_HTTP_FEED_URL`에는 token이나 signed query가 들어갈 수 있어 host·path·query 어느 것도 저장하지 않는다. 기존 로그 정책과 같은 판단이다.
 - **S3 bucket 이름과 허용 prefix**: 서버 설정이지 배치별 출처 정보가 아니다.
-- **재유입 이력**: dedup으로 재사용된 배치에 대해 "두 번째로 어느 경로로 또 들어왔는지"는 기록하지 않는다. 이를 남기려면 배치와 수집 사건을 분리하는 별도 구조가 필요한데, 실제 요구가 관측되기 전에는 만들지 않는다.
+- **재유입 이력**: dedup으로 재사용된 배치에 대해 "두 번째로 어느 경로로 또 들어왔는지"를 **DB에는** 기록하지 않는다. 이를 DB에 남기려면 배치와 수집 사건을 분리하는 별도 구조가 필요한데, 실제 요구가 관측되기 전에는 만들지 않는다. 다만 재유입 **사건 자체**는 아래 structured log로 남는다.
 
 조회는 `GET /api/v1/etl-loads` 목록과 `GET /api/v1/etl-loads/{id}` 상세 응답에서 두 필드로 확인한다.
 출처 기준 검색·필터는 제공하지 않는다.
+
+### duplicate 재유입 관측 (`etl_duplicate_ingestion`)
+
+`initial_source_type`은 최초 경로만 남기므로, "이번 요청이 어느 경로로 들어왔는가"는 DB만 봐서는 알 수 없다.
+그래서 Web/API ETL이 기존 배치를 재사용할 때(`created=false`) structured log를 **요청당 정확히 1건** 남긴다.
+
+```json
+{
+  "event": "etl_duplicate_ingestion",
+  "etl_load_run_id": 42,
+  "initial_source_type": "upload",
+  "request_source_type": "http_feed",
+  "same_source": "false",
+  "request_id": "..."
+}
+```
+
+| 필드 | 의미 |
+|---|---|
+| `etl_load_run_id` | 재사용된 기존 배치 ID |
+| `initial_source_type` | DB에 저장된 **최초** 경로 |
+| `request_source_type` | **이번 요청**이 들어온 경로 (`upload` / `s3` / `http_feed`) |
+| `same_source` | 위 두 값의 일치 여부. `log_event()`가 scalar만 받으므로 bool이 아닌 `"true"` / `"false"` 문자열 |
+| `request_id` | 같은 요청의 `http_request_completed` 로그와 잇는 correlation key |
+
+동작 규칙은 다음과 같다.
+
+- 신규 적재(`created=true`)에서는 남기지 않는다.
+- `etl.db_loader`의 두 duplicate 경로(SELECT로 바로 찾은 경우, unique index 경쟁에서 져 `IntegrityError` 후 재조회한 경우)가 모두 `created=false`로 route까지 오므로, route에서 한 번만 남겨도 둘 다 포함된다.
+- DB·API 응답·metric은 바뀌지 않는다. duplicate 총량은 기존 `catalogguard_web_etl_runs{outcome="duplicate"}`가 계속 담당하고, 이 로그는 "어느 경로 조합이었는가"만 보완한다.
+
+로그에 넣지 않는 값: `initial_source_ref`, `source_filename`, 입력·출력 SHA-256, HTTP feed URL·token, S3 bucket·object key, `actor_username`.
+locator가 필요하면 `etl_load_run_id`로 `GET /api/v1/etl-loads/{id}`를 조회하면 되므로 로그에 중복해 남길 이유가 없다.
+특히 duplicate 응답의 `actor_username`은 이번 요청자가 아니라 **최초 적재자**라, 로그에 넣으면 재전송한 사람으로 오해된다.
+
+한계:
+
+- **CLI(`etl.load_cli`)는 범위 밖**이다. CLI는 `configure_logging()`을 거치지 않는 별도 실행 경로라 duplicate가 나도 이 로그가 남지 않는다.
+- 로그 보존 기간을 넘어선 장기 감사 이력은 보장하지 않는다. 그런 요구가 실제로 생기면 그때 수집 사건 테이블을 다시 검토한다.
 
 ## 적재 배치 실행·조회 API
 
