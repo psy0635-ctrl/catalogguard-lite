@@ -71,7 +71,7 @@
 
 ## 변환과 reject 기준
 
-정상 행은 표준 CSV에 저장한다. 상품 ID·필수 원본값 누락, `price` 또는 `sale_price`로 매핑된 `discount_price`·`promo_price`의 가격 변환 실패·음수, 재고 정수 변환 실패·음수는 reject CSV에 저장한다.
+정상 행은 표준 CSV에 저장한다. 상품 ID·필수 원본값 누락, `price` 또는 `sale_price`로 매핑된 `discount_price`·`promo_price`의 가격 변환 실패·음수, 재고 정수 변환 실패·음수는 reject CSV에 저장한다. 할인 가격 원본이 비어 있으면 reject하지 않고 `sale_price`를 빈 값으로 출력한다. 한 행에 여러 오류가 있으면 `error_code`, `error_field`, `error_message`에 같은 순서의 JSON 배열로 함께 기록한다. 중복 상품 ID, 비표준 색상·사이즈, 가격 이상치, `sale_price`가 `price`보다 큰 상품 품질 문제는 정상 행으로 남겨 기존 CatalogGuard 검수기가 처리한다.
 
 ### 카테고리별 필수 속성 정책
 
@@ -81,7 +81,7 @@
 
 `size` 원본 컬럼은 `required_source_columns`에서 제거하지 않았다. 이 목록은 행 값 검사뿐 아니라 `run_pipeline()`의 공급사 CSV 헤더 존재 검사에도 쓰이므로, 제거하면 컬럼 자체가 없는 CSV를 걸러내지 못한다.
 
-표준 CSV를 DB에 적재하는 `etl/db_loader.py`도 같은 함수를 사용한다. `config/settings.py`의 `REQUIRED_FIELDS`는 그대로 두고, 카테고리 정책에서 선택 값인 필드만 예외로 판단한다. `BAG`의 빈 `size`는 `catalog_products_staging.size`에 빈 문자열로 저장한다. 이 컬럼은 `NOT NULL`이지만 빈 문자열은 저장할 수 있어 DB migration은 추가하지 않았다. 할인 가격 원본이 비어 있으면 reject하지 않고 `sale_price`를 빈 값으로 출력한다. 한 행에 여러 오류가 있으면 `error_code`, `error_field`, `error_message`에 같은 순서의 JSON 배열로 함께 기록한다. 중복 상품 ID, 비표준 색상·사이즈, 가격 이상치, `sale_price`가 `price`보다 큰 상품 품질 문제는 정상 행으로 남겨 기존 CatalogGuard 검수기가 처리한다.
+표준 CSV를 DB에 적재하는 `etl/db_loader.py`도 같은 함수를 사용한다. `config/settings.py`의 `REQUIRED_FIELDS`는 그대로 두고, 카테고리 정책에서 선택 값인 필드만 예외로 판단한다. `BAG`의 빈 `size`는 `catalog_products_staging.size`에 빈 문자열로 저장한다. 이 컬럼은 `NOT NULL`이지만 빈 문자열은 저장할 수 있어 DB migration은 추가하지 않았다.
 
 `rejected_rows.csv`는 오류가 없어도 헤더를 포함해 생성한다. `etl_summary.json`에는 프로필 이름·버전, 입력 파일명, 입력·출력·reject CSV SHA-256, 처리 건수, 오류 코드별 건수와 UTC 시각을 기록하며 절대 경로나 비밀값을 기록하지 않는다.
 
