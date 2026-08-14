@@ -6,6 +6,7 @@ from config.settings import VALID_CATEGORIES
 from core.fashion_attribute_validator import (
     build_color_comparison_key,
     build_size_comparison_key,
+    is_field_required_for_category,
 )
 from core.models import Product, ValidationIssue
 
@@ -96,7 +97,12 @@ def build_duplicate_product_content_key(
         return None
     if product.category not in VALID_CATEGORIES:
         return None
-    if not product.color or not product.size:
+    if not product.color:
+        return None
+    # size가 필수인 카테고리에서 값이 비면 기존처럼 비교 대상에서 제외합니다.
+    # BAG처럼 size가 선택 값인 카테고리는 빈 size 자체를 정상 비교값으로 사용하므로,
+    # 정규화 결과 ""가 그대로 키에 들어가 빈 size끼리만 같은 값으로 비교됩니다.
+    if not product.size and is_field_required_for_category(product.category, "size"):
         return None
     if product.price is None or product.price <= 0:
         return None
