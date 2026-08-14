@@ -1910,8 +1910,8 @@ ETL_WEB_RUN_RESPONSE = {
 
 ETL_PROFILE_LIST_RESPONSE = {
     "items": [
-        {"id": "sample_fashion_vendor_v1", "display_name": "패션 공급사 샘플 v1"},
-        {"id": "sample_marketplace_vendor_v1", "display_name": "마켓플레이스 공급사 샘플 v1"},
+        {"id": "sample_fashion_vendor_v1", "display_name": "패션 공급사 샘플"},
+        {"id": "sample_marketplace_vendor_v1", "display_name": "마켓플레이스 공급사 샘플"},
     ]
 }
 

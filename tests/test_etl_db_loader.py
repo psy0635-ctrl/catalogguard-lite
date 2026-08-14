@@ -7,6 +7,7 @@ import sys
 from io import StringIO
 from uuid import uuid4
 
+import pandas as pd
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -16,7 +17,12 @@ from sqlalchemy.exc import IntegrityError
 from config.database import get_optional_database_url
 from db.models import CatalogProductStaging, ETLLoadRun, ETLRejectedRow
 from db.session import create_database_engine, create_session_factory
-from etl.db_loader import ETLLoadError, _normalize_summary, load_standard_csv
+from etl.db_loader import (
+    ETLLoadError,
+    _build_staging_rows,
+    _normalize_summary,
+    load_standard_csv,
+)
 
 
 CSV_COLUMNS = [
@@ -712,3 +718,109 @@ def test_alembic_downgrade_removes_only_staging_tables_and_upgrade_restores_them
 
     assert {"etl_load_runs", "catalog_products_staging"}.issubset(before_downgrade)
     assert {"etl_load_runs", "catalog_products_staging"}.issubset(after_upgrade)
+
+
+# 아래는 ETL 적재도 검수와 같은 카테고리별 필수 속성 정책을 쓰는지 확인합니다.
+def bag_row(**changes) -> dict[str, str]:
+    row = {
+        "product_group_id": "G900",
+        "product_id": "P900",
+        "product_name": "레더 토트백",
+        "category": "BAG",
+        "color": "BLACK",
+        "size": "",
+        "stock": "5",
+        "price": "59000",
+        "image_path": "bag.jpg",
+        "sale_price": "",
+        "description": "",
+        "seller": "",
+    }
+    row.update(changes)
+    return row
+
+
+def test_build_staging_rows_allows_blank_size_for_bag():
+    rows = _build_staging_rows(pd.DataFrame([bag_row()], columns=CSV_COLUMNS))
+
+    assert len(rows) == 1
+    assert rows[0]["category"] == "BAG"
+    assert rows[0]["size"] == ""
+
+
+@pytest.mark.parametrize("category", ["TOP", "BOTTOM", "OUTER", "SHOES"])
+def test_build_staging_rows_still_fails_on_blank_size_for_apparel(category):
+    dataframe = pd.DataFrame([bag_row(category=category)], columns=CSV_COLUMNS)
+
+    with pytest.raises(ETLLoadError, match="필수 상품 값이 비어 있습니다"):
+        _build_staging_rows(dataframe)
+
+
+@pytest.mark.parametrize("blank_field", ["color", "image_path", "product_name"])
+def test_build_staging_rows_still_fails_on_other_blank_required_fields_for_bag(blank_field):
+    dataframe = pd.DataFrame([bag_row(**{blank_field: ""})], columns=CSV_COLUMNS)
+
+    with pytest.raises(ETLLoadError, match="필수 상품 값이 비어 있습니다"):
+        _build_staging_rows(dataframe)
+
+
+@pytest.mark.parametrize("category", ["ACCESSORY", "bag", ""])
+def test_build_staging_rows_keeps_blank_size_required_for_non_canonical_category(category):
+    # 허용 목록에 없거나 canonical이 아닌 카테고리는 BAG로 추정하지 않습니다.
+    dataframe = pd.DataFrame([bag_row(category=category)], columns=CSV_COLUMNS)
+
+    with pytest.raises(ETLLoadError, match="필수 상품 값이 비어 있습니다"):
+        _build_staging_rows(dataframe)
+
+
+def test_load_standard_csv_persists_bag_row_without_size(postgres_session):
+    # size 컬럼은 NOT NULL이지만 빈 문자열은 저장할 수 있어 migration이 필요하지 않습니다.
+    session, profile_name = postgres_session
+    csv_bytes = make_standard_csv([bag_row(), ROWS[0]])
+    summary_data = json.loads(make_summary(csv_bytes))
+    summary_data["profile_name"] = profile_name
+
+    outcome = load_standard_csv(session, csv_bytes, json.dumps(summary_data).encode())
+
+    assert outcome.created is True
+    run = session.get(ETLLoadRun, outcome.etl_load_run_id)
+    stored = {product.product_id: product for product in run.products}
+    assert stored["P900"].size == ""
+    assert stored["P900"].category == "BAG"
+    assert stored["P001"].size == "M"
+
+
+def test_same_supplier_input_is_reloaded_under_new_profile_version(postgres_session):
+    # 같은 공급사 입력이라도 profile version이 다르면 새 배치로 적재되어야
+    # BAG 정책 변경 전 결과를 그대로 재사용하지 않습니다.
+    session, profile_name = postgres_session
+    old_csv = make_standard_csv([ROWS[0]])
+    old_summary = json.loads(
+        make_summary(old_csv, version="1", total_rows=1, loaded_rows=1)
+    )
+    old_summary["profile_name"] = profile_name
+
+    new_csv = make_standard_csv([ROWS[0], bag_row()])
+    new_summary = json.loads(make_summary(new_csv, version="2"))
+    new_summary["profile_name"] = profile_name
+    # 같은 공급사 파일에서 나온 결과이므로 input hash는 동일합니다.
+    assert old_summary["input_file_sha256"] == new_summary["input_file_sha256"]
+
+    old_run = load_standard_csv(session, old_csv, json.dumps(old_summary).encode())
+    new_run = load_standard_csv(session, new_csv, json.dumps(new_summary).encode())
+
+    assert old_run.created is True
+    assert new_run.created is True
+    assert new_run.etl_load_run_id != old_run.etl_load_run_id
+
+    # 기존 version 1 이력은 그대로 보존됩니다.
+    stored_old = session.get(ETLLoadRun, old_run.etl_load_run_id)
+    assert stored_old.profile_version == "1"
+    assert [product.product_id for product in stored_old.products] == ["P001"]
+
+    stored_new = session.get(ETLLoadRun, new_run.etl_load_run_id)
+    assert stored_new.profile_version == "2"
+    assert {product.product_id for product in stored_new.products} == {"P001", "P900"}
+    assert {
+        product.product_id: product.size for product in stored_new.products
+    }["P900"] == ""

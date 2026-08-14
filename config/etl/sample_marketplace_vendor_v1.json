@@ -1,6 +1,6 @@
 {
   "profile_name": "sample_marketplace_vendor",
-  "profile_version": "1",
+  "profile_version": "2",
   "source_columns": {
     "style_id": "product_group_id",
     "sku_code": "product_id",

@@ -58,18 +58,30 @@
 ```json
 {
   "profile_name": "sample_fashion_vendor",
-  "profile_version": "1",
+  "profile_version": "2",
   "source_columns": {"vendor_sku": ["product_group_id", "product_id"]},
   "required_source_columns": ["vendor_sku"],
   "defaults": {"stock": 0}
 }
 ```
 
+두 샘플 프로필의 `profile_version`은 카테고리별 필수 속성 정책을 적용하면서 `"1"`에서 `"2"`로 올렸다. 중복 배치 판정 기준이 `(input_file_sha256, profile_name, profile_version)`이므로, 버전을 그대로 두면 이미 적재한 공급사 CSV를 다시 올렸을 때 새 정책이 적용되지 않은 기존 배치가 그대로 반환된다. 같은 프로필로 같은 입력을 변환한 결과가 달라지므로 버전을 올린 것이며, 기존 `"1"` 배치 이력은 그대로 남는다. 파일명과 `profile_id` allowlist key는 API·UI 호환을 위해 `_v1`을 유지한다.
+
 프로필은 CatalogGuard의 실제 표준 컬럼만 대상으로 허용한다. 대상 컬럼 중복, 필수 출력 컬럼 누락, 잘못된 JSON과 허용되지 않은 기본값은 파이프라인 전체 오류가 된다. 프로필은 단순 JSON 데이터만 해석하며 동적 코드 실행을 사용하지 않는다.
 
 ## 변환과 reject 기준
 
-정상 행은 표준 CSV에 저장한다. 상품 ID·필수 원본값 누락, `price` 또는 `sale_price`로 매핑된 `discount_price`·`promo_price`의 가격 변환 실패·음수, 재고 정수 변환 실패·음수는 reject CSV에 저장한다. 할인 가격 원본이 비어 있으면 reject하지 않고 `sale_price`를 빈 값으로 출력한다. 한 행에 여러 오류가 있으면 `error_code`, `error_field`, `error_message`에 같은 순서의 JSON 배열로 함께 기록한다. 중복 상품 ID, 비표준 색상·사이즈, 가격 이상치, `sale_price`가 `price`보다 큰 상품 품질 문제는 정상 행으로 남겨 기존 CatalogGuard 검수기가 처리한다.
+정상 행은 표준 CSV에 저장한다. 상품 ID·필수 원본값 누락, `price` 또는 `sale_price`로 매핑된 `discount_price`·`promo_price`의 가격 변환 실패·음수, 재고 정수 변환 실패·음수는 reject CSV에 저장한다.
+
+### 카테고리별 필수 속성 정책
+
+`required_source_columns`의 값이 비었는지는 그 컬럼이 매핑된 표준 컬럼과 행의 표준 카테고리를 함께 보고 판단한다. 정책의 단일 기준은 검수와 같은 `config/settings.py`의 `FASHION_CATEGORY_ATTRIBUTE_RULES`이며, 변환기는 `core/fashion_attribute_validator.py`의 `is_field_required_for_category()`를 호출하기만 한다. ETL이 같은 정책을 다시 구현하지 않는다.
+
+따라서 `size`로 매핑된 원본 컬럼(`size_name`, `fit_size`)이 비어 있어도 `category`가 `BAG`이면 reject하지 않는다. `TOP`·`BOTTOM`·`OUTER`·`SHOES`는 기존과 같이 `MISSING_SOURCE_VALUE`로 reject한다. 카테고리가 비었거나 허용 목록에 없으면 어떤 패션 카테고리인지 추정하지 않고 기존처럼 필수로 처리하며, `bag`처럼 canonical 대문자가 아닌 표기도 별칭으로 정규화하지 않으므로 계속 필수다.
+
+`size` 원본 컬럼은 `required_source_columns`에서 제거하지 않았다. 이 목록은 행 값 검사뿐 아니라 `run_pipeline()`의 공급사 CSV 헤더 존재 검사에도 쓰이므로, 제거하면 컬럼 자체가 없는 CSV를 걸러내지 못한다.
+
+표준 CSV를 DB에 적재하는 `etl/db_loader.py`도 같은 함수를 사용한다. `config/settings.py`의 `REQUIRED_FIELDS`는 그대로 두고, 카테고리 정책에서 선택 값인 필드만 예외로 판단한다. `BAG`의 빈 `size`는 `catalog_products_staging.size`에 빈 문자열로 저장한다. 이 컬럼은 `NOT NULL`이지만 빈 문자열은 저장할 수 있어 DB migration은 추가하지 않았다. 할인 가격 원본이 비어 있으면 reject하지 않고 `sale_price`를 빈 값으로 출력한다. 한 행에 여러 오류가 있으면 `error_code`, `error_field`, `error_message`에 같은 순서의 JSON 배열로 함께 기록한다. 중복 상품 ID, 비표준 색상·사이즈, 가격 이상치, `sale_price`가 `price`보다 큰 상품 품질 문제는 정상 행으로 남겨 기존 CatalogGuard 검수기가 처리한다.
 
 `rejected_rows.csv`는 오류가 없어도 헤더를 포함해 생성한다. `etl_summary.json`에는 프로필 이름·버전, 입력 파일명, 입력·출력·reject CSV SHA-256, 처리 건수, 오류 코드별 건수와 UTC 시각을 기록하며 절대 경로나 비밀값을 기록하지 않는다.
 
@@ -246,8 +258,10 @@ profile_id (Streamlit selectbox 값)
 
 | `profile_id` | 파일 | `display_name` |
 |---|---|---|
-| `sample_fashion_vendor_v1` | `config/etl/sample_fashion_vendor_v1.json` | 패션 공급사 샘플 v1 |
-| `sample_marketplace_vendor_v1` | `config/etl/sample_marketplace_vendor_v1.json` | 마켓플레이스 공급사 샘플 v1 |
+| `sample_fashion_vendor_v1` | `config/etl/sample_fashion_vendor_v1.json` | 패션 공급사 샘플 |
+| `sample_marketplace_vendor_v1` | `config/etl/sample_marketplace_vendor_v1.json` | 마켓플레이스 공급사 샘플 |
+
+`profile_id`와 파일명의 `_v1`은 서버 allowlist에서 쓰는 **안정적인 API 식별자**이며 실제 버전 값이 아니다. 기존 클라이언트 호환을 위해 이 문자열은 그대로 유지한다. 실제 ETL dedup·audit에 쓰이는 버전은 프로필 JSON의 `profile_version`이고 `etl_load_runs.profile_version`에도 그 값이 기록되며, 현재 두 sample profile의 `profile_version`은 `"2"`다. 두 값이 충돌해 보이지 않도록 `display_name`에는 버전을 넣지 않는다.
 
 `profile_id`에 `../../etc/passwd`, 절대경로, `..\..\` 같은 값을 보내면 registry 조회에서 바로 `ETLProfileNotFoundError`가 되며 `resolve()`도 실행되지 않으므로 서버 filesystem을 읽지 못한다. `tests/etl/test_web_service.py::test_run_web_etl_rejects_unknown_profile_without_touching_the_database`가 이 경로를 직접 확인하며, DB에 아무 것도 쓰지 않는 것(`session.new`/`session.dirty` 비어 있음)도 함께 검증한다.
 

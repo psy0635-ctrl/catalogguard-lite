@@ -1,6 +1,6 @@
 {
   "profile_name": "sample_fashion_vendor",
-  "profile_version": "1",
+  "profile_version": "2",
   "source_columns": {
     "vendor_sku": ["product_group_id", "product_id"],
     "item_name": "product_name",

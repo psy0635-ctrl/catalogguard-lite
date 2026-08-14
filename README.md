@@ -782,6 +782,8 @@ CSV의 공식 category 입력값은 위 대문자 값(canonical)뿐입니다. `t
 
 이 정책은 `size`에만 적용합니다. `BAG`에서도 `product_name`, `color`, `image_path` 같은 나머지 필수 값 정책은 그대로 유지됩니다.
 
+이 정책은 CSV 업로드 검수뿐 아니라 공급사 ETL 경로에도 같은 기준으로 적용됩니다. `etl/transformer.py`는 `required_source_columns`의 빈 값을, `etl/db_loader.py`는 표준 CSV의 빈 필수 값을 판단할 때 모두 `is_field_required_for_category()`를 호출합니다. 따라서 `BAG` + 빈 `size`는 검수에서 정상이고 ETL 변환·staging 적재도 통과합니다. ETL이 같은 정책을 다시 구현하지 않으며 기준은 `FASHION_CATEGORY_ATTRIBUTE_RULES` 한 곳뿐입니다. 자세한 내용은 `docs/etl_mvp.md`에 있습니다.
+
 카테고리 값이 비어 있거나 허용 목록에 없으면 어떤 패션 카테고리인지 추정하지 않고 기존 `REQUIRED_FIELDS` 정책을 그대로 적용하므로 `size`는 계속 필수입니다. canonical 대문자 표기와 정확히 일치할 때만 정책을 적용하므로, `bag`처럼 별칭으로 입력하면 기존과 같이 `카테고리 오류`가 발생하고 `size`도 필수로 남습니다.
 
 CSV 템플릿 다운로드 파일명은 `catalogguard_product_template.csv`입니다.
@@ -1813,8 +1815,8 @@ Streamlit이 웹 ETL 실행 화면에서 사용할 수 있는 ETL 프로필 목�
 ```json
 {
   "items": [
-    {"id": "sample_fashion_vendor_v1", "display_name": "패션 공급사 샘플 v1"},
-    {"id": "sample_marketplace_vendor_v1", "display_name": "마켓플레이스 공급사 샘플 v1"}
+    {"id": "sample_fashion_vendor_v1", "display_name": "패션 공급사 샘플"},
+    {"id": "sample_marketplace_vendor_v1", "display_name": "마켓플레이스 공급사 샘플"}
   ]
 }
 ```
