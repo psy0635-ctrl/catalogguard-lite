@@ -664,7 +664,7 @@ catalogguard-lite/
 | `api/dependencies.py` | `get_current_user()`(JWT 검증 + PostgreSQL 재조회), `require_viewer`/`require_operator` RBAC dependency |
 | `api/routes/auth.py` | `POST /api/v1/auth/login`(Access Token 발급), `GET /api/v1/auth/me` |
 | `config/logging.py` | 중복 handler 없이 한 줄 JSON 운영 로그를 기록하는 표준 라이브러리 유틸리티 |
-| `config/settings.py` | CSV 컬럼, 허용 카테고리, 업로드 제한, 금지어, API 클라이언트 환경변수, `INSPECTION_VERSION` |
+| `config/settings.py` | CSV 컬럼, 허용 카테고리, 카테고리별 필수 패션 속성 정책, 업로드 제한, 금지어, API 클라이언트 환경변수, `INSPECTION_VERSION` |
 | `config/database.py` | `DATABASE_URL`, `TEST_DATABASE_URL` 환경변수 읽기와 검증 |
 | `config/metrics.py` | `CATALOGGUARD_METRICS_ENABLED` 파싱, 전용 Prometheus `CollectorRegistry`와 metric 4개 정의, HTTP·Web ETL metric 기록 helper |
 | `core/inspection_service.py` | FastAPI 요청에서 실행되는 공통 CSV 검수 서비스 |
@@ -766,7 +766,23 @@ CSV의 공식 category 입력값은 위 대문자 값(canonical)뿐입니다. `t
 
 `카테고리 오류`와 `완전 중복 상품`은 1번 기준만 사용하므로 `shoes`, `신발`, `bag`, `가방`은 여전히 공식 입력값이 아닙니다. `상품명·카테고리 불일치`, `상품 그룹 카테고리 불일치`, `가격 이상치`는 2번 기준을 사용합니다.
 
-가방처럼 별도 의류 사이즈가 없는 상품도 `size`는 여전히 필수 값입니다. 이 경우 `size`에 `FREE`를 입력합니다. `BAG`을 공식 지원한다고 해서 `size`가 선택 값이 되지는 않으며, 비워 두면 기존 `필수 값 누락` 오류가 그대로 발생합니다.
+### 카테고리별 필수 패션 속성 정책
+
+필수 값 검사는 카테고리에 따라 `size` 필요 여부를 다르게 판단합니다. 정책은 `config/settings.py`의 `FASHION_CATEGORY_ATTRIBUTE_RULES` 한 곳에만 정의합니다.
+
+| 카테고리 | `size` |
+|---|---|
+| `TOP` | 필수 |
+| `BOTTOM` | 필수 |
+| `OUTER` | 필수 |
+| `SHOES` | 필수 |
+| `BAG` | 선택 |
+
+`BAG`은 의류 사이즈 체계가 없는 단일 사이즈 상품이 많아 `size`를 선택 값으로 처리하며, 비워 두어도 `필수 값 누락` 오류가 발생하지 않습니다. `FREE`를 입력해도 됩니다. 나머지 카테고리는 기존과 같이 `size`를 비우면 `필수 값 누락` 오류가 발생합니다.
+
+이 정책은 `size`에만 적용합니다. `BAG`에서도 `product_name`, `color`, `image_path` 같은 나머지 필수 값 정책은 그대로 유지됩니다.
+
+카테고리 값이 비어 있거나 허용 목록에 없으면 어떤 패션 카테고리인지 추정하지 않고 기존 `REQUIRED_FIELDS` 정책을 그대로 적용하므로 `size`는 계속 필수입니다. canonical 대문자 표기와 정확히 일치할 때만 정책을 적용하므로, `bag`처럼 별칭으로 입력하면 기존과 같이 `카테고리 오류`가 발생하고 `size`도 필수로 남습니다.
 
 CSV 템플릿 다운로드 파일명은 `catalogguard_product_template.csv`입니다.
 
@@ -894,7 +910,7 @@ G003: M / L / 100    -> 사이즈 체계 혼재 주의
 
 - `FREE`, `free`, `F`, `one size`, `프리`, `프리사이즈` 같은 FREE 계열
 - `OS`, `1호`, `여성용`, `custom size`, `M-L`, `95-100` 같은 사용자 정의·범위 표기
-- 빈 값. 빈 사이즈는 기존 `필수 값 누락` 오류가 처리합니다.
+- 빈 값. 빈 사이즈는 카테고리별 필수 패션 속성 정책에 따라 기존 `필수 값 누락` 오류가 처리하며, `size`가 선택 값인 `BAG`은 오류 없이 이 비교에서만 제외합니다.
 
 판정 방식은 다음과 같습니다.
 
@@ -1950,7 +1966,7 @@ curl.exe "http://127.0.0.1:8001/api/v1/inspections?limit=10&offset=0&filename=pr
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
 | `file_sha256` | `String(64)`, nullable | CSV bytes의 SHA-256 hex 문자열입니다. migration 이전 기존 이력은 NULL입니다. |
-| `inspection_version` | `String(20)`, nullable 아님 | 검수 규칙 버전입니다. 현재 `INSPECTION_VERSION` 값은 `"8"`입니다. DB `server_default`는 없습니다. |
+| `inspection_version` | `String(20)`, nullable 아님 | 검수 규칙 버전입니다. 현재 `INSPECTION_VERSION` 값은 `"9"`입니다. DB `server_default`는 없습니다. |
 
 중복 판단 기준은 같은 `file_sha256`과 같은 `inspection_version`입니다.
 
@@ -1958,7 +1974,7 @@ curl.exe "http://127.0.0.1:8001/api/v1/inspections?limit=10&offset=0&filename=pr
 - 파일명이 같아도 CSV bytes가 다르면 새로운 이력으로 저장합니다.
 - 같은 CSV라도 검수 규칙 버전이 달라지면 다시 검수하고 새 이력으로 저장할 수 있습니다.
 
-상품 그룹 내 중복 색상·사이즈 옵션 규칙을 추가할 때 검수 버전을 `"3"`으로 올렸고, 상품 그룹 카테고리 일관성 규칙을 추가하면서 `"4"`로 올렸습니다. 선택적 `sale_price`와 정상가·할인가 관계 규칙을 추가하면서 `"5"`로 올렸습니다. 상품 그룹 사이즈 체계 일관성 규칙을 추가하면서 `"6"`으로 올렸습니다. `SHOES`와 `BAG`를 공식 허용 카테고리로 확장하면서 `"7"`로 올렸습니다. 이번에 카테고리별 가격 이상치 비교가 기존 카테고리 별칭 정규화를 재사용하도록 통일하면서 현재 `INSPECTION_VERSION`을 `"8"`로 올렸습니다. 같은 CSV라도 카테고리 표기가 섞여 있으면 가격 그룹이 합쳐져 `가격 이상치` 결과가 달라질 수 있으므로, 기존 검수 결과를 그대로 재사용하지 않기 위한 것입니다. 같은 CSV라도 새 검수 기준으로 다시 검사할 수 있도록 inspection identity에 사용하는 규칙 버전을 올린 것이며, 동일 CSV라도 버전 6, 버전 7, 버전 8은 별도 검수 결과로 저장할 수 있습니다. 버전 6에서 `카테고리 오류`가 발생하던 canonical `SHOES`·`BAG` 상품이 버전 7에서는 정상 카테고리로 처리되고, 같은 이유로 완전 중복 검사 대상에도 포함되므로 같은 CSV의 결과가 달라질 수 있습니다. 파일 해시와 검수 버전을 함께 사용하는 기존 중복 저장 방지 기준은 그대로 유지됩니다. DB 스키마 변경은 없어 이 기능을 위한 Alembic migration은 추가하지 않았으며, 과거 이력과 기존 migration의 `"1"` backfill 값은 그대로 유지합니다.
+상품 그룹 내 중복 색상·사이즈 옵션 규칙을 추가할 때 검수 버전을 `"3"`으로 올렸고, 상품 그룹 카테고리 일관성 규칙을 추가하면서 `"4"`로 올렸습니다. 선택적 `sale_price`와 정상가·할인가 관계 규칙을 추가하면서 `"5"`로 올렸습니다. 상품 그룹 사이즈 체계 일관성 규칙을 추가하면서 `"6"`으로 올렸습니다. `SHOES`와 `BAG`를 공식 허용 카테고리로 확장하면서 `"7"`로 올렸습니다. 카테고리별 가격 이상치 비교가 기존 카테고리 별칭 정규화를 재사용하도록 통일하면서 `"8"`로 올렸습니다. 같은 CSV라도 카테고리 표기가 섞여 있으면 가격 그룹이 합쳐져 `가격 이상치` 결과가 달라질 수 있으므로, 기존 검수 결과를 그대로 재사용하지 않기 위한 것입니다. 이번에 카테고리별 필수 패션 속성 정책을 추가해 `BAG`의 `size`를 선택 값으로 바꾸면서 현재 `INSPECTION_VERSION`을 `"9"`로 올렸습니다. 버전 8까지 `필수 값 누락` 오류가 발생하던 빈 `size`의 `BAG` 상품이 버전 9에서는 정상 처리되므로, 같은 CSV를 다시 올렸을 때 버전 8 결과를 재사용해 새 정책이 적용되지 않는 일을 막기 위한 것입니다. 같은 CSV라도 새 검수 기준으로 다시 검사할 수 있도록 inspection identity에 사용하는 규칙 버전을 올린 것이며, 동일 CSV라도 버전 6, 버전 7, 버전 8은 별도 검수 결과로 저장할 수 있습니다. 버전 6에서 `카테고리 오류`가 발생하던 canonical `SHOES`·`BAG` 상품이 버전 7에서는 정상 카테고리로 처리되고, 같은 이유로 완전 중복 검사 대상에도 포함되므로 같은 CSV의 결과가 달라질 수 있습니다. 파일 해시와 검수 버전을 함께 사용하는 기존 중복 저장 방지 기준은 그대로 유지됩니다. DB 스키마 변경은 없어 이 기능을 위한 Alembic migration은 추가하지 않았으며, 과거 이력과 기존 migration의 `"1"` backfill 값은 그대로 유지합니다.
 
 PostgreSQL에는 다음 partial unique index가 있습니다.
 

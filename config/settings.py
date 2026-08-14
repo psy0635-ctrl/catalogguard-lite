@@ -51,7 +51,7 @@ CATALOGGUARD_JWT_ACCESS_TOKEN_TTL_SECONDS_ENV_VAR = (
 )
 DEFAULT_JWT_ACCESS_TOKEN_TTL_SECONDS = 60 * 60
 # 검수 규칙 버전입니다. 규칙이 바뀌어 같은 CSV도 다시 저장해야 하면 이 값을 올립니다.
-INSPECTION_VERSION = "8"
+INSPECTION_VERSION = "9"
 
 DATA_DIR = BASE_DIR / "data"
 DEV_DATA_PATH = DATA_DIR / "dev" / "products_dev.csv"
@@ -94,6 +94,19 @@ REQUIRED_FIELDS = [
 ]
 
 VALID_CATEGORIES = {"TOP", "BOTTOM", "OUTER", "SHOES", "BAG"}
+
+# 카테고리마다 다른 필수 패션 속성 정책입니다. 정책의 기준은 이 표 하나뿐입니다.
+# key는 VALID_CATEGORIES의 canonical 표기와 정확히 같아야 합니다.
+# 여기에 없는 카테고리(빈 값, 허용 목록에 없는 값 포함)는 카테고리를 추정하지 않고
+# REQUIRED_FIELDS 기본 정책을 그대로 적용합니다.
+FASHION_CATEGORY_ATTRIBUTE_RULES = {
+    "TOP": {"size_required": True},
+    "BOTTOM": {"size_required": True},
+    "OUTER": {"size_required": True},
+    "SHOES": {"size_required": True},
+    # 가방은 의류 사이즈 체계가 없는 단일 사이즈 상품이 많아 size를 선택 값으로 둡니다.
+    "BAG": {"size_required": False},
+}
 
 CATEGORY_KEYWORDS = {
     "상의": (

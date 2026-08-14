@@ -18,6 +18,7 @@ from core.duplicate_detector import (
 from core.fashion_attribute_validator import (
     find_standard_color,
     find_standard_size,
+    is_field_required_for_category,
 )
 from core.group_category_consistency_detector import (
     find_inconsistent_group_categories,
@@ -173,16 +174,21 @@ def check_missing_required_fields(products: list[Product]) -> list[ValidationIss
     issues = []
     for product in products:
         for field in REQUIRED_FIELDS:
-            if not getattr(product, field):
-                issues.append(
-                    ValidationIssue(
-                        rule="missing_required_field",
-                        severity="error",
-                        product_id=product.product_id,
-                        product_group_id=product.product_group_id,
-                        message=f"'{field}' is missing",
-                    )
+            if getattr(product, field):
+                continue
+            # 카테고리별 정책에서 선택 값인 속성은 비어 있어도 누락 오류로 보지 않습니다.
+            if not is_field_required_for_category(product.category, field):
+                continue
+
+            issues.append(
+                ValidationIssue(
+                    rule="missing_required_field",
+                    severity="error",
+                    product_id=product.product_id,
+                    product_group_id=product.product_group_id,
+                    message=f"'{field}' is missing",
                 )
+            )
     return issues
 
 

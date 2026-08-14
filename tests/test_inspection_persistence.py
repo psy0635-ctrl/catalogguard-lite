@@ -433,8 +433,9 @@ def test_build_result_create_items_maps_group_category_without_schema_changes():
     assert {item.risk_level for item in category_items} == {"중간"}
 
 
-def test_current_inspection_version_is_eight_for_price_anomaly_category_grouping():
-    assert INSPECTION_VERSION == "8"
+def test_current_inspection_version_is_nine_for_category_aware_required_fields():
+    # 같은 CSV가 버전 8 결과를 재사용해 새 BAG size 정책을 건너뛰지 않도록 고정합니다.
+    assert INSPECTION_VERSION == "9"
 
 
 def test_build_result_create_items_rejects_blank_required_result_fields():

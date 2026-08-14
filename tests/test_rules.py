@@ -1,7 +1,11 @@
 # 역할: 핵심 검수 규칙들이 상품 데이터 오류를 정확히 찾아내는지 테스트합니다.
 import pytest
 
-from config.settings import DEV_DATA_PATH
+from config.settings import (
+    DEV_DATA_PATH,
+    FASHION_CATEGORY_ATTRIBUTE_RULES,
+    VALID_CATEGORIES,
+)
 from core import rules
 from core.duplicate_detector import parse_duplicate_variant_message
 from core.loader import load_products
@@ -353,6 +357,97 @@ def test_check_missing_required_fields_allows_full_product():
     issues = check_missing_required_fields(products)
 
     assert issues == []
+
+
+# 아래는 카테고리별 필수 패션 속성 정책(category-aware validation) 테스트입니다.
+@pytest.mark.parametrize("category", ["TOP", "BOTTOM", "OUTER", "SHOES"])
+def test_check_missing_required_fields_requires_size_for_apparel_categories(category):
+    products = [make_product(category=category, product_name="테스트 상품", size="")]
+
+    issues = check_missing_required_fields(products)
+
+    assert len(issues) == 1
+    assert issues[0].rule == "missing_required_field"
+    assert issues[0].severity == "error"
+    assert "size" in issues[0].message
+
+
+def test_check_missing_required_fields_allows_blank_size_for_bag():
+    products = [make_product(category="BAG", product_name="백팩", size="")]
+
+    issues = check_missing_required_fields(products)
+
+    assert issues == []
+
+
+def test_check_missing_required_fields_still_checks_other_fields_for_bag():
+    # size만 선택 값이며, 나머지 필수 값 정책은 BAG에서도 그대로 유지되어야 합니다.
+    products = [make_product(category="BAG", product_name="백팩", size="", color="")]
+
+    issues = check_missing_required_fields(products)
+
+    assert len(issues) == 1
+    assert "color" in issues[0].message
+
+
+def test_check_missing_required_fields_requires_size_for_invalid_category():
+    # 허용 목록에 없는 카테고리는 어떤 패션 카테고리인지 추정하지 않고 기존 정책을 유지합니다.
+    products = [make_product(category="ACCESSORY", size="")]
+
+    missing_issues = check_missing_required_fields(products)
+    category_issues = check_invalid_category(products)
+
+    assert len(missing_issues) == 1
+    assert "size" in missing_issues[0].message
+    assert len(category_issues) == 1
+    assert category_issues[0].rule == "invalid_category"
+
+
+def test_check_missing_required_fields_requires_size_for_blank_category():
+    products = [make_product(category="", size="")]
+
+    missing_issues = check_missing_required_fields(products)
+    messages = [issue.message for issue in missing_issues]
+
+    assert len(missing_issues) == 2
+    assert any("category" in message for message in messages)
+    assert any("size" in message for message in messages)
+    # 빈 카테고리는 기존처럼 필수 값 누락만 처리하고 카테고리 오류는 만들지 않습니다.
+    assert check_invalid_category(products) == []
+
+
+def test_check_missing_required_fields_does_not_apply_bag_policy_to_lowercase_bag():
+    # canonical 표기가 아닌 값은 기존과 같이 카테고리 오류이며 size도 계속 필수입니다.
+    products = [make_product(category="bag", size="")]
+
+    missing_issues = check_missing_required_fields(products)
+
+    assert len(missing_issues) == 1
+    assert "size" in missing_issues[0].message
+    assert len(check_invalid_category(products)) == 1
+
+
+def test_run_all_rules_reports_no_issue_for_bag_without_size():
+    products = [make_product(category="BAG", product_name="백팩", size="")]
+
+    assert run_all_rules(products) == []
+
+
+def test_run_all_rules_reports_no_issue_for_bag_with_free_size():
+    products = [make_product(category="BAG", product_name="백팩", size="FREE")]
+
+    assert run_all_rules(products) == []
+
+
+def test_run_all_rules_reports_no_issue_for_normal_top_product():
+    products = [make_product(category="TOP", product_name="반팔 티셔츠", size="M")]
+
+    assert run_all_rules(products) == []
+
+
+def test_fashion_category_attribute_rules_cover_every_valid_category():
+    # 정책 표와 허용 카테고리 목록이 따로 놀지 않도록 고정합니다.
+    assert set(FASHION_CATEGORY_ATTRIBUTE_RULES) == VALID_CATEGORIES
 
 
 def test_check_invalid_category_rejects_unknown_category():
@@ -1286,16 +1381,22 @@ def test_check_duplicate_product_content_includes_shoes_and_bag(category, size):
     assert check_invalid_category(products) == []
 
 
-def test_blank_bag_size_keeps_missing_required_field():
-    # BAG 공식 지원이 size optional을 뜻하지는 않습니다.
-    products = [
-        make_product(product_name="레더 토트백", category="BAG", size="")
+def test_blank_bag_size_is_allowed_but_blank_apparel_size_is_not():
+    # BAG은 size가 선택 값이지만, 다른 패션 카테고리는 기존처럼 필수 값입니다.
+    bag_products = [make_product(product_name="레더 토트백", category="BAG", size="")]
+    apparel_products = [
+        make_product(product_name="레더 토트백", category="OUTER", size="")
     ]
 
-    issues = run_all_rules(products)
+    assert run_all_rules(bag_products) == []
 
-    assert [issue.rule for issue in issues] == ["missing_required_field"]
-    assert "size" in issues[0].message
+    apparel_issues = [
+        issue
+        for issue in run_all_rules(apparel_products)
+        if issue.rule == "missing_required_field"
+    ]
+    assert len(apparel_issues) == 1
+    assert "size" in apparel_issues[0].message
 
 
 def test_run_all_rules_flags_group_category_mismatch_between_allowed_categories():
