@@ -8,6 +8,7 @@ from core.fashion_attribute_validator import (
     find_size_system,
     find_standard_color,
     find_standard_size,
+    is_field_required_for_category,
 )
 
 
@@ -135,3 +136,29 @@ def test_find_size_system_ignores_non_ascii_digit_characters():
     # 전각 숫자나 위첨자는 숫자 사이즈 체계로 단정하지 않습니다.
     assert find_size_system("９５") is None
     assert find_size_system("²") is None
+
+
+@pytest.mark.parametrize(
+    ("category", "expected"),
+    [
+        ("TOP", True),
+        ("BOTTOM", True),
+        ("OUTER", True),
+        ("SHOES", True),
+        ("BAG", False),
+        # 정책 표에 없는 값은 카테고리를 추정하지 않고 기존처럼 필수로 봅니다.
+        ("bag", True),
+        (" BAG ", True),
+        ("ACCESSORY", True),
+        ("", True),
+        (None, True),
+    ],
+)
+def test_is_field_required_for_category_applies_size_policy(category, expected):
+    assert is_field_required_for_category(category, "size") is expected
+
+
+@pytest.mark.parametrize("field_name", ["color", "product_name", "image_path"])
+def test_is_field_required_for_category_keeps_other_fields_always_required(field_name):
+    # 정책이 없는 필드는 BAG에서도 기존 필수 값 정책을 그대로 따릅니다.
+    assert is_field_required_for_category("BAG", field_name) is True
