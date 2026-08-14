@@ -12,7 +12,11 @@ from db import models  # noqa: F401
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers 기본값은 True라, alembic.ini에 선언되지 않은 logger를 전부
+    # disabled로 바꿉니다. alembic.ini는 root/sqlalchemy/alembic만 선언하므로 기본값으로 두면
+    # 같은 프로세스에서 migration을 실행할 때 catalogguard 애플리케이션 logger가 조용히 죽습니다.
+    # False로 두어도 alembic.ini가 선언한 logger 설정은 그대로 적용됩니다.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
