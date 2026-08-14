@@ -1625,3 +1625,67 @@ def test_run_all_rules_keeps_non_complete_relations_in_three_product_variant():
         == ("G001", "BLACK", "M", ["P001", "P002", "P003"])
         for issue in variant_issues
     )
+
+
+def test_run_all_rules_flags_complete_duplicate_for_blank_size_bags():
+    # size가 선택 값인 BAG도 빈 size끼리 완전 중복 비교 대상입니다.
+    products = [
+        make_product(
+            product_group_id="G001",
+            product_id="P001",
+            product_name="클래식 숄더백",
+            category="BAG",
+            size="",
+            price=50000,
+        ),
+        make_product(
+            product_group_id="G002",
+            product_id="P002",
+            product_name="클래식 숄더백",
+            category="BAG",
+            size="",
+            price=50000,
+        ),
+    ]
+
+    issues = run_all_rules(products)
+    content_issues = [
+        issue for issue in issues if issue.rule == "duplicate_product_content"
+    ]
+
+    assert [issue.product_id for issue in content_issues] == ["P002"]
+    assert content_issues[0].severity == "error"
+    # 빈 size가 정상인 카테고리이므로 size 누락 오류는 생기지 않습니다.
+    assert [issue for issue in issues if issue.rule == "missing_required_field"] == []
+
+
+def test_run_all_rules_keeps_product_name_warning_beside_complete_duplicate_for_bags():
+    # 상품명 중복 주의와 완전 중복 오류가 함께 나오는 것은 사이즈가 있는 상품과 같은
+    # 기존 동작입니다. 이번 변경으로 한쪽을 숨기는 정책을 만들지 않습니다.
+    def bag(product_group_id: str, product_id: str):
+        return make_product(
+            product_group_id=product_group_id,
+            product_id=product_id,
+            product_name="클래식 숄더백",
+            category="BAG",
+            size="",
+            price=50000,
+        )
+
+    blank_size_rules = sorted(
+        {issue.rule for issue in run_all_rules([bag("G001", "P001"), bag("G002", "P002")])}
+    )
+    sized_rules = sorted(
+        {
+            issue.rule
+            for issue in run_all_rules(
+                [
+                    make_product(product_group_id="G001", product_id="P001", size="M"),
+                    make_product(product_group_id="G002", product_id="P002", size="M"),
+                ]
+            )
+        }
+    )
+
+    assert blank_size_rules == ["duplicate_product_content", "duplicate_product_name"]
+    assert blank_size_rules == sized_rules

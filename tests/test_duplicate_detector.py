@@ -1,11 +1,16 @@
 # 역할: 상품 ID와 상품명 중복 탐지 유틸의 다양한 비교 조건을 테스트합니다.
 from dataclasses import asdict
 
+import pytest
+
 from core import duplicate_detector
 from core.duplicate_detector import (
+    build_duplicate_product_content_key,
     detect_duplicate_products,
+    find_duplicate_product_content,
     find_duplicate_product_ids,
     find_duplicate_product_names,
+    find_duplicate_variant_combinations,
     has_explicit_option_difference,
     normalize_product_name,
     normalize_option_value,
@@ -547,3 +552,165 @@ def test_find_duplicate_variant_combinations_does_not_modify_products():
     duplicate_detector.find_duplicate_variant_combinations(products)
 
     assert [asdict(product) for product in products] == before_products
+
+
+# 아래는 size가 선택 값인 카테고리(BAG)의 빈 size도 완전 중복 비교에 포함되는지 확인합니다.
+# 정책의 단일 기준은 검수·ETL과 같은 config.settings.FASHION_CATEGORY_ATTRIBUTE_RULES입니다.
+def bag_product(**overrides) -> Product:
+    defaults = dict(
+        product_group_id="G001",
+        product_id="P001",
+        product_name="클래식 숄더백",
+        category="BAG",
+        color="BLACK",
+        size="",
+        stock=5,
+        price=50000,
+        image_path="fake/bag.jpg",
+    )
+    defaults.update(overrides)
+    return Product(**defaults)
+
+
+def test_build_duplicate_product_content_key_accepts_blank_size_for_bag():
+    key = build_duplicate_product_content_key(bag_product())
+
+    assert key is not None
+    # 빈 size는 정규화 결과 ""로 그대로 키에 들어갑니다.
+    assert key[3] == ""
+
+
+@pytest.mark.parametrize("category", ["TOP", "BOTTOM", "OUTER", "SHOES"])
+def test_build_duplicate_product_content_key_rejects_blank_size_for_apparel(category):
+    product = bag_product(category=category, product_name="반팔 티셔츠")
+
+    assert build_duplicate_product_content_key(product) is None
+
+
+@pytest.mark.parametrize("blank_field", ["color", "product_name", "product_group_id", "product_id"])
+def test_build_duplicate_product_content_key_still_rejects_other_blank_fields_for_bag(blank_field):
+    product = bag_product(**{blank_field: ""})
+
+    assert build_duplicate_product_content_key(product) is None
+
+
+@pytest.mark.parametrize("category", ["ACCESSORY", "bag", ""])
+def test_build_duplicate_product_content_key_rejects_blank_size_for_non_canonical_category(category):
+    # 허용 목록에 없거나 canonical이 아닌 카테고리는 BAG로 추정하지 않습니다.
+    assert build_duplicate_product_content_key(bag_product(category=category)) is None
+
+
+@pytest.mark.parametrize("price", [None, 0, -1000])
+def test_build_duplicate_product_content_key_still_rejects_invalid_price_for_bag(price):
+    assert build_duplicate_product_content_key(bag_product(price=price)) is None
+
+
+def test_find_duplicate_product_content_flags_two_blank_size_bags():
+    products = [
+        bag_product(product_group_id="G001", product_id="P001"),
+        bag_product(product_group_id="G002", product_id="P002"),
+    ]
+
+    issues = find_duplicate_product_content(products)
+
+    assert [issue.product_id for issue in issues] == ["P002"]
+    assert issues[0].rule == "duplicate_product_content"
+    assert issues[0].severity == "error"
+
+
+def test_find_duplicate_product_content_treats_blank_size_and_free_as_different():
+    # 빈 size를 FREE와 같은 값으로 보지 않습니다.
+    products = [
+        bag_product(product_group_id="G001", product_id="P001", size=""),
+        bag_product(product_group_id="G002", product_id="P002", size="FREE"),
+    ]
+
+    assert find_duplicate_product_content(products) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("color", "WHITE"), ("price", 60000), ("product_name", "다른 가방")],
+)
+def test_find_duplicate_product_content_keeps_other_fields_significant_for_bag(field, value):
+    products = [
+        bag_product(product_group_id="G001", product_id="P001"),
+        bag_product(product_group_id="G002", product_id="P002", **{field: value}),
+    ]
+
+    assert find_duplicate_product_content(products) == []
+
+
+def test_find_duplicate_product_content_does_not_flag_blank_size_apparel():
+    # TOP의 빈 size는 완전 중복이 아니라 기존 필수 값 누락 규칙이 처리합니다.
+    products = [
+        make_product(product_group_id="G001", product_id="P001", size=""),
+        make_product(product_group_id="G002", product_id="P002", size=""),
+    ]
+
+    assert find_duplicate_product_content(products) == []
+    missing_issues = check_missing_required_fields(products)
+    assert len(missing_issues) == 2
+    assert all("size" in issue.message for issue in missing_issues)
+
+
+def test_find_duplicate_product_content_keeps_existing_behaviour_for_sized_products():
+    products = [
+        make_product(product_group_id="G001", product_id="P001", size="M"),
+        make_product(product_group_id="G002", product_id="P002", size="M"),
+    ]
+
+    issues = find_duplicate_product_content(products)
+
+    assert [issue.product_id for issue in issues] == ["P002"]
+
+
+def test_find_duplicate_product_content_does_not_modify_products():
+    products = [
+        bag_product(product_group_id="G001", product_id="P001"),
+        bag_product(product_group_id="G002", product_id="P002"),
+    ]
+    before = [asdict(product) for product in products]
+
+    find_duplicate_product_content(products)
+
+    assert [asdict(product) for product in products] == before
+
+
+def test_find_duplicate_variant_combinations_still_skips_blank_size_bags():
+    # variant 규칙은 빈 size를 사이즈 체계로 분류할 수 없어 기존처럼 건너뜁니다.
+    # 이번 완전 중복 확대가 옵션 중복 규칙에 간접 회귀를 만들지 않는지 고정합니다.
+    products = [
+        bag_product(product_group_id="G001", product_id="P001"),
+        bag_product(product_group_id="G001", product_id="P002"),
+    ]
+
+    assert find_duplicate_variant_combinations(products) == []
+
+
+def test_find_duplicate_variant_combinations_unchanged_for_sized_complete_duplicates():
+    # 사이즈가 있는 완전 중복 관계는 기존처럼 옵션 중복으로 다시 표시하지 않습니다.
+    products = [
+        make_product(product_group_id="G001", product_id="P001", size="M"),
+        make_product(product_group_id="G001", product_id="P002", size="M"),
+    ]
+
+    assert find_duplicate_variant_combinations(products) == []
+    assert [issue.product_id for issue in find_duplicate_product_content(products)] == ["P002"]
+
+
+def test_run_all_rules_reports_complete_duplicate_for_blank_size_bags():
+    products = [
+        bag_product(product_group_id="G001", product_id="P001"),
+        bag_product(product_group_id="G002", product_id="P002"),
+    ]
+
+    issues = run_all_rules(products)
+    rules_by_product = {}
+    for issue in issues:
+        rules_by_product.setdefault(issue.product_id, []).append(issue.rule)
+
+    assert "duplicate_product_content" in rules_by_product["P002"]
+    # 빈 size가 정상인 카테고리이므로 size 누락 오류는 생기지 않습니다.
+    assert "missing_required_field" not in rules_by_product.get("P001", [])
+    assert "missing_required_field" not in rules_by_product["P002"]
