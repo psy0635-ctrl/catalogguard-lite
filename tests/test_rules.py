@@ -1689,3 +1689,100 @@ def test_run_all_rules_keeps_product_name_warning_beside_complete_duplicate_for_
 
     assert blank_size_rules == ["duplicate_product_content", "duplicate_product_name"]
     assert blank_size_rules == sized_rules
+
+
+def test_run_all_rules_flags_duplicate_variant_for_blank_size_bags():
+    # 같은 그룹, 같은 색상, 빈 size가 반복되면 완전 중복이 아니어도 옵션 중복입니다.
+    products = [
+        make_product(
+            product_group_id="G001",
+            product_id="P001",
+            product_name="클래식 숄더백",
+            category="BAG",
+            size="",
+            price=50000,
+        ),
+        make_product(
+            product_group_id="G001",
+            product_id="P002",
+            product_name="데일리 숄더백",
+            category="BAG",
+            size="",
+            price=52000,
+        ),
+    ]
+
+    issues = run_all_rules(products)
+    variant_issues = [
+        issue for issue in issues if issue.rule == "duplicate_variant_combination"
+    ]
+
+    assert [issue.product_id for issue in variant_issues] == ["P001", "P002"]
+    assert all(issue.severity == "error" for issue in variant_issues)
+    assert all(
+        parse_duplicate_variant_message(issue.message)
+        == ("G001", "BLACK", "", ["P001", "P002"])
+        for issue in variant_issues
+    )
+    # 빈 size가 정상인 카테고리이므로 size 누락 오류는 생기지 않습니다.
+    assert [issue for issue in issues if issue.rule == "missing_required_field"] == []
+
+
+def test_run_all_rules_keeps_complete_duplicate_priority_for_blank_size_bags():
+    # 완전 중복 관계에는 옵션 중복을 다시 붙이지 않는 기존 우선순위를 유지합니다.
+    products = [
+        make_product(
+            product_group_id="G001",
+            product_id="P001",
+            product_name="클래식 숄더백",
+            category="BAG",
+            size="",
+            price=50000,
+        ),
+        make_product(
+            product_group_id="G001",
+            product_id="P002",
+            product_name="클래식 숄더백",
+            category="BAG",
+            size="",
+            price=50000,
+        ),
+    ]
+
+    issues = run_all_rules(products)
+
+    assert [
+        issue.product_id
+        for issue in issues
+        if issue.rule == "duplicate_product_content"
+    ] == ["P002"]
+    assert [
+        issue for issue in issues if issue.rule == "duplicate_variant_combination"
+    ] == []
+
+
+@pytest.mark.parametrize("category", ["TOP", "BOTTOM", "OUTER", "SHOES"])
+def test_run_all_rules_keeps_missing_size_error_without_variant_issue(category):
+    # size가 필수인 카테고리의 빈 size는 기존처럼 필수 값 누락 오류만 만듭니다.
+    products = [
+        make_product(product_group_id="G001", product_id="P001", category=category, size=""),
+        make_product(
+            product_group_id="G001",
+            product_id="P002",
+            product_name="기본 반팔",
+            category=category,
+            size="",
+            price=12000,
+        ),
+    ]
+
+    issues = run_all_rules(products)
+    missing_issues = [
+        issue for issue in issues if issue.rule == "missing_required_field"
+    ]
+
+    assert [issue.product_id for issue in missing_issues] == ["P001", "P002"]
+    assert all("size" in issue.message for issue in missing_issues)
+    assert [
+        issue for issue in issues if issue.rule == "duplicate_variant_combination"
+    ] == []

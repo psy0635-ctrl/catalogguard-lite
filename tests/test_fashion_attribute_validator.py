@@ -5,6 +5,8 @@ from core import fashion_attribute_validator
 from core.fashion_attribute_validator import (
     SIZE_SYSTEM_ALPHA,
     SIZE_SYSTEM_NUMERIC,
+    build_size_comparison_key,
+    build_variant_size_comparison_key,
     find_size_system,
     find_standard_color,
     find_standard_size,
@@ -162,3 +164,47 @@ def test_is_field_required_for_category_applies_size_policy(category, expected):
 def test_is_field_required_for_category_keeps_other_fields_always_required(field_name):
     # 정책이 없는 필드는 BAG에서도 기존 필수 값 정책을 그대로 따릅니다.
     assert is_field_required_for_category("BAG", field_name) is True
+
+
+@pytest.mark.parametrize(
+    ("category", "size"),
+    [
+        ("BAG", "FREE"),
+        ("BAG", "free size"),
+        ("BAG", "M"),
+        ("BAG", " 95 "),
+        ("TOP", "medium"),
+        ("ACCESSORY", "MELANGE"),
+    ],
+)
+def test_build_variant_size_comparison_key_keeps_existing_key_for_filled_sizes(category, size):
+    # 값이 있는 사이즈는 카테고리와 무관하게 기존 비교 키를 그대로 사용합니다.
+    assert build_variant_size_comparison_key(category, size) == build_size_comparison_key(size)
+
+
+@pytest.mark.parametrize("size", ["", " ", "   "])
+def test_build_variant_size_comparison_key_accepts_blank_size_for_optional_category(size):
+    # size가 선택 값인 canonical 카테고리는 빈 사이즈 자체를 정상 비교값으로 사용합니다.
+    assert build_variant_size_comparison_key("BAG", size) == ""
+
+
+def test_build_variant_size_comparison_key_keeps_blank_size_different_from_free():
+    assert build_variant_size_comparison_key("BAG", "") != build_variant_size_comparison_key(
+        "BAG", "FREE"
+    )
+
+
+@pytest.mark.parametrize("category", ["TOP", "BOTTOM", "OUTER", "SHOES"])
+def test_build_variant_size_comparison_key_rejects_blank_size_for_required_category(category):
+    assert build_variant_size_comparison_key(category, "") is None
+
+
+@pytest.mark.parametrize("category", ["ACCESSORY", "bag", " BAG ", "", None])
+def test_build_variant_size_comparison_key_rejects_blank_size_for_non_canonical_category(category):
+    # 허용 목록에 없거나 canonical이 아닌 카테고리는 BAG로 추정하지 않습니다.
+    assert build_variant_size_comparison_key(category, "") is None
+
+
+@pytest.mark.parametrize("size", [None, 95])
+def test_build_variant_size_comparison_key_rejects_non_string_size(size):
+    assert build_variant_size_comparison_key("BAG", size) is None
