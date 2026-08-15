@@ -26,9 +26,11 @@ class _Rows:
 class _ReadOnlyListSession:
     def __init__(self, rows):
         self.rows = rows
+        self.execute_calls = 0
         self.scalar_calls = 0
 
     def execute(self, _statement):
+        self.execute_calls += 1
         return _Rows(self.rows)
 
     def scalar(self, _statement):
@@ -40,6 +42,71 @@ class _ReadOnlyListSession:
 
     def rollback(self):
         raise AssertionError("query service must not rollback")
+
+
+def test_list_unknown_size_tokens_groups_only_unknown_catalog_sizes_deterministically():
+    from db.catalog_promotion_query_service import list_unknown_size_tokens
+
+    session = _ReadOnlyListSession(
+        [
+            ("4XL", 10),
+            ("4xl", 5),
+            (" 4XL ", 2),
+            ("OS", 6),
+            ("XXXXL", 6),
+            ("4 XL", 4),
+            ("4-XL", 3),
+            ("4/XL", 2),
+            ("M", 100),
+            ("2XL", 90),
+            ("ONE SIZE", 80),
+            ("F", 70),
+            ("95", 60),
+            ("270", 50),
+            ("", 40),
+            ("   ", 30),
+        ]
+    )
+
+    result = list_unknown_size_tokens(session, limit=3)
+
+    assert [(item.token, item.count) for item in result] == [
+        ("4XL", 17),
+        ("OS", 6),
+        ("XXXXL", 6),
+    ]
+
+
+def test_list_unknown_size_tokens_keeps_unregistered_separator_variants_separate():
+    from db.catalog_promotion_query_service import list_unknown_size_tokens
+
+    session = _ReadOnlyListSession(
+        [("4XL", 1), ("4 XL", 1), ("4-XL", 1), ("4/XL", 1)]
+    )
+
+    result = list_unknown_size_tokens(session, limit=20)
+
+    assert [(item.token, item.count) for item in result] == [
+        ("4 XL", 1),
+        ("4-XL", 1),
+        ("4/XL", 1),
+        ("4XL", 1),
+    ]
+
+
+def test_list_unknown_size_tokens_processes_ten_thousand_grouped_catalog_sizes_in_one_query():
+    from db.catalog_promotion_query_service import list_unknown_size_tokens
+
+    session = _ReadOnlyListSession(
+        [(f"CUSTOM-{index:05d}", 1) for index in range(10_000)]
+        + [("4XL", 10_001)]
+    )
+
+    result = list_unknown_size_tokens(session, limit=1)
+
+    assert [(item.token, item.count) for item in result] == [("4XL", 10_001)]
+    assert session.execute_calls == 1
+    assert session.scalar_calls == 0
 
 
 def test_list_catalog_promotions_maps_joined_rows_without_writes():
@@ -230,6 +297,45 @@ def seeded_promotions():
             cleanup.execute(delete(ETLLoadRun).where(ETLLoadRun.id.in_(load_ids)))
             cleanup.commit()
         engine.dispose()
+
+
+def test_list_unknown_size_tokens_counts_current_catalog_snapshot_rows(
+    seeded_promotions,
+):
+    from db.catalog_promotion_query_service import list_unknown_size_tokens
+
+    session, _, oldest, _, _ = seeded_promotions
+    product = session.scalar(
+        select(CatalogProduct).where(
+            CatalogProduct.source_etl_load_run_id == oldest.etl_load_run_id
+        )
+    )
+    assert product is not None
+
+    product.size = "4XL"
+    session.add(
+        CatalogProduct(
+            supplier_key=product.supplier_key,
+            external_product_id="SKU-002",
+            product_group_id="GROUP-001",
+            product_name="Product 2",
+            category="TOP",
+            color="WHITE",
+            size="4xl",
+            stock=3,
+            price=1200,
+            sale_price=None,
+            image_path="image-2.jpg",
+            description=None,
+            seller="Seller",
+            source_etl_load_run_id=oldest.etl_load_run_id,
+        )
+    )
+    session.flush()
+
+    result = list_unknown_size_tokens(session, limit=20)
+
+    assert [(item.token, item.count) for item in result] == [("4XL", 2)]
 
 
 def test_list_catalog_promotions_sorts_latest_and_uses_sql_pagination(

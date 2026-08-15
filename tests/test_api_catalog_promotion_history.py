@@ -127,6 +127,21 @@ def fake_promotion_history_query_service(monkeypatch):
             return None
         return SimpleNamespace(items=[_audit()], total=1, limit=limit, offset=offset)
 
+    def fake_unknown_size_tokens(session, *, limit):
+        calls.append(
+            {
+                "operation": "unknown_size_tokens",
+                "session": session,
+                "limit": limit,
+            }
+        )
+        return state.unknown_size_tokens[:limit]
+
+    state.unknown_size_tokens = [
+        SimpleNamespace(token="4XL", count=8),
+        SimpleNamespace(token="OS", count=3),
+    ]
+
     app.dependency_overrides[get_session] = override_session
     monkeypatch.setattr(
         etl_loads_route,
@@ -146,8 +161,57 @@ def fake_promotion_history_query_service(monkeypatch):
         fake_audits,
         raising=False,
     )
+    monkeypatch.setattr(
+        etl_loads_route,
+        "list_unknown_size_tokens",
+        fake_unknown_size_tokens,
+        raising=False,
+    )
     yield SimpleNamespace(calls=calls, state=state)
     app.dependency_overrides.clear()
+
+
+def test_list_unknown_size_tokens_returns_the_read_only_contract_for_viewers(
+    fake_promotion_history_query_service,
+):
+    override_current_user(role="viewer")
+
+    response = client.get("/api/v1/catalog/unknown-size-tokens", params={"limit": 1})
+
+    assert response.status_code == 200
+    assert response.json() == {"items": [{"token": "4XL", "count": 8}]}
+    assert fake_promotion_history_query_service.calls[-1]["operation"] == "unknown_size_tokens"
+    assert fake_promotion_history_query_service.calls[-1]["limit"] == 1
+
+
+def test_list_unknown_size_tokens_allows_empty_items(
+    fake_promotion_history_query_service,
+):
+    fake_promotion_history_query_service.state.unknown_size_tokens = []
+
+    response = client.get("/api/v1/catalog/unknown-size-tokens")
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+    assert fake_promotion_history_query_service.calls[-1]["limit"] == 20
+
+
+def test_list_unknown_size_tokens_requires_authenticated_user(
+    fake_promotion_history_query_service,
+):
+    clear_current_user_override()
+
+    response = client.get("/api/v1/catalog/unknown-size-tokens")
+
+    assert response.status_code == 401
+    assert fake_promotion_history_query_service.calls == []
+
+
+@pytest.mark.parametrize("limit", [0, 101])
+def test_list_unknown_size_tokens_rejects_invalid_limits(limit):
+    response = client.get("/api/v1/catalog/unknown-size-tokens", params={"limit": limit})
+
+    assert response.status_code == 422
 
 
 def test_list_catalog_promotions_returns_safe_paged_contract(

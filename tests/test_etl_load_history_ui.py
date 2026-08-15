@@ -482,6 +482,8 @@ class FakeEtlApiClient:
         etl_profiles_error=None,
         etl_run_response=None,
         etl_run_error=None,
+        unknown_size_tokens=None,
+        unknown_size_token_error=None,
     ):
         self.list_calls = []
         self.detail_calls = []
@@ -495,6 +497,7 @@ class FakeEtlApiClient:
         self.rollback_detail_calls = []
         self.etl_profiles_calls = []
         self.etl_run_calls = []
+        self.unknown_size_token_calls = []
         self.etl_profiles = (
             [
                 {"id": "sample_fashion_vendor_v1", "display_name": "패션 공급사 샘플"},
@@ -516,6 +519,12 @@ class FakeEtlApiClient:
             "error_counts": {},
         }
         self.etl_run_error = etl_run_error
+        self.unknown_size_tokens = (
+            [{"token": "4XL", "count": 8}, {"token": "OS", "count": 3}]
+            if unknown_size_tokens is None
+            else unknown_size_tokens
+        )
+        self.unknown_size_token_error = unknown_size_token_error
         self.detail_error = detail_error
         self.list_items = [make_load()] if list_items is None else list_items
         self.list_pages = list_pages
@@ -587,6 +596,12 @@ class FakeEtlApiClient:
             "limit": params["limit"],
             "offset": params["offset"],
         }
+
+    def list_unknown_size_tokens(self, *, limit):
+        self.unknown_size_token_calls.append(limit)
+        if self.unknown_size_token_error is not None:
+            raise self.unknown_size_token_error
+        return {"items": self.unknown_size_tokens}
 
     def list_inspections(self, **params):
         return {
@@ -977,6 +992,62 @@ def test_etl_load_history_shows_empty_result_message(monkeypatch):
     assert "조건에 맞는 ETL 적재 이력이 없습니다." in [
         info.value for info in app.info
     ]
+
+
+def test_unknown_size_token_dataframe_uses_operator_facing_columns():
+    dataframe = etl_load_history.build_unknown_size_token_dataframe(
+        [{"token": "4XL", "count": 8}, {"token": "OS", "count": 3}]
+    )
+
+    assert list(dataframe.columns) == etl_load_history.UNKNOWN_SIZE_TOKEN_DISPLAY_COLUMNS
+    assert dataframe.to_dict("records") == [
+        {"사이즈 토큰": "4XL", "개수": 8},
+        {"사이즈 토큰": "OS", "개수": 3},
+    ]
+
+
+def test_etl_load_history_shows_unknown_size_token_report(monkeypatch):
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert len(app.exception) == 0
+    assert api_client.unknown_size_token_calls == [20]
+    assert "미판정 사이즈 토큰" in [subheader.value for subheader in app.subheader]
+    assert any(
+        set(dataframe.value.columns)
+        == set(etl_load_history.UNKNOWN_SIZE_TOKEN_DISPLAY_COLUMNS)
+        for dataframe in app.dataframe
+    )
+
+
+def test_etl_load_history_shows_empty_unknown_size_token_report(monkeypatch):
+    api_client = FakeEtlApiClient(unknown_size_tokens=[])
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert len(app.exception) == 0
+    assert "현재 운영 카탈로그에 미판정 사이즈 토큰이 없습니다." in [
+        info.value for info in app.info
+    ]
+
+
+def test_unknown_size_token_report_failure_does_not_block_etl_history(monkeypatch):
+    api_client = FakeEtlApiClient(
+        unknown_size_token_error=catalogguard_api.CatalogGuardApiResponseError(
+            "upstream failure"
+        )
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert len(app.exception) == 0
+    assert api_client.unknown_size_token_calls == [20]
+    assert "ETL 적재 이력" in [subheader.value for subheader in app.subheader]
+    assert any("미판정 사이즈 토큰을 불러오지 못했습니다." in error.value for error in app.error)
 
 
 def _patch_etl_api_client(monkeypatch, api_client):

@@ -25,6 +25,7 @@ from ui.auth import get_authenticated_api_client, is_operator
 ETL_LOAD_LIMIT = 10
 ETL_PRODUCT_LIMIT = 20
 ETL_REJECT_LIMIT = 20
+UNKNOWN_SIZE_TOKEN_LIMIT = 20
 PROMOTION_HISTORY_LIMIT = 10
 PROMOTION_AUDIT_LIMIT = 10
 ROLLBACK_HISTORY_LIMIT = 10
@@ -42,6 +43,7 @@ ETL_LOAD_DISPLAY_COLUMNS = [
 ]
 ETL_ERROR_DISPLAY_COLUMNS = ["오류 코드", "발생 건수"]
 ETL_REJECT_DISPLAY_COLUMNS = ["원본 행", "오류 코드", "오류 필드", "오류 메시지"]
+UNKNOWN_SIZE_TOKEN_DISPLAY_COLUMNS = ["사이즈 토큰", "개수"]
 ETL_PRODUCT_DISPLAY_COLUMNS = [
     "staging 상품 ID",
     "상품 그룹 ID",
@@ -260,6 +262,14 @@ def build_etl_rejection_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows, columns=ETL_REJECT_DISPLAY_COLUMNS)
+
+
+def build_unknown_size_token_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
+    rows = [
+        {"사이즈 토큰": item.get("token"), "개수": item.get("count")}
+        for item in items
+    ]
+    return pd.DataFrame(rows, columns=UNKNOWN_SIZE_TOKEN_DISPLAY_COLUMNS)
 
 
 def build_etl_product_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
@@ -1998,6 +2008,41 @@ def _render_etl_web_run(api_client) -> None:
         )
 
 
+def _render_unknown_size_token_report(api_client) -> None:
+    st.divider()
+    st.subheader("미판정 사이즈 토큰")
+    st.caption(
+        "현재 운영 카탈로그에서 표준 사이즈 vocabulary에 포함되지 않은 원본 토큰의 빈도입니다. "
+        "오류 판정이 아니라 vocabulary 검토용 보고서입니다."
+    )
+    try:
+        response = api_client.list_unknown_size_tokens(limit=UNKNOWN_SIZE_TOKEN_LIMIT)
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        st.error(
+            build_etl_api_error_display_message(
+                "미판정 사이즈 토큰을 불러오지 못했습니다.", error
+            )
+        )
+        return
+
+    items = response.get("items") or []
+    if not items:
+        st.info("현재 운영 카탈로그에 미판정 사이즈 토큰이 없습니다.")
+        return
+
+    st.dataframe(
+        build_unknown_size_token_dataframe(items),
+        width="stretch",
+        hide_index=True,
+    )
+
+
 def render_etl_load_history(api_client=None) -> None:
     initialize_etl_load_state()
 
@@ -2009,6 +2054,7 @@ def render_etl_load_history(api_client=None) -> None:
             return
 
     _render_etl_web_run(api_client)
+    _render_unknown_size_token_report(api_client)
 
     st.subheader("ETL 적재 이력")
     st.write(

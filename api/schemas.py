@@ -324,6 +324,15 @@ class CatalogPromotionAuditListResponse(BaseModel):
     offset: int
 
 
+class UnknownSizeTokenItemResponse(BaseModel):
+    token: str
+    count: int
+
+
+class UnknownSizeTokenReportResponse(BaseModel):
+    items: list[UnknownSizeTokenItemResponse]
+
+
 InspectionJobStatus = Literal["queued", "running", "succeeded", "failed"]
 
 
