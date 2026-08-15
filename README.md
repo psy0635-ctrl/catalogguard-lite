@@ -833,6 +833,12 @@ medium, m -> M
 
 문자열 유사도(fuzzy matching)로 오타를 추정하지 않는 이유도 여기에 있습니다. 사이즈 값은 `XS`·`XXS`·`XXXS`처럼 **실제로 서로 다른 값끼리도 한 글자 차이**여서, 유사도만으로는 오타와 사전에 없는 실제 사이즈를 구분할 수 없습니다. 예를 들어 `OS`는 `S`와 한 글자 차이지만 두 값의 의미는 서로 다릅니다. 잘못된 교정을 권하지 않기 위해 현재 MVP에서는 유사도 기반 추천을 사용하지 않습니다.
 
+#### 사이즈 vocabulary를 확장하는 기준
+
+현재 표준 사이즈 vocabulary는 `XXS`, `XS`, `S`, `M`, `L`, `XL`, `XXL`, `XXXL`, `FREE`이며, 문자형(ALPHA) 범위는 `XXS`부터 `XXXL`까지입니다. `FREE`는 별도 semantic canonical이라 ALPHA·NUMERIC 체계로 분류하지 않습니다. 사전에 근거가 확인된 표기만 지원하는 Policy C를 적용해, `2XL`→`XXL`, `3XL`→`XXXL`, `ONE SIZE`·`ONE-SIZE`·`ONE_SIZE`·`ONESIZE`→`FREE`, `F`→`FREE`는 기존 지원을 유지합니다.
+
+반면 `XXXS`, `XXXXL`, `4XL`, `5XL`, `2XS`, `3XS`, `OS`, `ONE`, `FS`는 현재 저장소 근거만으로 기존 canonical과 같은 의미라고 확정하지 않습니다. 예를 들어 `4XL`을 `XXXL`로 바꾸면 실제로 더 큰 별도 사이즈일 수 있는 값을 잃을 수 있습니다. 다른 사이즈를 잘못 합치는 것보다 unknown(미판정)으로 남겨 두는 편이 안전하므로, 이 값들은 실제 공급사 데이터 또는 승인된 size taxonomy 근거가 생길 때까지 새 alias·canonical로 등록하지 않습니다. 이는 unknown 자체를 오류로 만들지 않는 위 Policy E와 같은 보수적 원칙입니다.
+
 ### 상품 그룹 내 중복 색상·사이즈 옵션 기준
 
 다음 조건을 모두 만족하면 `상품 옵션 조합 중복` 오류로 표시합니다.
