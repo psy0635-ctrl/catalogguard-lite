@@ -874,3 +874,63 @@ def test_run_all_rules_reports_complete_duplicate_for_blank_size_bags():
     # 빈 size가 정상인 카테고리이므로 size 누락 오류는 생기지 않습니다.
     assert "missing_required_field" not in rules_by_product.get("P001", [])
     assert "missing_required_field" not in rules_by_product["P002"]
+
+
+# 아래는 등록된 별칭의 구분자 표기 차이도 같은 옵션으로 비교되는지 확인합니다.
+# 완전 중복은 계속 엄격 비교이므로 두 규칙의 결과가 달라야 정상입니다.
+@pytest.mark.parametrize("size", ["free-size", "free_size", "one_size", "FREE_SIZE"])
+def test_find_duplicate_variant_combinations_matches_free_alias_separator_variants(size):
+    products = [
+        bag_product(product_group_id="G001", product_id="P001", size="FREE"),
+        bag_product(product_group_id="G001", product_id="P002", size=size),
+    ]
+
+    issues = find_duplicate_variant_combinations(products)
+
+    assert [issue.product_id for issue in issues] == ["P001", "P002"]
+    assert all(
+        duplicate_detector.parse_duplicate_variant_message(issue.message)
+        == ("G001", "BLACK", "FREE", ["P001", "P002"])
+        for issue in issues
+    )
+
+
+@pytest.mark.parametrize(
+    ("first_size", "second_size"),
+    [("XL", "extra_large"), ("XL", "extra-large"), ("XS", "extra_small"), ("XXL", "xx_large")],
+)
+def test_find_duplicate_variant_combinations_matches_alpha_alias_separator_variants(
+    first_size,
+    second_size,
+):
+    products = [
+        make_product(product_group_id="G001", product_id="P001", size=first_size),
+        make_product(product_group_id="G001", product_id="P002", size=second_size),
+    ]
+
+    assert [issue.product_id for issue in find_duplicate_variant_combinations(products)] == [
+        "P001",
+        "P002",
+    ]
+
+
+@pytest.mark.parametrize("size", ["free-size", "free_size", "one_size"])
+def test_find_duplicate_product_content_keeps_strict_comparison_for_separator_variants(size):
+    # 완전 중복은 별칭을 쓰지 않으므로 구분자 표기가 다르면 계속 다른 상품입니다.
+    products = [
+        bag_product(product_group_id="G001", product_id="P001", size="FREE"),
+        bag_product(product_group_id="G002", product_id="P002", size=size),
+    ]
+
+    assert find_duplicate_product_content(products) == []
+
+
+@pytest.mark.parametrize("size", ["free/size", "S-M", "36-38", "OS"])
+def test_find_duplicate_variant_combinations_keeps_unregistered_values_distinct(size):
+    # 사전에 없는 표현은 구분자를 무시해도 표준값이 되지 않으므로 다른 옵션입니다.
+    products = [
+        bag_product(product_group_id="G001", product_id="P001", size="FREE"),
+        bag_product(product_group_id="G001", product_id="P002", size=size),
+    ]
+
+    assert find_duplicate_variant_combinations(products) == []

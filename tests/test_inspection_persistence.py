@@ -433,9 +433,9 @@ def test_build_result_create_items_maps_group_category_without_schema_changes():
     assert {item.risk_level for item in category_items} == {"중간"}
 
 
-def test_current_inspection_version_is_twelve_for_alias_whitespace_normalization():
-    # 같은 CSV가 버전 11 결과를 재사용해 별칭 공백 변형 검사를 건너뛰지 않도록 고정합니다.
-    assert INSPECTION_VERSION == "12"
+def test_current_inspection_version_is_thirteen_for_alias_separator_lookup():
+    # 같은 CSV가 버전 12 결과를 재사용해 별칭 구분자 변형 검사를 건너뛰지 않도록 고정합니다.
+    assert INSPECTION_VERSION == "13"
 
 
 def test_build_result_create_items_rejects_blank_required_result_fields():
