@@ -1786,3 +1786,51 @@ def test_run_all_rules_keeps_missing_size_error_without_variant_issue(category):
     assert [
         issue for issue in issues if issue.rule == "duplicate_variant_combination"
     ] == []
+
+
+@pytest.mark.parametrize("size", ["free  size", " free   size ", "free\tsize", "one  size"])
+def test_run_all_rules_detects_alias_variant_despite_extra_whitespace(size):
+    # 공급사가 별칭 사이에 공백을 여러 번 넣어도 의미 비교가 빠지지 않아야 합니다.
+    products = [
+        make_product(
+            product_group_id="G001",
+            product_id="P001",
+            product_name="클래식 숄더백",
+            category="BAG",
+            color="BLACK",
+            size="FREE",
+            price=50000,
+        ),
+        make_product(
+            product_group_id="G001",
+            product_id="P002",
+            product_name="클래식 숄더백",
+            category="BAG",
+            color="BLACK",
+            size=size,
+            price=50000,
+        ),
+    ]
+
+    issues = run_all_rules(products)
+    variant_issues = [
+        issue for issue in issues if issue.rule == "duplicate_variant_combination"
+    ]
+    non_standard_issues = [
+        issue for issue in issues if issue.rule == "non_standard_size"
+    ]
+
+    assert [issue.product_id for issue in variant_issues] == ["P001", "P002"]
+    assert all(
+        parse_duplicate_variant_message(issue.message)
+        == ("G001", "BLACK", "FREE", ["P001", "P002"])
+        for issue in variant_issues
+    )
+    # 표기 차이 자체는 기존 비표준 주의가 원본 값 그대로 안내합니다.
+    assert [issue.product_id for issue in non_standard_issues] == ["P002"]
+    assert size in non_standard_issues[0].message
+    assert "'FREE'" in non_standard_issues[0].message
+    # 완전 중복은 계속 엄격 비교이므로 표기가 다르면 중복 상품이 아닙니다.
+    assert [
+        issue for issue in issues if issue.rule == "duplicate_product_content"
+    ] == []
