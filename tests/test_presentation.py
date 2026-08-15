@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 from core import presentation
+from core.duplicate_detector import build_duplicate_variant_message
 from core.group_category_consistency_detector import build_group_category_message
 from core.group_size_consistency_detector import GROUP_SIZE_SYSTEM_MESSAGE
 from core.models import ValidationIssue
@@ -14,6 +15,7 @@ from core.presentation import (
     build_validation_summary_message,
     calculate_dataframe_height,
     filter_result_dataframe,
+    format_variant_size_display,
     translate_issue_message,
 )
 
@@ -400,6 +402,43 @@ def test_translate_duplicate_variant_combination_message_to_korean():
         "상품 그룹 'G001'에서 색상 'BLACK', 사이즈 'M' 조합이 "
         "상품 ID 'P001', 'P002'에 중복되어 있습니다."
     )
+
+
+def test_translate_duplicate_variant_combination_message_with_blank_size():
+    # size가 선택 값인 카테고리의 빈 사이즈는 사이즈 ''가 아니라 사람이 읽을 수 있게 표시합니다.
+    issue = make_issue(
+        rule="duplicate_variant_combination",
+        message=build_duplicate_variant_message("G001", "BLACK", "", ["P001", "P002"]),
+    )
+
+    message = translate_issue_message(issue)
+
+    assert message == (
+        "상품 그룹 'G001'에서 색상 'BLACK', 사이즈 없음 조합이 "
+        "상품 ID 'P001', 'P002'에 중복되어 있습니다."
+    )
+    assert "사이즈 ''" not in message
+
+
+def test_translate_duplicate_variant_combination_keeps_free_size_display():
+    # 빈 사이즈 표시를 바꾸면서 FREE 같은 실제 값 표기를 바꾸지 않습니다.
+    issue = make_issue(
+        rule="duplicate_variant_combination",
+        message=build_duplicate_variant_message("G001", "BLACK", "FREE", ["P001", "P002"]),
+    )
+
+    assert translate_issue_message(issue) == (
+        "상품 그룹 'G001'에서 색상 'BLACK', 사이즈 'FREE' 조합이 "
+        "상품 ID 'P001', 'P002'에 중복되어 있습니다."
+    )
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [("M", "'M'"), ("FREE", "'FREE'"), ("", "없음")],
+)
+def test_format_variant_size_display_quotes_only_filled_sizes(size, expected):
+    assert format_variant_size_display(size) == expected
 
 
 def test_translate_missing_required_field_message_to_korean():
@@ -929,6 +968,30 @@ def test_build_result_dataframe_displays_duplicate_variant_combination_in_korean
         "중복 상품을 통합하거나 옵션 값을 수정하세요."
     )
     assert df.iloc[0]["위험 수준"] == "중간"
+
+
+def test_build_result_dataframe_displays_blank_size_duplicate_variant_in_korean():
+    issue = make_issue(
+        rule="duplicate_variant_combination",
+        severity="error",
+        product_id="P002",
+        product_group_id="G001",
+        message=build_duplicate_variant_message("G001", "BLACK", "", ["P001", "P002"]),
+    )
+
+    df = build_result_dataframe([issue])
+
+    assert df.iloc[0]["오류 항목"] == "상품 옵션 조합 중복"
+    assert df.iloc[0]["오류 이유"] == (
+        "상품 그룹 'G001'에서 색상 'BLACK', 사이즈 없음 조합이 "
+        "상품 ID 'P001', 'P002'에 중복되어 있습니다."
+    )
+    assert "사이즈 ''" not in df.iloc[0]["오류 이유"]
+    # 해결 안내는 빈 사이즈에서도 통합·수정 두 방법을 그대로 안내합니다.
+    assert df.iloc[0]["수정 권장사항"] == (
+        "같은 상품 그룹 안에서 색상과 사이즈 조합이 한 번만 사용되도록 "
+        "중복 상품을 통합하거나 옵션 값을 수정하세요."
+    )
 
 
 def test_build_result_dataframe_displays_duplicate_product_name_warning():

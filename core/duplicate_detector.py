@@ -5,7 +5,7 @@ import re
 from config.settings import VALID_CATEGORIES
 from core.fashion_attribute_validator import (
     build_color_comparison_key,
-    build_size_comparison_key,
+    build_variant_size_comparison_key,
     is_field_required_for_category,
 )
 from core.models import Product, ValidationIssue
@@ -282,9 +282,10 @@ def find_duplicate_variant_combinations(
         product_group_id = product.product_group_id.strip()
         product_id = product.product_id.strip()
         color_key = build_color_comparison_key(product.color)
-        size_key = build_size_comparison_key(product.size)
+        size_key = build_variant_size_comparison_key(product.category, product.size)
 
-        # 비어 있는 값은 기존 필수값 누락 규칙이 담당합니다.
+        # 비어 있는 색상과, size가 필수인 카테고리의 빈 size는 기존 필수값 누락 규칙이 담당합니다.
+        # size가 선택 값인 카테고리의 빈 size는 정상 옵션 상태이므로 비교 대상에 남습니다.
         if (
             not product_group_id
             or not product_id

@@ -153,6 +153,17 @@ RESULT_COLUMNS = [
     "위험 수준",
 ]
 
+# 빈 사이즈를 화면에 보여줄 때 쓰는 표현입니다. 비교값과 저장값은 그대로 ""를 유지합니다.
+BLANK_VARIANT_SIZE_DISPLAY = "없음"
+
+
+def format_variant_size_display(size: str) -> str:
+    """옵션 조합 메시지에 넣을 사이즈 표기를 만듭니다."""
+    # size가 선택 값인 카테고리는 빈 사이즈도 정상 옵션이므로 사이즈 ''처럼 보이지 않게 합니다.
+    if not size:
+        return BLANK_VARIANT_SIZE_DISPLAY
+    return f"'{size}'"
+
 
 def translate_issue_message(issue: ValidationIssue) -> str:
     """검수 결과의 영문 메시지를 사용자용 한글 문장으로 변환합니다."""
@@ -263,8 +274,9 @@ def translate_issue_message(issue: ValidationIssue) -> str:
                 f"'{product_id}'" for product_id in product_ids
             )
             return (
-                f"상품 그룹 '{product_group_id}'에서 색상 '{color}', 사이즈 "
-                f"'{size}' 조합이 상품 ID {quoted_product_ids}에 중복되어 있습니다."
+                f"상품 그룹 '{product_group_id}'에서 색상 '{color}', "
+                f"사이즈 {format_variant_size_display(size)} 조합이 "
+                f"상품 ID {quoted_product_ids}에 중복되어 있습니다."
             )
 
         match = re.fullmatch(
@@ -278,8 +290,9 @@ def translate_issue_message(issue: ValidationIssue) -> str:
                 f"'{product_id}'" for product_id in product_ids.split(", ")
             )
             return (
-                f"상품 그룹 '{product_group_id}'에서 색상 '{color}', 사이즈 "
-                f"'{size}' 조합이 상품 ID {quoted_product_ids}에 중복되어 있습니다."
+                f"상품 그룹 '{product_group_id}'에서 색상 '{color}', "
+                f"사이즈 {format_variant_size_display(size)} 조합이 "
+                f"상품 ID {quoted_product_ids}에 중복되어 있습니다."
             )
 
     if issue.rule == "missing_required_field":

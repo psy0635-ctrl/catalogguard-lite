@@ -677,15 +677,132 @@ def test_find_duplicate_product_content_does_not_modify_products():
     assert [asdict(product) for product in products] == before
 
 
-def test_find_duplicate_variant_combinations_still_skips_blank_size_bags():
-    # variant 규칙은 빈 size를 사이즈 체계로 분류할 수 없어 기존처럼 건너뜁니다.
-    # 이번 완전 중복 확대가 옵션 중복 규칙에 간접 회귀를 만들지 않는지 고정합니다.
+def test_find_duplicate_variant_combinations_detects_blank_size_bags():
+    # size가 선택 값인 카테고리에서 빈 size는 정상 옵션 상태이므로 옵션 중복 비교 대상입니다.
+    products = [
+        bag_product(product_group_id="G001", product_id="P001"),
+        bag_product(
+            product_group_id="G001",
+            product_id="P002",
+            product_name="데일리 숄더백",
+            price=52000,
+        ),
+    ]
+
+    issues = find_duplicate_variant_combinations(products)
+
+    assert [issue.product_id for issue in issues] == ["P001", "P002"]
+    assert all(issue.rule == "duplicate_variant_combination" for issue in issues)
+    assert all(issue.severity == "error" for issue in issues)
+    # 비교값은 빈 문자열 그대로 유지하며 FREE 같은 다른 값으로 바꾸지 않습니다.
+    assert all(
+        duplicate_detector.parse_duplicate_variant_message(issue.message)
+        == ("G001", "BLACK", "", ["P001", "P002"])
+        for issue in issues
+    )
+
+
+def test_find_duplicate_variant_combinations_skips_complete_duplicate_blank_size_bags():
+    # 완전 중복 관계는 기존처럼 완전 중복 규칙이 우선하므로 옵션 중복으로 다시 표시하지 않습니다.
     products = [
         bag_product(product_group_id="G001", product_id="P001"),
         bag_product(product_group_id="G001", product_id="P002"),
     ]
 
     assert find_duplicate_variant_combinations(products) == []
+    assert [issue.product_id for issue in find_duplicate_product_content(products)] == ["P002"]
+
+
+def test_find_duplicate_variant_combinations_treats_blank_size_and_free_as_different_for_bag():
+    # 빈 size를 FREE와 같은 값으로 보지 않는 기존 정책을 옵션 중복에서도 유지합니다.
+    products = [
+        bag_product(product_group_id="G001", product_id="P001", size=""),
+        bag_product(product_group_id="G001", product_id="P002", size="FREE"),
+    ]
+
+    assert find_duplicate_variant_combinations(products) == []
+
+
+def test_find_duplicate_variant_combinations_allows_different_colors_with_blank_size():
+    products = [
+        bag_product(product_group_id="G001", product_id="P001", color="BLACK"),
+        bag_product(product_group_id="G001", product_id="P002", color="RED"),
+    ]
+
+    assert find_duplicate_variant_combinations(products) == []
+
+
+def test_find_duplicate_variant_combinations_ignores_blank_size_bags_in_different_groups():
+    # 옵션 중복은 같은 상품 그룹 안에서만 판단하는 기존 기준을 유지합니다.
+    products = [
+        bag_product(product_group_id="G001", product_id="P001"),
+        bag_product(
+            product_group_id="G002",
+            product_id="P002",
+            product_name="데일리 숄더백",
+            price=52000,
+        ),
+    ]
+
+    assert find_duplicate_variant_combinations(products) == []
+
+
+@pytest.mark.parametrize("category", ["TOP", "BOTTOM", "OUTER", "SHOES"])
+def test_find_duplicate_variant_combinations_skips_blank_size_for_required_categories(category):
+    # size가 필수인 카테고리의 빈 size는 기존처럼 필수 값 누락 규칙이 처리합니다.
+    products = [
+        bag_product(
+            product_group_id="G001",
+            product_id="P001",
+            category=category,
+            product_name="반팔 티셔츠",
+        ),
+        bag_product(
+            product_group_id="G001",
+            product_id="P002",
+            category=category,
+            product_name="기본 반팔",
+            price=52000,
+        ),
+    ]
+
+    assert find_duplicate_variant_combinations(products) == []
+    assert len(check_missing_required_fields(products)) == 2
+
+
+@pytest.mark.parametrize("category", ["ACCESSORY", "bag", ""])
+def test_find_duplicate_variant_combinations_skips_blank_size_for_non_canonical_category(category):
+    # 허용 목록에 없거나 canonical이 아닌 카테고리는 BAG로 추정하지 않고 기존 정책을 유지합니다.
+    products = [
+        bag_product(product_group_id="G001", product_id="P001", category=category),
+        bag_product(
+            product_group_id="G001",
+            product_id="P002",
+            category=category,
+            product_name="데일리 숄더백",
+            price=52000,
+        ),
+    ]
+
+    assert find_duplicate_variant_combinations(products) == []
+
+
+def test_find_duplicate_variant_combinations_keeps_non_complete_relations_for_blank_size_bags():
+    # 사이즈가 있는 상품과 같은 방식으로, 완전 중복인 관계만 빼고 실제 옵션 중복은 유지합니다.
+    products = [
+        bag_product(product_group_id="G001", product_id="P001"),
+        bag_product(product_group_id="G001", product_id="P002"),
+        bag_product(product_group_id="G001", product_id="P003", price=52000),
+    ]
+
+    issues = find_duplicate_variant_combinations(products)
+
+    assert [issue.product_id for issue in issues] == ["P001", "P002", "P003"]
+    assert all(
+        duplicate_detector.parse_duplicate_variant_message(issue.message)
+        == ("G001", "BLACK", "", ["P001", "P002", "P003"])
+        for issue in issues
+    )
 
 
 def test_find_duplicate_variant_combinations_unchanged_for_sized_complete_duplicates():

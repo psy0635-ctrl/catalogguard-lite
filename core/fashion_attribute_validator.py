@@ -185,3 +185,18 @@ def build_color_comparison_key(value: object) -> str | None:
 
 def build_size_comparison_key(value: object) -> str | None:
     return _build_comparison_key(value, find_standard_size)
+
+
+def build_variant_size_comparison_key(category: object, size: object) -> str | None:
+    """옵션 조합 비교에 쓸 사이즈 키를 카테고리 정책과 함께 만듭니다."""
+    size_key = build_size_comparison_key(size)
+    if size_key is not None:
+        return size_key
+
+    # 값이 있는 사이즈는 위에서 이미 처리되므로 여기부터는 비어 있는 사이즈입니다.
+    # size가 선택 값인 canonical 카테고리에서는 빈 사이즈 자체가 정상 옵션 상태이므로
+    # 빈 문자열을 그대로 비교값으로 사용합니다. 빈 값을 FREE 같은 다른 값으로 바꾸지 않습니다.
+    # 정책의 단일 기준은 완전 중복·필수 값 검사와 같은 is_field_required_for_category()입니다.
+    if not isinstance(size, str) or is_field_required_for_category(category, "size"):
+        return None
+    return ""
