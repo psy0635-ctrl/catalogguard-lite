@@ -131,26 +131,64 @@ def collapse_comparison_whitespace(value: str) -> str:
     return " ".join(value.split())
 
 
+# 별칭 조회에서만 무시하는 구분자입니다. 공급사마다 free size·free-size·free_size처럼
+# 같은 표기를 다른 구분자로 입력하기 때문입니다. '/'와 '.'는 BLACK/WHITE, 10.5처럼
+# 값 자체의 의미일 수 있으므로 제거하지 않습니다.
+ALIAS_IGNORED_SEPARATORS = frozenset(" \t\n\r\v\f-_")
+
+
+def build_alias_lookup_key(value: str) -> str:
+    """별칭 사전을 조회할 때 쓰는 구분자 무시 비교 키를 만듭니다."""
+    # 이 키는 사전 조회에만 사용합니다. 사전에 없는 사용자 정의 값은 이 키로 합치지 않으므로
+    # 'S-M'이나 '36-38'처럼 구분자에 의미가 있는 값이 표준값으로 바뀌지 않습니다.
+    return "".join(
+        character
+        for character in value
+        if character not in ALIAS_IGNORED_SEPARATORS
+    ).casefold()
+
+
+def build_alias_lookup_table(aliases: dict[str, str]) -> dict[str, str]:
+    """별칭 사전을 구분자 무시 조회 표로 바꿉니다."""
+    lookup_table: dict[str, str] = {}
+    for alias, standard_value in aliases.items():
+        lookup_key = build_alias_lookup_key(alias)
+        registered_value = lookup_table.get(lookup_key)
+        # 같은 조회 키가 서로 다른 표준값을 가리키면 어느 쪽이 맞는지 알 수 없으므로
+        # 조용히 덮어쓰지 않고 사전을 고치도록 즉시 알립니다.
+        if registered_value is not None and registered_value != standard_value:
+            raise ValueError(
+                f"alias lookup key '{lookup_key}' maps to both "
+                f"'{registered_value}' and '{standard_value}'"
+            )
+        lookup_table[lookup_key] = standard_value
+    return lookup_table
+
+
+COLOR_ALIAS_LOOKUP = build_alias_lookup_table(COLOR_ALIASES)
+SIZE_ALIAS_LOOKUP = build_alias_lookup_table(SIZE_ALIASES)
+
+
 def _find_standard_value(
     value: object,
-    aliases: dict[str, str],
+    alias_lookup: dict[str, str],
 ) -> str | None:
     if not isinstance(value, str):
         return None
 
-    normalized_value = collapse_comparison_whitespace(value).casefold()
-    if not normalized_value:
+    lookup_key = build_alias_lookup_key(value)
+    if not lookup_key:
         return None
 
-    return aliases.get(normalized_value)
+    return alias_lookup.get(lookup_key)
 
 
 def find_standard_color(value: object) -> str | None:
-    return _find_standard_value(value, COLOR_ALIASES)
+    return _find_standard_value(value, COLOR_ALIAS_LOOKUP)
 
 
 def find_standard_size(value: object) -> str | None:
-    return _find_standard_value(value, SIZE_ALIASES)
+    return _find_standard_value(value, SIZE_ALIAS_LOOKUP)
 
 
 def find_size_system(value: object) -> str | None:
