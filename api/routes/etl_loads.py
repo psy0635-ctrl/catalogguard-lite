@@ -54,6 +54,8 @@ from api.schemas import (
     ETLStagingProductListResponse,
     ETLStagingProductResponse,
     ETLWebRunResponse,
+    UnknownSizeTokenItemResponse,
+    UnknownSizeTokenReportResponse,
 )
 from config.metrics import record_web_etl_run, record_web_etl_rows
 from config.logging import LOGGER_NAME, log_event
@@ -115,6 +117,7 @@ from db.catalog_promotion_query_service import (
     get_catalog_promotion_detail,
     list_catalog_promotion_audits,
     list_catalog_promotions,
+    list_unknown_size_tokens,
 )
 from db.catalog_promotion_rollback_query_service import (
     CatalogPromotionRollbackChangeList,
@@ -132,6 +135,24 @@ _LOGGER = logging.getLogger(LOGGER_NAME)
 CATALOG_PROMOTION_NOT_FOUND_MESSAGE = "Promotion run not found."
 CATALOG_PROMOTION_ROLLBACK_NOT_FOUND_MESSAGE = "Rollback run not found."
 ETL_LOAD_NOT_FOUND_MESSAGE = "ETL 적재 배치를 찾을 수 없습니다."
+
+
+@router.get(
+    "/api/v1/catalog/unknown-size-tokens",
+    response_model=UnknownSizeTokenReportResponse,
+)
+def get_unknown_size_token_report(
+    limit: int = Query(default=20, ge=1, le=100),
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> UnknownSizeTokenReportResponse:
+    items = list_unknown_size_tokens(session, limit=limit)
+    return UnknownSizeTokenReportResponse(
+        items=[
+            UnknownSizeTokenItemResponse(token=item.token, count=item.count)
+            for item in items
+        ]
+    )
 
 
 def _build_list_response(result: ETLLoadList) -> ETLLoadListResponse:

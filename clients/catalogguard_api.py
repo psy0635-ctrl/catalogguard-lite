@@ -227,6 +227,7 @@ ETL_WEB_RUN_RESPONSE_KEYS = (
 )
 ETL_PROFILE_LIST_KEYS = ("items",)
 ETL_PROFILE_ITEM_KEYS = ("id", "display_name")
+UNKNOWN_SIZE_TOKEN_REPORT_RESPONSE_KEYS = ("items",)
 ETL_UNSUPPORTED_PROFILE_MESSAGE = "지원하지 않는 공급사 프로필입니다."
 CATALOG_PROMOTION_NOT_FOUND_MESSAGE = "Promotion run not found."
 CATALOG_PROMOTION_ROLLBACK_NOT_FOUND_MESSAGE = (
@@ -471,6 +472,22 @@ def _validate_etl_load_detail_response(data: dict[str, Any]) -> None:
             require_error_counts=True,
         )
         or not _validate_etl_product_list(data["products"])
+    ):
+        raise _invalid_etl_response()
+
+
+def _validate_unknown_size_token_report_response(data: dict[str, Any]) -> None:
+    if (
+        any(key not in data for key in UNKNOWN_SIZE_TOKEN_REPORT_RESPONSE_KEYS)
+        or not isinstance(data["items"], list)
+        or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("token"), str)
+            or not item["token"].strip()
+            or type(item.get("count")) is not int
+            or item["count"] < 1
+            for item in data["items"]
+        )
     ):
         raise _invalid_etl_response()
 
@@ -1243,6 +1260,15 @@ class CatalogGuardApiClient:
 
         data = self._get_json("/api/v1/etl-loads", params=params)
         _validate_etl_load_list_response(data)
+        return data
+
+    def list_unknown_size_tokens(self, *, limit: int = 20) -> dict[str, Any]:
+        _validate_etl_pagination(limit, 0)
+        data = self._get_json(
+            "/api/v1/catalog/unknown-size-tokens",
+            params={"limit": limit},
+        )
+        _validate_unknown_size_token_report_response(data)
         return data
 
     def get_etl_load_detail(

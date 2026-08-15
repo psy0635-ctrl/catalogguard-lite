@@ -6,12 +6,23 @@ from datetime import datetime
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from core.fashion_attribute_validator import (
+    build_size_comparison_key,
+    collapse_comparison_whitespace,
+    find_size_system,
+    find_standard_size,
+)
 from db.etl_query_service import (
     LIKE_ESCAPE_CHARACTER,
     escape_like_pattern,
     normalize_etl_filter,
 )
-from db.models import CatalogProductChange, CatalogPromotionRun, ETLLoadRun
+from db.models import (
+    CatalogProduct,
+    CatalogProductChange,
+    CatalogPromotionRun,
+    ETLLoadRun,
+)
 
 
 @dataclass(frozen=True)
@@ -68,6 +79,64 @@ class CatalogPromotionAuditList:
     total: int
     limit: int
     offset: int
+
+
+@dataclass(frozen=True)
+class UnknownSizeToken:
+    token: str
+    count: int
+
+
+def _is_unknown_size_token(size: object) -> bool:
+    if not isinstance(size, str):
+        return False
+
+    normalized_size = collapse_comparison_whitespace(size)
+    return bool(
+        normalized_size
+        and find_standard_size(normalized_size) is None
+        and find_size_system(normalized_size) is None
+    )
+
+
+def list_unknown_size_tokens(
+    session: Session,
+    *,
+    limit: int,
+) -> list[UnknownSizeToken]:
+    """Return the most frequent non-standard, non-numeric catalog size tokens."""
+    grouped_size_counts = session.execute(
+        select(CatalogProduct.size, func.count(CatalogProduct.id))
+        .group_by(CatalogProduct.size)
+    ).all()
+
+    grouped_tokens: dict[str, tuple[str, int]] = {}
+    for raw_size, raw_count in grouped_size_counts:
+        if not _is_unknown_size_token(raw_size):
+            continue
+
+        report_key = build_size_comparison_key(raw_size)
+        if report_key is None:
+            continue
+        display_token = collapse_comparison_whitespace(raw_size)
+        existing = grouped_tokens.get(report_key)
+        if existing is None:
+            grouped_tokens[report_key] = (display_token, int(raw_count))
+            continue
+
+        existing_token, existing_count = existing
+        grouped_tokens[report_key] = (
+            min(existing_token, display_token, key=lambda token: (token.casefold(), token)),
+            existing_count + int(raw_count),
+        )
+
+    items = [
+        UnknownSizeToken(token=token, count=count)
+        for token, count in grouped_tokens.values()
+    ]
+    return sorted(items, key=lambda item: (-item.count, item.token.casefold(), item.token))[
+        :limit
+    ]
 
 
 def _apply_run_filters(

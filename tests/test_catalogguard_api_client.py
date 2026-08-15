@@ -1459,6 +1459,43 @@ CATALOG_PROMOTION_AUDIT_RESPONSE = {
     "offset": 0,
 }
 
+UNKNOWN_SIZE_TOKEN_REPORT_RESPONSE = {
+    "items": [
+        {"token": "4XL", "count": 8},
+        {"token": "OS", "count": 3},
+    ]
+}
+
+
+def test_list_unknown_size_tokens_calls_get_with_limit_and_validates_contract():
+    client, session = make_client(
+        response=FakeResponse(payload=UNKNOWN_SIZE_TOKEN_REPORT_RESPONSE),
+        timeout_seconds=4.0,
+    )
+
+    data = client.list_unknown_size_tokens(limit=7)
+
+    assert data == UNKNOWN_SIZE_TOKEN_REPORT_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/catalog/unknown-size-tokens",
+            "params": {"limit": 7},
+            "timeout": 4.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize("limit", [0, 101])
+def test_list_unknown_size_tokens_rejects_invalid_limits_without_request(limit):
+    client, session = make_client(
+        response=FakeResponse(payload=UNKNOWN_SIZE_TOKEN_REPORT_RESPONSE)
+    )
+
+    with pytest.raises(ValueError):
+        client.list_unknown_size_tokens(limit=limit)
+
+    assert session.calls == []
+
 
 def test_list_catalog_promotions_calls_get_with_filters_and_validates_contract():
     client, session = make_client(
