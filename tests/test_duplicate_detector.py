@@ -723,6 +723,49 @@ def test_find_duplicate_variant_combinations_treats_blank_size_and_free_as_diffe
     assert find_duplicate_variant_combinations(products) == []
 
 
+# 아래는 별칭 의미 비교가 공백 표기 차이 때문에 빠지지 않는지 확인합니다.
+# 완전 중복은 계속 엄격 비교이므로 두 규칙의 결과가 서로 달라야 정상입니다.
+@pytest.mark.parametrize(
+    "size",
+    ["free size", "free  size", " free   size ", "free\tsize", "one  size"],
+)
+def test_find_duplicate_variant_combinations_matches_free_size_alias_spacing(size):
+    products = [
+        bag_product(product_group_id="G001", product_id="P001", size="FREE"),
+        bag_product(product_group_id="G001", product_id="P002", size=size),
+    ]
+
+    issues = find_duplicate_variant_combinations(products)
+
+    assert [issue.product_id for issue in issues] == ["P001", "P002"]
+    assert all(
+        duplicate_detector.parse_duplicate_variant_message(issue.message)
+        == ("G001", "BLACK", "FREE", ["P001", "P002"])
+        for issue in issues
+    )
+
+
+@pytest.mark.parametrize("size", ["free size", "free  size", "one size", "프리사이즈"])
+def test_find_duplicate_product_content_keeps_strict_size_comparison_for_aliases(size):
+    # 완전 중복은 별칭을 적용하지 않으므로 표기가 다르면 계속 다른 상품입니다.
+    products = [
+        bag_product(product_group_id="G001", product_id="P001", size="FREE"),
+        bag_product(product_group_id="G002", product_id="P002", size=size),
+    ]
+
+    assert find_duplicate_product_content(products) == []
+
+
+def test_find_duplicate_product_content_still_matches_case_and_outer_space_only():
+    # 대소문자와 앞뒤 공백만 다른 값은 기존처럼 완전 중복으로 봅니다.
+    products = [
+        bag_product(product_group_id="G001", product_id="P001", size="FREE"),
+        bag_product(product_group_id="G002", product_id="P002", size=" free "),
+    ]
+
+    assert [issue.product_id for issue in find_duplicate_product_content(products)] == ["P002"]
+
+
 def test_find_duplicate_variant_combinations_allows_different_colors_with_blank_size():
     products = [
         bag_product(product_group_id="G001", product_id="P001", color="BLACK"),

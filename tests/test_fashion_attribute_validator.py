@@ -5,6 +5,7 @@ from core import fashion_attribute_validator
 from core.fashion_attribute_validator import (
     SIZE_SYSTEM_ALPHA,
     SIZE_SYSTEM_NUMERIC,
+    build_color_comparison_key,
     build_size_comparison_key,
     build_variant_size_comparison_key,
     find_size_system,
@@ -208,3 +209,82 @@ def test_build_variant_size_comparison_key_rejects_blank_size_for_non_canonical_
 @pytest.mark.parametrize("size", [None, 95])
 def test_build_variant_size_comparison_key_rejects_non_string_size(size):
     assert build_variant_size_comparison_key("BAG", size) is None
+
+
+# 아래는 의미 비교에서 내부 연속 공백을 의미 차이로 보지 않는지 확인합니다.
+# 완전 중복 규칙의 엄격 비교 정책은 그대로 두고, 별칭 비교만 공백에 견디게 합니다.
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("free size", "FREE"),
+        ("free  size", "FREE"),
+        (" free   size ", "FREE"),
+        ("free\tsize", "FREE"),
+        ("free\nsize", "FREE"),
+        ("FREE  SIZE", "FREE"),
+        ("one size", "FREE"),
+        ("one  size", "FREE"),
+        ("extra large", "XL"),
+        ("extra  large", "XL"),
+        ("extra small", "XS"),
+        ("extra\tsmall", "XS"),
+    ],
+)
+def test_find_standard_size_ignores_internal_whitespace_differences(value, expected):
+    assert find_standard_size(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("free  size", "FREE"),
+        (" free   size ", "FREE"),
+        ("free\tsize", "FREE"),
+        ("one  size", "FREE"),
+        ("extra  large", "XL"),
+    ],
+)
+def test_build_size_comparison_key_ignores_internal_whitespace_differences(value, expected):
+    assert build_size_comparison_key(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # 별칭 사전에 없는 사용자 정의 값도 같은 기준으로 공백만 정리합니다.
+        ("MELANGE GRAY", "melange gray"),
+        ("melange  gray", "melange gray"),
+        ("dark\tblue", "dark blue"),
+    ],
+)
+def test_build_color_comparison_key_ignores_internal_whitespace_differences(value, expected):
+    assert build_color_comparison_key(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["OS", "ONE", "UNI", "ONESIZE123", "one size fits all", "one  size  fits  all", "1호"],
+)
+def test_find_standard_size_does_not_invent_new_aliases(value):
+    # 공백만 정리할 뿐 별칭 사전에 없는 표현을 새로 표준화하지는 않습니다.
+    assert find_standard_size(value) is None
+
+
+@pytest.mark.parametrize("value", ["", " ", "   ", "\t", "\n", "  \t \n "])
+def test_comparison_keys_still_treat_whitespace_only_values_as_blank(value):
+    # 공백만 있는 값은 기존처럼 비교 불가로 두어야 "" != "FREE" 정책이 유지됩니다.
+    assert find_standard_size(value) is None
+    assert build_size_comparison_key(value) is None
+    assert build_color_comparison_key(value) is None
+    assert build_variant_size_comparison_key("BAG", value) == ""
+    assert build_variant_size_comparison_key("BAG", value) != build_variant_size_comparison_key(
+        "BAG", "FREE"
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("extra large", SIZE_SYSTEM_ALPHA), ("extra  large", SIZE_SYSTEM_ALPHA)],
+)
+def test_find_size_system_classifies_whitespace_variants_of_alpha_aliases(value, expected):
+    assert find_size_system(value) == expected

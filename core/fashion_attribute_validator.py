@@ -123,6 +123,14 @@ def is_field_required_for_category(category: object, field_name: str) -> bool:
     return bool(category_rules.get(policy_key, True))
 
 
+def collapse_comparison_whitespace(value: str) -> str:
+    """의미 비교용으로 앞뒤 공백을 없애고 내부 연속 공백을 한 칸으로 정리합니다."""
+    # 공급사 데이터의 연속 공백·탭·줄바꿈은 사이즈나 색상의 의미 차이가 아니므로
+    # 'free  size'도 별칭 'free size'와 같은 값으로 비교할 수 있어야 합니다.
+    # 원본 값은 바꾸지 않고 비교용 문자열만 만듭니다.
+    return " ".join(value.split())
+
+
 def _find_standard_value(
     value: object,
     aliases: dict[str, str],
@@ -130,7 +138,7 @@ def _find_standard_value(
     if not isinstance(value, str):
         return None
 
-    normalized_value = value.strip().casefold()
+    normalized_value = collapse_comparison_whitespace(value).casefold()
     if not normalized_value:
         return None
 
@@ -169,7 +177,9 @@ def _build_comparison_key(
     if not isinstance(value, str):
         return None
 
-    normalized_value = value.strip()
+    # 별칭 사전에 없는 사용자 정의 값도 같은 기준으로 공백을 정리해야
+    # 'MELANGE GRAY'와 'melange  gray'가 같은 옵션으로 비교됩니다.
+    normalized_value = collapse_comparison_whitespace(value)
     if not normalized_value:
         return None
 
