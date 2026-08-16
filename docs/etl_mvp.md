@@ -224,6 +224,125 @@ feed URL과 응답 본문은 credential을 담을 수 있으므로 오류 메시
 
 실제 소켓 통신은 저장소 밖 임시 스크립트에서 로컬 `http.server`를 띄워 별도로 확인했다.
 
+## Airflow manual HTTP feed orchestration
+
+### 문제와 역할 분리
+
+HTTP 공급사 ETL을 API 호출이나 수동 실행에만 의존하면 timeout·일시적 network 오류가 났을 때 운영자가
+실행 상태와 재시도를 직접 판단해야 한다. 이 프로젝트는 기존 변환·적재 로직을 바꾸지 않고 Airflow가
+**실행 순서, task 상태, 재시도**만 담당하도록 했다. Orchestration은 여러 작업의 실행 순서와
+실패·재시도를 관리하는 것을 뜻한다.
+
+Airflow는 공급사 ETL 실행 흐름을 관리한다. Celery는 API가 요청한 사용자 검수의 비동기 inspection을
+처리한다. 두 실행기는 서로 대체하지 않으며, 이 DAG는 Celery worker나 Promotion을 호출하지 않는다.
+
+### 실행 흐름과 task 경계
+
+`catalogguard_http_feed_to_staging`은 `schedule=None`인 manual DAG다. `catchup=False`,
+`max_active_runs=1`, `max_active_tasks=1`이고,
+`ingest_configured_http_feed_to_staging` 단일 task만 가진다.
+
+```text
+운영자
+-> Airflow manual trigger(profile_id)
+-> catalogguard_http_feed_to_staging
+-> ingest_configured_http_feed_to_staging
+-> read_http_feed_csv()
+-> run_web_etl()
+-> run_pipeline()
+-> load_standard_csv()
+-> ETLLoadRun
+   -> CatalogProductStaging
+   -> ETLRejectedRow
+```
+
+Airflow는 새 ETL pipeline이 아니다. `read_http_feed_csv()`가 configured feed의 bytes와 파일명을
+읽고, 기존 `run_web_etl()`이 temporary file 경계를 통해 기존 `run_pipeline()`과
+`load_standard_csv()`를 호출한다. 변환 규칙, reject 처리, SHA-256, transactional staging 적재를
+복제하지 않는다. 단일 task를 택한 이유도 temporary artifact를 task 간 shared filesystem이나 XCom으로
+넘기지 않기 위해서다. XCom은 Airflow task 사이에 작은 값을 전달하는 기능이며, 이 DAG의 반환값/XCom은
+`etl_load_run_id`, `created`만 포함한다.
+
+### runtime과 DB 분리
+
+```text
+Airflow API server / scheduler / DAG processor
+-> Airflow metadata PostgreSQL 17
+   -> DAG run, task run, retry, scheduler metadata
+
+Airflow scheduler task
+-> CatalogGuard PostgreSQL
+   -> ETLLoadRun, CatalogProductStaging, ETLRejectedRow, catalog data
+```
+
+Airflow 3.3.0 / Python 3.11 image는 자체 `airflow/Dockerfile`과 dependency definition을 사용하고
+`LocalExecutor`로 task를 실행한다. metadata DB는 `airflow-db` service이고 CatalogGuard DB는
+`DATABASE_URL`로 별도 전달된다. scheduler만 CatalogGuard DB와 configured feed 설정을 받는다.
+application requirements·Dockerfile·DB schema를 Airflow용으로 바꾸지 않았다.
+
+`catalogguard_airflow_smoke`는 ETL을 실행하지 않는 no-side-effect import/structure 검증 DAG다.
+
+### Retry 정책
+
+Airflow task는 `retries=2`, 2분 delay, exponential backoff, 최대 10분 delay, 5분 execution timeout을
+사용한다. retry 여부는 안전한 오류 분류로만 결정한다.
+
+| 분류 | retry |
+|---|---|
+| timeout, transient network/DNS/connection | 예 |
+| HTTP 429, HTTP 5xx | 예 |
+| DB `connection_invalidated`, SQLSTATE `40001`, `40P01` | 예 |
+| redirect, HTTP 429 이외 4xx | 아니오 |
+| missing/unsafe feed 설정 | 아니오 |
+| invalid profile/CSV, pipeline/load validation | 아니오 |
+| 위 조건 이외 SQLAlchemy·constraint·schema·auth DB 오류 | 아니오 |
+
+모든 DB 오류를 retry하지 않는다. retryable failure는 `AirflowException`, permanent failure는
+`AirflowFailException`으로 안전한 오류 code만 전달하고 configured URL이나 원래 exception cause는
+task error에 연결하지 않는다.
+
+### Idempotency, lineage, security
+
+Idempotency는 같은 작업을 여러 번 실행해도 중복 결과가 생기지 않는 성질이다. staging batch의 identity는
+`(input_file_sha256, profile_name, profile_version)`이다.
+
+```text
+같은 CSV bytes + 같은 profile/version
+첫 실행  -> created=true, 새 ETLLoadRun
+두 번째  -> created=false, 기존 ETLLoadRun 재사용
+```
+
+기존 batch를 재사용하면 `ETLLoadRun`, `CatalogProductStaging`, `ETLRejectedRow`가 중복 생성되지 않는다.
+단, retry는 configured URL을 다시 읽는다. 같은 URL이라도 remote content가 바뀌면 SHA-256이 달라져
+새 batch가 될 수 있고, 이미 committed된 batch를 수정하지 않는다.
+
+Lineage는 데이터가 어느 입력 경로에서 왔는지 기록하는 정보다. Airflow HTTP task가 새 batch를 만들면
+`initial_source_type=http_feed`, `initial_source_ref=configured_http_feed`,
+`actor_user_id=NULL`, `actor_username=NULL`을 저장한다. 사용자 로그인 요청이 아닌 시스템 실행이므로
+fake `airflow` 사용자를 만들지 않았다. 실제 HTTP URL은 query token·credential·민감 endpoint를 포함할 수
+있어 lineage에 저장하지 않는다.
+
+- raw HTTP URL을 DAG parameter로 받지 않고 environment config에서만 읽는다.
+- `profile_id` allowlist만 받고 raw filesystem profile path는 허용하지 않는다.
+- 외부 URL은 HTTPS만 허용하며 local test를 위한 loopback HTTP만 예외다.
+- redirect·unsafe URL을 차단하고 timeout·bounded response read를 사용한다.
+- URL·token·password·`DATABASE_URL`을 XCom/result/안전한 예외에 넣지 않는다.
+- 실제 `.env`와 secret은 commit하지 않는다.
+- Promotion은 운영자의 별도 preview·승인 흐름이며 Airflow task가 자동 실행하지 않는다.
+
+### Linux CI와 현재 한계
+
+GitHub Actions의 `airflow-smoke`는 isolated Airflow image build, PostgreSQL 17 metadata DB,
+`airflow db migrate`, 독립 DAG processor, 별도 CatalogGuard test PostgreSQL, 기존 Alembic upgrade,
+deterministic HTTP feed, 두 DAG import/structure를 검증한다. 이어 실제 task를 두 번 실행해 staging
+적재, `created=true`/`created=false`, 동일 load run ID, load run 1건·staging 1건·reject 0건, lineage와
+NULL actor를 PostgreSQL에서 확인한다. main의 최신 검증 run `31926657432`에서 `test`, `browser-e2e`,
+`kubernetes-smoke`, `terraform-validate`, `airflow-smoke`가 모두 성공했다.
+
+현재 범위는 configured HTTP feed 하나의 manual trigger다. Airflow schedule, Airflow S3 source
+orchestration, Promotion automation은 구현하지 않았다. 운영 요구가 생기면 (1) schedule 정책 추가,
+(2) S3 source orchestration 검토, (3) Airflow run과 ETL 운영 지표 연결을 별도 범위로 검토한다.
+
 ### 실제 AWS staging 검증과 fake client 테스트의 구분
 
 이 기능의 단위·API 테스트(`tests/etl/test_s3_source.py`, `tests/test_api_etl_s3_load.py`)는 fake S3 client를 주입해 응답 계약·오류 매핑·크기 제한을 검증한다. 실제 AWS 자격증명이나 네트워크를 쓰지 않으므로 CI에서 항상 돌지만, 실제 S3의 동작까지 보장하지는 않는다.
@@ -812,8 +931,8 @@ fix commit(`cb5ed81`) push 후 GitHub Actions run `30969273954`에서 `test`·`b
 - 합성 패션 공급사 프로필 2종을 지원한다.
 - 실제 외부 공급사 운영 데이터 연동은 지원하지 않는다.
 - 자동 공급사 감지는 지원하지 않으며, 공급사별 프로필은 수동 선택한다.
-- 웹 수집과 외부 API 연동은 지원하지 않는다.
-- 웹 ETL(`POST /api/v1/etl-loads`)은 업로드부터 staging 적재까지 하나의 동기 HTTP 요청으로 처리하며, Celery 같은 비동기 실행은 지원하지 않는다.
+- 사용자가 임의 URL이나 일반 외부 API를 입력해 수집하는 기능은 지원하지 않는다. 신뢰 configured HTTP feed는 서버 환경설정으로만 읽고 Airflow manual DAG와 기존 HTTP API source adapter가 재사용한다.
+- 웹 ETL(`POST /api/v1/etl-loads`)은 업로드부터 staging 적재까지 하나의 동기 HTTP 요청으로 처리한다. 별도 Airflow DAG는 configured HTTP feed를 manual trigger로 orchestration하지만, 웹 ETL을 Celery job으로 바꾸거나 자동 schedule을 제공하지는 않는다.
 - 웹 ETL은 한 번에 CSV 파일 1개만 받으며, 여러 파일 동시 업로드나 ZIP 업로드는 지원하지 않는다.
 - 웹 ETL은 CSV만 지원하며 XLSX 등 다른 형식은 지원하지 않는다.
 - 웹 ETL의 `profile_id`는 서버 allowlist(`etl.profile_loader._ETL_PROFILE_REGISTRY`)로 고정되어 있으며, 사용자가 새 프로필을 업로드하거나 등록하는 Profile CRUD는 지원하지 않는다.
