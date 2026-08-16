@@ -1,0 +1,2 @@
+# Airflow dependencies are intentionally isolated from CatalogGuard's application requirements.
+apache-airflow[postgres]==3.3.0
