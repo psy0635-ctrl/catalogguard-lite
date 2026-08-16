@@ -584,6 +584,7 @@ catalogguard-lite/
       20260806_0010_add_actor_audit_columns.py
       20260808_0011_add_promotion_audit_order_index.py
       20260810_0012_add_inspection_actor_audit.py
+      20260813_0013_add_etl_initial_source_lineage.py
   data/
     dev/
       category_mismatch_test.csv
@@ -711,6 +712,7 @@ catalogguard-lite/
 | `alembic/versions/20260806_0010_add_actor_audit_columns.py` | `etl_load_runs`·`catalog_promotion_runs`·`catalog_promotion_rollbacks`에 `actor_user_id`(FK `ON DELETE SET NULL`)·`actor_username` nullable 컬럼 추가 마이그레이션 |
 | `alembic/versions/20260808_0011_add_promotion_audit_order_index.py` | promotion audit 페이지네이션을 위한 `(promotion_run_id, created_at DESC, id DESC)` 정렬 index 추가 마이그레이션 |
 | `alembic/versions/20260810_0012_add_inspection_actor_audit.py` | `inspection_runs`에 `actor_user_id`(FK `ON DELETE SET NULL`)·`actor_username` nullable 컬럼을 추가하는 Inspection Actor Audit 마이그레이션 |
+| `alembic/versions/20260813_0013_add_etl_initial_source_lineage.py` | `etl_load_runs`에 최초 입력 경로를 기록하는 `initial_source_type`·`initial_source_ref`를 추가하는 ETL lineage 마이그레이션 |
 | `.github/workflows/test.yml` | 일반 테스트와 분리된 `browser-e2e`·`kubernetes-smoke` job을 포함해 PostgreSQL·Chromium 실제 브라우저 흐름과 kind 실제 Kubernetes 배포까지 실행하는 GitHub Actions workflow |
 | `k8s/dev-postgres.yaml`, `k8s/migration-job.yaml`, `k8s/catalogguard-api.yaml` | kind CI 전용 PostgreSQL, Alembic Migration Job, FastAPI Deployment/Service manifest |
 | `.env.example` | 로컬 PostgreSQL 연결 환경변수 예시 |
@@ -1129,7 +1131,7 @@ python -m alembic upgrade head
 python -m alembic history
 ```
 
-현재 Alembic head는 `20260810_0012`입니다.
+현재 Alembic head는 `20260813_0013`입니다.
 
 `20260703_0001_create_inspection_tables.py`는 다음 테이블을 만듭니다.
 
@@ -1183,7 +1185,14 @@ python -m alembic history
 
 기존 검수 이력은 두 actor 컬럼을 `NULL`로 유지하며 임의 backfill하지 않습니다. 새 Sync·Async 검수 row를 만들 때만 인증된 JWT `current_user`의 scalar `id`·`username`을 저장합니다. 사용자가 삭제되면 `actor_user_id`만 `NULL`이 되고 `actor_username`과 검수 이력은 남습니다. 동일한 `file_sha256`·`inspection_version`의 기존 row를 재사용하면 actor를 UPDATE하지 않아 최초 row 생성 사용자를 보존합니다.
 
-격리된 로컬 PostgreSQL 18 테스트 클러스터에서 `upgrade head`, `downgrade 20260808_0011`, 재-upgrade를 실행했습니다. downgrade 시 `inspection_runs`의 actor 컬럼 2개와 해당 FK만 제거되고 다른 테이블·컬럼은 유지됐으며, 재-upgrade 뒤 `20260810_0012` 단일 head와 `ON DELETE SET NULL` FK가 복원되는 것을 SQLAlchemy inspector로 확인했습니다.
+격리된 로컬 PostgreSQL 18 테스트 클러스터에서 당시 `upgrade head`, `downgrade 20260808_0011`, 재-upgrade를 실행했습니다. downgrade 시 `inspection_runs`의 actor 컬럼 2개와 해당 FK만 제거되고 다른 테이블·컬럼은 유지됐으며, 재-upgrade 뒤 당시 head인 `20260810_0012`와 `ON DELETE SET NULL` FK가 복원되는 것을 SQLAlchemy inspector로 확인했습니다.
+
+`20260813_0013_add_etl_initial_source_lineage.py`(`down_revision=20260810_0012`)는 `etl_load_runs`에 최초 입력 경로 lineage를 위한 다음 컬럼을 추가합니다.
+
+- `initial_source_type`(`VARCHAR(20)`, `NOT NULL`): 기존 row backfill에만 `unknown` server default를 사용한 뒤 제거하고, `unknown`·`upload`·`s3`·`http_feed`·`cli`만 허용하는 `ck_etl_load_runs_initial_source_type` CHECK constraint를 추가
+- `initial_source_ref`(`VARCHAR(255)`, nullable)
+
+downgrade는 CHECK constraint를 먼저 제거한 뒤 `initial_source_ref`, `initial_source_type` 순으로 제거합니다.
 
 upgrade 동작은 다음 순서입니다.
 
@@ -1216,7 +1225,7 @@ psql "$env:DATABASE_URL" -c "\d users"
 
 같은 방식으로 로컬 disposable PostgreSQL 18에서 빈 DB의 `upgrade head`, `downgrade 20260803_0007`, `downgrade 20260728_0006`, 재-upgrade와 단일 head도 확인했다. `20260805_0009`도 같은 방식으로 `downgrade 20260803_0008` 뒤 재-upgrade와 단일 head(`20260805_0009`)를 disposable PostgreSQL 18에서 확인했다.
 
-`tests/test_inspection_actor_migration.py`와 `tests/test_catalog_promotion_migration.py`는 `alembic.script.ScriptDirectory`로 현재 단일 head가 `20260810_0012`인지 확인합니다. CI의 `Apply database migrations` step은 고정 revision이 아니라 `upgrade head`를 실행하므로 현재 migration chain 전체를 적용합니다.
+`tests/test_inspection_actor_migration.py`와 `tests/test_catalog_promotion_migration.py`는 `alembic.script.ScriptDirectory`로 현재 단일 head가 `20260813_0013`인지 확인합니다. CI의 `Apply database migrations` step은 고정 revision이 아니라 `upgrade head`를 실행하므로 현재 migration chain 전체를 적용합니다.
 
 ## 16. FastAPI 실행 방법
 
