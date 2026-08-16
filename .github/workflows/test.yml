@@ -451,6 +451,7 @@ jobs:
     env:
       AIRFLOW_IMAGE: "catalogguard-airflow:3.3.0-foundation"
       AIRFLOW_METADATA_DATABASE_URL: "postgresql+psycopg://airflow:airflow@127.0.0.1:5432/airflow"
+      CATALOGGUARD_DATABASE_URL: "postgresql+psycopg://catalogguard:catalogguard@127.0.0.1:5433/catalogguard_airflow_test"
     services:
       airflow-db:
         image: postgres:17
@@ -465,6 +466,19 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      catalogguard-db:
+        image: postgres:17
+        env:
+          POSTGRES_USER: catalogguard
+          POSTGRES_PASSWORD: catalogguard
+          POSTGRES_DB: catalogguard_airflow_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U catalogguard -d catalogguard_airflow_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -476,6 +490,7 @@ jobs:
           set -Eeuo pipefail
 
           config_file="${RUNNER_TEMP}/airflow-smoke.env"
+          task_config_file="${RUNNER_TEMP}/catalogguard-airflow-task.env"
           fernet_key="$(docker run --rm --entrypoint python "${AIRFLOW_IMAGE}" -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
 
           {
@@ -487,12 +502,49 @@ jobs:
             echo "AIRFLOW__API__SECRET_KEY=$(openssl rand -hex 32)"
             echo "AIRFLOW__API_AUTH__JWT_SECRET=$(openssl rand -hex 32)"
           } > "${config_file}"
+          {
+            echo "DATABASE_URL=${CATALOGGUARD_DATABASE_URL}"
+            echo "CATALOGGUARD_ETL_HTTP_FEED_URL=http://127.0.0.1:8765/supplier_feed.csv"
+            echo "CATALOGGUARD_ETL_HTTP_FEED_FILENAME=supplier_feed.csv"
+          } > "${task_config_file}"
       - name: Initialize isolated Airflow metadata database
         shell: bash
         run: |
           docker run --rm --network host \
             --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
             "${AIRFLOW_IMAGE}" db migrate
+      - name: Initialize isolated CatalogGuard test database
+        shell: bash
+        run: |
+          docker run --rm --network host \
+            --env "DATABASE_URL=${CATALOGGUARD_DATABASE_URL}" \
+            --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
+            --workdir /workspace \
+            "${AIRFLOW_IMAGE}" python -m alembic upgrade head
+      - name: Start deterministic HTTP feed server
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          feed_dir="${RUNNER_TEMP}/catalogguard-http-feed"
+          mkdir -p "${feed_dir}"
+          cat > "${feed_dir}/supplier_feed.csv" <<'CSV'
+          vendor_sku,item_name,main_category,brand_name,list_price,discount_price,colour,size_name,quantity,image_link,description_text
+          SKU-AIRFLOW-001,CatalogGuard Airflow Test,TOP,Brand,12000,10000,blue,M,5,https://example.test/airflow.jpg,description
+          CSV
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory "${feed_dir}" \
+            >"${RUNNER_TEMP}/catalogguard-http-feed.log" 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/catalogguard-http-feed.pid"
+
+          for _ in {1..15}; do
+            if curl --fail --silent --show-error http://127.0.0.1:8765/supplier_feed.csv >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          cat "${RUNNER_TEMP}/catalogguard-http-feed.log" || true
+          exit 1
       - name: Start standalone Airflow DAG processor
         shell: bash
         run: |
@@ -521,17 +573,35 @@ jobs:
           docker run --rm --network host \
             --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
             "${AIRFLOW_IMAGE}" dags list-import-errors
+          for attempt in {1..30}; do
+            if docker run --rm --network host \
+              --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
+              "${AIRFLOW_IMAGE}" dags list | grep -E '^catalogguard_http_feed_to_staging[[:space:]]'; then
+              break
+            fi
+
+            if [[ "${attempt}" == "30" ]]; then
+              docker logs airflow-dag-processor-smoke
+              exit 1
+            fi
+
+            sleep 2
+          done
           docker run --rm --network host \
             --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
             "${AIRFLOW_IMAGE}" tasks list catalogguard_airflow_smoke | grep -x 'start'
           docker run --rm --network host \
             --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
             "${AIRFLOW_IMAGE}" tasks list catalogguard_airflow_smoke | grep -x 'airflow_environment_check'
+          docker run --rm --network host \
+            --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
+            "${AIRFLOW_IMAGE}" tasks list catalogguard_http_feed_to_staging | grep -x 'ingest_configured_http_feed_to_staging'
           docker run --rm \
             --entrypoint python "${AIRFLOW_IMAGE}" \
             -c "import importlib.util; assert importlib.util.find_spec('etl') is not None"
           docker run --rm --network host \
             --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
+            --env-file "${RUNNER_TEMP}/catalogguard-airflow-task.env" \
             --entrypoint python "${AIRFLOW_IMAGE}" \
             -m unittest discover -s /opt/airflow/tests -v
       - name: Print Airflow DAG processor logs on failure
@@ -540,6 +610,13 @@ jobs:
       - name: Stop Airflow DAG processor
         if: always()
         run: docker rm --force airflow-dag-processor-smoke
+      - name: Stop deterministic HTTP feed server
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "${RUNNER_TEMP}/catalogguard-http-feed.pid" ]]; then
+            kill "$(cat "${RUNNER_TEMP}/catalogguard-http-feed.pid")" 2>/dev/null || true
+          fi
 
   browser-e2e:
     runs-on: ubuntu-latest

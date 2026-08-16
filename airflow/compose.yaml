@@ -67,6 +67,11 @@ services:
       airflow-api-server:
         condition: service_started
     environment:
+      # LocalExecutor runs task processes from the scheduler, so only this
+      # component receives CatalogGuard runtime credentials and feed config.
+      DATABASE_URL: ${DATABASE_URL:?set CatalogGuard DATABASE_URL in the local env file}
+      CATALOGGUARD_ETL_HTTP_FEED_URL: ${CATALOGGUARD_ETL_HTTP_FEED_URL:?set CATALOGGUARD_ETL_HTTP_FEED_URL in the local env file}
+      CATALOGGUARD_ETL_HTTP_FEED_FILENAME: ${CATALOGGUARD_ETL_HTTP_FEED_FILENAME:-supplier_feed.csv}
       AIRFLOW__API__SECRET_KEY: ${AIRFLOW_API_SECRET_KEY:?set AIRFLOW_API_SECRET_KEY in the local env file}
       AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_API_AUTH_JWT_SECRET:?set AIRFLOW_API_AUTH_JWT_SECRET in the local env file}
       AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/

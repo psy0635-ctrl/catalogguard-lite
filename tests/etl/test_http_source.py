@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 from urllib.error import HTTPError, URLError
 
 import pytest
@@ -15,7 +16,9 @@ from core.upload_validator import CsvUploadValidationError
 from etl.http_source import (
     DEFAULT_HTTP_FEED_FILENAME,
     HTTPFeedNotConfiguredError,
+    HTTPFeedPermanentError,
     HTTPFeedReadError,
+    HTTPFeedTransientError,
     read_http_feed_csv,
 )
 
@@ -188,6 +191,68 @@ def test_http_status_failures_are_translated_without_url_text(status_code, captu
 
     assert "supplier.example.invalid" not in str(error.value)
     assert not any("supplier.example.invalid" in record.getMessage() for record in captured_logs.records)
+
+
+@pytest.mark.parametrize("status_code", [429, 500, 503])
+def test_retryable_http_statuses_raise_a_safe_transient_error(status_code):
+    """A 429/5xx must stay retryable without retaining the configured feed URL."""
+    with pytest.raises(HTTPFeedTransientError) as error:
+        read_http_feed_csv(
+            opener=FakeOpener(HTTPError(FEED_URL, status_code, "boom", {}, None))
+        )
+
+    assert error.value.error_code == "http_feed_http_retryable"
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert "supplier.example.invalid" not in str(error.value)
+
+
+@pytest.mark.parametrize("status_code", [301, 302, 400, 404])
+def test_permanent_http_statuses_raise_a_safe_non_retryable_error(status_code):
+    """Redirects and non-429 client errors must not consume an Airflow retry."""
+    with pytest.raises(HTTPFeedPermanentError) as error:
+        read_http_feed_csv(
+            opener=FakeOpener(HTTPError(FEED_URL, status_code, "boom", {}, None))
+        )
+
+    expected_code = (
+        "http_feed_redirect_rejected"
+        if status_code in {301, 302}
+        else "http_feed_http_permanent"
+    )
+    assert error.value.error_code == expected_code
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert "supplier.example.invalid" not in str(error.value)
+
+
+def test_timeout_raises_a_safe_transient_error_without_the_original_cause():
+    """A retryable network failure must not expose a URL through Airflow traceback chaining."""
+    with pytest.raises(HTTPFeedTransientError) as error:
+        read_http_feed_csv(opener=FakeOpener(TimeoutError("timed out")))
+
+    assert error.value.error_code == "http_feed_network_retryable"
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "source_error",
+    [
+        ConnectionResetError("connection reset"),
+        URLError(ConnectionError("temporary network failure")),
+        URLError(socket.gaierror("temporary DNS failure")),
+    ],
+)
+def test_retryable_network_errors_raise_safe_transient_errors(source_error):
+    """Reset, temporary network, and DNS errors must be retryable by Airflow."""
+    with pytest.raises(HTTPFeedTransientError) as error:
+        read_http_feed_csv(opener=FakeOpener(source_error))
+
+    assert error.value.error_code == "http_feed_network_retryable"
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert "supplier.example.invalid" not in str(error.value)
 
 
 def test_network_failures_are_translated_without_url_text(captured_logs):
