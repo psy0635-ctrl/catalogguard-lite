@@ -1,2 +1,4 @@
 # Airflow dependencies are intentionally isolated from CatalogGuard's application requirements.
 apache-airflow[postgres]==3.3.0
+# Required by AIRFLOW__DATABASE__SQL_ALCHEMY_CONN's postgresql+psycopg dialect.
+psycopg[binary]
