@@ -50,7 +50,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, 
 19. 기존 Actor Audit을 Sync·Async Inspection까지 확장했습니다. `inspection_runs`에 nullable `actor_user_id`(`users.id`, `ON DELETE SET NULL`)와 `actor_username` snapshot을 추가하고, actor는 request form이 아니라 인증된 JWT `current_user`에서만 가져오도록 했습니다. 비동기 경로는 ORM 객체나 JWT 대신 두 scalar만 Redis job state와 Celery Worker로 전달했습니다. 동일 CSV·검수 버전의 기존 run을 재사용할 때는 최초 actor를 보존하며, 사용자 삭제 후 FK만 `NULL`이 되고 username snapshot은 남는 동작을 PostgreSQL 18 migration 왕복·Sync 통합 테스트·Redis/Celery/FastAPI E2E로 검증했습니다.
 20. AWS S3의 합성 공급사 CSV를 EC2 Instance Role의 최소권한 IAM으로 읽고, FastAPI의 기존 ETL Pipeline을 통해 RDS PostgreSQL staging에 적재하는 전체 흐름을 실제 AWS staging 환경에서 검증했습니다. S3 연동을 위해 두 번째 ETL pipeline을 만들지 않고 `run_web_etl()` 앞에 붙는 source adapter로 설계해 변환·중복 판단·Actor Audit 로직을 그대로 재사용했으며, EC2 Role에는 `s3:GetObject` 하나만 그것도 정확한 prefix로 제한해 부여하고 컨테이너에 AWS access key를 주입하지 않아 실제 principal이 `assumed-role/CatalogGuardEC2SSMRole/<instance-id>`로 동작하는 것을 확인했습니다. 동일 S3 객체 재처리 시 SHA-256 기반 idempotency와 Actor Audit이 유지되는 것을 실제 staging DB에서 검증했고, anonymous 401·viewer 403·허용 prefix 밖 400 차단과 함께 `s3:ListBucket`을 주지 않은 최소권한 때문에 없는 key가 404가 아니라 안전한 502로 응답한다는 실제 AWS 동작 차이까지 기록했습니다.
 21. 같은 상품 그룹에서 `S/M/L` 같은 문자형 사이즈와 `95/100` 같은 숫자형 사이즈가 함께 쓰이는 사이즈 체계 혼재를 탐지하는 검수 규칙을 추가했습니다. 기존 `SIZE_ALIASES`·`find_standard_size()`를 재사용해 표준화 로직을 새로 만들지 않고 문자형(ALPHA)·숫자형(NUMERIC)만 구분했으며, `95`나 `270`을 특정 카테고리로 단정하지 않고 명확히 판별 가능한 체계 혼합만 탐지하도록 범위를 제한했습니다. FREE·사용자 정의 값·빈 값은 체계 판정에서 제외해 정상 데이터의 오탐을 줄이고, 브랜드 정책상 혼용 가능성을 고려해 오류가 아닌 `warning`으로 설계했습니다. 정상 그룹, 혼재 그룹, FREE·custom·빈 값 제외, 빈 `product_group_id`를 하나의 가짜 그룹으로 묶지 않는 경계까지 단위·통합 회귀 테스트로 검증했습니다.
-22. 상품명 키워드 사전과 카테고리 별칭 사전은 신발·가방을 이미 알고 있는데 공식 허용 카테고리는 `TOP`·`BOTTOM`·`OUTER` 3개뿐이어서, "남성 러닝 운동화 + SHOES"처럼 의미가 정확히 맞는 상품도 `카테고리 오류`가 나던 정합성 문제를 해결했습니다. 새 카테고리 체계를 만드는 대신 공식 허용 목록만 5개로 확장해 기존 matcher·detector·DB·API·ETL 구조를 그대로 두었고, 확장 전 전체 테스트를 확장 상태로 미리 돌려 영향받는 테스트가 3건뿐임을 확인한 뒤 진행했습니다. `shoes`·`신발` 같은 표기는 비교용 별칭으로만 유지하고 정식 입력값으로는 계속 거부해 입력 데이터의 표기를 하나로 관리하도록 했으며, 가방의 "사이즈 없음"은 `size=FREE` 규약으로 표현해 카테고리별 필수 값 정책 변경까지 번지지 않게 범위를 제한했습니다.
+22. 상품명 키워드 사전과 카테고리 별칭 사전은 신발·가방을 이미 알고 있는데 공식 허용 카테고리는 `TOP`·`BOTTOM`·`OUTER` 3개뿐이어서, "남성 러닝 운동화 + SHOES"처럼 의미가 정확히 맞는 상품도 `카테고리 오류`가 나던 정합성 문제를 해결했습니다. 새 카테고리 체계를 만드는 대신 공식 허용 목록만 5개로 확장해 기존 matcher·detector·DB·API·ETL 구조를 그대로 두었고, 확장 전 전체 테스트를 확장 상태로 미리 돌려 영향받는 테스트가 3건뿐임을 확인한 뒤 진행했습니다. `shoes`·`신발` 같은 표기는 비교용 별칭으로만 유지하고 정식 입력값으로는 계속 거부해 입력 데이터의 표기를 하나로 관리하도록 했습니다. 후속 정책에서는 `BAG`의 `size`를 선택 값으로 두어 빈 값과 `FREE`를 모두 허용하되, 두 값을 같은 옵션으로 합치지 않습니다.
 23. HTTP 공급사 ETL을 API 재호출에만 의존하면 일시적 네트워크 오류 때 운영자가 재실행을 판단해야 한다는 문제를 확인했습니다. 기존 `read_http_feed_csv()`·`run_web_etl()`·`run_pipeline()`·`load_standard_csv()`는 그대로 두고 Airflow 3.3.0의 manual single-task DAG가 실행·상태·retry만 orchestration하도록 분리했습니다. HTTP timeout/network/DNS·429·5xx와 제한된 transient DB 오류만 retry하고, SHA-256·프로필 identity로 동일 bytes의 두 번째 실행을 `created=false`로 재사용해 staging 중복을 막았습니다. Airflow metadata PostgreSQL과 CatalogGuard application PostgreSQL을 분리하고, URL 원문 대신 안전한 lineage와 NULL actor를 저장했으며, Linux CI에서 image·migration·DAG processor·실제 HTTP staging load·중복 실행을 검증했습니다.
 
 ### Airflow ETL orchestration: 문제와 해결
@@ -199,7 +199,7 @@ catalogguard_ready.csv + etl_summary.json
 | pytest | 일반 unit·integration 9.1.1 / Chromium E2E 8.4.1 |
 | CI | GitHub Actions `Test` workflow |
 | CI 테스트 서비스 | PostgreSQL 18·Redis 7.4 서비스 컨테이너 |
-| CI 검증 범위 | 일반 `test` job의 Alembic·pytest·비동기 E2E·AWS Docker runtime smoke, `browser-e2e` job의 PostgreSQL·Chromium 실제 브라우저 ETL·promotion E2E, `kubernetes-smoke` job의 kind 실제 Kubernetes 배포·`/health`·`/ready` 검증, `terraform-validate` job의 fmt·init·validate·mock provider test |
+| CI 검증 범위 | 일반 `test` job의 Alembic·pytest·비동기 E2E·AWS Docker runtime smoke, `browser-e2e` job의 PostgreSQL·Chromium 실제 브라우저 ETL·promotion E2E, `kubernetes-smoke` job의 kind 실제 Kubernetes 배포·`/health`·`/ready` 검증, `terraform-validate` job의 fmt·init·validate·mock provider test, `airflow-smoke` job의 분리 Airflow image·metadata DB·DAG processor/import·deterministic HTTP staging/idempotency/lineage 검증 |
 | 필수 컬럼 | 9개 |
 | 선택 컬럼 | 3개 (`sale_price` 포함) |
 | 등록된 검수 규칙 함수 | 15개 |
@@ -208,6 +208,7 @@ catalogguard_ready.csv + etl_summary.json
 | ETL API client·UI 검증 | 응답 schema, nullable, request ID, stale 상태와 Streamlit AppTest 범위 |
 | promotion preview·service·API·concurrency 검증 | preview hash, 승인, 차단·stale·failed, transaction, 중복 성공 방지와 audit |
 | Chromium 브라우저 E2E | ETL reject 마스킹, promotion 승인·반영·이력·audit, rollback 실행·이력·상세·상품 Rollback 변경 Audit, 브라우저 오류 및 PostgreSQL 최종 상태 |
+| 로컬 데모 리허설 | Docker Desktop Linux engine과 PostgreSQL·Redis를 기동하고 FastAPI `/health`·`/ready`(database `ok`), Streamlit health, 기존 Chromium 2개 시나리오 성공을 확인. 합성 fixture 기반 로컬 검증이며 운영 환경 검증은 아님 |
 | 샘플 ETL CLI 결과 | 전체 3건, 정상 변환 2건, 오류 행 1건, 종료 코드 0 |
 | Web ETL·Rollback 검증 | `POST /api/v1/etl-loads`·`GET /api/v1/etl-profiles`, rollback preview/실행 API와 rollback 이력·상세·상품별 change audit 조회 API의 PostgreSQL 통합·API·client·UI 테스트 |
 | Actor Audit 검증 | 기존 `tests/test_actor_audit.py` 10 scenarios에 Inspection migration·Sync actor·위조 방지·dedup 최초 actor·사용자 삭제 snapshot·Redis legacy payload·Celery Worker·실제 Async E2E 검증을 추가 |
@@ -217,7 +218,7 @@ catalogguard_ready.csv + etl_summary.json
 | AWS staging S3 ingestion 실제 E2E 검증 | 실제 private S3 -> EC2 Instance Role(`s3:GetObject` + 정확한 prefix) -> FastAPI `POST /api/v1/etl-loads/s3` -> 기존 ETL pipeline -> RDS PostgreSQL. 합성 fixture 1건 `created=true`/loaded 1/rejected 0, 재요청 `created=false`·동일 run, Actor Audit 일치, 401/403/400/502 경계, EC2 cold start 후 `/health`·`/ready` 200(pytest 범위 밖 수동 검증, CI 자동 재실행 없음) |
 | Rollback Change Audit 기능 완료 commit 기준 전체 pytest | `1451 passed`, `0 skipped`, `4 deselected`, `0 failed`, warnings 0(일회성 PostgreSQL·Redis 서비스 컨테이너. Chromium E2E는 `-m "not e2e"`로 제외되어 별도 job에서 실행) |
 | Rollback Change Audit 기능 완료 commit 기준 CI | commit `abcea748e299009b4889b0daa98ad4c9c97e770b`을 대상으로 한 GitHub Actions run `31487868946` success (`test`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate` 4개 job) |
-| 최신 Alembic head | `20260810_0012`(Inspection Actor Audit, single head) |
+| 최신 Alembic head | `20260813_0013`(ETL initial source lineage, single head) |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
 
 ## 6.6 핵심 구현 구조

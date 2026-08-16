@@ -336,7 +336,7 @@ GitHub Actions의 `airflow-smoke`는 isolated Airflow image build, PostgreSQL 17
 `airflow db migrate`, 독립 DAG processor, 별도 CatalogGuard test PostgreSQL, 기존 Alembic upgrade,
 deterministic HTTP feed, 두 DAG import/structure를 검증한다. 이어 실제 task를 두 번 실행해 staging
 적재, `created=true`/`created=false`, 동일 load run ID, load run 1건·staging 1건·reject 0건, lineage와
-NULL actor를 PostgreSQL에서 확인한다. main의 최신 검증 run `31926657432`에서 `test`, `browser-e2e`,
+NULL actor를 PostgreSQL에서 확인한다. main 검증 run `31933774988`에서 `test`, `browser-e2e`,
 `kubernetes-smoke`, `terraform-validate`, `airflow-smoke`가 모두 성공했다.
 
 현재 범위는 configured HTTP feed 하나의 manual trigger다. Airflow schedule, Airflow S3 source
