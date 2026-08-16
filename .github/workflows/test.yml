@@ -445,6 +445,76 @@ jobs:
 
           exit 1
 
+  airflow-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AIRFLOW_IMAGE: "catalogguard-airflow:3.3.0-foundation"
+      AIRFLOW_METADATA_DATABASE_URL: "postgresql+psycopg://airflow:airflow@127.0.0.1:5432/airflow"
+    services:
+      airflow-db:
+        image: postgres:17
+        env:
+          POSTGRES_USER: airflow
+          POSTGRES_PASSWORD: airflow
+          POSTGRES_DB: airflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U airflow -d airflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Build isolated Airflow image
+        run: docker build --file airflow/Dockerfile --tag "${AIRFLOW_IMAGE}" .
+      - name: Generate ephemeral Airflow configuration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          config_file="${RUNNER_TEMP}/airflow-smoke.env"
+          fernet_key="$(docker run --rm --entrypoint python "${AIRFLOW_IMAGE}" -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+
+          {
+            echo "AIRFLOW__CORE__EXECUTOR=LocalExecutor"
+            echo "AIRFLOW__CORE__FERNET_KEY=${fernet_key}"
+            echo "AIRFLOW__CORE__LOAD_EXAMPLES=false"
+            echo "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=${AIRFLOW_METADATA_DATABASE_URL}"
+            echo "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_ASYNC=postgresql+asyncpg://airflow:airflow@127.0.0.1:5432/airflow"
+            echo "AIRFLOW__API__SECRET_KEY=$(openssl rand -hex 32)"
+            echo "AIRFLOW__API_AUTH__JWT_SECRET=$(openssl rand -hex 32)"
+          } > "${config_file}"
+      - name: Initialize isolated Airflow metadata database
+        shell: bash
+        run: |
+          docker run --rm --network host \
+            --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
+            "${AIRFLOW_IMAGE}" db migrate
+      - name: Run Airflow DAG import and structure smoke checks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          docker run --rm --network host \
+            --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
+            "${AIRFLOW_IMAGE}" dags list-import-errors
+          docker run --rm --network host \
+            --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
+            "${AIRFLOW_IMAGE}" dags list | grep -E '^catalogguard_airflow_smoke[[:space:]]'
+          docker run --rm --network host \
+            --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
+            "${AIRFLOW_IMAGE}" tasks list catalogguard_airflow_smoke | grep -x 'start'
+          docker run --rm \
+            --entrypoint python "${AIRFLOW_IMAGE}" \
+            -c "import importlib.util; assert importlib.util.find_spec('etl') is not None"
+          docker run --rm --network host \
+            --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
+            --entrypoint python "${AIRFLOW_IMAGE}" \
+            -m unittest discover -s /opt/airflow/tests -v
+
   browser-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 25

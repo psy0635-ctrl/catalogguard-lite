@@ -1,0 +1,88 @@
+name: catalogguard-airflow-foundation
+
+x-airflow-common: &airflow-common
+  build:
+    context: ..
+    dockerfile: airflow/Dockerfile
+    args:
+      AIRFLOW_VERSION: "3.3.0"
+  image: catalogguard-airflow:3.3.0-foundation
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?set AIRFLOW_FERNET_KEY in the local env file}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg://${AIRFLOW_METADATA_POSTGRES_USER:?set AIRFLOW_METADATA_POSTGRES_USER in the local env file}:${AIRFLOW_METADATA_POSTGRES_PASSWORD:?set AIRFLOW_METADATA_POSTGRES_PASSWORD in the local env file}@airflow-db:5432/${AIRFLOW_METADATA_POSTGRES_DB:?set AIRFLOW_METADATA_POSTGRES_DB in the local env file}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_ASYNC: postgresql+asyncpg://${AIRFLOW_METADATA_POSTGRES_USER:?set AIRFLOW_METADATA_POSTGRES_USER in the local env file}:${AIRFLOW_METADATA_POSTGRES_PASSWORD:?set AIRFLOW_METADATA_POSTGRES_PASSWORD in the local env file}@airflow-db:5432/${AIRFLOW_METADATA_POSTGRES_DB:?set AIRFLOW_METADATA_POSTGRES_DB in the local env file}
+
+services:
+  airflow-db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${AIRFLOW_METADATA_POSTGRES_USER:?set AIRFLOW_METADATA_POSTGRES_USER in the local env file}
+      POSTGRES_PASSWORD: ${AIRFLOW_METADATA_POSTGRES_PASSWORD:?set AIRFLOW_METADATA_POSTGRES_PASSWORD in the local env file}
+      POSTGRES_DB: ${AIRFLOW_METADATA_POSTGRES_DB:?set AIRFLOW_METADATA_POSTGRES_DB in the local env file}
+    volumes:
+      - airflow_metadata_db:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  airflow-init:
+    <<: *airflow-common
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+    command: ["bash", "-c", "exec airflow db migrate"]
+    restart: "no"
+
+  airflow-api-server:
+    <<: *airflow-common
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__API__BASE_URL: http://localhost:${AIRFLOW_API_HOST_PORT:-8088}
+      AIRFLOW__API__SECRET_KEY: ${AIRFLOW_API_SECRET_KEY:?set AIRFLOW_API_SECRET_KEY in the local env file}
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_API_AUTH_JWT_SECRET:?set AIRFLOW_API_AUTH_JWT_SECRET in the local env file}
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?set AIRFLOW_FERNET_KEY in the local env file}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg://${AIRFLOW_METADATA_POSTGRES_USER:?set AIRFLOW_METADATA_POSTGRES_USER in the local env file}:${AIRFLOW_METADATA_POSTGRES_PASSWORD:?set AIRFLOW_METADATA_POSTGRES_PASSWORD in the local env file}@airflow-db:5432/${AIRFLOW_METADATA_POSTGRES_DB:?set AIRFLOW_METADATA_POSTGRES_DB in the local env file}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_ASYNC: postgresql+asyncpg://${AIRFLOW_METADATA_POSTGRES_USER:?set AIRFLOW_METADATA_POSTGRES_USER in the local env file}:${AIRFLOW_METADATA_POSTGRES_PASSWORD:?set AIRFLOW_METADATA_POSTGRES_PASSWORD in the local env file}@airflow-db:5432/${AIRFLOW_METADATA_POSTGRES_DB:?set AIRFLOW_METADATA_POSTGRES_DB in the local env file}
+    command: ["airflow", "api-server"]
+    ports:
+      - "${AIRFLOW_API_HOST_PORT:-8088}:8080"
+
+  airflow-scheduler:
+    <<: *airflow-common
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-api-server:
+        condition: service_started
+    environment:
+      AIRFLOW__API__SECRET_KEY: ${AIRFLOW_API_SECRET_KEY:?set AIRFLOW_API_SECRET_KEY in the local env file}
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_API_AUTH_JWT_SECRET:?set AIRFLOW_API_AUTH_JWT_SECRET in the local env file}
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?set AIRFLOW_FERNET_KEY in the local env file}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg://${AIRFLOW_METADATA_POSTGRES_USER:?set AIRFLOW_METADATA_POSTGRES_USER in the local env file}:${AIRFLOW_METADATA_POSTGRES_PASSWORD:?set AIRFLOW_METADATA_POSTGRES_PASSWORD in the local env file}@airflow-db:5432/${AIRFLOW_METADATA_POSTGRES_DB:?set AIRFLOW_METADATA_POSTGRES_DB in the local env file}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN_ASYNC: postgresql+asyncpg://${AIRFLOW_METADATA_POSTGRES_USER:?set AIRFLOW_METADATA_POSTGRES_USER in the local env file}:${AIRFLOW_METADATA_POSTGRES_PASSWORD:?set AIRFLOW_METADATA_POSTGRES_PASSWORD in the local env file}@airflow-db:5432/${AIRFLOW_METADATA_POSTGRES_DB:?set AIRFLOW_METADATA_POSTGRES_DB in the local env file}
+    command: ["airflow", "scheduler"]
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    command: ["airflow", "dag-processor"]
+
+volumes:
+  airflow_metadata_db:

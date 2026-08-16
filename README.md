@@ -2570,6 +2570,38 @@ python -m pytest -m performance tests/performance/test_inspection_query_performa
 
 ## 공급사 CSV ETL MVP
 
+## Airflow foundation (ETL orchestration is not implemented yet)
+
+`airflow/` is an isolated Airflow 3 runtime foundation. It has its own image,
+Python dependency definition, PostgreSQL metadata database, API server,
+scheduler, and DAG processor. It does not share CatalogGuard's application
+requirements or PostgreSQL database, and the only DAG currently included is a
+no-side-effect import/structure smoke DAG. It does not call HTTP feeds, S3,
+`run_web_etl()`, staging loads, or promotion services.
+
+Before starting it, copy the example environment file and replace the Airflow
+placeholder secrets. Generate the Fernet key with the Airflow image, for example:
+
+```powershell
+docker run --rm --entrypoint python apache/airflow:3.3.0-python3.11 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Start the foundation and then inspect its smoke DAG:
+
+```powershell
+docker compose --env-file .env -f airflow/compose.yaml up --build -d
+docker compose --env-file .env -f airflow/compose.yaml exec airflow-scheduler airflow dags list-import-errors
+docker compose --env-file .env -f airflow/compose.yaml exec airflow-scheduler airflow tasks list catalogguard_airflow_smoke
+```
+
+The Airflow UI/API is exposed on `http://localhost:8088` by default. Stop only
+the Airflow foundation with the following command; it does not touch the
+CatalogGuard local Compose project or its volumes:
+
+```powershell
+docker compose --env-file .env -f airflow/compose.yaml down
+```
+
 `etl.cli`는 JSON 프로필을 사용해 서로 다른 컬럼 구조의 합성 공급사 CSV 2종을 CatalogGuard 표준 CSV로 변환합니다. 상품 그룹 ID와 SKU가 분리된 구조도 지원하는 것을 확인했으며, 정상가보다 큰 할인가 같은 상품 품질 문제는 정상 행으로 남겨 기존 검수기가 처리하도록 합니다. 자세한 프로필 비교, CLI 예시와 제한사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.
 
 ```powershell
