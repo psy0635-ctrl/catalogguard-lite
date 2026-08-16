@@ -10,7 +10,7 @@ https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
 
 > 공개 Streamlit 앱과 로컬 전체 시스템의 기능 범위는 다를 수 있습니다. 검수 이력과 ETL 적재 이력의 검색·상세 조회는 로컬 또는 별도 배포 환경에서 FastAPI 서버와 PostgreSQL이 함께 실행되어야 사용할 수 있습니다.
 
-프로젝트의 설계·검증 과정은 [포트폴리오 상세 문서](docs/portfolio_project.md), 공급사 변환 흐름은 [ETL MVP 문서](docs/etl_mvp.md), PostgreSQL 쿼리 검증은 [SQL 성능 분석 문서](docs/sql_performance_analysis.md)에서 확인할 수 있습니다.
+프로젝트의 설계·검증 과정은 [포트폴리오 상세 문서](docs/portfolio_project.md), 공급사 변환·HTTP feed Airflow orchestration 흐름은 [ETL MVP 문서](docs/etl_mvp.md), PostgreSQL 쿼리 검증은 [SQL 성능 분석 문서](docs/sql_performance_analysis.md)에서 확인할 수 있습니다.
 
 ## 2. 프로젝트 목적
 
@@ -493,6 +493,8 @@ python -m playwright install chromium
 ```
 
 GitHub Actions는 일반 `test` job에서 PostgreSQL·Redis 서비스, Alembic 마이그레이션, E2E를 제외한 전체 pytest와 비동기 검수 smoke를 실행하고, `Dockerfile.aws` image build·import·UID `10001`·PostgreSQL migration·기본 CMD Uvicorn·`/health` HTTP `200`도 확인합니다. `Dockerfile.aws`는 `api`·`config`·`core`·`db`·`etl`·`services`·`workers` package를 모두 image에 포함하며, import 검증은 `api.main` import 시 연결되는 `api.routes.etl_loads` -> `etl.*` import chain까지 실제로 확인합니다. 별도 `browser-e2e` job에서는 PostgreSQL 서비스와 Chromium을 사용해 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증합니다. AWS runtime smoke는 실제 AWS 배포가 아니며, 배포는 수행하지 않습니다. 세 번째 `kubernetes-smoke` job은 같은 `Dockerfile.aws` image를 kind 실제 Kubernetes cluster에 배포해 `/health`·`/ready`까지 확인합니다(자세한 내용은 16장 "Kubernetes Deployment Readiness" 참고). 네 번째 `terraform-validate` job은 실제 AWS 자격 증명 없이 `terraform/`의 fmt·init·validate와 mock provider 기반 `terraform test`만 실행하며, `terraform apply`는 수행하지 않습니다(자세한 내용은 16장 "Terraform AWS Staging IaC Validation" 참고).
+
+다섯 번째 `airflow-smoke` job은 분리된 Airflow 3.3.0 / Python 3.11 image와 PostgreSQL 17 metadata DB, 별도 CatalogGuard test DB, DAG processor, deterministic HTTP feed를 기동한다. 이어 Airflow migration·기존 Alembic migration·DAG import/structure·실제 staging load·idempotency·lineage를 검증한다.
 
 ## 8. 프로젝트 폴더 구조
 
@@ -2570,16 +2572,38 @@ python -m pytest -m performance tests/performance/test_inspection_query_performa
 
 ## 공급사 CSV ETL MVP
 
-## Airflow foundation and configured HTTP feed staging
+## Airflow Foundation과 configured HTTP feed staging
 
-`airflow/` is an isolated Airflow 3 runtime foundation. It has its own image,
-Python dependency definition, PostgreSQL metadata database, API server,
-scheduler, and DAG processor. It does not share CatalogGuard's application
-requirements or PostgreSQL database. The foundation includes the no-side-effect
-import/structure smoke DAG and a manual `catalogguard_http_feed_to_staging` DAG.
-The latter calls the existing `read_http_feed_csv()` and `run_web_etl()` service
-inside one task, so no CSV artifact is stored in XCom or shared filesystem. It
-does not perform promotion or invoke S3, Celery, Kafka, Spark, or Flink.
+`airflow/`는 CatalogGuard 애플리케이션과 분리된 Airflow 3.3.0 / Python 3.11
+runtime이다. 자체 image·의존성·PostgreSQL 17 metadata DB·API server·scheduler·DAG
+processor를 가지며, CatalogGuard application requirements나 application DB를 공유하지
+않는다. `LocalExecutor`를 사용한다.
+
+Airflow는 ETL 변환 로직을 새로 구현하지 않는다. 운영자가 manual trigger한
+`catalogguard_http_feed_to_staging`의 단일 task
+`ingest_configured_http_feed_to_staging`가 기존 서비스를 순서대로 호출한다.
+
+```text
+운영자
+-> Airflow manual trigger
+-> catalogguard_http_feed_to_staging
+-> ingest_configured_http_feed_to_staging
+-> read_http_feed_csv()
+-> run_web_etl()
+-> run_pipeline()
+-> load_standard_csv()
+-> ETLLoadRun / CatalogProductStaging / ETLRejectedRow
+```
+
+Orchestration은 실행 순서·상태·재시도를 관리하는 역할이다. 따라서 이 DAG는 CSV
+artifact를 XCom이나 shared filesystem에 저장하지 않고, XCom/task result로는
+`etl_load_run_id`와 `created`만 돌려준다. `catalogguard_airflow_smoke` DAG는 ETL을
+실행하지 않는 import/structure 검증용 DAG다.
+
+Airflow metadata DB는 DAG run·task run·retry·scheduler 상태를 저장하고,
+CatalogGuard DB는 ETL load run·staging·reject row·catalog data를 저장한다. 두 DB는
+별도 PostgreSQL instance이며, Airflow scheduler만 CatalogGuard DB 연결과 feed 환경설정을
+받는다.
 
 Before starting it, copy the example environment file and replace the Airflow
 placeholder secrets. Generate the Fernet key with the Airflow image, for example:
@@ -2596,24 +2620,35 @@ docker compose --env-file .env -f airflow/compose.yaml exec airflow-scheduler ai
 docker compose --env-file .env -f airflow/compose.yaml exec airflow-scheduler airflow tasks list catalogguard_airflow_smoke
 ```
 
-To run the configured HTTP feed staging DAG, trigger it manually and provide
-only an allowlisted `profile_id` (currently `sample_fashion_vendor_v1` or
-`sample_marketplace_vendor_v1`). The feed URL and filename are scheduler/task
-environment configuration, never DAG parameters. `DATABASE_URL` must point to
-the separately managed CatalogGuard database through a hostname reachable from
-the Airflow scheduler container; do not use `localhost` for a host-side
-database. The Airflow metadata database remains the `airflow-db` service.
+configured HTTP feed staging DAG는 manual trigger만 지원하며, allowlist의
+`profile_id`만 전달한다. feed URL·filename은 DAG parameter가 아니라 scheduler/task
+환경설정이다. `DATABASE_URL`은 scheduler container에서 도달 가능한 별도 CatalogGuard DB를
+가리켜야 하며, host-side DB에는 `localhost`를 사용하지 않는다. Airflow metadata DB는
+`airflow-db` service에 남는다.
 
 ```powershell
 docker compose --env-file .env -f airflow/compose.yaml exec airflow-scheduler airflow dags trigger catalogguard_http_feed_to_staging --conf '{"profile_id":"sample_fashion_vendor_v1"}'
 ```
 
-The task retries transient connection/DNS/timeout, HTTP 429, and HTTP 5xx
-failures. Redirects, other HTTP 4xx responses, unsafe or absent feed
-configuration, invalid CSV input, profile errors, and non-transient database
-failures do not retry. A retry fetches the configured URL again: if the remote
-feed changes, its different SHA-256 identity can create a separate ETL batch
-rather than mutating the already committed staging batch.
+task는 timeout·일시적 network/DNS/connection 문제, HTTP 429·5xx, 그리고
+`connection_invalidated`·SQLSTATE `40001`·`40P01`인 DB 오류만 retry한다. redirect,
+429 이외 HTTP 4xx, missing/unsafe feed 설정, invalid CSV/profile/pipeline/load 검증 오류와
+그 밖의 DB 오류는 retry하지 않는다.
+
+Idempotency(같은 작업을 다시 실행해도 중복 결과를 만들지 않는 성질)의 identity는
+`(input_file_sha256, profile_name, profile_version)`이다. 같은 bytes를 다시 처리하면
+기존 `ETLLoadRun`을 재사용해 `created=false`를 반환하므로 staging/reject row도 중복되지
+않는다. 단, retry가 URL을 다시 읽는 구조이므로 remote feed 내용이 바뀌면 SHA-256도 달라져
+새 batch가 될 수 있다.
+
+HTTP lineage는 `initial_source_type=http_feed`,
+`initial_source_ref=configured_http_feed`로 남기고 actor는 시스템 실행이므로 둘 다 `NULL`이다.
+실제 URL·query·token은 lineage·XCom·안전한 예외에 저장하지 않는다. raw URL parameter와 raw
+profile path를 받지 않고, profile allowlist·redirect 차단·unsafe URL 차단·환경설정 기반 feed를
+사용한다. 실제 `.env` 값과 secret은 commit하지 않는다.
+
+Airflow는 공급사 ETL 실행 흐름과 retry를 관리한다. 반면 Celery는 API가 요청한 사용자 검수의
+비동기 inspection 처리에만 사용하며, 이 DAG는 Celery·Promotion을 호출하지 않는다.
 
 The Airflow UI/API is exposed on `http://localhost:8088` by default. Stop only
 the Airflow foundation with the following command; it does not touch the
@@ -2622,6 +2657,12 @@ CatalogGuard local Compose project or its volumes:
 ```powershell
 docker compose --env-file .env -f airflow/compose.yaml down
 ```
+
+GitHub Actions의 다섯 job(`test`, `browser-e2e`, `kubernetes-smoke`,
+`terraform-validate`, `airflow-smoke`)이 main에서 검증된다. 특히 `airflow-smoke`는
+격리 Airflow image build, 두 PostgreSQL DB 초기화, Airflow/Alembic migration, deterministic
+HTTP feed, DAG processor·import·structure, 실제 staging load, idempotency와 lineage를 확인한다.
+세부 설계·용어·현재 한계는 [ETL MVP 문서의 Airflow orchestration 절](docs/etl_mvp.md#airflow-manual-http-feed-orchestration)을 참고한다.
 
 `etl.cli`는 JSON 프로필을 사용해 서로 다른 컬럼 구조의 합성 공급사 CSV 2종을 CatalogGuard 표준 CSV로 변환합니다. 상품 그룹 ID와 SKU가 분리된 구조도 지원하는 것을 확인했으며, 정상가보다 큰 할인가 같은 상품 품질 문제는 정상 행으로 남겨 기존 검수기가 처리하도록 합니다. 자세한 프로필 비교, CLI 예시와 제한사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.
 

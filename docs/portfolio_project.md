@@ -4,7 +4,7 @@
 
 ## 6.1 프로젝트 한 줄 소개
 
-CatalogGuard Lite는 Python·FastAPI 백엔드와 PostgreSQL 저장 계층을 중심으로 상품 CSV의 데이터 품질을 검수하고, ETL staging 결과를 선택적으로 운영 상품에 반영하는 품질 검사 도구입니다. 공급사 CSV의 Profile 기반 표준화·적재는 CLI와 Streamlit 웹 업로드가 같은 ETL Pipeline·loader를 공유하며, Streamlit은 저장된 batch를 선택해 preview·승인·promotion을 요청하고 FastAPI와 PostgreSQL이 반영·audit·conflict-safe rollback을 처리합니다.
+CatalogGuard Lite는 Python·FastAPI 백엔드와 PostgreSQL 저장 계층을 중심으로 상품 CSV의 데이터 품질을 검수하고, ETL staging 결과를 선택적으로 운영 상품에 반영하는 품질 검사 도구입니다. 공급사 CSV의 Profile 기반 표준화·적재는 CLI·Streamlit 웹 업로드·configured HTTP feed Airflow manual DAG가 같은 ETL Pipeline·loader를 공유하며, Streamlit은 저장된 batch를 선택해 preview·승인·promotion을 요청하고 FastAPI와 PostgreSQL이 반영·audit·conflict-safe rollback을 처리합니다.
 
 - 배포 URL: https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
 - 개발 언어: Python
@@ -25,7 +25,7 @@ Python·FastAPI와 PostgreSQL을 기반으로 상품 CSV의 형식·중복·가�
 
 ### 기술 스택
 
-Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Docker Compose, Kubernetes(kind), Terraform, GitHub Actions, Pytest
+Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, Streamlit, Docker Compose, Kubernetes(kind), Terraform, GitHub Actions, Pytest
 
 ### 이력서용 핵심 문장
 
@@ -51,6 +51,21 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Streamlit, Dock
 20. AWS S3의 합성 공급사 CSV를 EC2 Instance Role의 최소권한 IAM으로 읽고, FastAPI의 기존 ETL Pipeline을 통해 RDS PostgreSQL staging에 적재하는 전체 흐름을 실제 AWS staging 환경에서 검증했습니다. S3 연동을 위해 두 번째 ETL pipeline을 만들지 않고 `run_web_etl()` 앞에 붙는 source adapter로 설계해 변환·중복 판단·Actor Audit 로직을 그대로 재사용했으며, EC2 Role에는 `s3:GetObject` 하나만 그것도 정확한 prefix로 제한해 부여하고 컨테이너에 AWS access key를 주입하지 않아 실제 principal이 `assumed-role/CatalogGuardEC2SSMRole/<instance-id>`로 동작하는 것을 확인했습니다. 동일 S3 객체 재처리 시 SHA-256 기반 idempotency와 Actor Audit이 유지되는 것을 실제 staging DB에서 검증했고, anonymous 401·viewer 403·허용 prefix 밖 400 차단과 함께 `s3:ListBucket`을 주지 않은 최소권한 때문에 없는 key가 404가 아니라 안전한 502로 응답한다는 실제 AWS 동작 차이까지 기록했습니다.
 21. 같은 상품 그룹에서 `S/M/L` 같은 문자형 사이즈와 `95/100` 같은 숫자형 사이즈가 함께 쓰이는 사이즈 체계 혼재를 탐지하는 검수 규칙을 추가했습니다. 기존 `SIZE_ALIASES`·`find_standard_size()`를 재사용해 표준화 로직을 새로 만들지 않고 문자형(ALPHA)·숫자형(NUMERIC)만 구분했으며, `95`나 `270`을 특정 카테고리로 단정하지 않고 명확히 판별 가능한 체계 혼합만 탐지하도록 범위를 제한했습니다. FREE·사용자 정의 값·빈 값은 체계 판정에서 제외해 정상 데이터의 오탐을 줄이고, 브랜드 정책상 혼용 가능성을 고려해 오류가 아닌 `warning`으로 설계했습니다. 정상 그룹, 혼재 그룹, FREE·custom·빈 값 제외, 빈 `product_group_id`를 하나의 가짜 그룹으로 묶지 않는 경계까지 단위·통합 회귀 테스트로 검증했습니다.
 22. 상품명 키워드 사전과 카테고리 별칭 사전은 신발·가방을 이미 알고 있는데 공식 허용 카테고리는 `TOP`·`BOTTOM`·`OUTER` 3개뿐이어서, "남성 러닝 운동화 + SHOES"처럼 의미가 정확히 맞는 상품도 `카테고리 오류`가 나던 정합성 문제를 해결했습니다. 새 카테고리 체계를 만드는 대신 공식 허용 목록만 5개로 확장해 기존 matcher·detector·DB·API·ETL 구조를 그대로 두었고, 확장 전 전체 테스트를 확장 상태로 미리 돌려 영향받는 테스트가 3건뿐임을 확인한 뒤 진행했습니다. `shoes`·`신발` 같은 표기는 비교용 별칭으로만 유지하고 정식 입력값으로는 계속 거부해 입력 데이터의 표기를 하나로 관리하도록 했으며, 가방의 "사이즈 없음"은 `size=FREE` 규약으로 표현해 카테고리별 필수 값 정책 변경까지 번지지 않게 범위를 제한했습니다.
+23. HTTP 공급사 ETL을 API 재호출에만 의존하면 일시적 네트워크 오류 때 운영자가 재실행을 판단해야 한다는 문제를 확인했습니다. 기존 `read_http_feed_csv()`·`run_web_etl()`·`run_pipeline()`·`load_standard_csv()`는 그대로 두고 Airflow 3.3.0의 manual single-task DAG가 실행·상태·retry만 orchestration하도록 분리했습니다. HTTP timeout/network/DNS·429·5xx와 제한된 transient DB 오류만 retry하고, SHA-256·프로필 identity로 동일 bytes의 두 번째 실행을 `created=false`로 재사용해 staging 중복을 막았습니다. Airflow metadata PostgreSQL과 CatalogGuard application PostgreSQL을 분리하고, URL 원문 대신 안전한 lineage와 NULL actor를 저장했으며, Linux CI에서 image·migration·DAG processor·실제 HTTP staging load·중복 실행을 검증했습니다.
+
+### Airflow ETL orchestration: 문제와 해결
+
+**문제.** HTTP 공급사 feed는 일시적 통신 오류가 날 수 있지만, 기존 ETL service를 또 구현하거나
+실패할 때마다 운영자가 수동으로 재처리하면 실행 이력과 중복 처리가 불명확해진다.
+
+**해결.** Airflow는 manual trigger와 retry만 담당하고, 단일 task가 기존 ETL service를 호출한다.
+`(input_file_sha256, profile_name, profile_version)` identity가 이미 committed된 batch를 재사용하므로
+동일 bytes 재실행은 `created=false`가 되며 staging/reject row가 중복되지 않는다.
+
+**핵심 설계.** Airflow metadata DB와 CatalogGuard DB를 분리했고, HTTP URL·token을 XCom/lineage에
+남기지 않았다. Airflow는 데이터 pipeline orchestration, Celery는 사용자 검수의 비동기 API job이라는
+서로 다른 역할을 유지한다. 실제 Linux CI에서 Airflow runtime·두 DB migration·DAG import·실제
+staging load·idempotency·lineage를 함께 검증했다.
 
 ## 6.2 문제 정의
 
