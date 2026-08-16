@@ -5,6 +5,12 @@ from pathlib import Path
 import unittest
 
 
+try:
+    import airflow.sdk  # noqa: F401
+except ModuleNotFoundError:
+    raise unittest.SkipTest("Airflow DAG tests run in the isolated Airflow image")
+
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DAG_PATH = PROJECT_ROOT / "airflow" / "dags" / "catalogguard_airflow_smoke.py"
 
