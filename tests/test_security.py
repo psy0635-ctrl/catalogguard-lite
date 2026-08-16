@@ -4,6 +4,7 @@ import time
 import jwt
 import pytest
 
+from config.settings import JWTConfigurationError, get_jwt_secret
 from core.security import (
     InvalidTokenError,
     create_access_token,
@@ -102,7 +103,27 @@ def test_decode_access_token_rejects_garbage_token():
 def test_get_jwt_secret_raises_clear_error_when_missing(monkeypatch):
     monkeypatch.delenv("CATALOGGUARD_JWT_SECRET", raising=False)
 
-    from config.settings import JWTConfigurationError, get_jwt_secret
-
     with pytest.raises(JWTConfigurationError):
         get_jwt_secret()
+
+
+@pytest.mark.parametrize("configured_secret", ["CHANGE_ME", "  CHANGE_ME  "])
+def test_get_jwt_secret_rejects_example_placeholder(monkeypatch, configured_secret):
+    monkeypatch.setenv("CATALOGGUARD_JWT_SECRET", configured_secret)
+
+    with pytest.raises(JWTConfigurationError) as exc_info:
+        get_jwt_secret()
+
+    error_message = str(exc_info.value)
+    assert "CATALOGGUARD_JWT_SECRET" in error_message
+    assert "placeholder" in error_message
+    assert "CHANGE_ME" not in error_message
+
+
+@pytest.mark.parametrize(
+    "configured_secret", ["test-only-secret-value", "MY_CHANGE_ME_SECRET"]
+)
+def test_get_jwt_secret_accepts_non_placeholder_secret(monkeypatch, configured_secret):
+    monkeypatch.setenv("CATALOGGUARD_JWT_SECRET", configured_secret)
+
+    assert get_jwt_secret() == configured_secret
