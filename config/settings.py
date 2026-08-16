@@ -46,6 +46,7 @@ ETL_HTTP_FEED_SOURCE_REF = "configured_http_feed"
 # JWT access token 서명 키입니다. 서버 설정으로 고정하며 요청에서 선택할 수 없습니다.
 CATALOGGUARD_JWT_SECRET_ENV_VAR = "CATALOGGUARD_JWT_SECRET"
 CATALOGGUARD_JWT_ALGORITHM = "HS256"
+JWT_SECRET_PLACEHOLDERS = frozenset({"CHANGE_ME"})
 CATALOGGUARD_JWT_ACCESS_TOKEN_TTL_SECONDS_ENV_VAR = (
     "CATALOGGUARD_JWT_ACCESS_TOKEN_TTL_SECONDS"
 )
@@ -289,7 +290,7 @@ def get_inspection_job_ttl_seconds() -> int:
 
 
 class JWTConfigurationError(RuntimeError):
-    """Raised when CATALOGGUARD_JWT_SECRET is missing where a token must be signed or verified."""
+    """Raised when CATALOGGUARD_JWT_SECRET is unsafe for signing or verifying tokens."""
 
 
 def get_jwt_secret() -> str:
@@ -300,6 +301,11 @@ def get_jwt_secret() -> str:
         raise JWTConfigurationError(
             f"{CATALOGGUARD_JWT_SECRET_ENV_VAR} 환경변수가 설정되지 않았습니다. "
             "로그인/토큰 검증이 필요한 명령에서만 이 값을 설정해 주세요."
+        )
+    if secret in JWT_SECRET_PLACEHOLDERS:
+        raise JWTConfigurationError(
+            f"{CATALOGGUARD_JWT_SECRET_ENV_VAR}에 예시 placeholder가 설정되어 있습니다. "
+            "실제 비밀값으로 교체해 주세요."
         )
     return secret
 
