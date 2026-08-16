@@ -493,20 +493,40 @@ jobs:
           docker run --rm --network host \
             --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
             "${AIRFLOW_IMAGE}" db migrate
+      - name: Start standalone Airflow DAG processor
+        shell: bash
+        run: |
+          docker run -d --name airflow-dag-processor-smoke --network host \
+            --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
+            "${AIRFLOW_IMAGE}" dag-processor
       - name: Run Airflow DAG import and structure smoke checks
         shell: bash
         run: |
           set -Eeuo pipefail
 
+          for attempt in {1..30}; do
+            if docker run --rm --network host \
+              --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
+              "${AIRFLOW_IMAGE}" dags list | grep -E '^catalogguard_airflow_smoke[[:space:]]'; then
+              break
+            fi
+
+            if [[ "${attempt}" == "30" ]]; then
+              docker logs airflow-dag-processor-smoke
+              exit 1
+            fi
+
+            sleep 2
+          done
           docker run --rm --network host \
             --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
             "${AIRFLOW_IMAGE}" dags list-import-errors
           docker run --rm --network host \
             --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
-            "${AIRFLOW_IMAGE}" dags list | grep -E '^catalogguard_airflow_smoke[[:space:]]'
+            "${AIRFLOW_IMAGE}" tasks list catalogguard_airflow_smoke | grep -x 'start'
           docker run --rm --network host \
             --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
-            "${AIRFLOW_IMAGE}" tasks list catalogguard_airflow_smoke | grep -x 'start'
+            "${AIRFLOW_IMAGE}" tasks list catalogguard_airflow_smoke | grep -x 'airflow_environment_check'
           docker run --rm \
             --entrypoint python "${AIRFLOW_IMAGE}" \
             -c "import importlib.util; assert importlib.util.find_spec('etl') is not None"
@@ -514,6 +534,12 @@ jobs:
             --env-file "${RUNNER_TEMP}/airflow-smoke.env" \
             --entrypoint python "${AIRFLOW_IMAGE}" \
             -m unittest discover -s /opt/airflow/tests -v
+      - name: Print Airflow DAG processor logs on failure
+        if: failure()
+        run: docker logs airflow-dag-processor-smoke
+      - name: Stop Airflow DAG processor
+        if: always()
+        run: docker rm --force airflow-dag-processor-smoke
 
   browser-e2e:
     runs-on: ubuntu-latest
