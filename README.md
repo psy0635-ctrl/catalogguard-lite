@@ -2570,14 +2570,16 @@ python -m pytest -m performance tests/performance/test_inspection_query_performa
 
 ## 공급사 CSV ETL MVP
 
-## Airflow foundation (ETL orchestration is not implemented yet)
+## Airflow foundation and configured HTTP feed staging
 
 `airflow/` is an isolated Airflow 3 runtime foundation. It has its own image,
 Python dependency definition, PostgreSQL metadata database, API server,
 scheduler, and DAG processor. It does not share CatalogGuard's application
-requirements or PostgreSQL database, and the only DAG currently included is a
-no-side-effect import/structure smoke DAG. It does not call HTTP feeds, S3,
-`run_web_etl()`, staging loads, or promotion services.
+requirements or PostgreSQL database. The foundation includes the no-side-effect
+import/structure smoke DAG and a manual `catalogguard_http_feed_to_staging` DAG.
+The latter calls the existing `read_http_feed_csv()` and `run_web_etl()` service
+inside one task, so no CSV artifact is stored in XCom or shared filesystem. It
+does not perform promotion or invoke S3, Celery, Kafka, Spark, or Flink.
 
 Before starting it, copy the example environment file and replace the Airflow
 placeholder secrets. Generate the Fernet key with the Airflow image, for example:
@@ -2593,6 +2595,25 @@ docker compose --env-file .env -f airflow/compose.yaml up --build -d
 docker compose --env-file .env -f airflow/compose.yaml exec airflow-scheduler airflow dags list-import-errors
 docker compose --env-file .env -f airflow/compose.yaml exec airflow-scheduler airflow tasks list catalogguard_airflow_smoke
 ```
+
+To run the configured HTTP feed staging DAG, trigger it manually and provide
+only an allowlisted `profile_id` (currently `sample_fashion_vendor_v1` or
+`sample_marketplace_vendor_v1`). The feed URL and filename are scheduler/task
+environment configuration, never DAG parameters. `DATABASE_URL` must point to
+the separately managed CatalogGuard database through a hostname reachable from
+the Airflow scheduler container; do not use `localhost` for a host-side
+database. The Airflow metadata database remains the `airflow-db` service.
+
+```powershell
+docker compose --env-file .env -f airflow/compose.yaml exec airflow-scheduler airflow dags trigger catalogguard_http_feed_to_staging --conf '{"profile_id":"sample_fashion_vendor_v1"}'
+```
+
+The task retries transient connection/DNS/timeout, HTTP 429, and HTTP 5xx
+failures. Redirects, other HTTP 4xx responses, unsafe or absent feed
+configuration, invalid CSV input, profile errors, and non-transient database
+failures do not retry. A retry fetches the configured URL again: if the remote
+feed changes, its different SHA-256 identity can create a separate ETL batch
+rather than mutating the already committed staging batch.
 
 The Airflow UI/API is exposed on `http://localhost:8088` by default. Stop only
 the Airflow foundation with the following command; it does not touch the
