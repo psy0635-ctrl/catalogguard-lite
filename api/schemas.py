@@ -209,6 +209,16 @@ class ETLProfileListResponse(BaseModel):
     items: list[ETLProfileResponse]
 
 
+class ETLProfileDetailResponse(BaseModel):
+    id: str
+    display_name: str
+    profile_name: str
+    profile_version: str
+    source_columns: dict[str, list[str]]
+    required_source_columns: list[str]
+    defaults: dict[str, str]
+
+
 CatalogPromotionValue = str | int | None
 
 

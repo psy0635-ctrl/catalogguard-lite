@@ -2039,6 +2039,15 @@ ETL_PROFILE_LIST_RESPONSE = {
         {"id": "sample_marketplace_vendor_v1", "display_name": "마켓플레이스 공급사 샘플"},
     ]
 }
+ETL_PROFILE_DETAIL_RESPONSE = {
+    "id": "sample_fashion_vendor_v1",
+    "display_name": "패션 공급사 샘플",
+    "profile_name": "sample_fashion_vendor",
+    "profile_version": "2",
+    "source_columns": {"vendor_sku": ["product_group_id", "product_id"]},
+    "required_source_columns": ["vendor_sku"],
+    "defaults": {"stock": "0"},
+}
 
 
 def test_run_etl_load_posts_multipart_file_and_profile_id_form_field():
@@ -2559,6 +2568,56 @@ def test_list_etl_profiles_rejects_malformed_items():
 
     with pytest.raises(client_module.CatalogGuardApiResponseError):
         client.list_etl_profiles()
+
+
+def test_get_etl_profile_detail_returns_validated_response_and_escapes_path_id():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_PROFILE_DETAIL_RESPONSE),
+        timeout_seconds=6.0,
+    )
+
+    data = client.get_etl_profile_detail(" sample_fashion_vendor_v1 ")
+
+    assert data == ETL_PROFILE_DETAIL_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/etl-profiles/sample_fashion_vendor_v1",
+            "params": None,
+            "timeout": 6.0,
+        }
+    ]
+
+
+def test_get_etl_profile_detail_percent_encodes_path_separator():
+    client, session = make_client(response=FakeResponse(payload=ETL_PROFILE_DETAIL_RESPONSE))
+
+    client.get_etl_profile_detail("../secret")
+
+    assert session.calls[0]["url"].endswith("/api/v1/etl-profiles/..%2Fsecret")
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {key: value for key, value in ETL_PROFILE_DETAIL_RESPONSE.items() if key != "defaults"},
+        {**ETL_PROFILE_DETAIL_RESPONSE, "source_columns": {"vendor_sku": "product_id"}},
+    ],
+)
+def test_get_etl_profile_detail_rejects_missing_or_invalid_response_fields(response):
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload=response))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.get_etl_profile_detail("sample_fashion_vendor_v1")
+
+
+def test_get_etl_profile_detail_maps_404_to_profile_not_found_error():
+    client_module = import_client_module()
+    response = FakeResponse(status_code=404, payload={"detail": "missing"})
+    client, _ = make_client(response=response)
+
+    with pytest.raises(client_module.ETLProfileNotFoundError):
+        client.get_etl_profile_detail("unknown")
 
 
 LOGIN_RESPONSE = {

@@ -150,6 +150,16 @@ def test_no_token_returns_401_on_etl_quality_trend_before_database(
     assert reject_route_database_dependency() == 0
 
 
+def test_no_token_returns_401_on_etl_profile_detail_before_database(
+    reject_route_database_dependency,
+):
+    response = client.get("/api/v1/etl-profiles/sample_fashion_vendor_v1")
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "authentication_required"
+    assert reject_route_database_dependency() == 0
+
+
 def test_no_token_returns_401_on_etl_detail_before_database(
     reject_route_database_dependency,
 ):
@@ -394,6 +404,24 @@ def test_operator_token_can_read_etl_quality_trend(operator_token):
 
 def test_viewer_token_can_read_etl_profiles(viewer_token):
     response = client.get("/api/v1/etl-profiles", headers=_auth_headers(viewer_token))
+
+    assert response.status_code == 200
+
+
+def test_viewer_token_can_read_etl_profile_detail(viewer_token):
+    response = client.get(
+        "/api/v1/etl-profiles/sample_fashion_vendor_v1",
+        headers=_auth_headers(viewer_token),
+    )
+
+    assert response.status_code == 200
+
+
+def test_operator_token_can_read_etl_profile_detail(operator_token):
+    response = client.get(
+        "/api/v1/etl-profiles/sample_fashion_vendor_v1",
+        headers=_auth_headers(operator_token),
+    )
 
     assert response.status_code == 200
 

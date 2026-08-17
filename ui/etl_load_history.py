@@ -17,6 +17,7 @@ from clients.catalogguard_api import (
     CatalogPromotionRollbackNotFoundError,
     ETLInvalidUploadError,
     ETLLoadNotFoundError,
+    ETLProfileNotFoundError,
     ETLUnsupportedProfileError,
 )
 from ui.auth import get_authenticated_api_client, is_operator
@@ -43,6 +44,8 @@ ETL_LOAD_DISPLAY_COLUMNS = [
     "실행 사용자",
 ]
 ETL_ERROR_DISPLAY_COLUMNS = ["오류 코드", "발생 건수"]
+ETL_PROFILE_MAPPING_DISPLAY_COLUMNS = ["공급사 원본 컬럼", "CatalogGuard 컬럼"]
+ETL_PROFILE_DEFAULTS_DISPLAY_COLUMNS = ["CatalogGuard 컬럼", "기본값"]
 ETL_REJECT_DISPLAY_COLUMNS = ["원본 행", "오류 코드", "오류 필드", "오류 메시지"]
 UNKNOWN_SIZE_TOKEN_DISPLAY_COLUMNS = ["사이즈 토큰", "개수"]
 ETL_PRODUCT_DISPLAY_COLUMNS = [
@@ -177,6 +180,9 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_web_run_profiles_response": None,
     "etl_web_run_profiles_error": None,
     "etl_web_run_selected_profile_id": None,
+    "etl_web_run_profile_detail_id": None,
+    "etl_web_run_profile_detail_response": None,
+    "etl_web_run_profile_detail_error": None,
     "etl_web_run_in_flight": False,
     "etl_web_run_result": None,
     "etl_web_run_error": None,
@@ -252,6 +258,27 @@ def build_etl_error_counts_dataframe(error_counts: dict[str, int] | None) -> pd.
         ],
         columns=ETL_ERROR_DISPLAY_COLUMNS,
     )
+
+
+def build_etl_profile_mapping_dataframe(
+    source_columns: dict[str, list[str]],
+) -> pd.DataFrame:
+    rows = [
+        {
+            "공급사 원본 컬럼": source_column,
+            "CatalogGuard 컬럼": ", ".join(target_columns),
+        }
+        for source_column, target_columns in source_columns.items()
+    ]
+    return pd.DataFrame(rows, columns=ETL_PROFILE_MAPPING_DISPLAY_COLUMNS)
+
+
+def build_etl_profile_defaults_dataframe(defaults: dict[str, str]) -> pd.DataFrame:
+    rows = [
+        {"CatalogGuard 컬럼": column, "기본값": value}
+        for column, value in defaults.items()
+    ]
+    return pd.DataFrame(rows, columns=ETL_PROFILE_DEFAULTS_DISPLAY_COLUMNS)
 
 
 def build_etl_rejection_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
@@ -1993,9 +2020,70 @@ def _fetch_etl_profiles(api_client, session_state) -> list[dict[str, Any]] | Non
         return None
 
 
+def _fetch_etl_profile_detail(
+    api_client,
+    session_state,
+    profile_id: str | None,
+) -> dict[str, Any] | None:
+    if not profile_id:
+        return None
+
+    if session_state.get("etl_web_run_profile_detail_id") == profile_id:
+        cached = session_state.get("etl_web_run_profile_detail_response")
+        if isinstance(cached, dict):
+            return cached
+        if session_state.get("etl_web_run_profile_detail_error") is not None:
+            return None
+
+    session_state["etl_web_run_profile_detail_id"] = profile_id
+    session_state["etl_web_run_profile_detail_response"] = None
+    session_state["etl_web_run_profile_detail_error"] = None
+    try:
+        response = api_client.get_etl_profile_detail(profile_id)
+        session_state["etl_web_run_profile_detail_response"] = response
+        return response
+    except (
+        ETLProfileNotFoundError,
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+    ) as error:
+        session_state["etl_web_run_profile_detail_error"] = error
+        return None
+
+
 def _on_etl_web_run_profile_change(session_state) -> None:
     session_state["etl_web_run_result"] = None
     session_state["etl_web_run_error"] = None
+    session_state["etl_web_run_profile_detail_id"] = None
+    session_state["etl_web_run_profile_detail_response"] = None
+    session_state["etl_web_run_profile_detail_error"] = None
+
+
+def _render_etl_profile_detail(api_client, profile_id: str | None) -> None:
+    detail = _fetch_etl_profile_detail(api_client, st.session_state, profile_id)
+    if detail is None:
+        error = st.session_state.get("etl_web_run_profile_detail_error")
+        if error is not None:
+            st.error(
+                build_etl_api_error_display_message(
+                    "ETL 프로필 상세 정보를 불러오지 못했습니다.", error
+                )
+            )
+        return
+
+    st.subheader("선택한 ETL 프로필")
+    st.markdown(f"프로필 이름: {detail['display_name']}")
+    metadata_columns = st.columns(2)
+    metadata_columns[0].metric("내부 프로필", detail["profile_name"])
+    metadata_columns[1].metric("프로필 버전", detail["profile_version"])
+    st.markdown("#### 필수 원본 컬럼")
+    st.markdown("\n".join(f"- {column}" for column in detail["required_source_columns"]))
+    st.markdown("#### 컬럼 매핑")
+    st.dataframe(build_etl_profile_mapping_dataframe(detail["source_columns"]))
+    st.markdown("#### 기본값")
+    st.dataframe(build_etl_profile_defaults_dataframe(detail["defaults"]))
 
 
 def _etl_web_run_error_message(error: Exception) -> str:
@@ -2073,6 +2161,10 @@ def _render_etl_web_run(api_client) -> None:
         key="etl_web_run_selected_profile_id",
         on_change=_on_etl_web_run_profile_change,
         args=(st.session_state,),
+    )
+    _render_etl_profile_detail(
+        api_client,
+        st.session_state.get("etl_web_run_selected_profile_id"),
     )
     uploaded_file = st.file_uploader(
         "공급사 CSV 파일",

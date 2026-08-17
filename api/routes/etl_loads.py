@@ -48,6 +48,7 @@ from api.schemas import (
     ETLLoadQualitySummaryResponse,
     ETLLoadQualityTrendItemResponse,
     ETLLoadQualityTrendResponse,
+    ETLProfileDetailResponse,
     ETLProfileListResponse,
     ETLProfileResponse,
     ETLRejectErrorResponse,
@@ -82,7 +83,11 @@ from etl.http_source import (
     read_http_feed_csv,
 )
 from etl.pipeline import ETLPipelineError
-from etl.profile_loader import ETLProfileNotFoundError, list_etl_profiles
+from etl.profile_loader import (
+    ETLProfileNotFoundError,
+    get_etl_profile_detail,
+    list_etl_profiles,
+)
 from config.settings import ETL_HTTP_FEED_SOURCE_REF
 from etl.s3_source import (
     S3KeyNotAllowedError,
@@ -713,6 +718,36 @@ def list_etl_profile_options(
 ) -> ETLProfileListResponse:
     return ETLProfileListResponse(
         items=[ETLProfileResponse(**profile) for profile in list_etl_profiles()]
+    )
+
+
+@router.get(
+    "/api/v1/etl-profiles/{profile_id}",
+    response_model=ETLProfileDetailResponse,
+)
+def get_etl_profile_detail_route(
+    profile_id: str,
+    _current_user=Depends(require_viewer),
+) -> ETLProfileDetailResponse:
+    try:
+        detail = get_etl_profile_detail(profile_id)
+    except ETLProfileNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="ETL profile not found.",
+        ) from error
+
+    return ETLProfileDetailResponse(
+        id=detail["id"],
+        display_name=detail["display_name"],
+        profile_name=detail["profile_name"],
+        profile_version=detail["profile_version"],
+        source_columns={
+            source: list(targets)
+            for source, targets in detail["source_columns"].items()
+        },
+        required_source_columns=list(detail["required_source_columns"]),
+        defaults=detail["defaults"],
     )
 
 
