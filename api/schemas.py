@@ -93,6 +93,19 @@ class ETLLoadQualitySummaryResponse(BaseModel):
     rejection_rate: float
 
 
+class ETLLoadQualityTrendItemResponse(BaseModel):
+    etl_load_run_id: int
+    created_at: datetime
+    total_rows: int
+    loaded_rows: int
+    rejected_rows: int
+    rejection_rate: float
+
+
+class ETLLoadQualityTrendResponse(BaseModel):
+    items: list[ETLLoadQualityTrendItemResponse]
+
+
 class ETLStagingProductResponse(BaseModel):
     staging_product_id: int
     product_group_id: str

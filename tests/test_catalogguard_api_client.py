@@ -1037,6 +1037,19 @@ ETL_LOAD_QUALITY_SUMMARY_RESPONSE = {
     "rejection_rate": 6.67,
 }
 
+ETL_LOAD_QUALITY_TREND_RESPONSE = {
+    "items": [
+        {
+            "etl_load_run_id": 12,
+            "created_at": "2026-07-25T12:00:00Z",
+            "total_rows": 30,
+            "loaded_rows": 25,
+            "rejected_rows": 5,
+            "rejection_rate": 16.67,
+        }
+    ]
+}
+
 ETL_LOAD_DETAIL_RESPONSE = {
     "etl_load_run_id": 12,
     "source_filename": "vendor_products.csv",
@@ -1167,6 +1180,54 @@ def test_get_etl_load_quality_summary_calls_endpoint_and_trims_profile_filter():
             "timeout": 5.0,
         }
     ]
+
+
+def test_get_etl_load_quality_trend_calls_endpoint_with_trimmed_profile_and_limit():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_LOAD_QUALITY_TREND_RESPONSE),
+    )
+
+    data = client.get_etl_load_quality_trend(profile_name="  fashion  ", limit=3)
+
+    assert data == ETL_LOAD_QUALITY_TREND_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/etl-loads/quality-trend",
+            "params": {"profile_name": "fashion", "limit": 3},
+            "timeout": 5.0,
+        }
+    ]
+
+
+def test_get_etl_load_quality_trend_omits_blank_profile_filter():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_LOAD_QUALITY_TREND_RESPONSE),
+    )
+
+    client.get_etl_load_quality_trend(profile_name="   ", limit=10)
+
+    assert session.calls[0]["params"] == {"limit": 10}
+
+
+def test_get_etl_load_quality_trend_rejects_missing_item_field():
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={
+                "items": [
+                    {
+                        "etl_load_run_id": 12,
+                        "created_at": "2026-07-25T12:00:00Z",
+                        "total_rows": 30,
+                        "loaded_rows": 25,
+                        "rejected_rows": 5,
+                    }
+                ]
+            }
+        )
+    )
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_load_quality_trend()
 
 
 def test_get_etl_load_detail_calls_detail_endpoint_and_preserves_nullable_fields():

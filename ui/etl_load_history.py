@@ -23,6 +23,7 @@ from ui.auth import get_authenticated_api_client, is_operator
 
 
 ETL_LOAD_LIMIT = 10
+ETL_QUALITY_TREND_LIMIT = 10
 ETL_PRODUCT_LIMIT = 20
 ETL_REJECT_LIMIT = 20
 UNKNOWN_SIZE_TOKEN_LIMIT = 20
@@ -132,6 +133,9 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_load_quality_summary_initialized": False,
     "etl_load_quality_summary_response": None,
     "etl_load_quality_summary_error": None,
+    "etl_load_quality_trend_initialized": False,
+    "etl_load_quality_trend_response": None,
+    "etl_load_quality_trend_error": None,
     "etl_load_selected_run_id": None,
     "etl_load_detail_requested": False,
     "etl_load_detail_response": None,
@@ -620,6 +624,9 @@ def apply_etl_load_search(session_state) -> None:
     session_state["etl_load_quality_summary_initialized"] = False
     session_state["etl_load_quality_summary_response"] = None
     session_state["etl_load_quality_summary_error"] = None
+    session_state["etl_load_quality_trend_initialized"] = False
+    session_state["etl_load_quality_trend_response"] = None
+    session_state["etl_load_quality_trend_error"] = None
     session_state["etl_load_selected_run_id"] = None
     reset_etl_load_detail_state(session_state)
     clear_catalog_promotion_preview_state(session_state)
@@ -948,6 +955,62 @@ def _render_etl_load_quality_summary(api_client) -> None:
     )
     if response.get("quality_unavailable_batch_count", 0) > 0:
         st.info("과거 일부 배치는 품질 요약 정보가 없어 집계에서 제외되었습니다.")
+
+
+def _fetch_etl_load_quality_trend(api_client, session_state) -> dict[str, Any] | None:
+    if session_state.get("etl_load_quality_trend_initialized"):
+        cached_response = session_state.get("etl_load_quality_trend_response")
+        return cached_response if isinstance(cached_response, dict) else None
+
+    profile_name = str(session_state.get("etl_load_applied_profile", "")).strip()
+    try:
+        response = api_client.get_etl_load_quality_trend(
+            profile_name=profile_name or None,
+            limit=ETL_QUALITY_TREND_LIMIT,
+        )
+        session_state["etl_load_quality_trend_response"] = response
+        session_state["etl_load_quality_trend_error"] = None
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        session_state["etl_load_quality_trend_response"] = None
+        session_state["etl_load_quality_trend_error"] = error
+    session_state["etl_load_quality_trend_initialized"] = True
+    return session_state["etl_load_quality_trend_response"]
+
+
+def _render_etl_load_quality_trend(api_client) -> None:
+    response = _fetch_etl_load_quality_trend(api_client, st.session_state)
+    if response is None:
+        error = st.session_state.get("etl_load_quality_trend_error")
+        if error is not None:
+            st.error(
+                build_etl_api_error_display_message(
+                    "ETL 품질 추이를 불러오지 못했습니다.",
+                    error,
+                )
+            )
+        return
+
+    st.subheader("최근 ETL 품질 추이")
+    items = response.get("items") or []
+    if not items:
+        st.info("표시할 품질 추이 데이터가 없습니다.")
+        return
+
+    st.caption("최근 품질 집계 가능 배치의 Reject 비율(%) 추이입니다.")
+    st.line_chart(
+        pd.DataFrame(items),
+        x="created_at",
+        y="rejection_rate",
+        x_label="배치 시각",
+        y_label="Reject 비율 (%)",
+        width="stretch",
+    )
 
 
 def _fetch_etl_load_detail(api_client, session_state) -> dict[str, Any] | None:
@@ -2126,6 +2189,7 @@ def render_etl_load_history(api_client=None) -> None:
     )
     _render_etl_search_controls()
     _render_etl_load_quality_summary(api_client)
+    _render_etl_load_quality_trend(api_client)
 
     response = _fetch_etl_load_list(api_client, st.session_state)
     if response is None:

@@ -46,6 +46,8 @@ from api.schemas import (
     ETLLoadListItemResponse,
     ETLLoadListResponse,
     ETLLoadQualitySummaryResponse,
+    ETLLoadQualityTrendItemResponse,
+    ETLLoadQualityTrendResponse,
     ETLProfileListResponse,
     ETLProfileResponse,
     ETLRejectErrorResponse,
@@ -65,8 +67,10 @@ from db.etl_query_service import (
     ETLLoadDetail,
     ETLLoadList,
     ETLLoadQualitySummary,
+    ETLLoadQualityTrend,
     get_etl_load_detail,
     get_etl_load_quality_summary,
+    get_etl_load_quality_trend,
     list_etl_rejections,
     list_etl_loads,
     normalize_etl_filter,
@@ -193,6 +197,24 @@ def _build_quality_summary_response(
         loaded_rows=result.loaded_rows,
         rejected_rows=result.rejected_rows,
         rejection_rate=result.rejection_rate,
+    )
+
+
+def _build_quality_trend_response(
+    result: ETLLoadQualityTrend,
+) -> ETLLoadQualityTrendResponse:
+    return ETLLoadQualityTrendResponse(
+        items=[
+            ETLLoadQualityTrendItemResponse(
+                etl_load_run_id=item.etl_load_run_id,
+                created_at=item.created_at,
+                total_rows=item.total_rows,
+                loaded_rows=item.loaded_rows,
+                rejected_rows=item.rejected_rows,
+                rejection_rate=item.rejection_rate,
+            )
+            for item in result.items
+        ]
     )
 
 
@@ -665,6 +687,24 @@ def get_etl_load_quality_summary_route(
         profile_name=normalize_etl_filter(profile_name),
     )
     return _build_quality_summary_response(result)
+
+
+@router.get(
+    "/api/v1/etl-loads/quality-trend",
+    response_model=ETLLoadQualityTrendResponse,
+)
+def get_etl_load_quality_trend_route(
+    profile_name: str | None = Query(default=None),
+    limit: int = Query(default=10, ge=1, le=50),
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> ETLLoadQualityTrendResponse:
+    result = get_etl_load_quality_trend(
+        session,
+        profile_name=normalize_etl_filter(profile_name),
+        limit=limit,
+    )
+    return _build_quality_trend_response(result)
 
 
 @router.get("/api/v1/etl-profiles", response_model=ETLProfileListResponse)

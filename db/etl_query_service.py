@@ -48,6 +48,21 @@ class ETLLoadQualitySummary:
 
 
 @dataclass(frozen=True)
+class ETLLoadQualityTrendItem:
+    etl_load_run_id: int
+    created_at: datetime
+    total_rows: int
+    loaded_rows: int
+    rejected_rows: int
+    rejection_rate: float
+
+
+@dataclass(frozen=True)
+class ETLLoadQualityTrend:
+    items: list[ETLLoadQualityTrendItem]
+
+
+@dataclass(frozen=True)
 class ETLStagingProduct:
     staging_product_id: int
     product_group_id: str
@@ -150,6 +165,14 @@ def _apply_etl_load_filters(
     return statement
 
 
+def _quality_available_condition():
+    return (
+        ETLLoadRun.total_rows.is_not(None)
+        & ETLLoadRun.rejected_rows.is_not(None)
+        & ETLLoadRun.error_counts.is_not(None)
+    )
+
+
 def _to_load_list_item(load_run: ETLLoadRun) -> ETLLoadListItem:
     return ETLLoadListItem(
         etl_load_run_id=load_run.id,
@@ -220,11 +243,7 @@ def get_etl_load_quality_summary(
     profile_name: str | None = None,
 ) -> ETLLoadQualitySummary:
     """Aggregate ETL quality only from batches with complete quality metadata."""
-    quality_available = (
-        ETLLoadRun.total_rows.is_not(None)
-        & ETLLoadRun.rejected_rows.is_not(None)
-        & ETLLoadRun.error_counts.is_not(None)
-    )
+    quality_available = _quality_available_condition()
     statement = _apply_etl_load_filters(
         select(
             func.count().label("batch_count"),
@@ -280,6 +299,41 @@ def get_etl_load_quality_summary(
         rejection_rate=(
             round(rejected_rows / total_rows * 100, 2) if total_rows else 0.0
         ),
+    )
+
+
+def get_etl_load_quality_trend(
+    session: Session,
+    *,
+    profile_name: str | None = None,
+    limit: int,
+) -> ETLLoadQualityTrend:
+    """Return recent quality-available ETL batches in chronological order."""
+    statement = _apply_etl_load_filters(
+        select(ETLLoadRun),
+        profile_name=profile_name,
+    ).where(_quality_available_condition()).order_by(
+        ETLLoadRun.created_at.desc(),
+        ETLLoadRun.id.desc(),
+    )
+    load_runs = list(session.scalars(statement.limit(limit)).all())
+    load_runs.reverse()
+    return ETLLoadQualityTrend(
+        items=[
+            ETLLoadQualityTrendItem(
+                etl_load_run_id=load_run.id,
+                created_at=load_run.created_at,
+                total_rows=load_run.total_rows,
+                loaded_rows=load_run.loaded_rows,
+                rejected_rows=load_run.rejected_rows,
+                rejection_rate=(
+                    round(load_run.rejected_rows / load_run.total_rows * 100, 2)
+                    if load_run.total_rows
+                    else 0.0
+                ),
+            )
+            for load_run in load_runs
+        ]
     )
 
 
