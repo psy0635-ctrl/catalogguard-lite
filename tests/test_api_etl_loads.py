@@ -14,6 +14,7 @@ client = TestClient(app)
 ENDPOINT = "/api/v1/etl-loads"
 QUALITY_SUMMARY_ENDPOINT = f"{ENDPOINT}/quality-summary"
 QUALITY_TREND_ENDPOINT = f"{ENDPOINT}/quality-trend"
+ETL_PROFILES_ENDPOINT = "/api/v1/etl-profiles"
 
 
 @pytest.fixture(autouse=True)
@@ -387,6 +388,61 @@ def test_quality_trend_passes_trimmed_profile_filter_and_limit(
     assert response.status_code == 200
     assert fake_etl_query_service.calls[-1]["profile_name"] == "fashion"
     assert fake_etl_query_service.calls[-1]["limit"] == 3
+
+
+def test_etl_profile_detail_returns_safe_allowlisted_metadata_and_list_still_works():
+    response = client.get(f"{ETL_PROFILES_ENDPOINT}/sample_fashion_vendor_v1")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": "sample_fashion_vendor_v1",
+        "display_name": "패션 공급사 샘플",
+        "profile_name": "sample_fashion_vendor",
+        "profile_version": "2",
+        "source_columns": {
+            "vendor_sku": ["product_group_id", "product_id"],
+            "item_name": ["product_name"],
+            "main_category": ["category"],
+            "brand_name": ["seller"],
+            "list_price": ["price"],
+            "discount_price": ["sale_price"],
+            "colour": ["color"],
+            "size_name": ["size"],
+            "quantity": ["stock"],
+            "description_text": ["description"],
+            "image_link": ["image_path"],
+        },
+        "required_source_columns": [
+            "vendor_sku",
+            "item_name",
+            "main_category",
+            "list_price",
+            "colour",
+            "size_name",
+            "image_link",
+        ],
+        "defaults": {"stock": "0"},
+    }
+    assert client.get(ETL_PROFILES_ENDPOINT).json()["items"] == [
+        {"id": "sample_fashion_vendor_v1", "display_name": "패션 공급사 샘플"},
+        {
+            "id": "sample_marketplace_vendor_v1",
+            "display_name": "마켓플레이스 공급사 샘플",
+        },
+    ]
+    assert not {"filename", "path", "profile_path"} & set(response.json())
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "detail"),
+    [("not-exists", "ETL profile not found."), ("..%2Fsecret", "Not Found")],
+)
+def test_etl_profile_detail_rejects_unknown_or_traversal_ids_safely(profile_id, detail):
+    response = client.get(f"{ETL_PROFILES_ENDPOINT}/{profile_id}")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == detail
+    assert "config" not in response.text.lower()
 
 
 @pytest.mark.parametrize("limit", [0, 51])

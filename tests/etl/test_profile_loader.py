@@ -3,10 +3,12 @@ from pathlib import Path
 
 import pytest
 
+import etl.profile_loader as profile_loader
 from etl.profile_loader import (
     ETL_PROFILE_DIR,
     ETLProfileNotFoundError,
     ETLProfileValidationError,
+    get_etl_profile_detail,
     get_profile_path,
     list_etl_profiles,
     load_profile,
@@ -156,6 +158,57 @@ def test_get_profile_path_resolves_known_id_to_a_loadable_profile():
     assert path.parent.resolve() == ETL_PROFILE_DIR.resolve()
     profile = load_profile(path)
     assert profile.name == "sample_fashion_vendor"
+
+
+def test_get_etl_profile_detail_returns_safe_allowlisted_profile_metadata():
+    detail = get_etl_profile_detail("sample_fashion_vendor_v1")
+
+    assert detail == {
+        "id": "sample_fashion_vendor_v1",
+        "display_name": "패션 공급사 샘플",
+        "profile_name": "sample_fashion_vendor",
+        "profile_version": "2",
+        "source_columns": {
+            "vendor_sku": ("product_group_id", "product_id"),
+            "item_name": ("product_name",),
+            "main_category": ("category",),
+            "brand_name": ("seller",),
+            "list_price": ("price",),
+            "discount_price": ("sale_price",),
+            "colour": ("color",),
+            "size_name": ("size",),
+            "quantity": ("stock",),
+            "description_text": ("description",),
+            "image_link": ("image_path",),
+        },
+        "required_source_columns": (
+            "vendor_sku",
+            "item_name",
+            "main_category",
+            "list_price",
+            "colour",
+            "size_name",
+            "image_link",
+        ),
+        "defaults": {"stock": "0"},
+    }
+    assert not {"filename", "path", "profile_path"} & set(detail)
+
+
+@pytest.mark.parametrize("profile_id", ["unknown_profile", "../secret"])
+def test_get_etl_profile_detail_rejects_non_allowlisted_ids(profile_id):
+    with pytest.raises(ETLProfileNotFoundError):
+        get_etl_profile_detail(profile_id)
+
+
+def test_get_etl_profile_detail_reuses_profile_loader_validation(monkeypatch):
+    def raise_validation_error(_profile_path):
+        raise ETLProfileValidationError("invalid profile")
+
+    monkeypatch.setattr(profile_loader, "load_profile", raise_validation_error)
+
+    with pytest.raises(ETLProfileValidationError, match="invalid profile"):
+        get_etl_profile_detail("sample_fashion_vendor_v1")
 
 
 @pytest.mark.parametrize(

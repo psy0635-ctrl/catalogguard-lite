@@ -1,6 +1,7 @@
 from datetime import date
 import re
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID
 
 import requests
@@ -245,6 +246,15 @@ ETL_WEB_RUN_RESPONSE_KEYS = (
 )
 ETL_PROFILE_LIST_KEYS = ("items",)
 ETL_PROFILE_ITEM_KEYS = ("id", "display_name")
+ETL_PROFILE_DETAIL_RESPONSE_KEYS = (
+    "id",
+    "display_name",
+    "profile_name",
+    "profile_version",
+    "source_columns",
+    "required_source_columns",
+    "defaults",
+)
 UNKNOWN_SIZE_TOKEN_REPORT_RESPONSE_KEYS = ("items",)
 ETL_UNSUPPORTED_PROFILE_MESSAGE = "지원하지 않는 공급사 프로필입니다."
 CATALOG_PROMOTION_NOT_FOUND_MESSAGE = "Promotion run not found."
@@ -435,6 +445,39 @@ def _validate_etl_load_quality_trend_item(item: object) -> bool:
         loaded_rows=item["loaded_rows"],
         rejected_rows=item["rejected_rows"],
         error_counts=None,
+    )
+
+
+def _is_valid_etl_profile_detail_response(data: dict[str, Any]) -> bool:
+    text_fields = ("id", "display_name", "profile_name", "profile_version")
+    source_columns = data.get("source_columns")
+    required_source_columns = data.get("required_source_columns")
+    defaults = data.get("defaults")
+    return (
+        all(isinstance(data.get(field), str) and data[field].strip() for field in text_fields)
+        and isinstance(source_columns, dict)
+        and bool(source_columns)
+        and all(
+            isinstance(source, str)
+            and source.strip()
+            and isinstance(targets, list)
+            and bool(targets)
+            and all(isinstance(target, str) and target.strip() for target in targets)
+            for source, targets in source_columns.items()
+        )
+        and isinstance(required_source_columns, list)
+        and all(
+            isinstance(source, str) and source.strip()
+            for source in required_source_columns
+        )
+        and all(source in source_columns for source in required_source_columns)
+        and isinstance(defaults, dict)
+        and all(
+            isinstance(column, str)
+            and column.strip()
+            and isinstance(value, str)
+            for column, value in defaults.items()
+        )
     )
 
 
@@ -994,6 +1037,10 @@ class ETLLoadNotFoundError(CatalogGuardApiError):
     pass
 
 
+class ETLProfileNotFoundError(CatalogGuardApiError):
+    pass
+
+
 class CatalogPromotionNotFoundError(CatalogGuardApiError):
     pass
 
@@ -1241,6 +1288,22 @@ class CatalogGuardApiClient:
             or any(key not in item for key in ETL_PROFILE_ITEM_KEYS)
             for item in items
         ):
+            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+        return data
+
+    def get_etl_profile_detail(self, profile_id: str) -> dict[str, Any]:
+        normalized_profile_id = str(profile_id).strip()
+        if not normalized_profile_id:
+            raise ValueError("profile_id must not be empty")
+
+        data = self._get_json(
+            f"/api/v1/etl-profiles/{quote(normalized_profile_id, safe='')}",
+            raise_not_found=True,
+            not_found_error=ETLProfileNotFoundError,
+            not_found_message="ETL 프로필을 찾을 수 없습니다.",
+        )
+        self._validate_response_keys(data, ETL_PROFILE_DETAIL_RESPONSE_KEYS)
+        if not _is_valid_etl_profile_detail_response(data):
             raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
         return data
 

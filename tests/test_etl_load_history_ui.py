@@ -480,6 +480,8 @@ class FakeEtlApiClient:
         promotion_audit_pages=None,
         etl_profiles=None,
         etl_profiles_error=None,
+        etl_profile_details=None,
+        etl_profile_detail_error=None,
         etl_run_response=None,
         etl_run_error=None,
         unknown_size_tokens=None,
@@ -499,6 +501,7 @@ class FakeEtlApiClient:
         self.rollback_history_calls = []
         self.rollback_detail_calls = []
         self.etl_profiles_calls = []
+        self.etl_profile_detail_calls = []
         self.etl_run_calls = []
         self.unknown_size_token_calls = []
         self.quality_summary_calls = []
@@ -512,6 +515,27 @@ class FakeEtlApiClient:
             else etl_profiles
         )
         self.etl_profiles_error = etl_profiles_error
+        self.etl_profile_details = etl_profile_details or {
+            "sample_fashion_vendor_v1": {
+                "id": "sample_fashion_vendor_v1",
+                "display_name": "패션 공급사 샘플",
+                "profile_name": "sample_fashion_vendor",
+                "profile_version": "2",
+                "source_columns": {"vendor_sku": ["product_group_id", "product_id"]},
+                "required_source_columns": ["vendor_sku"],
+                "defaults": {"stock": "0"},
+            },
+            "sample_marketplace_vendor_v1": {
+                "id": "sample_marketplace_vendor_v1",
+                "display_name": "마켓플레이스 공급사 샘플",
+                "profile_name": "sample_marketplace_vendor",
+                "profile_version": "2",
+                "source_columns": {"market_sku": ["product_group_id", "product_id"]},
+                "required_source_columns": ["market_sku"],
+                "defaults": {"stock": "0"},
+            },
+        }
+        self.etl_profile_detail_error = etl_profile_detail_error
         self.etl_run_response = etl_run_response or {
             "etl_load_run_id": 99,
             "created": True,
@@ -605,6 +629,12 @@ class FakeEtlApiClient:
         if self.etl_profiles_error is not None:
             raise self.etl_profiles_error
         return {"items": self.etl_profiles}
+
+    def get_etl_profile_detail(self, profile_id):
+        self.etl_profile_detail_calls.append(profile_id)
+        if self.etl_profile_detail_error is not None:
+            raise self.etl_profile_detail_error
+        return self.etl_profile_details[profile_id]
 
     def run_etl_load(self, **params):
         self.etl_run_calls.append(params)
@@ -1414,6 +1444,79 @@ def test_etl_web_run_profile_dropdown_lists_allowlisted_profiles(monkeypatch):
         "마켓플레이스 공급사 샘플",
     ]
     assert api_client.etl_profiles_calls == [1]
+
+
+def test_etl_web_run_shows_selected_profile_detail_before_upload(monkeypatch):
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert "선택한 ETL 프로필" in [subheader.value for subheader in app.subheader]
+    assert any("패션 공급사 샘플" in markdown.value for markdown in app.markdown)
+    assert any("필수 원본 컬럼" in markdown.value for markdown in app.markdown)
+    assert any("기본값" in markdown.value for markdown in app.markdown)
+    assert any(
+        {"공급사 원본 컬럼", "CatalogGuard 컬럼"} == set(dataframe.value.columns)
+        for dataframe in app.dataframe
+    )
+    assert any(
+        {"CatalogGuard 컬럼", "기본값"} == set(dataframe.value.columns)
+        for dataframe in app.dataframe
+    )
+    assert api_client.etl_profile_detail_calls == ["sample_fashion_vendor_v1"]
+
+
+def test_etl_web_run_profile_change_replaces_detail_without_clearing_upload_state(
+    monkeypatch,
+):
+    from ui.etl_load_history import _on_etl_web_run_profile_change
+
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    next(
+        widget
+        for widget in app.selectbox
+        if widget.key == "etl_web_run_selected_profile_id"
+    ).select("sample_marketplace_vendor_v1").run(timeout=10)
+
+    assert api_client.etl_profile_detail_calls == [
+        "sample_fashion_vendor_v1",
+        "sample_marketplace_vendor_v1",
+    ]
+    assert any("마켓플레이스 공급사 샘플" in markdown.value for markdown in app.markdown)
+    assert not any("sample_fashion_vendor" in markdown.value for markdown in app.markdown)
+
+    state = {
+        "etl_web_run_upload_file": object(),
+        "etl_web_run_result": {"etl_load_run_id": 1},
+        "etl_web_run_error": ValueError("stale"),
+        "etl_web_run_profile_detail_id": "sample_fashion_vendor_v1",
+        "etl_web_run_profile_detail_response": {"id": "sample_fashion_vendor_v1"},
+        "etl_web_run_profile_detail_error": ValueError("stale"),
+    }
+    upload = state["etl_web_run_upload_file"]
+    _on_etl_web_run_profile_change(state)
+
+    assert state["etl_web_run_upload_file"] is upload
+    assert state["etl_web_run_profile_detail_response"] is None
+
+
+def test_etl_web_run_shows_profile_detail_api_error(monkeypatch):
+    api_client = FakeEtlApiClient(
+        etl_profile_detail_error=catalogguard_api.CatalogGuardApiResponseError(
+            "private", request_id="a" * 32
+        )
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert "ETL 프로필 상세 정보를 불러오지 못했습니다.\n\n요청 ID: " + "a" * 32 in [
+        error.value for error in app.error
+    ]
 
 
 def test_etl_web_run_submit_button_disabled_without_uploaded_file(monkeypatch):

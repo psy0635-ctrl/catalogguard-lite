@@ -40,6 +40,24 @@ def list_etl_profiles() -> list[dict[str, str]]:
     ]
 
 
+def get_etl_profile_detail(profile_id: str) -> dict[str, object]:
+    """Return safe metadata for one allowlisted ETL profile."""
+    info = _ETL_PROFILE_REGISTRY.get(profile_id)
+    if info is None:
+        raise ETLProfileNotFoundError(f"Unknown ETL profile: {profile_id}")
+
+    profile = load_profile(get_profile_path(profile_id))
+    return {
+        "id": profile_id,
+        "display_name": info["display_name"],
+        "profile_name": profile.name,
+        "profile_version": profile.version,
+        "source_columns": dict(profile.source_columns),
+        "required_source_columns": profile.required_source_columns,
+        "defaults": dict(profile.defaults),
+    }
+
+
 def get_profile_path(profile_id: str) -> Path:
     """Resolve a profile_id to its config file path using the server allowlist only.
 
