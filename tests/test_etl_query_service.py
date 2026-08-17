@@ -349,3 +349,156 @@ def test_query_service_does_not_modify_database(seeded_runs):
         )
     )
     assert after == before
+
+
+def test_etl_quality_summary_returns_zeroes_when_no_batches_match(postgres_session):
+    import db.etl_query_service as etl_query_service
+
+    session, profile_prefix = postgres_session
+
+    result = etl_query_service.get_etl_load_quality_summary(
+        session,
+        profile_name=f"{profile_prefix}_missing",
+    )
+
+    assert result.batch_count == 0
+    assert result.quality_available_batch_count == 0
+    assert result.quality_unavailable_batch_count == 0
+    assert result.total_rows == 0
+    assert result.loaded_rows == 0
+    assert result.rejected_rows == 0
+    assert result.rejection_rate == 0.0
+
+
+def test_etl_quality_summary_uses_weighted_totals_not_batch_rate_average(
+    postgres_session,
+):
+    import db.etl_query_service as etl_query_service
+
+    session, profile_prefix = postgres_session
+    profile_name = f"{profile_prefix}_weighted"
+    created_at = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
+    _add_run(
+        session,
+        profile_name=profile_name,
+        source_filename="small.csv",
+        created_at=created_at,
+        suffix="d",
+        product_count=5,
+        total_rows=10,
+        rejected_rows=5,
+        error_counts={"INVALID_PRICE": 5},
+    )
+    _add_run(
+        session,
+        profile_name=profile_name,
+        source_filename="large.csv",
+        created_at=created_at,
+        suffix="e",
+        product_count=990,
+        total_rows=1000,
+        rejected_rows=10,
+        error_counts={"INVALID_PRICE": 10},
+    )
+    session.commit()
+
+    result = etl_query_service.get_etl_load_quality_summary(
+        session,
+        profile_name=profile_name,
+    )
+
+    assert result.batch_count == 2
+    assert result.quality_available_batch_count == 2
+    assert result.quality_unavailable_batch_count == 0
+    assert result.total_rows == 1010
+    assert result.loaded_rows == 995
+    assert result.rejected_rows == 15
+    assert result.rejection_rate == 1.49
+
+
+def test_etl_quality_summary_applies_existing_profile_name_filter_policy(
+    postgres_session,
+):
+    import db.etl_query_service as etl_query_service
+
+    session, profile_prefix = postgres_session
+    created_at = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
+    _add_run(
+        session,
+        profile_name=f"{profile_prefix}_Fashion_A",
+        source_filename="fashion.csv",
+        created_at=created_at,
+        suffix="f",
+        product_count=95,
+        total_rows=100,
+        rejected_rows=5,
+        error_counts={"INVALID_PRICE": 5},
+    )
+    _add_run(
+        session,
+        profile_name=f"{profile_prefix}_market_B",
+        source_filename="market.csv",
+        created_at=created_at,
+        suffix="g",
+        product_count=40,
+        total_rows=50,
+        rejected_rows=10,
+        error_counts={"INVALID_PRICE": 10},
+    )
+    session.commit()
+
+    result = etl_query_service.get_etl_load_quality_summary(
+        session,
+        profile_name="  FASHION_A  ",
+    )
+
+    assert result.batch_count == 1
+    assert result.quality_available_batch_count == 1
+    assert result.total_rows == 100
+    assert result.loaded_rows == 95
+    assert result.rejected_rows == 5
+    assert result.rejection_rate == 5.0
+
+
+def test_etl_quality_summary_excludes_legacy_quality_null_batches_from_all_totals(
+    postgres_session,
+):
+    import db.etl_query_service as etl_query_service
+
+    session, profile_prefix = postgres_session
+    profile_name = f"{profile_prefix}_legacy"
+    created_at = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
+    _add_run(
+        session,
+        profile_name=profile_name,
+        source_filename="available.csv",
+        created_at=created_at,
+        suffix="h",
+        product_count=95,
+        total_rows=100,
+        rejected_rows=5,
+        error_counts={"INVALID_PRICE": 5},
+    )
+    _add_run(
+        session,
+        profile_name=profile_name,
+        source_filename="legacy.csv",
+        created_at=created_at,
+        suffix="i",
+        product_count=100,
+    )
+    session.commit()
+
+    result = etl_query_service.get_etl_load_quality_summary(
+        session,
+        profile_name=profile_name,
+    )
+
+    # Legacy batch는 배치 수에는 남지만, 추정한 0값으로 품질 합계를 오염시키면 안 됩니다.
+    assert result.batch_count == 2
+    assert result.quality_available_batch_count == 1
+    assert result.quality_unavailable_batch_count == 1
+    assert result.total_rows == 100
+    assert result.loaded_rows == 95
+    assert result.rejected_rows == 5
+    assert result.rejection_rate == 5.0

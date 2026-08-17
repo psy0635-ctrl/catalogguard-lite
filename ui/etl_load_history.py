@@ -129,6 +129,9 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_load_offset": 0,
     "etl_load_list_response": None,
     "etl_load_list_error": None,
+    "etl_load_quality_summary_initialized": False,
+    "etl_load_quality_summary_response": None,
+    "etl_load_quality_summary_error": None,
     "etl_load_selected_run_id": None,
     "etl_load_detail_requested": False,
     "etl_load_detail_response": None,
@@ -614,6 +617,9 @@ def apply_etl_load_search(session_state) -> None:
     session_state["etl_load_list_response"] = None
     session_state["etl_load_list_error"] = None
     session_state["etl_load_initialized"] = False
+    session_state["etl_load_quality_summary_initialized"] = False
+    session_state["etl_load_quality_summary_response"] = None
+    session_state["etl_load_quality_summary_error"] = None
     session_state["etl_load_selected_run_id"] = None
     reset_etl_load_detail_state(session_state)
     clear_catalog_promotion_preview_state(session_state)
@@ -884,6 +890,64 @@ def _fetch_etl_load_list(api_client, session_state) -> dict[str, Any] | None:
         session_state["etl_load_list_error"] = error
         session_state["etl_load_initialized"] = False
         return None
+
+
+def _fetch_etl_load_quality_summary(api_client, session_state) -> dict[str, Any] | None:
+    if session_state.get("etl_load_quality_summary_initialized"):
+        cached_response = session_state.get("etl_load_quality_summary_response")
+        return cached_response if isinstance(cached_response, dict) else None
+
+    profile_name = str(session_state.get("etl_load_applied_profile", "")).strip()
+    try:
+        response = api_client.get_etl_load_quality_summary(
+            profile_name=profile_name or None,
+        )
+        session_state["etl_load_quality_summary_response"] = response
+        session_state["etl_load_quality_summary_error"] = None
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        session_state["etl_load_quality_summary_response"] = None
+        session_state["etl_load_quality_summary_error"] = error
+    session_state["etl_load_quality_summary_initialized"] = True
+    return session_state["etl_load_quality_summary_response"]
+
+
+def _render_etl_load_quality_summary(api_client) -> None:
+    response = _fetch_etl_load_quality_summary(api_client, st.session_state)
+    if response is None:
+        error = st.session_state.get("etl_load_quality_summary_error")
+        if error is not None:
+            st.error(
+                build_etl_api_error_display_message(
+                    "ETL 품질 요약을 불러오지 못했습니다.",
+                    error,
+                )
+            )
+        return
+
+    st.subheader("ETL 품질 요약")
+    metric_columns = st.columns(6)
+    metric_columns[0].metric("실행 배치", response.get("batch_count", 0), border=True)
+    metric_columns[1].metric(
+        "품질 집계 가능 배치",
+        response.get("quality_available_batch_count", 0),
+        border=True,
+    )
+    metric_columns[2].metric("전체 입력", response.get("total_rows", 0), border=True)
+    metric_columns[3].metric("정상 적재", response.get("loaded_rows", 0), border=True)
+    metric_columns[4].metric("Reject", response.get("rejected_rows", 0), border=True)
+    metric_columns[5].metric(
+        "Reject 비율",
+        f"{float(response.get('rejection_rate', 0.0)):.2f}%",
+        border=True,
+    )
+    if response.get("quality_unavailable_batch_count", 0) > 0:
+        st.info("과거 일부 배치는 품질 요약 정보가 없어 집계에서 제외되었습니다.")
 
 
 def _fetch_etl_load_detail(api_client, session_state) -> dict[str, Any] | None:
@@ -2061,6 +2125,7 @@ def render_etl_load_history(api_client=None) -> None:
         "공급사 CSV를 PostgreSQL staging에 적재한 배치와 staging 상품을 조회합니다."
     )
     _render_etl_search_controls()
+    _render_etl_load_quality_summary(api_client)
 
     response = _fetch_etl_load_list(api_client, st.session_state)
     if response is None:

@@ -484,6 +484,7 @@ class FakeEtlApiClient:
         etl_run_error=None,
         unknown_size_tokens=None,
         unknown_size_token_error=None,
+        quality_summary=None,
     ):
         self.list_calls = []
         self.detail_calls = []
@@ -498,6 +499,7 @@ class FakeEtlApiClient:
         self.etl_profiles_calls = []
         self.etl_run_calls = []
         self.unknown_size_token_calls = []
+        self.quality_summary_calls = []
         self.etl_profiles = (
             [
                 {"id": "sample_fashion_vendor_v1", "display_name": "패션 공급사 샘플"},
@@ -525,6 +527,15 @@ class FakeEtlApiClient:
             else unknown_size_tokens
         )
         self.unknown_size_token_error = unknown_size_token_error
+        self.quality_summary = quality_summary or {
+            "batch_count": 3,
+            "quality_available_batch_count": 2,
+            "quality_unavailable_batch_count": 0,
+            "total_rows": 300,
+            "loaded_rows": 280,
+            "rejected_rows": 20,
+            "rejection_rate": 6.67,
+        }
         self.detail_error = detail_error
         self.list_items = [make_load()] if list_items is None else list_items
         self.list_pages = list_pages
@@ -602,6 +613,10 @@ class FakeEtlApiClient:
         if self.unknown_size_token_error is not None:
             raise self.unknown_size_token_error
         return {"items": self.unknown_size_tokens}
+
+    def get_etl_load_quality_summary(self, *, profile_name=None):
+        self.quality_summary_calls.append(profile_name)
+        return self.quality_summary
 
     def list_inspections(self, **params):
         return {
@@ -841,6 +856,42 @@ def test_etl_load_history_apptest_queries_once_and_shows_detail(monkeypatch):
         for dataframe in app.dataframe
     )
     assert any("a" * 64 in code.value for code in app.code)
+
+
+def test_etl_load_history_shows_quality_summary_for_applied_profile(monkeypatch):
+    api_client = FakeEtlApiClient(
+        quality_summary={
+            "batch_count": 3,
+            "quality_available_batch_count": 2,
+            "quality_unavailable_batch_count": 1,
+            "total_rows": 300,
+            "loaded_rows": 280,
+            "rejected_rows": 20,
+            "rejection_rate": 6.67,
+        }
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    next(widget for widget in app.text_input if widget.label == "공급사 프로필").set_value(
+        "  sample_fashion_vendor_v2  "
+    ).run(timeout=10)
+    next(widget for widget in app.button if widget.label == "조회").click().run(timeout=10)
+
+    assert len(app.exception) == 0
+    assert api_client.quality_summary_calls[-1] == "sample_fashion_vendor_v2"
+    assert "ETL 품질 요약" in [subheader.value for subheader in app.subheader]
+    assert {metric.label for metric in app.metric} >= {
+        "실행 배치",
+        "품질 집계 가능 배치",
+        "전체 입력",
+        "정상 적재",
+        "Reject",
+        "Reject 비율",
+    }
+    assert "과거 일부 배치는 품질 요약 정보가 없어 집계에서 제외되었습니다." in [
+        info.value for info in app.info
+    ]
 
 
 def test_etl_load_history_does_not_retry_failed_detail_within_one_click(

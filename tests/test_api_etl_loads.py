@@ -12,6 +12,7 @@ from db.session import get_session
 
 client = TestClient(app)
 ENDPOINT = "/api/v1/etl-loads"
+QUALITY_SUMMARY_ENDPOINT = f"{ENDPOINT}/quality-summary"
 
 
 @pytest.fixture(autouse=True)
@@ -111,6 +112,15 @@ def fake_etl_query_service(monkeypatch):
         limit=20,
         offset=0,
     )
+    quality_summary = SimpleNamespace(
+        batch_count=3,
+        quality_available_batch_count=2,
+        quality_unavailable_batch_count=1,
+        total_rows=300,
+        loaded_rows=280,
+        rejected_rows=20,
+        rejection_rate=6.67,
+    )
 
     def override_session():
         yield fake_session
@@ -174,10 +184,26 @@ def fake_etl_query_service(monkeypatch):
         rejections.offset = offset
         return rejections
 
+    def fake_get_etl_load_quality_summary(session, *, profile_name=None):
+        calls.append(
+            {
+                "operation": "quality-summary",
+                "session": session,
+                "profile_name": profile_name,
+            }
+        )
+        return quality_summary
+
     app.dependency_overrides[get_session] = override_session
     monkeypatch.setattr(etl_loads_route, "list_etl_loads", fake_list_etl_loads)
     monkeypatch.setattr(etl_loads_route, "get_etl_load_detail", fake_get_etl_load_detail)
     monkeypatch.setattr(etl_loads_route, "list_etl_rejections", fake_list_etl_rejections)
+    monkeypatch.setattr(
+        etl_loads_route,
+        "get_etl_load_quality_summary",
+        fake_get_etl_load_quality_summary,
+        raising=False,
+    )
     yield SimpleNamespace(calls=calls, state=state)
     app.dependency_overrides.clear()
 
@@ -262,6 +288,38 @@ def test_empty_etl_load_list_is_returned(fake_etl_query_service):
     assert response.status_code == 200
     assert response.json()["items"] == []
     assert response.json()["total"] == 0
+
+
+def test_quality_summary_returns_aggregate_values_and_static_route_wins(
+    fake_etl_query_service,
+):
+    response = client.get(QUALITY_SUMMARY_ENDPOINT)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "batch_count": 3,
+        "quality_available_batch_count": 2,
+        "quality_unavailable_batch_count": 1,
+        "total_rows": 300,
+        "loaded_rows": 280,
+        "rejected_rows": 20,
+        "rejection_rate": 6.67,
+    }
+    assert fake_etl_query_service.calls[-1] == {
+        "operation": "quality-summary",
+        "session": fake_etl_query_service.calls[-1]["session"],
+        "profile_name": None,
+    }
+
+
+def test_quality_summary_passes_trimmed_profile_filter(fake_etl_query_service):
+    response = client.get(
+        QUALITY_SUMMARY_ENDPOINT,
+        params={"profile_name": "  fashion  "},
+    )
+
+    assert response.status_code == 200
+    assert fake_etl_query_service.calls[-1]["profile_name"] == "fashion"
 
 
 @pytest.mark.parametrize(

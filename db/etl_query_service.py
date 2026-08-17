@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from db.models import CatalogProductStaging, ETLLoadRun, ETLRejectedRow
@@ -34,6 +34,17 @@ class ETLLoadList:
     total: int
     limit: int
     offset: int
+
+
+@dataclass(frozen=True)
+class ETLLoadQualitySummary:
+    batch_count: int
+    quality_available_batch_count: int
+    quality_unavailable_batch_count: int
+    total_rows: int
+    loaded_rows: int
+    rejected_rows: int
+    rejection_rate: float
 
 
 @dataclass(frozen=True)
@@ -200,6 +211,75 @@ def list_etl_loads(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+def get_etl_load_quality_summary(
+    session: Session,
+    *,
+    profile_name: str | None = None,
+) -> ETLLoadQualitySummary:
+    """Aggregate ETL quality only from batches with complete quality metadata."""
+    quality_available = (
+        ETLLoadRun.total_rows.is_not(None)
+        & ETLLoadRun.rejected_rows.is_not(None)
+        & ETLLoadRun.error_counts.is_not(None)
+    )
+    statement = _apply_etl_load_filters(
+        select(
+            func.count().label("batch_count"),
+            func.count(case((quality_available, 1))).label(
+                "quality_available_batch_count"
+            ),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (quality_available, ETLLoadRun.total_rows),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("total_rows"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (quality_available, ETLLoadRun.loaded_rows),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("loaded_rows"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (quality_available, ETLLoadRun.rejected_rows),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("rejected_rows"),
+        ).select_from(ETLLoadRun),
+        profile_name=profile_name,
+    )
+    row = session.execute(statement).one()
+    batch_count = int(row.batch_count or 0)
+    quality_available_batch_count = int(row.quality_available_batch_count or 0)
+    total_rows = int(row.total_rows or 0)
+    rejected_rows = int(row.rejected_rows or 0)
+
+    # Legacy batch의 NULL quality 값은 0으로 추정하지 않고, quality aggregate 전체에서 제외합니다.
+    return ETLLoadQualitySummary(
+        batch_count=batch_count,
+        quality_available_batch_count=quality_available_batch_count,
+        quality_unavailable_batch_count=(
+            batch_count - quality_available_batch_count
+        ),
+        total_rows=total_rows,
+        loaded_rows=int(row.loaded_rows or 0),
+        rejected_rows=rejected_rows,
+        rejection_rate=(
+            round(rejected_rows / total_rows * 100, 2) if total_rows else 0.0
+        ),
     )
 
 

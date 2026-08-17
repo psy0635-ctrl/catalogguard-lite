@@ -45,6 +45,7 @@ from api.schemas import (
     ETLLoadDetailResponse,
     ETLLoadListItemResponse,
     ETLLoadListResponse,
+    ETLLoadQualitySummaryResponse,
     ETLProfileListResponse,
     ETLProfileResponse,
     ETLRejectErrorResponse,
@@ -63,7 +64,9 @@ from core.upload_validator import CsvUploadValidationError
 from db.etl_query_service import (
     ETLLoadDetail,
     ETLLoadList,
+    ETLLoadQualitySummary,
     get_etl_load_detail,
+    get_etl_load_quality_summary,
     list_etl_rejections,
     list_etl_loads,
     normalize_etl_filter,
@@ -176,6 +179,20 @@ def _build_list_response(result: ETLLoadList) -> ETLLoadListResponse:
         total=result.total,
         limit=result.limit,
         offset=result.offset,
+    )
+
+
+def _build_quality_summary_response(
+    result: ETLLoadQualitySummary,
+) -> ETLLoadQualitySummaryResponse:
+    return ETLLoadQualitySummaryResponse(
+        batch_count=result.batch_count,
+        quality_available_batch_count=result.quality_available_batch_count,
+        quality_unavailable_batch_count=result.quality_unavailable_batch_count,
+        total_rows=result.total_rows,
+        loaded_rows=result.loaded_rows,
+        rejected_rows=result.rejected_rows,
+        rejection_rate=result.rejection_rate,
     )
 
 
@@ -632,6 +649,22 @@ def list_etl_load_runs(
         profile_name=normalize_etl_filter(profile_name),
     )
     return _build_list_response(result)
+
+
+@router.get(
+    "/api/v1/etl-loads/quality-summary",
+    response_model=ETLLoadQualitySummaryResponse,
+)
+def get_etl_load_quality_summary_route(
+    profile_name: str | None = Query(default=None),
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> ETLLoadQualitySummaryResponse:
+    result = get_etl_load_quality_summary(
+        session,
+        profile_name=normalize_etl_filter(profile_name),
+    )
+    return _build_quality_summary_response(result)
 
 
 @router.get("/api/v1/etl-profiles", response_model=ETLProfileListResponse)
