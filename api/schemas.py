@@ -83,6 +83,16 @@ class ETLLoadListResponse(BaseModel):
     offset: int
 
 
+class ETLLoadQualitySummaryResponse(BaseModel):
+    batch_count: int
+    quality_available_batch_count: int
+    quality_unavailable_batch_count: int
+    total_rows: int
+    loaded_rows: int
+    rejected_rows: int
+    rejection_rate: float
+
+
 class ETLStagingProductResponse(BaseModel):
     staging_product_id: int
     product_group_id: str

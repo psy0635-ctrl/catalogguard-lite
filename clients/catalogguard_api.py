@@ -34,6 +34,15 @@ JOB_SUBMISSION_RESPONSE_KEYS = ("job_id", "status", "status_url")
 JOB_STATUS_RESPONSE_KEYS = ("job_id", "status")
 VALID_JOB_STATUSES = {"queued", "running", "succeeded", "failed"}
 ETL_LOAD_LIST_RESPONSE_KEYS = ("items", "total", "limit", "offset")
+ETL_LOAD_QUALITY_SUMMARY_RESPONSE_KEYS = (
+    "batch_count",
+    "quality_available_batch_count",
+    "quality_unavailable_batch_count",
+    "total_rows",
+    "loaded_rows",
+    "rejected_rows",
+    "rejection_rate",
+)
 ETL_LOAD_ITEM_KEYS = (
     "etl_load_run_id",
     "source_filename",
@@ -360,6 +369,31 @@ def _validate_etl_load_list_response(data: dict[str, Any]) -> None:
         or not _validate_etl_list_metadata(data["limit"])
         or not _validate_etl_list_metadata(data["offset"], allow_limit_zero=True)
         or any(not _validate_etl_load_item(item) for item in data["items"])
+    ):
+        raise _invalid_etl_response()
+
+
+def _validate_etl_load_quality_summary_response(data: dict[str, Any]) -> None:
+    integer_fields = (
+        "batch_count",
+        "quality_available_batch_count",
+        "quality_unavailable_batch_count",
+        "total_rows",
+        "loaded_rows",
+        "rejected_rows",
+    )
+    rejection_rate = data.get("rejection_rate")
+    if (
+        any(key not in data for key in ETL_LOAD_QUALITY_SUMMARY_RESPONSE_KEYS)
+        or any(
+            type(data[field]) is not int or data[field] < 0
+            for field in integer_fields
+        )
+        or type(rejection_rate) not in (int, float)
+        or rejection_rate < 0
+        or data["quality_available_batch_count"]
+        + data["quality_unavailable_batch_count"]
+        != data["batch_count"]
     ):
         raise _invalid_etl_response()
 
@@ -1260,6 +1294,23 @@ class CatalogGuardApiClient:
 
         data = self._get_json("/api/v1/etl-loads", params=params)
         _validate_etl_load_list_response(data)
+        return data
+
+    def get_etl_load_quality_summary(
+        self,
+        *,
+        profile_name: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, str] = {}
+        normalized_profile_name = _normalize_optional_etl_filter(profile_name)
+        if normalized_profile_name:
+            params["profile_name"] = normalized_profile_name
+
+        data = self._get_json(
+            "/api/v1/etl-loads/quality-summary",
+            params=params,
+        )
+        _validate_etl_load_quality_summary_response(data)
         return data
 
     def list_unknown_size_tokens(self, *, limit: int = 20) -> dict[str, Any]:

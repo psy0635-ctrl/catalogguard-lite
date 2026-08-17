@@ -1027,6 +1027,16 @@ ETL_LOAD_LIST_RESPONSE = {
     "offset": 0,
 }
 
+ETL_LOAD_QUALITY_SUMMARY_RESPONSE = {
+    "batch_count": 3,
+    "quality_available_batch_count": 2,
+    "quality_unavailable_batch_count": 1,
+    "total_rows": 300,
+    "loaded_rows": 280,
+    "rejected_rows": 20,
+    "rejection_rate": 6.67,
+}
+
 ETL_LOAD_DETAIL_RESPONSE = {
     "etl_load_run_id": 12,
     "source_filename": "vendor_products.csv",
@@ -1140,6 +1150,23 @@ def test_list_etl_loads_validates_item_shape():
 
     with pytest.raises(import_client_module().CatalogGuardApiResponseError):
         client.list_etl_loads()
+
+
+def test_get_etl_load_quality_summary_calls_endpoint_and_trims_profile_filter():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_LOAD_QUALITY_SUMMARY_RESPONSE),
+    )
+
+    data = client.get_etl_load_quality_summary(profile_name="  fashion  ")
+
+    assert data == ETL_LOAD_QUALITY_SUMMARY_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/etl-loads/quality-summary",
+            "params": {"profile_name": "fashion"},
+            "timeout": 5.0,
+        }
+    ]
 
 
 def test_get_etl_load_detail_calls_detail_endpoint_and_preserves_nullable_fields():

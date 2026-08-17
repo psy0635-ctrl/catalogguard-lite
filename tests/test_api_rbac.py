@@ -130,6 +130,16 @@ def test_no_token_returns_401_on_protected_read_endpoint(
     assert reject_route_database_dependency() == 0
 
 
+def test_no_token_returns_401_on_etl_quality_summary_before_database(
+    reject_route_database_dependency,
+):
+    response = client.get("/api/v1/etl-loads/quality-summary")
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "authentication_required"
+    assert reject_route_database_dependency() == 0
+
+
 def test_no_token_returns_401_on_etl_detail_before_database(
     reject_route_database_dependency,
 ):
@@ -332,6 +342,24 @@ def test_viewer_token_is_forbidden_from_running_rollback(viewer_token):
 
 def test_viewer_token_can_read_etl_load_list(viewer_token):
     response = client.get("/api/v1/etl-loads", headers=_auth_headers(viewer_token))
+
+    assert response.status_code == 200
+
+
+def test_viewer_token_can_read_etl_quality_summary(viewer_token):
+    response = client.get(
+        "/api/v1/etl-loads/quality-summary",
+        headers=_auth_headers(viewer_token),
+    )
+
+    assert response.status_code == 200
+
+
+def test_operator_token_can_read_etl_quality_summary(operator_token):
+    response = client.get(
+        "/api/v1/etl-loads/quality-summary",
+        headers=_auth_headers(operator_token),
+    )
 
     assert response.status_code == 200
 
