@@ -8,7 +8,7 @@
 
 ## 지원 프로필
 
-`config/etl/sample_fashion_vendor_v1.json`은 첫 번째 합성 공급사 컬럼을 지원한다.
+`config/etl/sample_fashion_vendor/v2.json`(현재 active 버전)은 첫 번째 합성 공급사 컬럼을 지원한다.
 
 | 원본 컬럼 | CatalogGuard 대상 컬럼 | 처리 |
 |---|---|---|
@@ -29,12 +29,12 @@
 
 | 프로필 | 그룹·SKU 구조 | 확인한 범위 |
 |---|---|---|
-| `sample_fashion_vendor_v1.json` | `vendor_sku` 하나를 `product_group_id`와 `product_id`에 함께 매핑 | 단일 공급사 SKU 기반 변환 |
-| `sample_marketplace_vendor_v1.json` | `style_id`와 `sku_code`를 각각 `product_group_id`, `product_id`에 매핑 | 그룹 ID와 개별 SKU가 분리된 변환 |
+| `sample_fashion_vendor/v2.json` | `vendor_sku` 하나를 `product_group_id`와 `product_id`에 함께 매핑 | 단일 공급사 SKU 기반 변환 |
+| `sample_marketplace_vendor/v2.json` | `style_id`와 `sku_code`를 각각 `product_group_id`, `product_id`에 매핑 | 그룹 ID와 개별 SKU가 분리된 변환 |
 
 ### 두 번째 프로필 매핑
 
-`config/etl/sample_marketplace_vendor_v1.json`은 다음 매핑을 사용한다.
+`config/etl/sample_marketplace_vendor/v2.json`은 다음 매핑을 사용한다.
 
 | 원본 컬럼 | CatalogGuard 컬럼 |
 |---|---|
@@ -90,7 +90,7 @@
 ```powershell
 python -m etl.cli `
   --input .\tests\fixtures\etl\sample_vendor_mixed.csv `
-  --profile .\config\etl\sample_fashion_vendor_v1.json `
+  --profile .\config\etl\sample_fashion_vendor\v2.json `
   --output .\output\catalogguard_ready.csv `
   --rejects .\output\rejected_rows.csv `
   --summary .\output\etl_summary.json
@@ -103,7 +103,7 @@ python -m etl.cli `
 ```powershell
 .\.venv\Scripts\python.exe -m etl.cli `
   --input .\tests\fixtures\etl\sample_marketplace_vendor_mixed.csv `
-  --profile .\config\etl\sample_marketplace_vendor_v1.json `
+  --profile .\config\etl\sample_marketplace_vendor\v2.json `
   --output .\.tmp_etl_marketplace\catalogguard_ready.csv `
   --rejects .\.tmp_etl_marketplace\rejected_rows.csv `
   --summary .\.tmp_etl_marketplace\etl_summary.json
@@ -373,14 +373,27 @@ profile_id (Streamlit selectbox 값)
 -> config/etl/<registry가 아는 파일명>.json
 ```
 
-`get_profile_path()`는 registry에 없는 `profile_id`를 `ETLProfileNotFoundError`로 거부하고, registry에 있는 경우에도 `(ETL_PROFILE_DIR / info["filename"]).resolve()`의 부모 디렉터리가 `ETL_PROFILE_DIR.resolve()`와 같은지 다시 확인한 뒤에만 경로를 반환한다. 현재 registry는 다음 두 항목만 포함한다.
+`get_profile_path()`는 registry에 없는 `profile_id`를 `ETLProfileNotFoundError`로 거부하고, registry에 있는 경우에도 `resolve()` 뒤의 경로가 `ETL_PROFILE_DIR.resolve()` 안에 있는지(`is_relative_to`) 다시 확인한 뒤에만 경로를 반환한다. 현재 registry는 다음 두 항목만 포함한다.
 
-| `profile_id` | 파일 | `display_name` |
-|---|---|---|
-| `sample_fashion_vendor_v1` | `config/etl/sample_fashion_vendor_v1.json` | 패션 공급사 샘플 |
-| `sample_marketplace_vendor_v1` | `config/etl/sample_marketplace_vendor_v1.json` | 마켓플레이스 공급사 샘플 |
+| `profile_id` | active version | 실행되는 파일 | `display_name` |
+|---|---|---|---|
+| `sample_fashion_vendor_v1` | `"2"` | `config/etl/sample_fashion_vendor/v2.json` | 패션 공급사 샘플 |
+| `sample_marketplace_vendor_v1` | `"2"` | `config/etl/sample_marketplace_vendor/v2.json` | 마켓플레이스 공급사 샘플 |
 
-`profile_id`와 파일명의 `_v1`은 서버 allowlist에서 쓰는 **안정적인 API 식별자**이며 실제 버전 값이 아니다. 기존 클라이언트 호환을 위해 이 문자열은 그대로 유지한다. 실제 ETL dedup·audit에 쓰이는 버전은 프로필 JSON의 `profile_version`이고 `etl_load_runs.profile_version`에도 그 값이 기록되며, 현재 두 sample profile의 `profile_version`은 `"2"`다. 두 값이 충돌해 보이지 않도록 `display_name`에는 버전을 넣지 않는다.
+프로필은 버전별 archive 디렉터리에 보존한다. 해석 흐름은 다음과 같다.
+
+```text
+profile_id (예: sample_fashion_vendor_v1)
+-> registry의 active_version ("2")
+-> versions["2"] = "sample_fashion_vendor/v2.json"
+-> containment 검사 후 경로 반환
+-> load_profile()
+-> ETL 실행
+```
+
+active version은 registry의 **명시적 값**으로만 정한다. 가장 큰 번호나 가장 최근 파일로 추론하지 않는다(`docs/etl_profile_lifecycle.md` Policy H). 과거 버전인 `v1.json`도 archive에 남아 있고 `get_profile_version_path(profile_id, version)`으로 읽을 수 있지만, **웹 ETL에서 사용자가 실행 버전을 고르는 기능은 없다.** 요청은 여전히 `profile_id`만 받고 항상 active version으로 실행된다.
+
+`profile_id`의 `_v1`은 서버 allowlist에서 쓰는 **안정적인 API 식별자**이며 실제 버전 값이 아니다. 기존 클라이언트 호환을 위해 이 문자열은 그대로 유지한다. 실제 ETL dedup·audit에 쓰이는 버전은 프로필 JSON의 `profile_version`이고 `etl_load_runs.profile_version`에도 그 값이 기록되며, 현재 두 sample profile의 `profile_version`은 `"2"`다. 두 값이 충돌해 보이지 않도록 `display_name`에는 버전을 넣지 않는다.
 
 `profile_id`에 `../../etc/passwd`, 절대경로, `..\..\` 같은 값을 보내면 registry 조회에서 바로 `ETLProfileNotFoundError`가 되며 `resolve()`도 실행되지 않으므로 서버 filesystem을 읽지 못한다. `tests/etl/test_web_service.py::test_run_web_etl_rejects_unknown_profile_without_touching_the_database`가 이 경로를 직접 확인하며, DB에 아무 것도 쓰지 않는 것(`session.new`/`session.dirty` 비어 있음)도 함께 검증한다.
 

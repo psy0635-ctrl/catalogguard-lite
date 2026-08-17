@@ -81,7 +81,7 @@ New-Item -ItemType Directory -Force .\output\demo | Out-Null
 
 python -m etl.cli `
   --input .\tests\fixtures\e2e\etl_browser_vendor.csv `
-  --profile .\config\etl\sample_marketplace_vendor_v1.json `
+  --profile .\config\etl\sample_marketplace_vendor\v2.json `
   --output .\output\demo\catalogguard_ready.csv `
   --rejects .\output\demo\rejected_rows.csv `
   --summary .\output\demo\etl_summary.json
@@ -89,7 +89,7 @@ python -m etl.load_cli --input .\output\demo\catalogguard_ready.csv --rejects .\
 
 python -m etl.cli `
   --input .\tests\fixtures\e2e\etl_browser_promotion_vendor.csv `
-  --profile .\config\etl\sample_marketplace_vendor_v1.json `
+  --profile .\config\etl\sample_marketplace_vendor\v2.json `
   --output .\output\demo\catalogguard_promotion_ready.csv `
   --rejects .\output\demo\promotion_rejected_rows.csv `
   --summary .\output\demo\promotion_etl_summary.json

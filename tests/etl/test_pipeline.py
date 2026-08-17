@@ -10,7 +10,7 @@ from core.inspection_service import inspect_dataframe
 from core.upload_validator import validate_and_read_uploaded_csv
 from etl import pipeline as pipeline_module
 from etl.pipeline import ETLPipelineError, run_pipeline
-from etl.profile_loader import load_profile
+from etl.profile_loader import get_profile_path, load_profile
 
 
 PROFILE = {
@@ -261,7 +261,7 @@ def test_repository_sample_profile_converts_mixed_supplier_fixture(tmp_path):
 
     result = run_pipeline(
         BASE_DIR / "tests" / "fixtures" / "etl" / "sample_vendor_mixed.csv",
-        BASE_DIR / "config" / "etl" / "sample_fashion_vendor_v1.json",
+        get_profile_path("sample_fashion_vendor_v1"),
         output_path,
         rejects_path,
         summary_path,
@@ -274,7 +274,7 @@ def test_repository_sample_profile_converts_mixed_supplier_fixture(tmp_path):
 
 
 def test_repository_marketplace_profile_preserves_group_and_sku_relationships(tmp_path):
-    profile_path = BASE_DIR / "config" / "etl" / "sample_marketplace_vendor_v1.json"
+    profile_path = get_profile_path("sample_marketplace_vendor_v1")
     input_path = BASE_DIR / "tests" / "fixtures" / "etl" / "sample_marketplace_vendor_mixed.csv"
     output_path, rejects_path, summary_path = output_paths(tmp_path)
 
@@ -373,7 +373,7 @@ def test_repository_profile_loads_bag_row_without_size_end_to_end(tmp_path):
 
     result = run_pipeline(
         input_path,
-        BASE_DIR / "config" / "etl" / "sample_fashion_vendor_v1.json",
+        get_profile_path("sample_fashion_vendor_v1"),
         output_path,
         rejects_path,
         summary_path,
@@ -397,7 +397,7 @@ def test_repository_profile_still_rejects_apparel_row_without_size_end_to_end(tm
 
     result = run_pipeline(
         input_path,
-        BASE_DIR / "config" / "etl" / "sample_fashion_vendor_v1.json",
+        get_profile_path("sample_fashion_vendor_v1"),
         output_path,
         rejects_path,
         summary_path,
@@ -420,7 +420,7 @@ def test_repository_profile_keeps_existing_result_for_rows_with_size(tmp_path):
 
     result = run_pipeline(
         input_path,
-        BASE_DIR / "config" / "etl" / "sample_fashion_vendor_v1.json",
+        get_profile_path("sample_fashion_vendor_v1"),
         output_path,
         rejects_path,
         summary_path,
@@ -432,8 +432,8 @@ def test_repository_profile_keeps_existing_result_for_rows_with_size(tmp_path):
 
 def test_repository_profiles_declare_category_aware_version(tmp_path):
     # 같은 공급사 CSV가 예전 결과를 재사용하지 않도록 두 샘플 프로필 모두 버전을 올렸습니다.
-    for filename in ("sample_fashion_vendor_v1.json", "sample_marketplace_vendor_v1.json"):
-        profile = load_profile(BASE_DIR / "config" / "etl" / filename)
+    for profile_id in ("sample_fashion_vendor_v1", "sample_marketplace_vendor_v1"):
+        profile = load_profile(get_profile_path(profile_id))
         assert profile.version == "2"
         # size 원본 컬럼은 헤더 존재 검사를 위해 필수 목록에 그대로 남아 있어야 합니다.
         size_source_columns = [

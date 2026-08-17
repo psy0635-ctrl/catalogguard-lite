@@ -525,8 +525,12 @@ catalogguard-lite/
     metrics.py
     settings.py
     etl/
-      sample_fashion_vendor_v1.json
-      sample_marketplace_vendor_v1.json
+      sample_fashion_vendor/
+        v1.json
+        v2.json
+      sample_marketplace_vendor/
+        v1.json
+        v2.json
   core/
     __init__.py
     category_mismatch_detector.py
@@ -703,8 +707,8 @@ catalogguard-lite/
 | `scripts/create_user.py` | 로그인 계정을 생성하는 bootstrap CLI(회원가입 API 없음). `--username`, `--role`, 비밀번호는 인자·환경변수·interactive prompt 중 하나로 지정 |
 | `tests/e2e/test_etl_browser_e2e.py` | 실제 Chromium의 ETL 탭·promotion 승인·반영·reject 마스킹·raw 미노출과 PostgreSQL 최종 상태 검증 |
 | `tests/fixtures/e2e/etl_browser_vendor.csv` | 정상 2행·복수 오류 reject 1행과 합성 민감정보를 담은 브라우저 E2E fixture |
-| `config/etl/sample_fashion_vendor_v1.json` | 샘플 공급사 컬럼과 CatalogGuard 표준 컬럼 매핑 프로필 |
-| `config/etl/sample_marketplace_vendor_v1.json` | 별도 상품 그룹 ID와 SKU를 사용하는 두 번째 합성 공급사 매핑 프로필 |
+| `config/etl/sample_fashion_vendor/` | 샘플 공급사 매핑 프로필의 버전별 보존 archive(`v1.json`, `v2.json`). 현재 active 버전은 `v2.json` |
+| `config/etl/sample_marketplace_vendor/` | 별도 상품 그룹 ID와 SKU를 사용하는 두 번째 합성 공급사 프로필의 버전별 archive. 현재 active 버전은 `v2.json` |
 | `compose.local.yaml` | PostgreSQL·Redis·FastAPI·Celery Worker 로컬 실행 구성 |
 | `alembic/versions/20260703_0001_create_inspection_tables.py` | 검수 이력 저장 테이블 생성 마이그레이션 |
 | `alembic/versions/20260705_0002_add_inspection_file_identity.py` | 파일 해시와 검수 버전 컬럼, CHECK constraint, partial unique index 추가 마이그레이션 |
@@ -2502,8 +2506,10 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 웹 ETL은 업로드부터 staging 적재까지 하나의 동기 HTTP 요청으로 처리하며, 비동기(Celery) 처리는 아직 없습니다.
 - 웹 ETL은 한 번에 CSV 파일 1개만 업로드할 수 있으며, 여러 파일 동시 업로드는 지원하지 않습니다.
 - 웹 ETL은 CSV만 지원하며 Excel/XLSX 업로드는 지원하지 않습니다.
-- 웹 ETL의 ETL 프로필은 서버 allowlist(`config/etl/*.json`)로 고정되어 있으며, 사용자가 새 프로필을 업로드하거나 만드는 기능은 없습니다. 프로필 상세는 조회만 가능합니다.
-- 이미 공개된 `profile_version`의 매핑이 같은 버전 번호를 유지한 채 바뀌면 pytest가 실패시킵니다(`tests/etl/test_profile_version_guardrail.py`). 다만 프로필 JSON과 기록된 fingerprint를 함께 고치는 경우와 `etl/transformer.py` 같은 코드 쪽 의미 변경은 자동으로 감지하지 못하며, 실행 중인 서버를 막는 런타임 가드도 아닙니다. 버전별 JSON archive는 아직 없습니다.
+- 웹 ETL의 ETL 프로필은 서버 allowlist로 고정되어 있으며, 사용자가 새 프로필을 업로드하거나 만드는 기능은 없습니다. 프로필 상세는 조회만 가능합니다. 프로필은 `config/etl/<profile_name>/v<번호>.json` 버전별 archive로 보존하고, 신규 실행에 쓸 버전은 registry의 명시적 `active_version`으로만 정합니다(가장 큰 번호를 자동 선택하지 않습니다). `profile_id`는 기존 그대로이며 현재 두 프로필의 active 버전은 모두 `"2"`입니다. 과거 `v1.json` 정의도 archive에 남아 있지만, 웹 ETL에서 실행 버전을 고르는 기능은 없습니다.
+- 이미 공개된 `profile_version`의 매핑이 같은 버전 번호를 유지한 채 바뀌면 pytest가 실패시킵니다(`tests/etl/test_profile_version_guardrail.py`). 현재 active 버전뿐 아니라 archive의 과거 버전까지 검사합니다. 다만 프로필 JSON과 기록된 fingerprint를 함께 고치는 경우와 `etl/transformer.py` 같은 코드 쪽 의미 변경은 자동으로 감지하지 못하며, 실행 중인 서버를 막는 런타임 가드도 아닙니다.
+- 과거 프로필 JSON 정의는 archive에서 읽을 수 있지만, 현재 코드로 과거 배치 결과를 그대로 재현하는 것은 보장하지 않습니다. `v1` → `v2` 전환에는 JSON 밖의 코드 변경도 있었고, `etl_load_runs`에는 프로필 snapshot이나 실행 당시 애플리케이션 버전이 저장되지 않습니다.
+- 프로필 활성 버전을 바꾸는 API·화면(Activation/Deactivation)과 Profile CRUD는 아직 없습니다. `active_version`은 코드 registry 값입니다.
 - `etl_load_runs`는 `profile_name`·`profile_version`만 기록하고 프로필 JSON snapshot이나 매핑 hash는 저장하지 않으므로, 어떤 버전을 썼는지는 알 수 있지만 그 버전의 당시 내용이 보존된다고 DB가 보장하지는 않습니다. 버전 증가 기준과 향후 방향은 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)에 정리했습니다.
 - Web ETL CSV 업로드 자체를 대상으로 하는 전용 Chromium Browser E2E는 아직 없습니다. 웹 ETL 핵심 로직은 API·Client·PostgreSQL 통합 테스트와 Streamlit AppTest로 검증합니다.
 - S3 ingestion은 호출자가 `object_key` 하나를 지정하는 pull 방식입니다. S3 event 알림·Lambda·SQS 기반 자동 수집과 prefix 일괄 처리는 지원하지 않습니다.
@@ -2552,7 +2558,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - `gender` 선택 컬럼과 표준화
 - 웹 ETL 처리 시간이 길어질 경우의 비동기(Celery) 실행
 - 웹 ETL 다중 파일 업로드와 XLSX 등 추가 입력 형식 지원
-- 버전별 immutable 프로필 JSON archive와 명시적 active version pointer(Profile CRUD보다 먼저 적용)
+- 프로필 활성 버전 전환·비활성화(Activation / Deactivation, Profile CRUD보다 먼저 적용)
 - 사용자 정의 ETL 프로필 등록·관리(Profile CRUD)
 - Web ETL CSV 업로드 전용 Browser E2E
 - 실제 운영 공급사·production catalog 연동과 배포 환경 promotion 검증
@@ -2682,7 +2688,7 @@ HTTP feed, DAG processor·import·structure, 실제 staging load, idempotency와
 ```powershell
 python -m etl.cli `
   --input .\tests\fixtures\etl\sample_vendor_mixed.csv `
-  --profile .\config\etl\sample_fashion_vendor_v1.json `
+  --profile .\config\etl\sample_fashion_vendor\v2.json `
   --output .\output\catalogguard_ready.csv `
   --rejects .\output\rejected_rows.csv `
   --summary .\output\etl_summary.json

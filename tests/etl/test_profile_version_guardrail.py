@@ -13,7 +13,13 @@ from pathlib import Path
 import pytest
 
 from etl.models import ETLProfile
-from etl.profile_loader import get_profile_path, list_etl_profiles, load_profile
+from etl.profile_loader import (
+    _ETL_PROFILE_REGISTRY,
+    get_profile_path,
+    get_profile_version_path,
+    list_etl_profiles,
+    load_profile,
+)
 
 
 BASELINE_PATH = (
@@ -80,7 +86,20 @@ def load_baseline() -> dict[str, dict[str, str]]:
 
 
 def published_profiles() -> list[ETLProfile]:
-    """Load every allowlisted profile through the existing loader validation."""
+    """Load every archived profile version through the existing loader validation.
+
+    Phase 4부터는 현재 active 버전만이 아니라 registry에 등록된 과거 버전도 불변이어야
+    하므로, archive 전체를 검사합니다.
+    """
+    return [
+        load_profile(get_profile_version_path(profile_id, version))
+        for profile_id in _ETL_PROFILE_REGISTRY
+        for version in _ETL_PROFILE_REGISTRY[profile_id]["versions"]
+    ]
+
+
+def active_profiles() -> list[ETLProfile]:
+    """Load only the version each profile_id currently runs."""
     return [
         load_profile(get_profile_path(profile["id"]))
         for profile in list_etl_profiles()
@@ -132,10 +151,18 @@ def fixture_fashion_profile() -> ETLProfile:
 
 
 def test_published_profiles_still_match_their_registered_fingerprint():
-    # 핵심 guardrail입니다. 실제 config/etl 파일을 읽어 비교합니다.
+    # 핵심 guardrail입니다. archive의 모든 버전 파일을 읽어 비교하므로,
+    # 과거 v1을 수정해도 현재 v2를 수정해도 실패합니다.
     baseline = load_baseline()
 
     for profile in published_profiles():
+        assert_profile_matches_baseline(profile, baseline)
+
+
+def test_active_profiles_still_match_their_registered_fingerprint():
+    baseline = load_baseline()
+
+    for profile in active_profiles():
         assert_profile_matches_baseline(profile, baseline)
 
 
@@ -150,6 +177,19 @@ def test_every_current_profile_version_has_a_baseline_entry():
             f"profile_name={profile.name} profile_version={profile.version} "
             "has no fingerprint record"
         )
+
+
+def test_guardrail_covers_every_archived_version_not_just_the_active_one():
+    # active 버전만 검사하면 과거 v1을 조용히 고쳐도 CI가 통과합니다.
+    checked = {(profile.name, profile.version) for profile in published_profiles()}
+    expected = {
+        (info["profile_name"], version)
+        for info in _ETL_PROFILE_REGISTRY.values()
+        for version in info["versions"]
+    }
+
+    assert checked == expected
+    assert len(checked) > len(active_profiles())
 
 
 def test_baseline_file_has_a_valid_structure():

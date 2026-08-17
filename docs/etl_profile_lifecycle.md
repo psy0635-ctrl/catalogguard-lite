@@ -48,7 +48,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 
 ### 2.2 프로필 JSON에 실제로 있는 필드
 
-`config/etl/sample_fashion_vendor_v1.json`, `config/etl/sample_marketplace_vendor_v1.json` 두 파일 모두 다음 5개 필드만 가진다.
+`config/etl/sample_fashion_vendor/v2.json`, `config/etl/sample_marketplace_vendor/v2.json` 두 파일 모두 다음 5개 필드만 가진다.
 
 - `profile_name`
 - `profile_version`
@@ -88,9 +88,9 @@ ux_etl_load_runs_input_profile_version
 
 ### 2.6 과거 버전 archive / registry 존재 여부
 
-**없음.**
+**Phase 2 작성 시점에는 없었다.** `config/etl/`에는 현재 버전 JSON 파일 2개만 있었고, 과거 `profile_version = "1"`의 내용은 git 이력에만 남아 있었으며(`80e8ea4`), 애플리케이션이 읽을 수 있는 archive·registry 형태로는 존재하지 않았다.
 
-`config/etl/`에는 현재 버전 JSON 파일 2개만 있다. 과거 `profile_version = "1"`의 내용은 **git 이력에만** 남아 있고(`80e8ea4`), 애플리케이션이 읽을 수 있는 archive·registry·DB 테이블 형태로는 존재하지 않는다. Profile을 담는 DB 모델도 없다.
+> **갱신**: 이 항목은 Phase 4에서 해소되었다. 지금은 버전별 archive와 명시적 active pointer가 있다(13장). Profile을 담는 DB 모델은 여전히 없다.
 
 ### 2.7 `profile_version` 값의 검증 수준
 
@@ -121,7 +121,7 @@ ux_etl_load_runs_input_profile_version
 
 ### 3.1 문제 상황
 
-현재 `sample_fashion_vendor`의 `profile_version`은 `"2"`다. 어떤 사람이 `config/etl/sample_fashion_vendor_v1.json`을 열어 매핑을 이렇게 바꿨다고 하자.
+현재 `sample_fashion_vendor`의 `profile_version`은 `"2"`다. 어떤 사람이 `config/etl/sample_fashion_vendor/v2.json`을 열어 매핑을 이렇게 바꿨다고 하자.
 
 ```text
 변경 전 (v2):  "vendor_sku": ["product_group_id", "product_id"]
@@ -380,7 +380,7 @@ registry: sample_fashion_vendor_v1 -> active_version "3"
 | Phase 1 | Read-only Profile Detail (`GET /api/v1/etl-profiles/{profile_id}`, 클라이언트, Streamlit 표시) | **완료** (`973882e`) |
 | Phase 2 | Lifecycle Policy 확정 — 이 문서 | **이번 작업** |
 | Phase 3 | Published version guardrail — 이미 공개된 `(profile_name, profile_version)`의 매핑이 바뀌면 CI에서 실패시킨다 | **완료** (12장) |
-| Phase 4 | Versioned archive + active pointer — 버전별 JSON 보존, registry가 활성 버전을 명시 (Option B) | 이후 |
+| Phase 4 | Versioned archive + active pointer — 버전별 JSON 보존, registry가 활성 버전을 명시 (Option B) | **완료** (13장) |
 | Phase 5 | Activation / Deactivation — 활성 버전 전환과 비활성화(삭제 아님) | 이후 |
 | Phase 6 | 필요할 때만 DB-backed Profile / ProfileVersion (Option C) | 조건부 |
 
@@ -468,6 +468,95 @@ fingerprint는 `load_profile()`이 검증·정규화한 `ETLProfile`에서 계�
 - `etl/transformer.py`나 카테고리 정책 같은 **코드 쪽 의미 변경은 감지하지 못한다.** Policy B의 그 항목은 여전히 사람의 판단이다.
 - 런타임 강제가 아니라 CI 검사다. 실행 중인 서버가 바뀐 프로필을 거부하지는 않는다.
 - Phase 4의 실제 버전별 JSON archive는 아직 없다. 지금 남는 것은 매핑 원문이 아니라 지문뿐이다.
+
+---
+
+## 13. `[현재 구현]` Phase 4 — Versioned archive + active pointer
+
+8장 Option B를 구현했다. 과거 정의를 파일로 보존하고, 신규 실행에 쓸 버전은 registry가 명시한다.
+
+### 13.1 디렉터리 구조
+
+```text
+config/etl/
+  sample_fashion_vendor/
+    v1.json      (보존, 수정 금지)
+    v2.json      (현재 active)
+  sample_marketplace_vendor/
+    v1.json      (보존, 수정 금지)
+    v2.json      (현재 active)
+```
+
+기존 flat 파일(`config/etl/sample_fashion_vendor_v1.json` 등)은 **삭제했다.** 같은 정의를 두 곳에 두면 한쪽만 수정되어 서로 달라질 수 있기 때문이다. 호환용 symlink도 두지 않았다(Windows 환경 고려).
+
+### 13.2 Registry
+
+`etl/profile_loader.py`의 `_ETL_PROFILE_REGISTRY`가 다음을 가진다.
+
+| key | 의미 |
+| --- | --- |
+| `display_name` | UI 표시용. semantic 필드가 아니다 (Policy C) |
+| `profile_name` | 계보 이름 (Policy D) |
+| `active_version` | 신규 ETL 실행에 쓸 버전 하나 |
+| `versions` | 버전 → archive 파일 상대 경로 |
+
+현재 두 profile 모두 `active_version = "2"`다. v1을 archive에 넣었다고 active가 바뀌지 않는다.
+
+**active version은 명시적 pointer로만 정한다** (Policy H). `max()`·정렬·mtime·파일명으로 추론하지 않는다. `profile_version`이 임의 문자열을 허용해 크기 비교가 성립하지 않고(`"10"` < `"9"`), 아직 검증하지 않은 버전이 파일 추가만으로 운영 실행에 들어가면 안 되기 때문이다. `tests/etl/test_profile_version_archive.py::test_active_version_is_not_inferred_from_the_largest_version`이 `versions`에 `"10"`이 있어도 active `"2"`가 선택되는 것을 고정한다.
+
+### 13.3 경로 해석과 안전성
+
+- `get_profile_path(profile_id)` — **active version** 파일 경로. 기존 호출자(`run_web_etl()` 등)의 계약이 그대로다.
+- `get_profile_version_path(profile_id, profile_version)` — 과거 버전 조회용 내부 helper. `profile_version`은 `versions`의 **정확한 key**여야 하므로 호출자 문자열이 경로 조각으로 쓰이지 않는다. `"../1"`, `"v2.json"`, `"/etc/passwd"` 등은 `ETLProfileNotFoundError`로 거부한다.
+
+nested 디렉터리를 쓰게 되면서 기존의 "부모 디렉터리가 `ETL_PROFILE_DIR`와 같은가" 검사는 성립하지 않는다. 대신 `resolve()` 뒤에 `is_relative_to(ETL_PROFILE_DIR.resolve())`로 **containment**를 확인한다. 문자열 `startswith()`는 쓰지 않는다. registry 값 자체가 실수로 archive 밖(`../../config/settings.py`)을 가리켜도 거부하며, symlink는 `resolve()`가 실제 대상으로 바꾼 뒤 검사하므로 탈출할 수 없다.
+
+### 13.4 v1 archive의 출처
+
+v1은 **추측해서 만들지 않았다.** git 이력에서 원문을 그대로 복원했다.
+
+```text
+git show 80e8ea4^:config/etl/sample_fashion_vendor_v1.json
+git show 80e8ea4^:config/etl/sample_marketplace_vendor_v1.json
+```
+
+`80e8ea4`가 두 프로필의 `profile_version`을 `"1"` → `"2"`로 올린 커밋이므로, 그 부모가 v1 시점의 마지막 상태다. 복원한 v1과 현재 v2의 차이는 **`profile_version` 값 한 줄뿐**이고 `source_columns`·`required_source_columns`·`defaults`는 동일하다.
+
+### 13.5 fingerprint baseline
+
+`tests/fixtures/etl/profile_fingerprints.json`에 v1 항목을 **추가**했다. 기존 v2 항목은 수정하지 않았다.
+
+| profile_name | version | fingerprint |
+| --- | --- | --- |
+| sample_fashion_vendor | 1 | `917268b6…4e22b1` |
+| sample_fashion_vendor | 2 | `917268b6…4e22b1` |
+| sample_marketplace_vendor | 1 | `43f7ece4…c31608` |
+| sample_marketplace_vendor | 2 | `43f7ece4…c31608` |
+
+**v1과 v2의 fingerprint가 같은 것은 정상이다.** Phase 3 fingerprint는 `source_columns`·`required_source_columns`·`defaults`만 포함하고 `profile_version`은 포함하지 않는데(12장), 두 파일은 그 값만 다르기 때문이다. 값이 같다고 해서 임의로 바꾸지 않았다.
+
+이는 동시에 12장 마지막 한계를 다시 보여 준다. v1 → v2의 실제 변화는 JSON이 아니라 **코드**(`etl/transformer.py`, `etl/db_loader.py`의 카테고리별 필수 속성 정책)에 있었고, fingerprint는 그것을 담지 않는다.
+
+### 13.6 guardrail 확장
+
+Phase 3 guardrail이 이제 **archive 전체**를 검사한다. 등록된 모든 `(profile_name, profile_version)`을 `load_profile()`로 읽어 baseline과 비교하므로, 과거 v1을 수정해도 현재 v2를 수정해도 CI가 실패한다. 새 버전을 registry에 추가했는데 baseline 항목이 없으면 실패하고, 과거 항목이 남아 있는 것은 계속 허용한다(append-only).
+
+### 13.7 이번에 바뀌지 않은 것
+
+- active transform 동작: 두 profile 모두 `"2"` 그대로. 파일 위치만 바뀌었고 매핑·기본값·필수 컬럼은 한 글자도 바꾸지 않았다
+- `INSPECTION_VERSION = "13"`, Alembic head `20260813_0013`, DB 스키마·migration·의존성·workflow
+- API 계약: `GET /api/v1/etl-profiles`, `GET /api/v1/etl-profiles/{profile_id}` 응답 그대로. Profile Detail은 계속 active 버전을 보여 주며 archive 경로·파일명·registry 내부를 노출하지 않는다
+- 웹 ETL: `profile_id`로 실행하면 계속 active v2만 쓴다. 사용자가 v1을 고르는 기능은 없다
+
+### 13.8 재현성: 가능해진 것과 아직 아닌 것
+
+**가능해진 것** — 과거 profile JSON 정의를 애플리케이션이 archive 파일에서 읽을 수 있다. "그때 v1이 어떤 매핑이었나"에 저장소가 답한다.
+
+**아직 보장하지 않는 것** — 현재 코드로 v1.json을 실행해도 **과거 v1 배치의 결과를 그대로 재현한다고 말할 수 없다.** v1 → v2 전환에는 JSON 밖의 코드 변경(카테고리별 필수 속성 정책)이 포함됐고, 지금 실행되는 것은 언제나 현재 코드다. `ETLLoadRun`에는 여전히 profile snapshot도, application commit SHA도, transformer 코드 버전도 저장하지 않는다(2.3, 2.5). git 이력을 함께 보면 개발자가 당시 코드를 찾을 수는 있지만, 런타임이 자동으로 재현해 주는 기능은 아니다.
+
+### 13.9 아직 없는 것
+
+Phase 5의 Activation / Deactivation은 **미구현**이다. `active_version`은 코드 registry의 값이며, 이를 바꾸는 API·UI·DB 플래그는 없다. Profile CRUD도 없다.
 
 ---
 

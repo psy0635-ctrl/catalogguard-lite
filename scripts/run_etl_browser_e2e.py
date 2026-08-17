@@ -21,7 +21,7 @@ FIXTURE_PATH = ROOT / "tests" / "fixtures" / "e2e" / "etl_browser_vendor.csv"
 PROMOTION_FIXTURE_PATH = (
     ROOT / "tests" / "fixtures" / "e2e" / "etl_browser_promotion_vendor.csv"
 )
-PROFILE_PATH = ROOT / "config" / "etl" / "sample_marketplace_vendor_v1.json"
+PROFILE_PATH = ROOT / "config" / "etl" / "sample_marketplace_vendor" / "v2.json"
 DEFAULT_ARTIFACT_DIR = ROOT / "artifacts" / "browser-e2e"
 
 
