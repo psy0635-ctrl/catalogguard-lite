@@ -2503,7 +2503,8 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 웹 ETL은 한 번에 CSV 파일 1개만 업로드할 수 있으며, 여러 파일 동시 업로드는 지원하지 않습니다.
 - 웹 ETL은 CSV만 지원하며 Excel/XLSX 업로드는 지원하지 않습니다.
 - 웹 ETL의 ETL 프로필은 서버 allowlist(`config/etl/*.json`)로 고정되어 있으며, 사용자가 새 프로필을 업로드하거나 만드는 기능은 없습니다. 프로필 상세는 조회만 가능합니다.
-- 이미 ETL 실행에 사용한 `profile_version`의 매핑을 그대로 두고 수정하는 것을 막는 장치는 아직 없습니다. `etl_load_runs`는 `profile_name`·`profile_version`만 기록하고 프로필 JSON snapshot이나 매핑 hash는 저장하지 않으므로, 어떤 버전을 썼는지는 알 수 있지만 그 버전의 당시 내용이 보존된다고 DB가 보장하지는 않습니다. 버전 증가 기준과 향후 방향은 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)에 정리했습니다.
+- 이미 공개된 `profile_version`의 매핑이 같은 버전 번호를 유지한 채 바뀌면 pytest가 실패시킵니다(`tests/etl/test_profile_version_guardrail.py`). 다만 프로필 JSON과 기록된 fingerprint를 함께 고치는 경우와 `etl/transformer.py` 같은 코드 쪽 의미 변경은 자동으로 감지하지 못하며, 실행 중인 서버를 막는 런타임 가드도 아닙니다. 버전별 JSON archive는 아직 없습니다.
+- `etl_load_runs`는 `profile_name`·`profile_version`만 기록하고 프로필 JSON snapshot이나 매핑 hash는 저장하지 않으므로, 어떤 버전을 썼는지는 알 수 있지만 그 버전의 당시 내용이 보존된다고 DB가 보장하지는 않습니다. 버전 증가 기준과 향후 방향은 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)에 정리했습니다.
 - Web ETL CSV 업로드 자체를 대상으로 하는 전용 Chromium Browser E2E는 아직 없습니다. 웹 ETL 핵심 로직은 API·Client·PostgreSQL 통합 테스트와 Streamlit AppTest로 검증합니다.
 - S3 ingestion은 호출자가 `object_key` 하나를 지정하는 pull 방식입니다. S3 event 알림·Lambda·SQS 기반 자동 수집과 prefix 일괄 처리는 지원하지 않습니다.
 - S3 source를 실제로 호출하는 Streamlit 화면은 없습니다. 현재는 API 직접 호출로만 사용합니다.
@@ -2551,7 +2552,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - `gender` 선택 컬럼과 표준화
 - 웹 ETL 처리 시간이 길어질 경우의 비동기(Celery) 실행
 - 웹 ETL 다중 파일 업로드와 XLSX 등 추가 입력 형식 지원
-- 공개된 `profile_version`의 매핑이 조용히 수정되는 것을 막는 immutable version guardrail(Profile CRUD보다 먼저 적용)
+- 버전별 immutable 프로필 JSON archive와 명시적 active version pointer(Profile CRUD보다 먼저 적용)
 - 사용자 정의 ETL 프로필 등록·관리(Profile CRUD)
 - Web ETL CSV 업로드 전용 Browser E2E
 - 실제 운영 공급사·production catalog 연동과 배포 환경 promotion 검증
