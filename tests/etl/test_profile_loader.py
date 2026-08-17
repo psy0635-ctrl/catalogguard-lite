@@ -155,7 +155,9 @@ def test_allowlisted_profile_ids_keep_loading_their_current_profile_version():
 def test_get_profile_path_resolves_known_id_to_a_loadable_profile():
     path = get_profile_path("sample_fashion_vendor_v1")
 
-    assert path.parent.resolve() == ETL_PROFILE_DIR.resolve()
+    # 버전별 archive 하위 디렉터리를 쓰므로 부모가 같은지가 아니라
+    # resolve() 뒤에도 archive root 안에 있는지로 확인합니다.
+    assert path.resolve().is_relative_to(ETL_PROFILE_DIR.resolve())
     profile = load_profile(path)
     assert profile.name == "sample_fashion_vendor"
 

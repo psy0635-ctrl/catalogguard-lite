@@ -16,18 +16,34 @@ class ETLProfileNotFoundError(ValueError):
 # 웹 ETL 실행은 이 allowlist에 있는 profile_id만 받습니다.
 # 사용자가 보낸 파일 경로를 그대로 신뢰하지 않기 위한 유일한 진입점입니다.
 #
-# profile_id와 파일명의 '_v1'은 기존 API 클라이언트 호환을 위해 고정된 식별자이며,
+# profile_id의 '_v1'은 기존 API 클라이언트 호환을 위해 고정된 식별자이며,
 # 실제 검수/적재에 쓰이는 버전이 아닙니다. 실제 버전은 프로필 JSON의 profile_version이고
 # ETLLoadRun에도 그 값이 기록되므로, display_name에는 버전을 넣지 않습니다.
+#
+# versions는 지금까지 공개된 모든 버전의 보존된 정의를 가리키고, 신규 ETL 실행에 쓸
+# 버전은 active_version 하나로만 정합니다. "가장 큰 번호"를 active로 추론하지 않는
+# 이유는 docs/etl_profile_lifecycle.md Policy H에 있습니다. 버전 문자열은 임의 값을
+# 허용하므로 크기 비교가 성립하지 않고, 아직 검증하지 않은 버전이 파일을 추가하는
+# 것만으로 운영 실행에 들어가면 안 되기 때문입니다.
 ETL_PROFILE_DIR = BASE_DIR / "config" / "etl"
-_ETL_PROFILE_REGISTRY: dict[str, dict[str, str]] = {
+_ETL_PROFILE_REGISTRY: dict[str, dict] = {
     "sample_fashion_vendor_v1": {
-        "filename": "sample_fashion_vendor_v1.json",
         "display_name": "패션 공급사 샘플",
+        "profile_name": "sample_fashion_vendor",
+        "active_version": "2",
+        "versions": {
+            "1": "sample_fashion_vendor/v1.json",
+            "2": "sample_fashion_vendor/v2.json",
+        },
     },
     "sample_marketplace_vendor_v1": {
-        "filename": "sample_marketplace_vendor_v1.json",
         "display_name": "마켓플레이스 공급사 샘플",
+        "profile_name": "sample_marketplace_vendor",
+        "active_version": "2",
+        "versions": {
+            "1": "sample_marketplace_vendor/v1.json",
+            "2": "sample_marketplace_vendor/v2.json",
+        },
     },
 }
 
@@ -58,21 +74,53 @@ def get_etl_profile_detail(profile_id: str) -> dict[str, object]:
     }
 
 
+def _registry_entry(profile_id: str) -> dict:
+    info = _ETL_PROFILE_REGISTRY.get(profile_id)
+    if info is None:
+        raise ETLProfileNotFoundError(f"Unknown ETL profile: {profile_id}")
+    return info
+
+
+def _archived_version_path(info: dict, profile_version: str) -> Path:
+    """Resolve one registered version to a file inside the profile archive.
+
+    profile_version은 registry versions의 정확한 key여야 하므로, 호출자가 보낸 값이
+    경로 조각으로 쓰이지 않습니다. registry 값 자체가 잘못돼 archive 밖을 가리키는
+    경우까지 막기 위해, resolve() 뒤에도 ETL_PROFILE_DIR 안에 있는지 확인합니다.
+    symlink는 resolve()가 실제 대상으로 바꾼 뒤 검사하므로 밖으로 탈출할 수 없습니다.
+    """
+    relative_path = info["versions"].get(profile_version)
+    if relative_path is None:
+        raise ETLProfileNotFoundError(
+            f"Unknown ETL profile version: {profile_version}"
+        )
+
+    profile_dir = ETL_PROFILE_DIR.resolve()
+    candidate_path = (ETL_PROFILE_DIR / relative_path).resolve()
+    if not candidate_path.is_relative_to(profile_dir) or not candidate_path.is_file():
+        raise ETLProfileNotFoundError(
+            f"Unknown ETL profile version: {profile_version}"
+        )
+    return candidate_path
+
+
 def get_profile_path(profile_id: str) -> Path:
-    """Resolve a profile_id to its config file path using the server allowlist only.
+    """Resolve a profile_id to the config file of its active version.
 
     Never accepts a filesystem path from the caller: profile_id must be an exact
     allowlist key, so arbitrary/relative paths can't reach load_profile().
     """
-    info = _ETL_PROFILE_REGISTRY.get(profile_id)
-    if info is None:
-        raise ETLProfileNotFoundError(f"Unknown ETL profile: {profile_id}")
+    info = _registry_entry(profile_id)
+    return _archived_version_path(info, info["active_version"])
 
-    profile_dir = ETL_PROFILE_DIR.resolve()
-    candidate_path = (ETL_PROFILE_DIR / info["filename"]).resolve()
-    if candidate_path.parent != profile_dir or not candidate_path.is_file():
-        raise ETLProfileNotFoundError(f"Unknown ETL profile: {profile_id}")
-    return candidate_path
+
+def get_profile_version_path(profile_id: str, profile_version: str) -> Path:
+    """Resolve one archived version of an allowlisted profile.
+
+    과거 정의를 읽기 위한 내부 helper입니다. 신규 ETL 실행은 여전히
+    get_profile_path()의 active version만 사용합니다.
+    """
+    return _archived_version_path(_registry_entry(profile_id), profile_version)
 
 
 def _require_non_empty_text(data: dict, key: str) -> str:

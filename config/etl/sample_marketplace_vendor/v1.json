@@ -1,0 +1,30 @@
+{
+  "profile_name": "sample_marketplace_vendor",
+  "profile_version": "1",
+  "source_columns": {
+    "style_id": "product_group_id",
+    "sku_code": "product_id",
+    "title": "product_name",
+    "category_code": "category",
+    "label": "seller",
+    "regular_price": "price",
+    "promo_price": "sale_price",
+    "tone": "color",
+    "fit_size": "size",
+    "available_qty": "stock",
+    "details": "description",
+    "photo": "image_path"
+  },
+  "required_source_columns": [
+    "style_id",
+    "sku_code",
+    "title",
+    "category_code",
+    "label",
+    "regular_price",
+    "tone",
+    "fit_size",
+    "photo"
+  ],
+  "defaults": {"stock": 0}
+}
