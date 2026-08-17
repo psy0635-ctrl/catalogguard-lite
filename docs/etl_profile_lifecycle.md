@@ -379,7 +379,7 @@ registry: sample_fashion_vendor_v1 -> active_version "3"
 | --- | --- | --- |
 | Phase 1 | Read-only Profile Detail (`GET /api/v1/etl-profiles/{profile_id}`, 클라이언트, Streamlit 표시) | **완료** (`973882e`) |
 | Phase 2 | Lifecycle Policy 확정 — 이 문서 | **이번 작업** |
-| Phase 3 | Published version guardrail — 이미 공개된 `(profile_name, profile_version)`의 매핑이 바뀌면 CI에서 실패시킨다 | 다음 |
+| Phase 3 | Published version guardrail — 이미 공개된 `(profile_name, profile_version)`의 매핑이 바뀌면 CI에서 실패시킨다 | **완료** (12장) |
 | Phase 4 | Versioned archive + active pointer — 버전별 JSON 보존, registry가 활성 버전을 명시 (Option B) | 이후 |
 | Phase 5 | Activation / Deactivation — 활성 버전 전환과 비활성화(삭제 아님) | 이후 |
 | Phase 6 | 필요할 때만 DB-backed Profile / ProfileVersion (Option C) | 조건부 |
@@ -432,7 +432,42 @@ Full CRUD는 로드맵의 마지막이며, 그마저도 조건부다. 프로필�
 - 의존성·GitHub Actions workflow 변경 없음
 - `profile_version` validation 동작 변경 없음(임의 문자열 허용 상태 그대로)
 
-이 문서는 **정책을 고정하는 설계 gate**이며, 여기서 정한 규칙을 실제로 강제하는 코드는 다음 단계(Phase 3)에서 만든다.
+이 문서는 **정책을 고정하는 설계 gate**이며, 여기서 정한 규칙을 실제로 강제하는 장치는 Phase 3에서 만들었다(12장).
+
+---
+
+## 12. `[현재 구현]` Phase 3 — Published version guardrail
+
+Policy A·B를 사람의 기억이 아니라 테스트로 강제한다. **production 동작은 바꾸지 않는다.**
+
+| 항목 | 값 |
+| --- | --- |
+| baseline 파일 | `tests/fixtures/etl/profile_fingerprints.json` |
+| baseline 구조 | `profile_name` → `profile_version` → fingerprint |
+| guardrail 테스트 | `tests/etl/test_profile_version_guardrail.py` |
+| fingerprint 대상 | `source_columns`, `required_source_columns`, `defaults` |
+| 알고리즘 | canonical JSON(UTF-8)의 SHA-256, 64자리 lowercase hex |
+| 실행 | 기존 `pytest`에 포함(별도 CI job 없음) |
+
+fingerprint는 `load_profile()`이 검증·정규화한 `ETLProfile`에서 계산한다. guardrail이 JSON을 다시 해석하지 않으므로 검증 기준은 여전히 loader 한 곳뿐이다. `profile_id`, `display_name`, 파일명, 경로는 payload에 넣지 않고, `profile_name`/`profile_version`은 payload가 아니라 기록을 찾는 key로만 쓴다.
+
+정규화 기준은 "보기 좋게 전부 정렬"이 아니라 **의미가 없다고 확인한 것만 정렬**이다.
+
+- `source_columns`의 dict 순서와 `defaults`의 key 순서는 정렬한다. `_validate_mapping()`이 하나의 표준 컬럼에 두 공급사 컬럼이 매핑되는 것을 막으므로, 어떤 순서로 채워도 같은 표준 행이 나온다.
+- `required_source_columns`의 순서와 한 source의 target 순서는 **보존한다.** 특히 `required_source_columns` 순서는 `transform_rows()`가 만드는 `MISSING_SOURCE_VALUE` 오류 배열 순서가 되고, 그 배열이 reject CSV와 `etl_rejected_rows.errors`에 그대로 저장되므로 실제 출력에 드러난다.
+
+동작:
+
+- 공개된 버전의 매핑이 바뀌면 → 실패. 메시지가 `profile_name`/`profile_version`과 "기존 버전을 고치지 말고 새 버전을 추가하라"를 알려 준다.
+- `profile_version`을 올렸는데 새 기록을 추가하지 않으면 → 실패. 기존 기록을 덮어써서 해결하도록 유도하지 않는다.
+- 과거 버전 기록은 남아 있어도 된다. baseline은 append-only로 자라며, 현재 allowlist와 개수가 같을 것을 요구하지 않는다.
+
+**한계(숨기지 않는다)**:
+
+- 프로필 JSON과 baseline 해시를 **함께** 고쳐 버리면 pytest만으로는 막지 못한다. 이 경우는 PR diff와 코드 리뷰가 막는다. 기존 기록의 수정·삭제는 리뷰에서 걸러야 할 신호다.
+- `etl/transformer.py`나 카테고리 정책 같은 **코드 쪽 의미 변경은 감지하지 못한다.** Policy B의 그 항목은 여전히 사람의 판단이다.
+- 런타임 강제가 아니라 CI 검사다. 실행 중인 서버가 바뀐 프로필을 거부하지는 않는다.
+- Phase 4의 실제 버전별 JSON archive는 아직 없다. 지금 남는 것은 매핑 원문이 아니라 지문뿐이다.
 
 ---
 
