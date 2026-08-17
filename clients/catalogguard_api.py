@@ -43,6 +43,15 @@ ETL_LOAD_QUALITY_SUMMARY_RESPONSE_KEYS = (
     "rejected_rows",
     "rejection_rate",
 )
+ETL_LOAD_QUALITY_TREND_RESPONSE_KEYS = ("items",)
+ETL_LOAD_QUALITY_TREND_ITEM_KEYS = (
+    "etl_load_run_id",
+    "created_at",
+    "total_rows",
+    "loaded_rows",
+    "rejected_rows",
+    "rejection_rate",
+)
 ETL_LOAD_ITEM_KEYS = (
     "etl_load_run_id",
     "source_filename",
@@ -396,6 +405,37 @@ def _validate_etl_load_quality_summary_response(data: dict[str, Any]) -> None:
         != data["batch_count"]
     ):
         raise _invalid_etl_response()
+
+
+def _validate_etl_load_quality_trend_response(data: dict[str, Any]) -> None:
+    items = data.get("items")
+    if (
+        any(key not in data for key in ETL_LOAD_QUALITY_TREND_RESPONSE_KEYS)
+        or not isinstance(items, list)
+        or any(not _validate_etl_load_quality_trend_item(item) for item in items)
+    ):
+        raise _invalid_etl_response()
+
+
+def _validate_etl_load_quality_trend_item(item: object) -> bool:
+    if not isinstance(item, dict) or any(
+        key not in item for key in ETL_LOAD_QUALITY_TREND_ITEM_KEYS
+    ):
+        return False
+    if not (
+        type(item["etl_load_run_id"]) is int
+        and item["etl_load_run_id"] >= 1
+        and isinstance(item["created_at"], str)
+        and type(item["rejection_rate"]) in (int, float)
+        and item["rejection_rate"] >= 0
+    ):
+        return False
+    return _validate_etl_quality_counts(
+        total_rows=item["total_rows"],
+        loaded_rows=item["loaded_rows"],
+        rejected_rows=item["rejected_rows"],
+        error_counts=None,
+    )
 
 
 def _validate_etl_product_item(item: object) -> bool:
@@ -1311,6 +1351,26 @@ class CatalogGuardApiClient:
             params=params,
         )
         _validate_etl_load_quality_summary_response(data)
+        return data
+
+    def get_etl_load_quality_trend(
+        self,
+        *,
+        profile_name: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError("limit must be between 1 and 50")
+        params: dict[str, int | str] = {"limit": limit}
+        normalized_profile_name = _normalize_optional_etl_filter(profile_name)
+        if normalized_profile_name:
+            params["profile_name"] = normalized_profile_name
+
+        data = self._get_json(
+            "/api/v1/etl-loads/quality-trend",
+            params=params,
+        )
+        _validate_etl_load_quality_trend_response(data)
         return data
 
     def list_unknown_size_tokens(self, *, limit: int = 20) -> dict[str, Any]:

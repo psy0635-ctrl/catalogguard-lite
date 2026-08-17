@@ -13,6 +13,7 @@ from db.session import get_session
 client = TestClient(app)
 ENDPOINT = "/api/v1/etl-loads"
 QUALITY_SUMMARY_ENDPOINT = f"{ENDPOINT}/quality-summary"
+QUALITY_TREND_ENDPOINT = f"{ENDPOINT}/quality-trend"
 
 
 @pytest.fixture(autouse=True)
@@ -121,6 +122,18 @@ def fake_etl_query_service(monkeypatch):
         rejected_rows=20,
         rejection_rate=6.67,
     )
+    quality_trend = SimpleNamespace(
+        items=[
+            SimpleNamespace(
+                etl_load_run_id=12,
+                created_at=load.created_at,
+                total_rows=30,
+                loaded_rows=25,
+                rejected_rows=5,
+                rejection_rate=16.67,
+            )
+        ]
+    )
 
     def override_session():
         yield fake_session
@@ -194,6 +207,17 @@ def fake_etl_query_service(monkeypatch):
         )
         return quality_summary
 
+    def fake_get_etl_load_quality_trend(session, *, profile_name=None, limit=10):
+        calls.append(
+            {
+                "operation": "quality-trend",
+                "session": session,
+                "profile_name": profile_name,
+                "limit": limit,
+            }
+        )
+        return quality_trend
+
     app.dependency_overrides[get_session] = override_session
     monkeypatch.setattr(etl_loads_route, "list_etl_loads", fake_list_etl_loads)
     monkeypatch.setattr(etl_loads_route, "get_etl_load_detail", fake_get_etl_load_detail)
@@ -202,6 +226,12 @@ def fake_etl_query_service(monkeypatch):
         etl_loads_route,
         "get_etl_load_quality_summary",
         fake_get_etl_load_quality_summary,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        etl_loads_route,
+        "get_etl_load_quality_trend",
+        fake_get_etl_load_quality_trend,
         raising=False,
     )
     yield SimpleNamespace(calls=calls, state=state)
@@ -320,6 +350,48 @@ def test_quality_summary_passes_trimmed_profile_filter(fake_etl_query_service):
 
     assert response.status_code == 200
     assert fake_etl_query_service.calls[-1]["profile_name"] == "fashion"
+
+
+def test_quality_trend_returns_items_and_static_route_wins(fake_etl_query_service):
+    response = client.get(QUALITY_TREND_ENDPOINT)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "etl_load_run_id": 12,
+                "created_at": "2026-07-25T12:00:00Z",
+                "total_rows": 30,
+                "loaded_rows": 25,
+                "rejected_rows": 5,
+                "rejection_rate": 16.67,
+            }
+        ]
+    }
+    assert fake_etl_query_service.calls[-1] == {
+        "operation": "quality-trend",
+        "session": fake_etl_query_service.calls[-1]["session"],
+        "profile_name": None,
+        "limit": 10,
+    }
+
+
+def test_quality_trend_passes_trimmed_profile_filter_and_limit(
+    fake_etl_query_service,
+):
+    response = client.get(
+        QUALITY_TREND_ENDPOINT,
+        params={"profile_name": "  fashion  ", "limit": 3},
+    )
+
+    assert response.status_code == 200
+    assert fake_etl_query_service.calls[-1]["profile_name"] == "fashion"
+    assert fake_etl_query_service.calls[-1]["limit"] == 3
+
+
+@pytest.mark.parametrize("limit", [0, 51])
+def test_quality_trend_rejects_invalid_limit(limit):
+    assert client.get(QUALITY_TREND_ENDPOINT, params={"limit": limit}).status_code == 422
 
 
 @pytest.mark.parametrize(

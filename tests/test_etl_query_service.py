@@ -502,3 +502,150 @@ def test_etl_quality_summary_excludes_legacy_quality_null_batches_from_all_total
     assert result.loaded_rows == 95
     assert result.rejected_rows == 5
     assert result.rejection_rate == 5.0
+
+
+def test_etl_quality_trend_returns_recent_available_batches_in_chronological_order(
+    postgres_session,
+):
+    from db.etl_query_service import get_etl_load_quality_trend
+
+    session, profile_prefix = postgres_session
+    profile_name = f"{profile_prefix}_trend"
+    base_time = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
+    older = _add_run(
+        session,
+        profile_name=profile_name,
+        source_filename="older.csv",
+        created_at=base_time,
+        suffix="j",
+        product_count=90,
+        total_rows=100,
+        rejected_rows=10,
+        error_counts={"INVALID_PRICE": 10},
+    )
+    legacy = _add_run(
+        session,
+        profile_name=profile_name,
+        source_filename="legacy.csv",
+        created_at=base_time + timedelta(minutes=1),
+        suffix="k",
+        product_count=100,
+    )
+    zero_total = _add_run(
+        session,
+        profile_name=profile_name,
+        source_filename="zero.csv",
+        created_at=base_time + timedelta(minutes=2),
+        suffix="l",
+        total_rows=0,
+        rejected_rows=0,
+        error_counts={},
+    )
+    tied_older = _add_run(
+        session,
+        profile_name=profile_name,
+        source_filename="tied-older.csv",
+        created_at=base_time + timedelta(minutes=3),
+        suffix="m",
+        product_count=18,
+        total_rows=20,
+        rejected_rows=2,
+        error_counts={"INVALID_PRICE": 2},
+    )
+    tied_newer = _add_run(
+        session,
+        profile_name=profile_name,
+        source_filename="tied-newer.csv",
+        created_at=base_time + timedelta(minutes=3),
+        suffix="n",
+        product_count=8,
+        total_rows=10,
+        rejected_rows=2,
+        error_counts={"INVALID_PRICE": 2},
+    )
+    session.commit()
+
+    result = get_etl_load_quality_trend(session, profile_name=profile_name, limit=3)
+
+    assert [item.etl_load_run_id for item in result.items] == [
+        zero_total.id,
+        tied_older.id,
+        tied_newer.id,
+    ]
+    assert [item.rejection_rate for item in result.items] == [0.0, 10.0, 20.0]
+    assert legacy.id not in {item.etl_load_run_id for item in result.items}
+    assert older.id not in {item.etl_load_run_id for item in result.items}
+
+
+def test_etl_quality_trend_reuses_profile_filter_policy_and_returns_empty_items(
+    postgres_session,
+):
+    from db.etl_query_service import get_etl_load_quality_trend
+
+    session, profile_prefix = postgres_session
+    created_at = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
+    literal_percent = _add_run(
+        session,
+        profile_name=f"{profile_prefix}_Trend%A",
+        source_filename="literal-percent.csv",
+        created_at=created_at,
+        suffix="o",
+        product_count=9,
+        total_rows=10,
+        rejected_rows=1,
+        error_counts={"INVALID_PRICE": 1},
+    )
+    _add_run(
+        session,
+        profile_name=f"{profile_prefix}_TrendXA",
+        source_filename="plain.csv",
+        created_at=created_at,
+        suffix="p",
+        product_count=8,
+        total_rows=10,
+        rejected_rows=2,
+        error_counts={"INVALID_PRICE": 2},
+    )
+    session.commit()
+
+    filtered = get_etl_load_quality_trend(
+        session,
+        profile_name=f"  {profile_prefix.upper()}_trend%a  ",
+        limit=10,
+    )
+    missing = get_etl_load_quality_trend(
+        session,
+        profile_name=f"{profile_prefix}_missing",
+        limit=10,
+    )
+
+    assert [item.etl_load_run_id for item in filtered.items] == [literal_percent.id]
+    assert missing.items == []
+
+
+def test_etl_quality_trend_query_does_not_modify_database(postgres_session):
+    from db.etl_query_service import get_etl_load_quality_trend
+
+    session, profile_prefix = postgres_session
+    run = _add_run(
+        session,
+        profile_name=f"{profile_prefix}_readonly",
+        source_filename="readonly.csv",
+        created_at=datetime(2026, 8, 1, 12, tzinfo=timezone.utc),
+        suffix="q",
+        product_count=9,
+        total_rows=10,
+        rejected_rows=1,
+        error_counts={"INVALID_PRICE": 1},
+    )
+    session.commit()
+    before = session.scalar(
+        select(ETLLoadRun.loaded_rows).where(ETLLoadRun.id == run.id)
+    )
+
+    get_etl_load_quality_trend(session, profile_name=f"{profile_prefix}_readonly", limit=10)
+
+    after = session.scalar(
+        select(ETLLoadRun.loaded_rows).where(ETLLoadRun.id == run.id)
+    )
+    assert after == before

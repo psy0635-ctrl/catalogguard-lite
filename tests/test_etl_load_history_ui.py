@@ -485,6 +485,8 @@ class FakeEtlApiClient:
         unknown_size_tokens=None,
         unknown_size_token_error=None,
         quality_summary=None,
+        quality_trend=None,
+        quality_trend_error=None,
     ):
         self.list_calls = []
         self.detail_calls = []
@@ -500,6 +502,7 @@ class FakeEtlApiClient:
         self.etl_run_calls = []
         self.unknown_size_token_calls = []
         self.quality_summary_calls = []
+        self.quality_trend_calls = []
         self.etl_profiles = (
             [
                 {"id": "sample_fashion_vendor_v1", "display_name": "패션 공급사 샘플"},
@@ -536,6 +539,21 @@ class FakeEtlApiClient:
             "rejected_rows": 20,
             "rejection_rate": 6.67,
         }
+        self.quality_trend = (
+            [
+                {
+                    "etl_load_run_id": 12,
+                    "created_at": "2026-07-25T12:00:00Z",
+                    "total_rows": 30,
+                    "loaded_rows": 25,
+                    "rejected_rows": 5,
+                    "rejection_rate": 16.67,
+                }
+            ]
+            if quality_trend is None
+            else quality_trend
+        )
+        self.quality_trend_error = quality_trend_error
         self.detail_error = detail_error
         self.list_items = [make_load()] if list_items is None else list_items
         self.list_pages = list_pages
@@ -617,6 +635,14 @@ class FakeEtlApiClient:
     def get_etl_load_quality_summary(self, *, profile_name=None):
         self.quality_summary_calls.append(profile_name)
         return self.quality_summary
+
+    def get_etl_load_quality_trend(self, *, profile_name=None, limit=10):
+        self.quality_trend_calls.append(
+            {"profile_name": profile_name, "limit": limit}
+        )
+        if self.quality_trend_error is not None:
+            raise self.quality_trend_error
+        return {"items": self.quality_trend}
 
     def list_inspections(self, **params):
         return {
@@ -892,6 +918,52 @@ def test_etl_load_history_shows_quality_summary_for_applied_profile(monkeypatch)
     assert "과거 일부 배치는 품질 요약 정보가 없어 집계에서 제외되었습니다." in [
         info.value for info in app.info
     ]
+
+
+def test_etl_load_history_shows_quality_trend_for_applied_profile_without_filename(
+    monkeypatch,
+):
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    next(widget for widget in app.text_input if widget.label == "원본 파일명").set_value(
+        "vendor_products.csv"
+    ).run(timeout=10)
+    next(widget for widget in app.text_input if widget.label == "공급사 프로필").set_value(
+        "  sample_fashion_vendor_v2  "
+    ).run(timeout=10)
+    next(widget for widget in app.button if widget.label == "조회").click().run(timeout=10)
+
+    assert len(app.exception) == 0
+    assert api_client.quality_trend_calls[-1] == {
+        "profile_name": "sample_fashion_vendor_v2",
+        "limit": 10,
+    }
+    assert "최근 ETL 품질 추이" in [subheader.value for subheader in app.subheader]
+    assert app.get("vega_lite_chart")
+
+
+def test_etl_load_history_shows_empty_quality_trend_message(monkeypatch):
+    api_client = FakeEtlApiClient(quality_trend=[])
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert len(app.exception) == 0
+    assert "표시할 품질 추이 데이터가 없습니다." in [info.value for info in app.info]
+
+
+def test_etl_load_history_shows_quality_trend_api_error(monkeypatch):
+    api_client = FakeEtlApiClient(
+        quality_trend_error=catalogguard_api.CatalogGuardApiResponseError("invalid")
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert len(app.exception) == 0
+    assert "ETL 품질 추이를 불러오지 못했습니다." in [error.value for error in app.error]
 
 
 def test_etl_load_history_does_not_retry_failed_detail_within_one_click(
