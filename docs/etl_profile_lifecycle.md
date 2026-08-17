@@ -1,0 +1,446 @@
+# ETL Profile Version Lifecycle Policy
+
+## 이 문서의 목적
+
+ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**, 프로필 버전을 어떻게 다룰지 먼저 고정하기 위한 문서다. 코드를 바꾸는 문서가 아니라, 앞으로 코드를 바꿀 때 지켜야 할 규칙을 정하는 문서다.
+
+이 문서는 다음 세 가지를 **명확히 구분해서** 쓴다. 아직 없는 기능을 이미 있는 것처럼 쓰지 않는다.
+
+- `[현재 구현]` — 지금 저장소 코드에 실제로 있는 동작
+- `[정책 결정]` — 이번 단계에서 확정하는 규칙(코드 변경 없음)
+- `[향후 구현]` — 아직 없고, 나중에 만들 때 따를 방향
+
+이번 작업에서 production code는 한 줄도 바꾸지 않았다. 변경 대상은 이 문서와 README의 최소 반영뿐이다.
+
+---
+
+## 1. 용어 정리
+
+낯선 용어는 바로 쉬운 말로 붙여 둔다.
+
+| 용어 | 쉬운 설명 |
+| --- | --- |
+| Immutable(불변) | 한 번 공개(=실제 ETL 실행에 사용)된 버전의 내용을 나중에 바꾸지 않는 것 |
+| Lineage(계보) | 같은 Profile이 버전별로 이어지는 줄기. `sample_fashion_vendor`의 v1 → v2 → v3 같은 흐름 |
+| Version bump | 의미가 바뀌었을 때 버전 숫자를 하나 올리는 것. 기존 버전을 고치는 게 아니라 새 버전을 만드는 것 |
+| Deactivate(비활성화) | 기록은 그대로 남기고, 앞으로 새로 쓰는 것만 막는 것. 삭제와 다르다 |
+| Active version | 새 ETL 실행에 쓸 "지금 이 버전" 하나를 가리키는 표시 |
+| Reproducibility(재현성) | 과거 배치가 "그때 어떤 규칙으로 변환됐는지"를 나중에도 알 수 있는 성질 |
+| Dedup identity | 같은 배치인지 판정하는 기준 키. 이 키가 같으면 새 배치를 만들지 않는다 |
+| Snapshot | 그 시점의 내용을 통째로 복사해 저장해 둔 것 |
+| Fingerprint(지문) | 내용 전체를 짧은 해시 문자열 하나로 요약한 값. 내용이 바뀌면 값이 바뀐다 |
+
+---
+
+## 2. `[현재 구현]` 코드에서 확인한 사실
+
+아래는 모두 현재 저장소 코드를 직접 읽고 확인한 내용이다. 추측은 없다.
+
+### 2.1 세 가지 식별자의 역할
+
+| 값 | 어디에 있나 | 현재 값 | 실제 역할 |
+| --- | --- | --- | --- |
+| `profile_id` | `etl/profile_loader.py`의 `_ETL_PROFILE_REGISTRY` key (코드 안) | `sample_fashion_vendor_v1`, `sample_marketplace_vendor_v1` | API/UI가 프로필을 고를 때 쓰는 **allowlist 식별자**. 파일 경로가 아니다 |
+| `profile_name` | 프로필 JSON의 `profile_name` | `sample_fashion_vendor`, `sample_marketplace_vendor` | 프로필 **계보 이름**. `etl_load_runs.profile_name`에 기록되고 이력 검색 필터로도 쓰인다 |
+| `profile_version` | 프로필 JSON의 `profile_version` | 두 프로필 모두 **`"2"`** | 실제 **변환 의미 버전**. `etl_load_runs.profile_version`에 기록되고 dedup 키의 일부다 |
+
+`profile_id`와 파일명의 `_v1`은 **semantic version이 아니다.** 기존 API 클라이언트 호환을 위해 고정된 문자열이며, `etl/profile_loader.py` 주석과 `docs/etl_mvp.md`에도 같은 내용이 이미 적혀 있다. 실제 버전은 JSON의 `profile_version`("2")이고, 두 값이 충돌해 보이지 않도록 `display_name`에는 버전 표기를 넣지 않는다(`tests/etl/test_profile_loader.py::test_list_etl_profiles_display_names_do_not_claim_a_profile_version`이 이를 검증한다).
+
+### 2.2 프로필 JSON에 실제로 있는 필드
+
+`config/etl/sample_fashion_vendor_v1.json`, `config/etl/sample_marketplace_vendor_v1.json` 두 파일 모두 다음 5개 필드만 가진다.
+
+- `profile_name`
+- `profile_version`
+- `source_columns` — 공급사 컬럼 → 표준 컬럼 매핑(한 원본 컬럼이 여러 표준 컬럼으로 갈 수 있다)
+- `required_source_columns` — 반드시 있어야 하는 공급사 컬럼 목록
+- `defaults` — 값이 비었을 때 채울 기본값
+
+`display_name`은 **JSON에 없다.** 코드 쪽 `_ETL_PROFILE_REGISTRY`에만 있다. 이 사실은 뒤의 Policy C에서 중요하게 쓰인다.
+
+### 2.3 `ETLLoadRun`이 저장하는 것
+
+`db/models.py`의 `ETLLoadRun` 컬럼 전체:
+
+`source_filename`, `profile_name`, `profile_version`, `input_file_sha256`, `output_file_sha256`, `loaded_rows`, `total_rows`, `rejected_rows`, `error_counts`, `reject_details_stored`, `rejects_file_sha256`, `initial_source_type`, `initial_source_ref`, `actor_user_id`, `actor_username`, `created_at`
+
+- `profile_name`: `String(100)`, NOT NULL
+- `profile_version`: `String(20)`, NOT NULL
+
+### 2.4 Dedup identity
+
+`db/models.py`에 unique index가 있다.
+
+```text
+ux_etl_load_runs_input_profile_version
+  = (input_file_sha256, profile_name, profile_version)
+```
+
+`etl/db_loader.py`의 `load_standard_csv()`도 정확히 같은 세 컬럼으로 기존 배치를 조회하고, 이미 있으면 새 행을 만들지 않고 `created=False`로 기존 배치를 그대로 반환한다. `IntegrityError` 경쟁 상황에서도 기존 row를 **update하지 않는다.**
+
+`etl/web_service.py`의 `run_web_etl()`은 변환을 먼저 다 수행한 뒤 `load_standard_csv()`를 호출하므로, dedup에 걸리면 **이번에 계산한 새 결과를 버리고** 기존 배치를 돌려준다. 즉 버전을 올리지 않으면 이미 적재한 CSV에는 새 매핑이 반영되지 않는다.
+
+### 2.5 프로필 스냅샷 / mapping hash 저장 여부
+
+**없음.**
+
+`ETLLoadRun`에는 프로필 JSON 전체 snapshot도, mapping config의 hash도 저장하지 않는다. `input_file_sha256`·`output_file_sha256`·`rejects_file_sha256`은 모두 **파일 bytes**의 해시이지 프로필 내용의 해시가 아니다. `etl/pipeline.py`가 만드는 summary JSON에도 `profile_name`/`profile_version` 문자열만 들어가고 매핑 내용은 들어가지 않는다.
+
+### 2.6 과거 버전 archive / registry 존재 여부
+
+**없음.**
+
+`config/etl/`에는 현재 버전 JSON 파일 2개만 있다. 과거 `profile_version = "1"`의 내용은 **git 이력에만** 남아 있고(`80e8ea4`), 애플리케이션이 읽을 수 있는 archive·registry·DB 테이블 형태로는 존재하지 않는다. Profile을 담는 DB 모델도 없다.
+
+### 2.7 `profile_version` 값의 검증 수준
+
+- `etl/profile_loader.py`의 `load_profile()`은 `_require_non_empty_text()`로 **"공백이 아닌 문자열"** 만 확인한다. 숫자인지, 순서가 증가하는지, 형식이 무엇인지는 검사하지 않는다.
+- `etl/db_loader.py`는 길이 20자 초과만 거부한다(`profile_name`은 100자).
+- DB 컬럼은 `String(20)`.
+
+따라서 지금 코드는 `"2"`뿐 아니라 `"2.1.0"`, `"v3-beta"`, `"abc"` 같은 임의 문자열도 받아들인다. **이 문서는 이 validation 동작을 바꾸지 않는다.**
+
+### 2.8 Read-only Profile Detail (직전 단계 완료분)
+
+커밋 `973882e`("feat: add ETL profile detail")로 다음이 추가되었고, 조회 전용이다.
+
+- `GET /api/v1/etl-profiles/{profile_id}` → `ETLProfileDetailResponse(id, display_name, profile_name, profile_version, source_columns, required_source_columns, defaults)`, 권한은 viewer 이상
+- `etl.profile_loader.get_etl_profile_detail()`
+- `clients/catalogguard_api.py`의 `get_etl_profile_detail()`
+- Streamlit `ui/etl_load_history.py`의 `_render_etl_profile_detail()`
+
+즉 운영자는 **지금 화면에서 프로필 매핑을 볼 수 있다.** 다만 이 화면이 보여 주는 것은 언제나 "현재 파일의 내용"이지 "과거 배치가 사용한 내용"이 아니다. 이 구분이 아래 4장 위험의 핵심이다.
+
+### 2.9 품질 지표의 집계 기준
+
+`db/etl_query_service.py`의 `get_etl_load_quality_summary()`와 `get_etl_load_quality_trend()`는 `profile_name`으로만 필터한다(부분 일치, 대소문자 무시). **`profile_version`은 필터 조건에 없다.** 따라서 한 계보의 여러 버전 배치가 같은 요약/추세에 함께 집계된다.
+
+---
+
+## 3. 지금 구조에서 무엇이 위험한가
+
+### 3.1 문제 상황
+
+현재 `sample_fashion_vendor`의 `profile_version`은 `"2"`다. 어떤 사람이 `config/etl/sample_fashion_vendor_v1.json`을 열어 매핑을 이렇게 바꿨다고 하자.
+
+```text
+변경 전 (v2):  "vendor_sku": ["product_group_id", "product_id"]
+변경 후 (여전히 v2로 두고): "vendor_sku": "product_id"
+```
+
+`profile_version`은 `"2"` 그대로 둔다. 코드상 이 편집을 막는 장치는 **없다.** `load_profile()`은 매핑이 스키마상 유효하기만 하면 통과시킨다.
+
+### 3.2 그래서 생기는 문제 5가지
+
+**(1) 같은 입력 + 같은 버전인데 결과가 달라진다**
+
+같은 공급사 CSV를 넣어도 변환 결과 CSV가 달라진다. 그런데 이력에 남는 라벨은 양쪽 다 `profile_name=sample_fashion_vendor, profile_version=2`다. 버전 문자열이 결과를 설명하지 못한다.
+
+**(2) dedup identity의 의미가 깨진다**
+
+dedup 키는 `(input_file_sha256, profile_name, profile_version)`이다. 이 키의 전제는 "세 값이 같으면 결과도 같다"는 것이다. 버전을 그대로 두고 매핑만 바꾸면 이 전제가 무너진다. 실제로는 결과가 달라지는데도 시스템은 "이미 적재한 배치"라고 판단해 **새 매핑을 적용한 결과를 버리고** 옛 배치를 돌려준다(2.4 참조). 사용자는 새 매핑으로 적재했다고 믿지만 DB에는 옛 결과가 남는다.
+
+**(3) 과거 배치의 당시 매핑을 재현할 수 없다**
+
+`ETLLoadRun`에는 스냅샷도 hash도 없다(2.5). 파일은 덮어쓰였고 archive도 없다(2.6). 남는 단서는 git 이력뿐인데, DB가 그것을 보장하는 구조가 아니다. "3개월 전 batch 41은 어떤 매핑이었나"에 시스템이 답하지 못한다.
+
+**(4) 품질 지표 비교가 왜곡된다**
+
+Quality Summary / Quality Trend는 `profile_name`으로만 묶는다(2.9). 매핑이 바뀌면 reject 판정 기준이 바뀌므로 rejection rate가 변한다. 그런데 추세 그래프에는 "공급사 데이터 품질이 나빠졌다"처럼 보인다. 실제 원인은 공급사가 아니라 **우리 쪽 프로필 편집**이다. 원인 오진으로 이어진다.
+
+**(5) 운영자가 보는 "버전 2"의 의미가 시점마다 달라진다**
+
+Profile Detail 화면(2.8)은 현재 파일 내용을 보여 준다. 운영자가 이력에서 `profile_version=2` 배치를 보고 Detail 화면의 매핑을 그 배치의 매핑이라고 이해하는 것은 자연스럽다. 그러나 in-place 편집이 있었다면 그 이해는 틀린다. **틀렸다는 사실조차 화면에 드러나지 않는다.** 이것이 가장 조용하고 위험한 실패다.
+
+### 3.3 이미 있는 좋은 선례
+
+`80e8ea4`("feat: align ETL required attributes with category-aware policy")에서 카테고리별 필수 속성 정책을 도입할 때, 두 샘플 프로필의 `profile_version`을 `"1"` → `"2"`로 올렸다. 커밋 메시지에 그 이유가 명시돼 있다. dedup 키가 `(input_file_sha256, profile_name, profile_version)`이므로 버전을 두지 않으면 이미 적재한 CSV에 새 정책이 적용되지 않기 때문이다. 기존 `"1"` 배치 이력은 남겼고, 파일명과 `profile_id`는 호환을 위해 유지했다.
+
+즉 **이 프로젝트는 이미 올바른 판단을 한 번 내렸다.** 이번 문서는 그 판단을 사람의 기억이 아니라 문서화된 규칙으로 만든다.
+
+주의할 점 하나: 이 사례에서 실제로 바뀐 것은 프로필 JSON이 아니라 **코드**(`etl/transformer.py`, `etl/db_loader.py`의 카테고리 정책)였다. 그런데도 버전을 올렸다. 변환 의미는 프로필 JSON만으로 결정되지 않고 코드와 함께 결정되기 때문이다. 이 점은 아래 정책에서 그대로 반영한다.
+
+---
+
+## 4. `[정책 결정]` Lifecycle 정책
+
+각 정책이 현재 코드와 충돌하지 않는지 검토한 결과를 함께 적는다.
+
+### Policy A — Published Version Immutable (채택)
+
+**규칙**: 한 번이라도 실제 ETL 실행에 사용된 `(profile_name, profile_version)` 조합의 변환 의미는 수정하지 않는다. `source_columns`, `required_source_columns`, `defaults`를 바꾸지 않는다. 바꿔야 하면 **기존 버전을 고치지 말고 새 버전을 만든다.**
+
+쉽게: v2를 고치는 게 아니라 v3를 추가한다.
+
+**현재 코드와의 정합성**: 충돌 없음. `load_profile()`은 버전 값의 형식을 강제하지 않으므로 `"3"`으로 올리는 것만으로 정상 동작한다. dedup 키에 버전이 들어 있으므로 새 버전은 자동으로 새 배치를 만든다.
+
+**한계(솔직하게)**: 현재 이 규칙을 **강제하는 코드는 없다.** 사람이 JSON을 편집하면 그대로 통과한다. 이 규칙을 자동으로 지켜 주는 장치가 다음 구현 후보 A(7장)다.
+
+### Policy B — Semantic Change = Version Bump (채택)
+
+**규칙**: 변환 결과의 의미에 영향을 주는 변경이 있으면 `profile_version`을 올린다. 대상은 다음과 같다.
+
+- `source_columns` 매핑 변경(추가/삭제/대상 컬럼 변경)
+- `required_source_columns` 변경 — 입력 검증 의미와 reject 판정이 바뀐다
+- `defaults` 변경 — 빈 값일 때 채워지는 출력 값이 바뀐다
+- 프로필 JSON 밖이라도, **그 프로필로 변환한 결과의 의미를 바꾸는 코드 변경** (예: `80e8ea4`의 카테고리별 필수 속성 정책)
+
+마지막 항목이 중요하다. 변환 의미는 프로필 JSON 단독으로 결정되지 않는다. `etl/transformer.py`, `core/fashion_attribute_validator.py`, `config/settings.py`의 `CSV_TEMPLATE_COLUMNS`/`REQUIRED_FIELDS`가 함께 결정한다. 코드 쪽 변경으로 같은 입력의 결과가 달라진다면, 프로필 JSON을 한 글자도 안 고쳤더라도 버전을 올린다.
+
+**현재 코드와의 정합성**: 충돌 없음. `80e8ea4`가 이미 이 방식으로 처리했다.
+
+### Policy C — `display_name`은 semantic version 대상 아님 (채택, 단 조건 있음)
+
+**규칙**: `display_name`은 UI 표시용 metadata이고 변환 결과를 바꾸지 않으므로, `"패션 공급사 샘플"` → `"패션 공급사 A"` 같은 변경으로 `profile_version`을 올리지 않는다.
+
+**현재 registry 구조와의 관계(요청하신 검토)**: 구조상 충돌은 없지만 두 가지를 짚어야 한다.
+
+1. `display_name`은 프로필 JSON이 아니라 **코드**(`_ETL_PROFILE_REGISTRY`)에 있다(2.2). 그래서 "JSON을 고쳤으니 버전을 올려야 하나?"라는 질문 자체가 성립하지 않는다. `display_name` 변경은 애초에 JSON을 건드리지 않는다. 대신 코드 변경 + 배포가 필요하다는 부수 효과가 있다. 향후 Profile 등록 기능을 만들 때 `display_name`을 JSON이나 DB로 옮긴다면, **그때도 이 값은 semantic 필드가 아님을 명시**해야 한다.
+2. `display_name`에 버전처럼 보이는 문자열(`"샘플 v1"`, `"패션 v2"`)을 **넣지 않는다.** 넣으면 사용자가 목록에서 "v1"을 고르고 이력에는 `profile_version="2"`가 기록되는 표시 불일치가 생긴다. 이는 `80e8ea4`에서 실제로 제거한 문제이고, `tests/etl/test_profile_loader.py::test_list_etl_profiles_display_names_do_not_claim_a_profile_version`이 회귀를 막고 있다.
+
+### Policy D — `profile_name` 변경은 새 lineage (채택)
+
+**규칙**: `profile_name`은 하나의 계보 이름이다. `sample_fashion_vendor` → `new_fashion_vendor`처럼 이름 자체가 바뀌면 version bump가 아니라 **새 계보**로 본다. 새 계보는 `profile_version`을 처음부터(`"1"`) 시작한다.
+
+**근거**: `profile_name`은 dedup 키의 일부이자 이력 검색·품질 집계의 기준이다(2.4, 2.9). 이름이 바뀌면 과거 배치는 옛 이름으로만 검색되고 품질 추세도 갈라진다. 즉 이름 변경은 이미 시스템 안에서 "다른 계보"처럼 동작한다. 정책이 그 실제 동작을 따라가는 것이 안전하다.
+
+**주의**: 기존 계보 이름을 새 이름으로 **소급 변경(rename)하지 않는다.** 과거 `etl_load_runs` 행의 `profile_name`을 바꾸면 그 배치가 실제로 어떤 프로필로 만들어졌는지에 대한 기록이 오염된다.
+
+### Policy E — `profile_id`는 API identifier (채택)
+
+**규칙**: `_v1`이 붙은 `profile_id`는 semantic version이 아니다. 기존 client 호환 때문에 **이번 단계에서 rename하지 않는다.** 문서·화면·코드에서 세 값을 항상 구분해 쓴다.
+
+```text
+profile_id       = API/UI에서 선택하는 allowlist 식별자   (예: sample_fashion_vendor_v1)
+profile_name     = Profile 계보 이름                      (예: sample_fashion_vendor)
+profile_version  = 실제 ETL 변환 의미 버전                (예: "2")
+```
+
+**현재 코드와의 정합성**: 충돌 없음. 이미 이렇게 동작하며 `etl/profile_loader.py` 주석과 `docs/etl_mvp.md`에도 같은 내용이 있다.
+
+**향후 주의**: 새 프로필을 추가할 때 새 `profile_id`에 `_v1` 같은 버전형 접미사를 붙이지 않는 편이 좋다. 지금의 `_v1`은 이미 굳어진 호환 부채이지 따라야 할 관례가 아니다.
+
+### Policy F — Historical Version Preservation (채택, 대부분 `[향후 구현]`)
+
+**규칙**: 한 번 ETL에 사용된 프로필 버전의 내용은 나중에 물리적으로 덮어쓰거나 삭제하지 않는다. 목표 구조는 다음과 같다.
+
+```text
+sample_fashion_vendor
+ ├─ v1  archived
+ ├─ v2  archived
+ └─ v3  active
+```
+
+**현재 상태(솔직하게)**: 이런 archive 구조는 **지금 없다.** 현재 `config/etl/`에는 현재 버전 파일 하나씩만 있고, v1의 내용은 git 이력에만 남아 있다(2.6). 위 그림은 `[향후 구현]` 방향이지 현재 동작이 아니다.
+
+**지금 당장 지킬 수 있는 최소한**: 프로필 JSON 파일을 **삭제하지 않는다.** 새 버전을 만들 때도 옛 내용을 git 이력에서 되찾을 수 있도록 커밋 메시지에 버전 변경 사실과 이유를 남긴다(`80e8ea4`가 좋은 예다).
+
+### Policy G — Delete 대신 Deactivate (채택, `[향후 구현]`)
+
+**규칙**: 향후 Profile CRUD의 DELETE는 파일/DB row의 실제 제거를 기본 동작으로 삼지 않는다. `active = false` 같은 비활성화를 기본으로 한다.
+
+**근거**: 과거 `etl_load_runs` 행이 `(profile_name, profile_version)`으로 그 버전을 참조한다. 원본을 지우면 이력이 가리키는 대상이 사라져, 3.2의 (3)(5) 문제가 영구화된다.
+
+**현재 상태**: Profile을 담는 DB 모델 자체가 없으므로 이번 단계에서 구현하지 않는다. DELETE API도 없다(현재 프로필 관련 API는 목록·상세 조회 2개뿐이다).
+
+### Policy H — Active Version (채택, `[향후 구현]`, 단 자동 추론 금지)
+
+**규칙**: 한 `profile_name`에 여러 버전이 생기면, 신규 ETL 실행에 쓸 버전을 **명시적으로** 지정한다. **"가장 큰 숫자 = active"로 자동 추론하지 않는다.**
+
+**자동 추론을 쓰지 않는 이유**:
+
+1. `profile_version`은 임의 문자열을 허용한다(2.7). `"10"`과 `"9"`를 문자열로 비교하면 `"10"`이 더 작다. `"v3-beta"` 같은 값은 비교 자체가 정의되지 않는다.
+2. 새 버전을 커밋했지만 아직 검증 전인 상태가 있을 수 있다. "가장 큰 것이 자동으로 실행된다"면 준비되지 않은 버전이 곧바로 운영 실행에 들어간다.
+3. 문제가 생겼을 때 이전 버전으로 되돌리려면 "더 큰 번호"를 새로 만들어야 하는데, 이는 내용상 롤백인 것을 버전 진행처럼 위장한다.
+
+**더 안전한 방식**: 명시적 registry pointer. 사실 현재 구조가 이미 원시적인 형태의 pointer다. `_ETL_PROFILE_REGISTRY[profile_id]["filename"]`이 "지금 쓸 파일"을 가리킨다. 향후에는 이 pointer가 버전을 직접 가리키게 확장하면 된다.
+
+```text
+[향후 구현 방향]
+registry: sample_fashion_vendor_v1  ->  active_version: "3"
+archive:  v1.json, v2.json, v3.json  (모두 보존)
+```
+
+---
+
+## 5. `[정책 결정]` Version bump 판정표
+
+현재 프로필 구조에 실제로 있는 필드만 표에 넣는다.
+
+| 변경 | Version bump | 이유 |
+| --- | --- | --- |
+| `source_columns` 매핑 변경 | **필요** | 같은 입력의 변환 결과가 달라진다 |
+| `required_source_columns` 변경 | **필요** | 입력 검증과 reject 판정 의미가 달라진다 |
+| `defaults` 변경 | **필요** | 빈 값일 때 출력되는 값이 달라진다 |
+| 변환 의미를 바꾸는 코드 변경 (transformer, 카테고리 필수 속성 정책 등) | **필요** | JSON이 그대로여도 같은 입력의 결과가 달라진다 (`80e8ea4` 선례) |
+| `profile_name` 변경 | **새 profile 계보 권장** | 계보 자체가 바뀐다. bump가 아니다 (Policy D) |
+| `display_name` 변경 | 불필요 | UI 표시만 바뀌고 변환에 영향이 없다. 애초에 JSON 밖에 있다 (Policy C) |
+| 설명 문서·주석 수정 | 불필요 | 변환에 영향이 없다 |
+| JSON 키 순서·들여쓰기 같은 formatting | 불필요 | 파싱 결과가 동일하다 |
+
+---
+
+## 6. `[정책 결정]` Version 형식
+
+**결정: 단순 증가 정수 문자열(`"1"`, `"2"`, `"3"`)을 계속 쓴다. SemVer(`2.1.0`)는 이번 MVP에서 도입하지 않는다.**
+
+근거:
+
+- 현재 프로필은 2개이고 버전은 각각 `"2"` 하나뿐이다. SemVer의 major/minor/patch 구분이 표현할 만한 복잡성이 아직 없다.
+- 이 프로젝트에서 프로필 변경은 사실상 전부 "결과가 달라지는 변경"이다. Policy B의 bump 대상 목록이 곧 major 변경에 해당하므로, minor/patch 자리는 늘 `0`으로 남을 가능성이 높다. 의미 없는 자릿수는 오히려 판단을 흐린다.
+- `etl_load_runs.profile_version`은 `String(20)`이라 형식 변경이 스키마 변경을 부르지는 않지만, 형식이 섞이면(`"2"`와 `"2.0.0"`이 공존) dedup 키가 다른 값으로 취급되어 같은 입력이 두 배치로 갈라진다.
+- 유지보수 난이도. 정수 하나는 규칙 설명이 한 줄로 끝난다.
+
+`[현재 구현]` 다시 확인: 코드는 형식을 강제하지 않는다(2.7). `"2.1.0"`도 `"abc"`도 통과한다. 즉 위 결정은 **규약(convention)이며 코드가 막아 주는 제약이 아니다.** 이번 문서 작업에서 validation 동작은 바꾸지 않았다.
+
+---
+
+## 7. `[현재 구현]` 재현성이 지금 어디까지 가능한가
+
+"재현성"을 쉬운 말로 정의하면 이렇다.
+
+> 과거 배치가 `profile_name = sample_fashion_vendor`, `profile_version = 2`를 기록했다면, 나중에도 "그때 v2가 어떤 매핑이었는지"를 알 수 있어야 한다.
+
+현재 도달한 수준을 과장하지 않고 나누면 다음과 같다.
+
+| 질문 | 지금 답할 수 있나 | 근거 |
+| --- | --- | --- |
+| 이 배치는 어떤 프로필 계보를 썼나 | **가능** | `etl_load_runs.profile_name` |
+| 이 배치는 어떤 버전을 썼나 | **가능** | `etl_load_runs.profile_version` |
+| 이 배치의 입력 파일이 무엇이었나(동일성 확인) | **가능** | `input_file_sha256` (단, 원본 bytes는 보존하지 않음) |
+| 이 배치의 출력 CSV가 무엇이었나(동일성 확인) | **가능** | `output_file_sha256` |
+| 그 버전의 **당시 매핑 내용**이 무엇이었나 | **DB만으로는 불가능** | 스냅샷·hash 미저장(2.5), archive 없음(2.6) |
+| 그 버전이 그 뒤에 수정되지 않았음을 증명 | **불가능** | in-place 편집을 막거나 감지하는 장치 없음 |
+
+정확한 현재 상태 서술은 다음 한 문장이다.
+
+> **어떤 버전을 사용했는지는 알 수 있지만, 그 버전의 당시 정확한 JSON 내용이 영구 보존된다고 DB 자체가 보장하지는 않는다.**
+
+git 이력에 과거 내용이 남는 것은 사실이지만, 그것은 개발 저장소의 성질이지 애플리케이션이 제공하는 보장이 아니다. 저장소를 볼 수 없는 운영자는 답을 얻지 못한다.
+
+---
+
+## 8. `[향후 구현]` 구조 옵션 비교
+
+### Option A — 현재 방식 유지 (config JSON + code allowlist)
+
+프로필 JSON 파일 하나 + 코드 registry. 버전 관리는 사람이 규약으로 지킨다.
+
+- **장점**: 추가 작업 없음. 구조가 단순하고 읽기 쉽다. 프로필 변경이 코드 리뷰를 거친다(권한 통제가 자연스럽다).
+- **단점**: Policy A를 강제하지 못한다. 과거 버전을 애플리케이션이 읽을 수 없다. 3.2의 위험이 그대로 남는다.
+- **구현 복잡도**: 없음(0)
+- **MVP 적합성**: 지금 동작 중이므로 적합하지만, 위험이 문서로만 관리된다.
+- **확장성**: 낮음. 프로필이 늘고 버전이 쌓이면 관리가 사람 기억에 의존한다.
+
+### Option B — 버전별 immutable JSON archive + active registry
+
+버전마다 별도 파일을 두고, registry가 "지금 쓸 버전"을 가리킨다.
+
+```text
+config/etl/sample_fashion_vendor/
+  v1.json   (보존, 수정 금지)
+  v2.json   (보존, 수정 금지)
+  v3.json   (보존, 수정 금지)
+registry: sample_fashion_vendor_v1 -> active_version "3"
+```
+
+- **장점**: Policy A·F·H를 구조 자체로 표현한다. 과거 버전을 애플리케이션이 읽을 수 있어 재현성이 실제로 생긴다. 파일 기반이라 git diff로 변경이 그대로 드러난다. allowlist 보안 모델(`get_profile_path()`의 경로 검증)을 그대로 유지할 수 있다.
+- **단점**: `get_profile_path()`와 registry 구조를 바꿔야 한다. 파일이 계속 늘어난다. active pointer를 코드에 두면 활성 버전 전환에 배포가 필요하다.
+- **구현 복잡도**: 중간. DB 마이그레이션은 필요 없다.
+- **MVP 적합성**: 좋음. 현재 구조의 자연스러운 확장이다.
+- **확장성**: 좋음. 나중에 Option C로 옮길 때도 archive가 그대로 이관 대상이 된다.
+
+### Option C — Profile / ProfileVersion DB 테이블
+
+프로필과 버전을 DB로 옮기고 CRUD API를 붙인다.
+
+- **장점**: 화면에서 프로필을 만들고 활성화할 수 있다. `active` 플래그, 작성자, 시각 같은 메타데이터를 자연스럽게 갖는다. `etl_load_runs`에서 FK로 버전을 참조할 수 있다.
+- **단점**: 가장 큰 변경이다. 테이블 2개 + Alembic migration + CRUD API + RBAC + UI + 검증. 사용자가 매핑을 직접 입력하게 되므로 지금 코드 리뷰가 담당하던 안전장치를 애플리케이션 검증으로 전부 대체해야 한다. 잘못된 프로필이 곧바로 운영 실행에 들어갈 수 있는 새 위험이 생긴다. 프로필 정의가 git 밖으로 나가 코드 리뷰 대상에서 빠진다.
+- **구현 복잡도**: 높음.
+- **MVP 적합성**: 낮음. 프로필이 2개뿐인 지금 단계에 비해 과하다.
+- **확장성**: 가장 높음. 운영자가 직접 공급사를 늘리는 단계가 되면 결국 필요하다.
+
+### 추천
+
+**현재 단계 목표 구조로는 Option B를 추천한다.** 다만 지금 당장 B를 통째로 만들자는 뜻은 아니다(로드맵 9장, 다음 구현 10장 참고).
+
+이유:
+
+- 지금 가장 큰 위험은 "프로필을 만들 수 없다"가 아니라 **"이미 쓴 버전이 조용히 바뀔 수 있다"**(3.2)이다. Option B는 이 위험을 정면으로 해결하지만 Option C는 이 위험을 해결하면서 새 위험(무검증 사용자 입력)을 추가한다.
+- 현재 프로필은 2개다. 프로필을 늘리는 기능보다 있는 프로필을 신뢰할 수 있게 만드는 것이 먼저다.
+- 포트폴리오 관점에서도 "DB CRUD를 만들었다"보다 **"불변성과 재현성 문제를 먼저 식별하고, 가장 작은 안전장치부터 넣었다"**가 설명하기에 훨씬 강한 이야기다. 실제로 이 판단은 `80e8ea4`에서 한 번 내렸던 판단과 일관된다.
+- Option B는 Option C로 가는 길을 막지 않는다. archive된 버전 JSON은 나중에 `profile_versions` 테이블의 초기 데이터가 된다.
+
+---
+
+## 9. `[향후 구현]` 단계별 로드맵
+
+| Phase | 내용 | 상태 |
+| --- | --- | --- |
+| Phase 1 | Read-only Profile Detail (`GET /api/v1/etl-profiles/{profile_id}`, 클라이언트, Streamlit 표시) | **완료** (`973882e`) |
+| Phase 2 | Lifecycle Policy 확정 — 이 문서 | **이번 작업** |
+| Phase 3 | Published version guardrail — 이미 공개된 `(profile_name, profile_version)`의 매핑이 바뀌면 CI에서 실패시킨다 | 다음 |
+| Phase 4 | Versioned archive + active pointer — 버전별 JSON 보존, registry가 활성 버전을 명시 (Option B) | 이후 |
+| Phase 5 | Activation / Deactivation — 활성 버전 전환과 비활성화(삭제 아님) | 이후 |
+| Phase 6 | 필요할 때만 DB-backed Profile / ProfileVersion (Option C) | 조건부 |
+
+Phase 4가 끝나기 전에는 새 프로필 **등록** 기능을 만들지 않는다. 등록을 먼저 만들면 보존 구조 없이 프로필 수만 늘어 3.2의 위험이 프로필 수만큼 곱해진다.
+
+Full CRUD는 로드맵의 마지막이며, 그마저도 조건부다. 프로필이 계속 2~3개 수준이면 Option C는 필요하지 않을 수 있다.
+
+---
+
+## 10. `[향후 구현]` 다음 실제 구현 후보 비교
+
+| 기준 | A. Immutable version guardrail | B. Versioned profile registration | C. DB-backed Profile/ProfileVersion |
+| --- | --- | --- | --- |
+| 구현 난이도 | 낮음 (테스트 + 고정 기록 파일) | 중간 (registry/경로 구조 변경) | 높음 (테이블 2개 + migration + CRUD API + RBAC + UI) |
+| 현재 위험 감소 | **큼** — 3.2의 (1)(2)(5)를 직접 차단 | 큼 — (3)까지 해결 | 큼, 단 새 위험 추가 |
+| 실제 사용자 가치 | 간접적(사고 예방) | 중간(과거 버전 조회 가능) | 직접적(프로필 추가 가능) |
+| 포트폴리오 가치 | **높음** — 문제 식별 → 최소 안전장치 서사 | 높음 | 중간 (흔한 CRUD) |
+| 기존 구조 변경량 | **거의 없음** (production code 무변경 가능) | 중간 | 큼 |
+| 되돌리기 쉬움 | 매우 쉬움 | 보통 | 어려움 |
+
+### 최종 추천: **A. Immutable version guardrail**
+
+현재 단계에서는 **가장 작은 안전장치를 먼저** 넣는다.
+
+구체적 형태(다음 단계에서 설계·구현할 내용이며, 이번 문서에서는 만들지 않았다):
+
+- 공개된 각 `(profile_name, profile_version)`에 대해 **semantic 필드만**(`source_columns`, `required_source_columns`, `defaults`) 정규화해 fingerprint(해시)를 계산하고, 그 값을 저장소에 고정 기록으로 남긴다.
+- 테스트가 현재 프로필 JSON에서 fingerprint를 다시 계산해 고정 기록과 비교한다. 다르면 실패하고, 실패 메시지가 "매핑을 바꿨다면 `profile_version`을 올리세요"라고 알려 준다.
+- 정당한 bump는 **기존 기록을 수정하는 것이 아니라 새 항목을 추가**하는 방식으로만 반영한다. 기존 항목을 지우거나 고치는 변경은 리뷰에서 걸러야 할 신호다.
+
+이 방식의 장점:
+
+- production code를 바꾸지 않고도 Policy A와 B를 강제할 수 있다. 런타임 동작·API 계약·DB 스키마가 그대로다.
+- 고정 기록 파일 자체가 **가장 값싼 형태의 archive**다. 매핑 원문은 아니지만, "당시 v2의 지문"이 남으므로 이후 Phase 4에서 실제 archive로 확장할 때 기준점이 된다.
+
+이 방식의 한계(미리 밝혀 둔다):
+
+- 저장소 안의 프로필 JSON만 검사한다. `etl/transformer.py`나 카테고리 정책 같은 **코드 쪽 의미 변경은 자동으로 감지하지 못한다.** 그 판단은 여전히 사람 몫이며, `80e8ea4`처럼 리뷰에서 짚어야 한다.
+- 런타임 강제가 아니라 CI 검사다. 이는 의도된 선택이다. 이 단계에서 production 동작을 바꾸지 않기 위해서다.
+
+---
+
+## 11. 이번 작업이 바꾸지 않은 것
+
+- production code 변경 없음: `etl/*`, `api/*`, `clients/*`, `ui/*`, `db/*`, `config/etl/*.json` 모두 그대로
+- `INSPECTION_VERSION = "13"` 유지
+- 두 샘플 프로필의 `profile_version = "2"` 유지
+- Alembic head `20260813_0013` 유지, DB 스키마·migration 변경 없음
+- 의존성·GitHub Actions workflow 변경 없음
+- `profile_version` validation 동작 변경 없음(임의 문자열 허용 상태 그대로)
+
+이 문서는 **정책을 고정하는 설계 gate**이며, 여기서 정한 규칙을 실제로 강제하는 코드는 다음 단계(Phase 3)에서 만든다.
+
+---
+
+## 참고
+
+- `docs/etl_mvp.md` — 프로필 형식, dedup 기준, 웹 ETL 흐름, allowlist 보안 모델
+- `etl/profile_loader.py` — `_ETL_PROFILE_REGISTRY`, `get_profile_path()`, `load_profile()`, `get_etl_profile_detail()`
+- `etl/db_loader.py` — `load_standard_csv()`의 dedup 처리
+- `db/models.py` — `ETLLoadRun`과 `ux_etl_load_runs_input_profile_version`
+- `80e8ea4` — `profile_version`을 `"1"`에서 `"2"`로 올린 커밋과 그 근거
+- `973882e` — Read-only Profile Detail 추가 커밋
