@@ -89,6 +89,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - `etl.cli`를 통한 공급사 CSV 표준화, reject CSV·요약 JSON 생성
 - `etl.load_cli`를 통한 표준 CSV·summary JSON의 PostgreSQL staging 적재
 - Streamlit `ETL 실행` 영역에서 공급사 CSV 업로드와 서버 allowlist 기반 ETL 프로필 선택
+- 실제 Chromium에서 Streamlit CSV 업로드 → 프로필 선택 → FastAPI Web ETL → PostgreSQL staging → ETL 이력·상세 조회까지 E2E 검증
 - `GET /api/v1/etl-profiles/{profile_id}`와 Streamlit `ETL 실행` 영역의 조회 전용 프로필 상세로 선택한 프로필의 `profile_name`·`profile_version`·컬럼 매핑·필수 원본 컬럼·기본값 확인(프로필 수정·등록은 지원하지 않음)
 - `POST /api/v1/etl-loads`로 업로드 CSV와 profile_id를 받아 기존 `run_pipeline()`·`load_standard_csv()`를 그대로 실행하고 PostgreSQL staging까지 적재
 - 동일한 원본 파일 해시·프로필 이름·버전의 웹 ETL 요청은 새 배치를 만들지 않고 기존 배치를 `created=false`로 재사용
@@ -2511,7 +2512,6 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 과거 프로필 JSON 정의는 archive에서 읽을 수 있지만, 현재 코드로 과거 배치 결과를 그대로 재현하는 것은 보장하지 않습니다. `v1` → `v2` 전환에는 JSON 밖의 코드 변경도 있었고, `etl_load_runs`에는 프로필 snapshot이나 실행 당시 애플리케이션 버전이 저장되지 않습니다.
 - 프로필 활성 버전을 바꾸는 API·화면(Activation/Deactivation)과 Profile CRUD는 아직 없습니다. `active_version`은 코드 registry 값입니다.
 - `etl_load_runs`는 `profile_name`·`profile_version`만 기록하고 프로필 JSON snapshot이나 매핑 hash는 저장하지 않으므로, 어떤 버전을 썼는지는 알 수 있지만 그 버전의 당시 내용이 보존된다고 DB가 보장하지는 않습니다. 버전 증가 기준과 향후 방향은 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)에 정리했습니다.
-- Web ETL CSV 업로드 자체를 대상으로 하는 전용 Chromium Browser E2E는 아직 없습니다. 웹 ETL 핵심 로직은 API·Client·PostgreSQL 통합 테스트와 Streamlit AppTest로 검증합니다.
 - S3 ingestion은 호출자가 `object_key` 하나를 지정하는 pull 방식입니다. S3 event 알림·Lambda·SQS 기반 자동 수집과 prefix 일괄 처리는 지원하지 않습니다.
 - S3 source를 실제로 호출하는 Streamlit 화면은 없습니다. 현재는 API 직접 호출로만 사용합니다.
 - EC2 Role에 `s3:ListBucket`을 부여하지 않았으므로, 허용 prefix 안에 없는 key는 `404 s3_object_not_found`가 아니라 `502 s3_read_failed`로 응답합니다. 최소권한을 유지하기 위한 의도된 선택입니다.
@@ -2560,7 +2560,6 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 웹 ETL 다중 파일 업로드와 XLSX 등 추가 입력 형식 지원
 - 프로필 활성 버전 전환·비활성화(Activation / Deactivation, Profile CRUD보다 먼저 적용)
 - 사용자 정의 ETL 프로필 등록·관리(Profile CRUD)
-- Web ETL CSV 업로드 전용 Browser E2E
 - 실제 운영 공급사·production catalog 연동과 배포 환경 promotion 검증
 - 증분 ETL과 대용량 streaming 처리
 - Async worker(`workers/inspection_tasks.py`)의 세션 트랜잭션 경계 정리(현재는 `session.rollback()`으로 사전 조회를 분리하며, sync 경로와 다른 방식)

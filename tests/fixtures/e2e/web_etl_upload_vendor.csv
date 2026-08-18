@@ -1,0 +1,3 @@
+style_id,sku_code,title,category_code,label,regular_price,promo_price,tone,fit_size,available_qty,details,photo
+CG-E2E-WEB-UPLOAD,CG-E2E-WEB-UPLOAD-BLK-M,CatalogGuard Web Upload Tee,TOP,E2E Web Upload Vendor,51000,41000,BLACK,M,6,Synthetic Chromium upload fixture,https://example.test/catalogguard-web-upload-black.jpg
+CG-E2E-WEB-UPLOAD,CG-E2E-WEB-UPLOAD-WHT-L,CatalogGuard Web Upload Tee,TOP,E2E Web Upload Vendor,53000,43000,WHITE,L,9,Synthetic Chromium upload fixture,https://example.test/catalogguard-web-upload-white.jpg

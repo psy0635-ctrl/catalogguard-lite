@@ -21,6 +21,9 @@ FIXTURE_PATH = ROOT / "tests" / "fixtures" / "e2e" / "etl_browser_vendor.csv"
 PROMOTION_FIXTURE_PATH = (
     ROOT / "tests" / "fixtures" / "e2e" / "etl_browser_promotion_vendor.csv"
 )
+WEB_UPLOAD_FIXTURE_PATH = (
+    ROOT / "tests" / "fixtures" / "e2e" / "web_etl_upload_vendor.csv"
+)
 PROFILE_PATH = ROOT / "config" / "etl" / "sample_marketplace_vendor" / "v2.json"
 DEFAULT_ARTIFACT_DIR = ROOT / "artifacts" / "browser-e2e"
 
@@ -128,6 +131,7 @@ class ETLBrowserE2ERunner:
         if (
             not FIXTURE_PATH.is_file()
             or not PROMOTION_FIXTURE_PATH.is_file()
+            or not WEB_UPLOAD_FIXTURE_PATH.is_file()
             or not PROFILE_PATH.is_file()
         ):
             raise BrowserE2EError("Browser E2E fixture or profile is missing")
@@ -153,6 +157,7 @@ class ETLBrowserE2ERunner:
             "E2E_STREAMLIT_URL": f"http://127.0.0.1:{args.streamlit_port}",
             "E2E_SOURCE_FILENAME": FIXTURE_PATH.name,
             "E2E_PROMOTION_SOURCE_FILENAME": PROMOTION_FIXTURE_PATH.name,
+            "E2E_WEB_UPLOAD_SOURCE_FILENAME": WEB_UPLOAD_FIXTURE_PATH.name,
             "E2E_ARTIFACT_DIR": str(self.artifact_dir),
             "E2E_OPERATOR_USERNAME": self.operator_username,
             "E2E_OPERATOR_PASSWORD": self.operator_password,
@@ -376,6 +381,7 @@ class ETLBrowserE2ERunner:
                     "-m",
                     "pytest",
                     "tests/e2e/test_etl_browser_e2e.py",
+                    "tests/e2e/test_web_etl_upload_browser_e2e.py",
                     "--browser",
                     "chromium",
                     "--tracing",
