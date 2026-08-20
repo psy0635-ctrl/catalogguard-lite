@@ -1932,6 +1932,8 @@ bucket과 허용 prefix는 요청이 아니라 서버 환경변수 `CATALOGGUARD
 | S3 읽기 실패(권한 거부 포함) | `502` | `s3_read_failed` |
 | 서버에 bucket 미설정 | `503` | `s3_not_configured` |
 
+비활성 프로필 검사는 **S3를 읽기 전에** 수행하므로, 비활성 프로필 요청은 위 S3 source 오류보다 먼저 `409`로 끊기고 외부 요청 자체를 만들지 않습니다. HTTP feed(`POST /api/v1/etl-loads/http`)도 같습니다. 없는 `profile_id`는 사전 검사하지 않으므로 기존처럼 source 오류가 먼저 반환됩니다.
+
 AWS 자격증명은 요청이나 환경변수로 받지 않고 boto3 기본 credential chain을 사용하므로, EC2에서는 Instance Role이 그대로 적용됩니다.
 
 ### `GET /api/v1/etl-loads`

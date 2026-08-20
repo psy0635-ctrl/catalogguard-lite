@@ -29,6 +29,7 @@ from etl.http_source import (
 )
 from etl.pipeline import ETLPipelineError
 from etl.profile_loader import ETLProfileInactiveError, ETLProfileNotFoundError
+import etl.profile_loader as profile_loader
 from etl.web_service import ETLWebRunOutcome
 
 
@@ -537,3 +538,72 @@ def test_http_endpoint_persists_staging_actor_and_reuses_duplicate_identity(
             cleanup.execute(delete(ETLLoadRun).where(ETLLoadRun.id == run_id))
             cleanup.execute(delete(User).where(User.username == username))
             cleanup.commit()
+
+
+def _deactivated_registry_entry(profile_id: str) -> dict:
+    entry = dict(profile_loader._ETL_PROFILE_REGISTRY[profile_id])
+    entry["active_version"] = None
+    return entry
+
+
+def test_inactive_profile_is_rejected_before_any_http_feed_read(monkeypatch):
+    # 비활성 프로필 때문에 외부 feed를 건드리지 않습니다. 나가지 않아야 할 요청이
+    # 나가고 나서 409를 주는 것은 정책을 지킨 것이 아닙니다.
+    metrics: list[str] = []
+    monkeypatch.setitem(
+        profile_loader._ETL_PROFILE_REGISTRY,
+        "sample_fashion_vendor_v1",
+        _deactivated_registry_entry("sample_fashion_vendor_v1"),
+    )
+    app.dependency_overrides[get_session] = lambda: iter([object()])
+    monkeypatch.setattr(
+        etl_loads_route,
+        "read_http_feed_csv",
+        lambda: pytest.fail("inactive profile must not reach the HTTP feed source"),
+    )
+    monkeypatch.setattr(
+        etl_loads_route,
+        "run_web_etl",
+        lambda *args, **kwargs: pytest.fail("inactive profile must not run Web ETL"),
+    )
+    monkeypatch.setattr(etl_loads_route, "record_web_etl_run", metrics.append)
+
+    response = client.post(ENDPOINT, json=REQUEST)
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "inactive_profile"
+    assert metrics == ["failed"]
+
+
+def test_inactive_profile_outranks_a_source_error_that_would_fire_first(monkeypatch):
+    # feed 미설정(503)처럼 source가 먼저 실패했을 상황에서도 비활성 차단이 앞섭니다.
+    monkeypatch.setitem(
+        profile_loader._ETL_PROFILE_REGISTRY,
+        "sample_fashion_vendor_v1",
+        _deactivated_registry_entry("sample_fashion_vendor_v1"),
+    )
+    app.dependency_overrides[get_session] = lambda: iter([object()])
+    monkeypatch.setattr(
+        etl_loads_route,
+        "read_http_feed_csv",
+        lambda: (_ for _ in ()).throw(HTTPFeedNotConfiguredError("not configured")),
+    )
+
+    response = client.post(ENDPOINT, json=REQUEST)
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "inactive_profile"
+
+
+def test_unknown_profile_keeps_the_existing_source_error_precedence(monkeypatch):
+    app.dependency_overrides[get_session] = lambda: iter([object()])
+    monkeypatch.setattr(
+        etl_loads_route,
+        "read_http_feed_csv",
+        lambda: (_ for _ in ()).throw(HTTPFeedReadError("boom")),
+    )
+
+    response = client.post(ENDPOINT, json={**REQUEST, "profile_id": "not-exists"})
+
+    assert response.status_code == 502
+    assert response.json()["detail"]["code"] == "http_feed_read_failed"
