@@ -257,6 +257,9 @@ ETL_PROFILE_DETAIL_RESPONSE_KEYS = (
 )
 UNKNOWN_SIZE_TOKEN_REPORT_RESPONSE_KEYS = ("items",)
 ETL_UNSUPPORTED_PROFILE_MESSAGE = "지원하지 않는 공급사 프로필입니다."
+ETL_INACTIVE_PROFILE_MESSAGE = (
+    "선택한 ETL 프로필이 비활성화되었습니다. 사용할 수 있는 프로필을 다시 선택하세요."
+)
 CATALOG_PROMOTION_NOT_FOUND_MESSAGE = "Promotion run not found."
 CATALOG_PROMOTION_ROLLBACK_NOT_FOUND_MESSAGE = (
     "Rollback 실행 이력을 찾을 수 없습니다."
@@ -293,6 +296,17 @@ def _get_response_request_id(response: object | None) -> str | None:
     if not callable(get_header):
         return None
     return _normalize_request_id(get_header("X-Request-ID"))
+
+
+def _error_detail_payload(response: object) -> dict[str, Any] | None:
+    """Return the dict body of an error response's "detail" field, or None."""
+    try:
+        payload = response.json()
+    except (AttributeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("detail"), dict):
+        return None
+    return payload["detail"]
 
 
 def _normalize_optional_etl_filter(value: str | None) -> str:
@@ -1097,6 +1111,16 @@ class ETLUnsupportedProfileError(ETLWebRunApiError):
     pass
 
 
+class ETLProfileInactiveError(ETLWebRunApiError):
+    """서버가 409 inactive_profile을 보냈을 때 쓰는 전용 오류입니다.
+
+    ETLUnsupportedProfileError와 형제 관계로 둡니다. "없는 프로필"과 "있지만 비활성인
+    프로필"은 사용자가 해야 할 일이 다르므로(오타 수정 vs 다른 프로필 선택) 한쪽이
+    다른 쪽을 상속하면 안 됩니다. 서버 etl.profile_loader의 같은 이름 예외와는 다른
+    module이고, 이쪽은 HTTP 응답을 표현합니다.
+    """
+
+
 class ETLInvalidUploadError(ETLWebRunApiError):
     pass
 
@@ -1301,6 +1325,8 @@ class CatalogGuardApiClient:
             raise_not_found=True,
             not_found_error=ETLProfileNotFoundError,
             not_found_message="ETL 프로필을 찾을 수 없습니다.",
+            # 이 endpoint만 409 inactive_profile을 전용 오류로 구분합니다.
+            map_inactive_profile=True,
         )
         self._validate_response_keys(data, ETL_PROFILE_DETAIL_RESPONSE_KEYS)
         if not _is_valid_etl_profile_detail_response(data):
@@ -1717,6 +1743,7 @@ class CatalogGuardApiClient:
         raise_not_found: bool = False,
         not_found_error: type[CatalogGuardApiError] = InspectionNotFoundError,
         not_found_message: str = NOT_FOUND_ERROR_MESSAGE,
+        map_inactive_profile: bool = False,
     ) -> dict[str, Any]:
         response = self._get_response(
             path,
@@ -1724,6 +1751,7 @@ class CatalogGuardApiClient:
             raise_not_found=raise_not_found,
             not_found_error=not_found_error,
             not_found_message=not_found_message,
+            map_inactive_profile=map_inactive_profile,
         )
 
         try:
@@ -1789,6 +1817,7 @@ class CatalogGuardApiClient:
         raise_not_found: bool,
         not_found_error: type[CatalogGuardApiError] = InspectionNotFoundError,
         not_found_message: str = NOT_FOUND_ERROR_MESSAGE,
+        map_inactive_profile: bool = False,
     ):
         url = f"{self._base_url}{path}"
 
@@ -1812,6 +1841,16 @@ class CatalogGuardApiClient:
                     not_found_message,
                     request_id=request_id,
                 ) from error
+            # opt-in입니다. 모든 GET의 409를 profile 오류로 바꾸면 관계없는 endpoint의
+            # 상태 충돌까지 잘못 분류됩니다. 켠 곳에서도 payload의 code가 실제로
+            # inactive_profile일 때만 전용 오류가 됩니다.
+            if map_inactive_profile and status_code == 409:
+                inactive_error = self._build_inactive_profile_error(
+                    error_response,
+                    request_id=request_id,
+                )
+                if inactive_error is not None:
+                    raise inactive_error from error
             auth_error = self._build_auth_error(
                 status_code,
                 error_response,
@@ -1997,20 +2036,48 @@ class CatalogGuardApiClient:
             )
         return None
 
+    def _build_inactive_profile_error(
+        self,
+        response: object,
+        *,
+        request_id: str | None,
+    ) -> "ETLProfileInactiveError | None":
+        """Return the inactive-profile error only when the payload actually says so.
+
+        code가 다른 값이거나 JSON/detail이 없으면 None을 돌려주어, 호출자가 기존
+        일반 오류 처리를 그대로 쓰게 합니다. 409를 무조건 비활성으로 해석하지
+        않습니다.
+
+        사용자에게 보여 줄 문구는 서버 message 원문이 아니라 클라이언트가 관리하는
+        고정 문구를 씁니다. 서버 문구가 그대로 화면에 새면 내부 표현이 노출될 수
+        있고, 문구가 바뀌면 UI가 조용히 따라 바뀌기 때문입니다.
+        """
+        detail = _error_detail_payload(response)
+        if detail is None or detail.get("code") != "inactive_profile":
+            return None
+        return ETLProfileInactiveError(
+            ETL_INACTIVE_PROFILE_MESSAGE,
+            code="inactive_profile",
+            request_id=request_id,
+        )
+
     def _build_etl_run_error(
         self,
         response: object,
         *,
         request_id: str | None,
     ) -> ETLWebRunApiError | None:
-        try:
-            payload = response.json()
-        except (AttributeError, ValueError):
-            return None
-        if not isinstance(payload, dict) or not isinstance(payload.get("detail"), dict):
+        inactive_error = self._build_inactive_profile_error(
+            response,
+            request_id=request_id,
+        )
+        if inactive_error is not None:
+            return inactive_error
+
+        detail = _error_detail_payload(response)
+        if detail is None:
             return None
 
-        detail = payload["detail"]
         code = detail.get("code")
         message = detail.get("message")
         safe_message = message if isinstance(message, str) and message else None

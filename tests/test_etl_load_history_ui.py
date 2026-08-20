@@ -1636,6 +1636,108 @@ def test_submit_etl_web_run_success_invalidates_history_cache_but_keeps_promotio
     assert session_state["catalog_promotion_history_response"] == {"items": []}
 
 
+def test_etl_web_run_error_message_names_the_inactive_profile_cause():
+    from clients.catalogguard_api import (
+        ETLProfileInactiveError,
+        ETLUnsupportedProfileError,
+    )
+    from ui.etl_load_history import (
+        ETL_INACTIVE_PROFILE_RUN_MESSAGE,
+        _etl_web_run_error_message,
+    )
+
+    message = _etl_web_run_error_message(
+        ETLProfileInactiveError("server text", code="inactive_profile")
+    )
+
+    assert message == ETL_INACTIVE_PROFILE_RUN_MESSAGE
+    assert "비활성화" in message
+    # 서버 원문을 그대로 보여 주지 않습니다.
+    assert "server text" not in message
+    # 없는 프로필 문구와 섞이지 않습니다.
+    assert message != _etl_web_run_error_message(
+        ETLUnsupportedProfileError("no", code="unsupported_profile")
+    )
+
+
+def test_submit_etl_web_run_inactive_profile_refreshes_the_profile_list_cache():
+    from unittest.mock import Mock
+
+    from clients.catalogguard_api import ETLProfileInactiveError
+    from ui.etl_load_history import _submit_etl_web_run
+
+    error = ETLProfileInactiveError("server text", code="inactive_profile")
+    api_client = FakeEtlApiClient(etl_run_error=error)
+    uploaded_file = Mock(name="vendor.csv")
+    uploaded_file.name = "vendor.csv"
+    uploaded_file.getvalue.return_value = b"a,b\n1,2\n"
+
+    state = {
+        # 목록을 받은 뒤 배포로 프로필이 내려간 race 상황입니다.
+        "etl_web_run_profiles_response": {
+            "items": [{"id": "sample_fashion_vendor_v1", "display_name": "패션"}]
+        },
+        "etl_web_run_profiles_error": None,
+        "etl_web_run_profile_detail_id": "sample_fashion_vendor_v1",
+        "etl_web_run_profile_detail_response": {"id": "sample_fashion_vendor_v1"},
+        "etl_load_list_response": {"items": [], "total": 0},
+        "etl_load_initialized": True,
+    }
+
+    import streamlit as st
+
+    original_session_state = st.session_state
+    try:
+        st.session_state = state
+        _submit_etl_web_run(
+            api_client,
+            profile_id="sample_fashion_vendor_v1",
+            uploaded_file=uploaded_file,
+        )
+    finally:
+        st.session_state = original_session_state
+
+    assert state["etl_web_run_error"] is error
+    assert state["etl_web_run_result"] is None
+    assert state["etl_web_run_in_flight"] is False
+    # 다음 rerun이 GET /api/v1/etl-profiles를 다시 호출하도록 캐시를 비웁니다.
+    assert state["etl_web_run_profiles_response"] is None
+    assert state["etl_web_run_profiles_error"] is None
+    assert state["etl_web_run_profile_detail_id"] is None
+    assert state["etl_web_run_profile_detail_response"] is None
+    # 실행이 성사되지 않았으므로 ETL 이력 캐시는 건드리지 않습니다.
+    assert state["etl_load_list_response"] == {"items": [], "total": 0}
+    assert state["etl_load_initialized"] is True
+
+
+def test_fetch_etl_profile_detail_inactive_error_refreshes_the_profile_list_cache():
+    from clients.catalogguard_api import ETLProfileInactiveError
+    from ui.etl_load_history import _fetch_etl_profile_detail
+
+    error = ETLProfileInactiveError("server text", code="inactive_profile")
+    api_client = FakeEtlApiClient(etl_profile_detail_error=error)
+    state = {
+        "etl_web_run_profiles_response": {
+            "items": [{"id": "sample_fashion_vendor_v1", "display_name": "패션"}]
+        },
+        "etl_web_run_profiles_error": None,
+    }
+
+    detail = _fetch_etl_profile_detail(api_client, state, "sample_fashion_vendor_v1")
+
+    assert detail is None
+    # 일반 서버 오류가 아니라 비활성 상태로 구분돼야 화면이 원인을 말할 수 있습니다.
+    assert state["etl_web_run_profile_detail_error"] is error
+    assert state["etl_web_run_profiles_response"] is None
+    assert state["etl_web_run_profiles_error"] is None
+    # detail_id는 남겨 두어 같은 rerun/재조회에서 409를 반복 호출하지 않습니다.
+    assert state["etl_web_run_profile_detail_id"] == "sample_fashion_vendor_v1"
+
+    _fetch_etl_profile_detail(api_client, state, "sample_fashion_vendor_v1")
+
+    assert api_client.etl_profile_detail_calls == ["sample_fashion_vendor_v1"]
+
+
 def test_submit_etl_web_run_failure_stores_error_and_leaves_history_cache_alone():
     from unittest.mock import Mock
 

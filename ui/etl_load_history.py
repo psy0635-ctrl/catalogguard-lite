@@ -17,6 +17,7 @@ from clients.catalogguard_api import (
     CatalogPromotionRollbackNotFoundError,
     ETLInvalidUploadError,
     ETLLoadNotFoundError,
+    ETLProfileInactiveError,
     ETLProfileNotFoundError,
     ETLUnsupportedProfileError,
 )
@@ -45,6 +46,12 @@ ETL_LOAD_DISPLAY_COLUMNS = [
 ]
 ETL_ERROR_DISPLAY_COLUMNS = ["오류 코드", "발생 건수"]
 ETL_PROFILE_MAPPING_DISPLAY_COLUMNS = ["공급사 원본 컬럼", "CatalogGuard 컬럼"]
+# 비활성 프로필 안내 문구입니다. 서버가 보낸 message 원문을 쓰지 않고 화면 문구는
+# 여기서 관리합니다. 실행 실패와 상세 조회 실패는 사용자가 처한 상황이 달라 나눕니다.
+ETL_INACTIVE_PROFILE_RUN_MESSAGE = (
+    "선택한 ETL 프로필이 비활성화되었습니다. 사용할 수 있는 프로필을 다시 선택하세요."
+)
+ETL_INACTIVE_PROFILE_DETAIL_MESSAGE = "선택한 ETL 프로필이 비활성화되었습니다."
 ETL_PROFILE_DEFAULTS_DISPLAY_COLUMNS = ["CatalogGuard 컬럼", "기본값"]
 ETL_REJECT_DISPLAY_COLUMNS = ["원본 행", "오류 코드", "오류 필드", "오류 메시지"]
 UNKNOWN_SIZE_TOKEN_DISPLAY_COLUMNS = ["사이즈 토큰", "개수"]
@@ -2020,6 +2027,20 @@ def _fetch_etl_profiles(api_client, session_state) -> list[dict[str, Any]] | Non
         return None
 
 
+def _invalidate_etl_profile_list_cache(session_state) -> None:
+    """Forget the cached profile list so the next rerun re-reads the active set.
+
+    비활성 오류는 목록을 받은 뒤 배포로 그 프로필이 내려간 race에서 나옵니다. 캐시를
+    비워 두면 다음 rerun의 _fetch_etl_profiles()가 GET /api/v1/etl-profiles를 다시
+    호출해 서버의 현재 active 목록을 받습니다.
+
+    여기서 st.rerun()을 부르지 않습니다. 렌더링 도중 rerun을 걸면 같은 비활성 오류로
+    다시 들어와 무한 rerun이 됩니다. 새로고침은 다음 상호작용 때 자연스럽게 일어납니다.
+    """
+    session_state["etl_web_run_profiles_response"] = None
+    session_state["etl_web_run_profiles_error"] = None
+
+
 def _fetch_etl_profile_detail(
     api_client,
     session_state,
@@ -2042,6 +2063,12 @@ def _fetch_etl_profile_detail(
         response = api_client.get_etl_profile_detail(profile_id)
         session_state["etl_web_run_profile_detail_response"] = response
         return response
+    except ETLProfileInactiveError as error:
+        session_state["etl_web_run_profile_detail_error"] = error
+        # 목록만 무효화합니다. detail_id는 그대로 두어야 이번 프로필의 오류가 캐시되고,
+        # rerun마다 같은 409 요청을 반복하지 않습니다.
+        _invalidate_etl_profile_list_cache(session_state)
+        return None
     except (
         ETLProfileNotFoundError,
         CatalogGuardApiConfigurationError,
@@ -2068,7 +2095,10 @@ def _render_etl_profile_detail(api_client, profile_id: str | None) -> None:
         if error is not None:
             st.error(
                 build_etl_api_error_display_message(
-                    "ETL 프로필 상세 정보를 불러오지 못했습니다.", error
+                    ETL_INACTIVE_PROFILE_DETAIL_MESSAGE
+                    if isinstance(error, ETLProfileInactiveError)
+                    else "ETL 프로필 상세 정보를 불러오지 못했습니다.",
+                    error,
                 )
             )
         return
@@ -2087,6 +2117,10 @@ def _render_etl_profile_detail(api_client, profile_id: str | None) -> None:
 
 
 def _etl_web_run_error_message(error: Exception) -> str:
+    # 없는 프로필과 비활성 프로필은 사용자가 할 일이 다릅니다(오타 수정 vs 다른 프로필
+    # 선택). 두 예외는 형제 관계라 순서와 무관하지만 의미가 섞이지 않게 따로 둡니다.
+    if isinstance(error, ETLProfileInactiveError):
+        return ETL_INACTIVE_PROFILE_RUN_MESSAGE
     if isinstance(error, ETLUnsupportedProfileError):
         return "지원하지 않는 공급사 프로필입니다."
     if isinstance(error, ETLInvalidUploadError):
@@ -2118,6 +2152,14 @@ def _submit_etl_web_run(api_client, *, profile_id, uploaded_file) -> None:
         st.session_state["etl_load_list_response"] = None
         st.session_state["etl_load_initialized"] = False
         st.session_state["etl_load_offset"] = 0
+    except ETLProfileInactiveError as error:
+        # 목록을 받은 뒤 프로필이 내려간 race입니다. 오류만 띄우고 오래된 목록을 그대로
+        # 두면 사용자가 같은 프로필을 다시 고르게 되므로 캐시를 무효화합니다.
+        st.session_state["etl_web_run_error"] = error
+        _invalidate_etl_profile_list_cache(st.session_state)
+        st.session_state["etl_web_run_profile_detail_id"] = None
+        st.session_state["etl_web_run_profile_detail_response"] = None
+        st.session_state["etl_web_run_profile_detail_error"] = None
     except (
         ETLUnsupportedProfileError,
         ETLInvalidUploadError,

@@ -2620,6 +2620,150 @@ def test_get_etl_profile_detail_maps_404_to_profile_not_found_error():
         client.get_etl_profile_detail("unknown")
 
 
+INACTIVE_PROFILE_PAYLOAD = {
+    "detail": {
+        "code": "inactive_profile",
+        "message": "internal server supplied message",
+    }
+}
+
+
+def test_run_etl_load_maps_inactive_profile_with_a_client_owned_message():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(status_code=409, payload=INACTIVE_PROFILE_PAYLOAD)
+    )
+
+    with pytest.raises(client_module.ETLProfileInactiveError) as error:
+        client.run_etl_load(
+            profile_id="sample_fashion_vendor_v1",
+            source_filename="vendor.csv",
+            file_content=b"a,b\n1,2\n",
+        )
+
+    assert error.value.code == "inactive_profile"
+    assert str(error.value) == client_module.ETL_INACTIVE_PROFILE_MESSAGE
+    # 서버 원문이 사용자 메시지로 새면 안 됩니다.
+    assert "internal server supplied message" not in str(error.value)
+
+
+def test_run_etl_load_inactive_profile_preserves_request_id():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=409,
+            payload=INACTIVE_PROFILE_PAYLOAD,
+            headers={"X-Request-ID": "b" * 32},
+        )
+    )
+
+    with pytest.raises(client_module.ETLProfileInactiveError) as error:
+        client.run_etl_load(
+            profile_id="sample_fashion_vendor_v1",
+            source_filename="vendor.csv",
+            file_content=b"a,b\n1,2\n",
+        )
+
+    assert error.value.request_id == "b" * 32
+
+
+def test_inactive_profile_error_is_not_an_unsupported_profile_error():
+    # 없는 프로필과 비활성 프로필이 상속으로 묶이면 호출자가 둘을 구분할 수 없습니다.
+    client_module = import_client_module()
+
+    assert not issubclass(
+        client_module.ETLProfileInactiveError,
+        client_module.ETLUnsupportedProfileError,
+    )
+    assert not issubclass(
+        client_module.ETLUnsupportedProfileError,
+        client_module.ETLProfileInactiveError,
+    )
+    assert issubclass(
+        client_module.ETLProfileInactiveError,
+        client_module.CatalogGuardApiResponseError,
+    )
+
+
+def test_get_etl_profile_detail_maps_409_to_inactive_profile_error():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=409,
+            payload=INACTIVE_PROFILE_PAYLOAD,
+            headers={"X-Request-ID": "c" * 32},
+        )
+    )
+
+    with pytest.raises(client_module.ETLProfileInactiveError) as error:
+        client.get_etl_profile_detail("sample_fashion_vendor_v1")
+
+    assert error.value.code == "inactive_profile"
+    assert error.value.request_id == "c" * 32
+    assert str(error.value) == client_module.ETL_INACTIVE_PROFILE_MESSAGE
+    assert "internal server supplied message" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        FakeResponse(status_code=409, json_error=ValueError("not json")),
+        FakeResponse(status_code=409, payload={"message": "no detail key"}),
+        FakeResponse(status_code=409, payload={"detail": "not a dict"}),
+        FakeResponse(
+            status_code=409,
+            payload={"detail": {"code": "something_else", "message": "other"}},
+        ),
+    ],
+)
+def test_profile_detail_409_without_the_inactive_code_stays_a_generic_error(response):
+    # 409를 무조건 비활성으로 해석하면 관계없는 상태 충돌까지 잘못 분류됩니다.
+    client_module = import_client_module()
+    client, _ = make_client(response=response)
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.get_etl_profile_detail("sample_fashion_vendor_v1")
+
+    assert not isinstance(error.value, client_module.ETLProfileInactiveError)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        FakeResponse(status_code=409, json_error=ValueError("not json")),
+        FakeResponse(
+            status_code=409,
+            payload={"detail": {"code": "something_else", "message": "other"}},
+        ),
+    ],
+)
+def test_run_etl_load_409_without_the_inactive_code_stays_a_generic_error(response):
+    client_module = import_client_module()
+    client, _ = make_client(response=response)
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.run_etl_load(
+            profile_id="sample_fashion_vendor_v1",
+            source_filename="vendor.csv",
+            file_content=b"a,b\n1,2\n",
+        )
+
+    assert not isinstance(error.value, client_module.ETLProfileInactiveError)
+
+
+def test_other_get_endpoints_do_not_map_409_to_an_inactive_profile_error():
+    # map_inactive_profile은 profile detail에서만 켭니다.
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(status_code=409, payload=INACTIVE_PROFILE_PAYLOAD)
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.list_etl_profiles()
+
+    assert not isinstance(error.value, client_module.ETLProfileInactiveError)
+
+
 LOGIN_RESPONSE = {
     "access_token": "a.b.c",
     "token_type": "bearer",

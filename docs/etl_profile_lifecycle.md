@@ -384,6 +384,7 @@ registry: sample_fashion_vendor_v1 -> active_version "3"
 | Phase 3 | Published version guardrail — 이미 공개된 `(profile_name, profile_version)`의 매핑이 바뀌면 CI에서 실패시킨다 | **완료** (12장) |
 | Phase 4 | Versioned archive + active pointer — 버전별 JSON 보존, registry가 활성 버전을 명시 (Option B) | **완료** (13장) |
 | Phase 5A | Deployment-based Activation / Deactivation — `active_version`이 버전 문자열 또는 `None`. `None`이면 신규 ETL 실행만 막는다 | **완료** (14장) |
+| Phase 5A.1 | 클라이언트/UI의 inactive 처리 — Python client가 `inactive_profile`을 전용 예외로 매핑하고 Streamlit이 원인을 안내한다 | **완료** (15장) |
 | Phase 5B | Runtime/Admin activation management — activation을 바꾸는 API·Streamlit UI·권한 | **미구현** |
 | Phase 6 | 필요할 때만 DB-backed Profile / ProfileVersion (Option C) | 조건부 |
 
@@ -642,7 +643,39 @@ activation 변경은 **배포가 필요한 code configuration**이다. `active_v
 - DB-backed active flag가 없다(Phase 6, 조건부)
 - Profile CRUD(등록·수정·삭제)가 없다
 - 런타임 메모리의 registry를 API로 고치는 기능은 **의도적으로** 만들지 않았다. 재시작하면 사라지는 상태는 "관리 기능처럼 보이지만 관리되지 않는" 더 나쁜 상태를 만든다
-- API 클라이언트(`clients/catalogguard_api.py`)는 `inactive_profile` 코드를 전용 예외로 매핑하지 않는다. Streamlit 목록이 비활성 프로필을 이미 제외하므로 이 경로는 경합 상황에서만 닿고, 그때는 기존 일반 서버 오류 처리로 떨어진다
+
+---
+
+## 15. `[현재 구현]` Phase 5A.1 — 클라이언트/UI의 inactive 처리
+
+Phase 5A에서 서버는 `409 inactive_profile`을 구분했지만, Python API 클라이언트는 이 코드를 전용 예외로 매핑하지 않아 Streamlit에는 일반 서버 오류로 보였다. 사용자가 보는 화면이 실제 원인을 말하지 못하는 gap이었다. 서버 계약은 그대로 두고 클라이언트·UI만 맞춘다.
+
+### 15.1 클라이언트 매핑
+
+`clients/catalogguard_api.py`에 `ETLProfileInactiveError`를 추가했다. `ETLWebRunApiError`(즉 `CatalogGuardApiResponseError`) 계열이고 `code`와 `request_id`를 기존 방식대로 보존한다. `ETLUnsupportedProfileError`와는 **형제 관계**다. 사용자가 해야 할 일이 다르기 때문이다 — 없는 프로필은 선택을 고쳐야 하고, 비활성 프로필은 다른 프로필을 골라야 한다.
+
+| 경로 | 응답 | 클라이언트 예외 |
+| --- | --- | --- |
+| `POST /api/v1/etl-loads` | `409 inactive_profile` | `ETLProfileInactiveError` |
+| `GET /api/v1/etl-profiles/{profile_id}` | `409 inactive_profile` | `ETLProfileInactiveError` |
+| 위 두 경로 | `400 unsupported_profile` / `404` | 기존 계약 그대로 |
+
+Profile Detail의 409 매핑은 **opt-in**이다. `_get_json()`/`_get_response()`의 `map_inactive_profile` 플래그를 profile detail에서만 켠다. 모든 GET의 409를 프로필 오류로 바꾸면 관계없는 endpoint의 상태 충돌까지 잘못 분류된다. 켠 곳에서도 payload의 `code`가 실제로 `inactive_profile`일 때만 전용 예외가 되고, JSON이 아니거나 `detail`이 없거나 코드가 다르면 기존 `CatalogGuardApiResponseError`로 남는다.
+
+화면 문구는 **클라이언트가 관리하는 고정 문구**를 쓰고 서버 `message` 원문을 그대로 노출하지 않는다. archive 경로나 registry 내부값은 표시하지 않는다.
+
+### 15.2 Streamlit race 처리
+
+목록을 받은 뒤 배포로 프로필이 내려가는 race가 있다. 이때 오류만 띄우고 오래된 목록을 그대로 두면 사용자가 같은 프로필을 다시 고르게 된다.
+
+- 실행(`_submit_etl_web_run()`)과 상세 조회(`_fetch_etl_profile_detail()`) 모두 `ETLProfileInactiveError`를 일반 서버 오류와 구분해 처리한다
+- 두 경로 모두 프로필 목록 캐시(`etl_web_run_profiles_response`, `etl_web_run_profiles_error`)를 무효화해, 다음 rerun의 `_fetch_etl_profiles()`가 `GET /api/v1/etl-profiles`를 다시 호출해 서버의 현재 active 목록을 받는다
+- 실행 실패 쪽은 상세 캐시(`etl_web_run_profile_detail_*`)도 함께 비운다. 상세 조회 쪽은 `detail_id`를 남겨 같은 프로필에 409 요청을 반복하지 않는다
+- **캐시 무효화 시 `st.rerun()`을 부르지 않는다.** 렌더링 도중 rerun을 걸면 같은 비활성 오류로 다시 들어와 무한 rerun이 된다. 새로고침은 기존 흐름(실행 버튼 뒤의 `st.rerun()`, 또는 다음 상호작용)에서 자연스럽게 일어난다
+
+### 15.3 여전히 없는 것
+
+Phase 5A.1은 **표시와 오류 분류만** 바꾼다. 14.7의 목록은 그대로 유효하다. runtime activation API·Streamlit 활성/비활성 버튼·DB-backed active flag·Profile CRUD는 없고, activation 상태를 바꾸려면 여전히 코드 변경 → 테스트 → 배포가 필요하다.
 
 ---
 
