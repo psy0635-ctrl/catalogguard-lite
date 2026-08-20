@@ -5,6 +5,7 @@ import logging
 
 import pytest
 
+from config.logging import LOGGER_NAME
 from config.settings import (
     MAX_UPLOAD_SIZE_BYTES,
     get_catalogguard_etl_s3_bucket,
@@ -184,24 +185,71 @@ def test_malformed_head_response_is_translated_to_safe_read_error(monkeypatch):
     assert [call[0] for call in client.calls] == ["head_object"]
 
 
+@pytest.fixture
+def captured_s3_logs(caplog):
+    """Capture project logger records regardless of global logging setup order.
+
+    config.logging.configure_logging()은 catalogguard.api의 propagate를 False로 두고,
+    이는 tests/test_api_logging.py가 명시적으로 검증하는 계약입니다. caplog의 기본
+    handler는 root logger에 붙으므로, api.main을 import한 테스트가 같은 실행에서 먼저
+    돌면 이 logger의 record가 root까지 올라오지 않아 caplog.records가 비게 됩니다.
+    그래서 tests/test_api_logging.py의 captured_api_logs와 같은 방식으로 handler를
+    project logger에 직접 붙이고 끝나면 반드시 떼어 냅니다. propagate 값과 production
+    handler는 건드리지 않습니다.
+    """
+    logger = logging.getLogger(LOGGER_NAME)
+    caplog.set_level(logging.WARNING, logger=LOGGER_NAME)
+    # propagate가 아직 True인 실행(= configure_logging()이 한 번도 돌지 않은 경우)에는
+    # caplog가 root에 붙여 둔 handler가 이 record를 이미 받습니다. 그때 handler를 또
+    # 붙이면 같은 record가 두 번 잡히므로, 전파되지 않을 때만 직접 붙입니다. 여기서
+    # propagate 값을 읽기만 하고 바꾸지 않는 것이 중요합니다.
+    attach_directly = not logger.propagate
+    if attach_directly:
+        logger.addHandler(caplog.handler)
+    try:
+        yield caplog
+    finally:
+        if attach_directly:
+            logger.removeHandler(caplog.handler)
+
+
+def s3_source_failed_events(caplog) -> list[dict[str, object]]:
+    """Return parsed etl_s3_source_failed events from the project logger only.
+
+    record 위치(-1)에 기대지 않고 event 이름으로 고릅니다. 다른 library가 같은
+    구간에서 로그를 남겨도 검증이 흔들리지 않습니다.
+    """
+    events = []
+    for record in caplog.records:
+        if record.name != LOGGER_NAME:
+            continue
+        try:
+            event = json.loads(record.getMessage())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("event") == "etl_s3_source_failed":
+            events.append(event)
+    return events
+
+
 @pytest.mark.parametrize("size", [0, MAX_UPLOAD_SIZE_BYTES + 1])
 def test_invalid_head_content_length_blocks_get_object_and_logs_safely(
-    monkeypatch, caplog, size
+    monkeypatch, captured_s3_logs, size
 ):
     monkeypatch.setenv("CATALOGGUARD_ETL_S3_BUCKET", "catalogguard-source")
     client = FakeS3Client(head_response={"ContentLength": size}, object_response={})
-    caplog.set_level(logging.WARNING, logger="catalogguard.api")
 
     with pytest.raises(CsvUploadValidationError):
         read_s3_csv_object("products.csv", client=client)
 
     assert [call[0] for call in client.calls] == ["head_object"]
-    assert json.loads(caplog.records[-1].message)["code"] == "s3_read_failed"
+    events = s3_source_failed_events(captured_s3_logs)
+    assert [event["code"] for event in events] == ["s3_read_failed"]
 
 
 @pytest.mark.parametrize("size", [0, MAX_UPLOAD_SIZE_BYTES + 1])
 def test_invalid_get_content_length_blocks_body_read_closes_body_and_logs_safely(
-    monkeypatch, caplog, size
+    monkeypatch, captured_s3_logs, size
 ):
     monkeypatch.setenv("CATALOGGUARD_ETL_S3_BUCKET", "catalogguard-source")
     body = FakeBody(b"not read")
@@ -209,14 +257,14 @@ def test_invalid_get_content_length_blocks_body_read_closes_body_and_logs_safely
         head_response={"ContentLength": 1},
         object_response={"ContentLength": size, "Body": body},
     )
-    caplog.set_level(logging.WARNING, logger="catalogguard.api")
 
     with pytest.raises(CsvUploadValidationError):
         read_s3_csv_object("products.csv", client=client)
 
     assert body.read_sizes == []
     assert body.closed is True
-    assert json.loads(caplog.records[-1].message)["code"] == "s3_read_failed"
+    events = s3_source_failed_events(captured_s3_logs)
+    assert [event["code"] for event in events] == ["s3_read_failed"]
 
 
 def test_download_reads_at_bounded_size_and_closes_body(monkeypatch):
@@ -234,7 +282,7 @@ def test_download_reads_at_bounded_size_and_closes_body(monkeypatch):
     [b"", pytest.param(b"x" * (MAX_UPLOAD_SIZE_BYTES + 1), id="oversized")],
 )
 def test_bounded_download_rejects_invalid_size_closes_body_and_logs_safely(
-    monkeypatch, caplog, content
+    monkeypatch, captured_s3_logs, content
 ):
     monkeypatch.setenv("CATALOGGUARD_ETL_S3_BUCKET", "catalogguard-source")
     body = FakeBody(content)
@@ -242,13 +290,13 @@ def test_bounded_download_rejects_invalid_size_closes_body_and_logs_safely(
         head_response={"ContentLength": 1},
         object_response={"ContentLength": 1, "Body": body},
     )
-    caplog.set_level(logging.WARNING, logger="catalogguard.api")
 
     with pytest.raises(CsvUploadValidationError):
         read_s3_csv_object("products.csv", client=client)
 
     assert body.closed is True
-    assert json.loads(caplog.records[-1].message)["code"] == "s3_read_failed"
+    events = s3_source_failed_events(captured_s3_logs)
+    assert [event["code"] for event in events] == ["s3_read_failed"]
 
 
 def test_malformed_get_content_length_is_translated_to_safe_read_error(monkeypatch):
