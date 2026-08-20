@@ -84,6 +84,7 @@ from etl.http_source import (
 )
 from etl.pipeline import ETLPipelineError
 from etl.profile_loader import (
+    ETLProfileInactiveError,
     ETLProfileNotFoundError,
     get_etl_profile_detail,
     list_etl_profiles,
@@ -736,6 +737,17 @@ def get_etl_profile_detail_route(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="ETL profile not found.",
         ) from error
+    except ETLProfileInactiveError as error:
+        # 이 endpoint는 active 버전의 detail을 보여 줍니다. 비활성 프로필에 대해
+        # 마지막 active 버전을 그대로 보여 주면 "지금 이 버전으로 실행된다"는 거짓을
+        # 말하게 되므로, 404(없음)와 구분되는 409로 상태 충돌을 알립니다.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "inactive_profile",
+                "message": "ETL profile is inactive.",
+            },
+        ) from error
 
     return ETLProfileDetailResponse(
         id=detail["id"],
@@ -821,6 +833,17 @@ async def create_etl_load_run(
                 "message": "지원하지 않는 공급사 프로필입니다.",
             },
         ) from None
+    except ETLProfileInactiveError:
+        # 없는 프로필(400 unsupported_profile)과 섞지 않습니다. 프로필은 존재하고
+        # archive도 그대로 있지만 지금 실행할 버전이 없는 상태이므로 409입니다.
+        record_web_etl_run("failed")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "inactive_profile",
+                "message": "비활성화된 공급사 프로필입니다.",
+            },
+        ) from None
     except (CsvUploadValidationError, ETLPipelineError) as error:
         record_web_etl_run("failed")
         raise HTTPException(
@@ -891,6 +914,17 @@ def _run_server_side_source_etl(
             detail={
                 "code": "unsupported_profile",
                 "message": "Unsupported supplier profile.",
+            },
+        ) from None
+    except ETLProfileInactiveError:
+        # S3/HTTP도 업로드와 같은 정책입니다. 입력 경로가 달라도 비활성 프로필로는
+        # 신규 ETL을 실행하지 않습니다.
+        record_web_etl_run("failed")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "inactive_profile",
+                "message": "Supplier profile is inactive.",
             },
         ) from None
     except (CsvUploadValidationError, ETLPipelineError) as error:

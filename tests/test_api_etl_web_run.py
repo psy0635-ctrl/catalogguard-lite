@@ -19,7 +19,7 @@ from db.models import CatalogProductStaging, ETLLoadRun, User
 from db.session import create_database_engine, create_session_factory, get_session
 from etl.db_loader import ETLLoadError
 from etl.pipeline import ETLPipelineError
-from etl.profile_loader import ETLProfileNotFoundError
+from etl.profile_loader import ETLProfileInactiveError, ETLProfileNotFoundError
 from etl.web_service import ETLWebRunOutcome
 
 
@@ -120,6 +120,55 @@ def test_unsupported_profile_returns_safe_400_without_leaking_paths(monkeypatch)
     detail = response.json()["detail"]
     assert detail["code"] == "unsupported_profile"
     assert "/" not in detail["message"] and "\\" not in detail["message"]
+
+
+def test_inactive_profile_returns_409_without_leaking_paths(monkeypatch):
+    # 신규 ETL 실행 차단은 서버가 합니다. Streamlit 목록에서 숨기는 것만으로는
+    # API를 직접 부르는 요청을 막지 못합니다.
+    metrics: list[str] = []
+
+    def fake_run_web_etl(session, **kwargs):
+        raise ETLProfileInactiveError(
+            "ETL profile is inactive: sample_fashion_vendor_v1"
+        )
+
+    app.dependency_overrides[get_session] = lambda: iter([object()])
+    monkeypatch.setattr(etl_loads_route, "run_web_etl", fake_run_web_etl)
+    monkeypatch.setattr(etl_loads_route, "record_web_etl_run", metrics.append)
+
+    response = client.post(
+        ENDPOINT,
+        files=_files(),
+        data={"profile_id": "sample_fashion_vendor_v1"},
+    )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "inactive_profile"
+    # archive 경로·파일명·registry 내부는 노출하지 않습니다.
+    assert "/" not in detail["message"] and "\\" not in detail["message"]
+    assert "config" not in response.text.lower() and "v2.json" not in response.text
+    assert metrics == ["failed"]
+
+
+def test_inactive_profile_is_not_reported_as_unsupported_profile(monkeypatch):
+    # 없는 프로필(400 unsupported_profile)과 비활성 프로필(409 inactive_profile)이
+    # 섞이면 호출자가 "오타"와 "운영이 내린 프로필"을 구분할 수 없습니다.
+    app.dependency_overrides[get_session] = lambda: iter([object()])
+    monkeypatch.setattr(
+        etl_loads_route,
+        "run_web_etl",
+        lambda session, **kwargs: (_ for _ in ()).throw(
+            ETLProfileNotFoundError("unknown")
+        ),
+    )
+
+    unsupported = client.post(
+        ENDPOINT, files=_files(), data={"profile_id": "not-exists"}
+    )
+
+    assert unsupported.status_code == 400
+    assert unsupported.json()["detail"]["code"] == "unsupported_profile"
 
 
 def test_empty_upload_returns_safe_400(monkeypatch):

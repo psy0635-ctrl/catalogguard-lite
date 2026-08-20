@@ -243,6 +243,8 @@ sample_fashion_vendor
 
 **현재 상태**: Profile을 담는 DB 모델 자체가 없으므로 이번 단계에서 구현하지 않는다. DELETE API도 없다(현재 프로필 관련 API는 목록·상세 조회 2개뿐이다).
 
+> **갱신(Phase 5A)**: 비활성 상태 자체는 이제 코드에 있다. `active_version = None`이 Deactivate이며, `versions`의 archive는 그대로 남는다(14장). 다만 이 값을 바꾸는 DELETE/deactivate **API는 여전히 없다.** 변경하려면 코드를 고쳐 배포해야 한다.
+
 ### Policy H — Active Version (채택, `[향후 구현]`, 단 자동 추론 금지)
 
 **규칙**: 한 `profile_name`에 여러 버전이 생기면, 신규 ETL 실행에 쓸 버전을 **명시적으로** 지정한다. **"가장 큰 숫자 = active"로 자동 추론하지 않는다.**
@@ -381,7 +383,8 @@ registry: sample_fashion_vendor_v1 -> active_version "3"
 | Phase 2 | Lifecycle Policy 확정 — 이 문서 | **이번 작업** |
 | Phase 3 | Published version guardrail — 이미 공개된 `(profile_name, profile_version)`의 매핑이 바뀌면 CI에서 실패시킨다 | **완료** (12장) |
 | Phase 4 | Versioned archive + active pointer — 버전별 JSON 보존, registry가 활성 버전을 명시 (Option B) | **완료** (13장) |
-| Phase 5 | Activation / Deactivation — 활성 버전 전환과 비활성화(삭제 아님) | 이후 |
+| Phase 5A | Deployment-based Activation / Deactivation — `active_version`이 버전 문자열 또는 `None`. `None`이면 신규 ETL 실행만 막는다 | **완료** (14장) |
+| Phase 5B | Runtime/Admin activation management — activation을 바꾸는 API·Streamlit UI·권한 | **미구현** |
 | Phase 6 | 필요할 때만 DB-backed Profile / ProfileVersion (Option C) | 조건부 |
 
 Phase 4가 끝나기 전에는 새 프로필 **등록** 기능을 만들지 않는다. 등록을 먼저 만들면 보존 구조 없이 프로필 수만 늘어 3.2의 위험이 프로필 수만큼 곱해진다.
@@ -556,7 +559,86 @@ Phase 3 guardrail이 이제 **archive 전체**를 검사한다. 등록된 모든
 
 ### 13.9 아직 없는 것
 
-Phase 5의 Activation / Deactivation은 **미구현**이다. `active_version`은 코드 registry의 값이며, 이를 바꾸는 API·UI·DB 플래그는 없다. Profile CRUD도 없다.
+Phase 4 시점에는 Activation / Deactivation이 **미구현**이었다. 이후 Phase 5A에서 비활성 상태(`active_version = None`)를 코드에 추가했다(14장). 그래도 `active_version`은 여전히 코드 registry의 값이고, 이를 **런타임에** 바꾸는 API·UI·DB 플래그는 없다. Profile CRUD도 없다.
+
+---
+
+## 14. `[현재 구현]` Phase 5A — Deployment-based Activation / Deactivation
+
+Phase 4의 명시적 active pointer 위에 **비활성(deactivated)** 상태 하나를 더 표현한다. 구조는 그대로 두고 `active_version`이 가질 수 있는 값만 넓혔다.
+
+### 14.1 상태 표현
+
+`active_version`은 **버전 문자열 또는 `None`** 둘 중 하나다.
+
+| `active_version` | 의미 |
+| --- | --- |
+| `"2"` (버전 문자열) | 활성. 신규 ETL 실행은 그 버전의 archive를 쓴다 |
+| `None` | 비활성. 신규 ETL 실행만 막는다. archive와 registry 항목은 그대로 남는다 |
+
+`""`, `" "`, `"disabled"` 같은 값은 **비활성 표시가 아니다.** 그런 값은 `versions`에 없는 잘못된 pointer이므로 기존처럼 `ETLProfileNotFoundError`로 실패한다. 비활성 상태를 뜻하는 값은 `None` 하나뿐이라 상태가 모호해질 여지를 두지 않는다. `tests/etl/test_profile_activation.py::test_placeholder_strings_are_not_a_deactivation_marker`가 이를 고정한다.
+
+Policy H는 그대로다. 비활성 프로필에서 "가장 큰 버전으로 대신 실행"하지 않는다. 비활성은 *무엇을 실행할지 정해지지 않은* 상태이지 *최신 버전으로 실행해도 되는* 상태가 아니다.
+
+### 14.2 없는 프로필과 비활성 프로필은 다른 상태다
+
+| 상황 | 예외 | API 응답 |
+| --- | --- | --- |
+| allowlist에 없는 `profile_id` | `ETLProfileNotFoundError` | 실행 API `400 unsupported_profile`, 상세 API `404` (기존 계약 그대로) |
+| 있지만 `active_version = None` | `ETLProfileInactiveError` | `409 inactive_profile` |
+
+`ETLProfileInactiveError`는 `ETLProfileNotFoundError`를 **상속하지 않는다.** 상속으로 묶으면 기존 `except ETLProfileNotFoundError`가 비활성 상태까지 조용히 삼켜, "오타로 없는 프로필"과 "운영이 내린 프로필"이 같은 응답으로 뭉개진다.
+
+### 14.3 신규 ETL 실행 차단
+
+차단은 **서버에서** 한다. 목록에서 숨기는 것은 앞단일 뿐 방어선이 아니다. 세 입력 경로가 모두 같은 `get_profile_path()`를 지나므로 정책이 한 곳에서 갈라지지 않는다.
+
+| 입력 경로 | endpoint | 비활성일 때 |
+| --- | --- | --- |
+| Web CSV Upload | `POST /api/v1/etl-loads` | `409 {"code": "inactive_profile"}` |
+| S3 source | `POST /api/v1/etl-loads/s3` | `409 {"code": "inactive_profile"}` |
+| HTTP feed | `POST /api/v1/etl-loads/http-feed` | `409 {"code": "inactive_profile"}` |
+
+응답 메시지는 archive 경로·파일명·registry 내부를 노출하지 않는다. 세 경로 모두 기존 실패 metric(`record_web_etl_run("failed")`)을 그대로 남긴다.
+
+### 14.4 Profile 목록과 상세
+
+- `GET /api/v1/etl-profiles` — `list_etl_profiles()`가 비활성 프로필을 **제외**한다. 이 목록의 유일한 용도가 "신규 ETL 실행용 selector"이기 때문이다. 응답 형태(`{id, display_name}`)는 그대로다. Streamlit selector에서도 비활성 프로필을 고를 수 없게 된다.
+- `GET /api/v1/etl-profiles/{profile_id}` — 이 API는 **active 버전의** detail을 보여 준다. 비활성 프로필에 마지막 active 버전을 그대로 보여 주면 "지금 이 버전으로 실행된다"는 거짓이 되므로 `409 inactive_profile`을 반환한다. 없어졌다(`404`)고 말하지도 않는다.
+
+archive 버전을 조회하는 **공개 API는 만들지 않았다.** 과거 정의 접근은 내부 helper `get_profile_version_path()`로만 가능하다.
+
+### 14.5 Deactivate는 Delete가 아니다
+
+`active_version = None`이어도 다음은 그대로다.
+
+- `versions`의 archive 파일과 registry 항목은 삭제하지 않는다
+- `get_profile_version_path(profile_id, "1")`, `get_profile_version_path(profile_id, "2")`는 계속 동작한다
+- Phase 3 fingerprint guardrail은 archive 전체를 계속 검사한다
+- 과거 `etl_load_runs` 행이 참조하는 `(profile_name, profile_version)` 정의를 여전히 읽을 수 있다
+
+막히는 것은 **신규 실행 하나뿐이다.**
+
+### 14.6 이번에 바뀌지 않은 것
+
+- **두 프로필은 계속 active `"2"`다.** Phase 5A는 기능을 지원하는 코드 확장이지 실제 프로필을 비활성화하는 작업이 아니다
+- `INSPECTION_VERSION = "13"`, Alembic head `20260813_0013`, DB 스키마·migration·의존성·workflow
+- ETL transform 의미, dedup identity, fingerprint baseline
+- 없는 `profile_id`의 기존 계약: 실행 API `400 unsupported_profile`, 상세 API `404`
+- 활성 프로필의 목록·상세·Web/S3/HTTP ETL·Browser E2E 동작
+
+### 14.7 아직 없는 것 (Phase 5B)
+
+activation 변경은 **배포가 필요한 code configuration**이다. `active_version`을 바꾸려면 코드 변경 → 테스트 → 배포를 거쳐야 하고, 그래서 변경이 git diff와 리뷰에 그대로 남는다.
+
+없는 것을 분명히 적어 둔다.
+
+- activation/deactivation을 바꾸는 **관리자 API가 없다**
+- Streamlit **활성/비활성 버튼이 없다**
+- DB-backed active flag가 없다(Phase 6, 조건부)
+- Profile CRUD(등록·수정·삭제)가 없다
+- 런타임 메모리의 registry를 API로 고치는 기능은 **의도적으로** 만들지 않았다. 재시작하면 사라지는 상태는 "관리 기능처럼 보이지만 관리되지 않는" 더 나쁜 상태를 만든다
+- API 클라이언트(`clients/catalogguard_api.py`)는 `inactive_profile` 코드를 전용 예외로 매핑하지 않는다. Streamlit 목록이 비활성 프로필을 이미 제외하므로 이 경로는 경합 상황에서만 닿고, 그때는 기존 일반 서버 오류 처리로 떨어진다
 
 ---
 

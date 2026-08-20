@@ -8,6 +8,7 @@ from api.main import app
 from api.routes import etl_loads as etl_loads_route
 from conftest import clear_current_user_override, override_current_user
 from db.session import get_session
+import etl.profile_loader as profile_loader
 
 
 client = TestClient(app)
@@ -431,6 +432,56 @@ def test_etl_profile_detail_returns_safe_allowlisted_metadata_and_list_still_wor
         },
     ]
     assert not {"filename", "path", "profile_path"} & set(response.json())
+
+
+def _deactivated_registry_entry(profile_id: str) -> dict:
+    entry = dict(profile_loader._ETL_PROFILE_REGISTRY[profile_id])
+    entry["active_version"] = None
+    return entry
+
+
+def test_inactive_profile_detail_returns_409_instead_of_the_last_active_version(
+    monkeypatch,
+):
+    monkeypatch.setitem(
+        profile_loader._ETL_PROFILE_REGISTRY,
+        "sample_fashion_vendor_v1",
+        _deactivated_registry_entry("sample_fashion_vendor_v1"),
+    )
+
+    response = client.get(f"{ETL_PROFILES_ENDPOINT}/sample_fashion_vendor_v1")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "inactive_profile",
+        "message": "ETL profile is inactive.",
+    }
+    # 존재하지 않는다(404)고 말하지도, archive 내부를 노출하지도 않습니다.
+    assert "config" not in response.text.lower() and "v2.json" not in response.text
+
+
+def test_inactive_profile_is_dropped_from_the_selectable_profile_list(monkeypatch):
+    monkeypatch.setitem(
+        profile_loader._ETL_PROFILE_REGISTRY,
+        "sample_fashion_vendor_v1",
+        _deactivated_registry_entry("sample_fashion_vendor_v1"),
+    )
+
+    response = client.get(ETL_PROFILES_ENDPOINT)
+
+    assert response.status_code == 200
+    # 활성 프로필은 계속 목록과 상세 조회 모두 정상입니다.
+    assert response.json()["items"] == [
+        {
+            "id": "sample_marketplace_vendor_v1",
+            "display_name": "마켓플레이스 공급사 샘플",
+        }
+    ]
+    active_detail = client.get(
+        f"{ETL_PROFILES_ENDPOINT}/sample_marketplace_vendor_v1"
+    )
+    assert active_detail.status_code == 200
+    assert active_detail.json()["profile_version"] == "2"
 
 
 @pytest.mark.parametrize(
