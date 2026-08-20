@@ -78,6 +78,23 @@ def list_etl_profiles() -> list[dict[str, str]]:
     ]
 
 
+def is_etl_profile_inactive(profile_id: str) -> bool:
+    """Return True only for an allowlisted profile whose active_version is None.
+
+    S3/HTTP feed는 source adapter가 먼저 실행되는 구조라, 외부를 읽기 전에 비활성
+    여부만 값싸게 물어볼 곳이 필요합니다. 이 함수는 registry를 읽기만 하며 경로를
+    해석하지도, 예외를 던지지도 않습니다. 실제 실행 차단은 계속 get_profile_path()가
+    합니다.
+
+    없는 profile_id는 False입니다. "없음"과 "비활성"은 다른 상태이고, 여기서 unknown을
+    함께 처리하면 호출자가 기존 unsupported_profile 계약을 우회하게 되기 때문입니다.
+    잘못된 active pointer("999" 등)도 False입니다. 비활성이 아니라 잘못된 설정이므로
+    기존대로 get_profile_path()에서 실패해야 합니다.
+    """
+    info = _ETL_PROFILE_REGISTRY.get(profile_id)
+    return info is not None and info["active_version"] is None
+
+
 def get_etl_profile_detail(profile_id: str) -> dict[str, object]:
     """Return safe metadata for one allowlisted ETL profile."""
     info = _ETL_PROFILE_REGISTRY.get(profile_id)

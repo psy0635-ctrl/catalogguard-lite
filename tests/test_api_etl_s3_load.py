@@ -24,6 +24,7 @@ from db.session import create_database_engine, create_session_factory, get_sessi
 from etl.db_loader import ETLLoadError
 from etl.pipeline import ETLPipelineError
 from etl.profile_loader import ETLProfileInactiveError, ETLProfileNotFoundError
+import etl.profile_loader as profile_loader
 from etl.s3_source import (
     S3KeyNotAllowedError,
     S3NotConfiguredError,
@@ -492,3 +493,78 @@ def test_s3_endpoint_persists_staging_actor_and_reuses_duplicate_identity(
             cleanup.execute(delete(ETLLoadRun).where(ETLLoadRun.id == run_id))
             cleanup.execute(delete(User).where(User.username == username))
             cleanup.commit()
+
+
+def _deactivated_registry_entry(profile_id: str) -> dict:
+    entry = dict(profile_loader._ETL_PROFILE_REGISTRY[profile_id])
+    entry["active_version"] = None
+    return entry
+
+
+def test_inactive_profile_is_rejected_before_any_s3_read(monkeypatch):
+    # 서버가 이미 비활성인 것을 아는데도 S3를 먼저 읽으면, source가 실패할 때
+    # 409 inactive_profile 대신 404/502/503 같은 source 오류가 앞서 나갑니다.
+    metrics: list[str] = []
+    monkeypatch.setitem(
+        profile_loader._ETL_PROFILE_REGISTRY,
+        "sample_fashion_vendor_v1",
+        _deactivated_registry_entry("sample_fashion_vendor_v1"),
+    )
+    app.dependency_overrides[get_session] = lambda: iter([object()])
+    monkeypatch.setattr(
+        etl_loads_route,
+        "read_s3_csv_object",
+        lambda key: pytest.fail("inactive profile must not reach the S3 source"),
+    )
+    monkeypatch.setattr(
+        etl_loads_route,
+        "run_web_etl",
+        lambda *args, **kwargs: pytest.fail("inactive profile must not run Web ETL"),
+    )
+    monkeypatch.setattr(etl_loads_route, "record_web_etl_run", metrics.append)
+
+    response = client.post(ENDPOINT, json=REQUEST)
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "inactive_profile"
+    assert metrics == ["failed"]
+
+
+def test_inactive_profile_outranks_a_source_error_that_would_fire_first(monkeypatch):
+    # 허용되지 않은 object_key처럼 source adapter가 먼저 실패했을 상황에서도
+    # 비활성 차단이 앞섭니다. Phase 5A 정책이 source 오류에 가려지면 안 됩니다.
+    monkeypatch.setitem(
+        profile_loader._ETL_PROFILE_REGISTRY,
+        "sample_fashion_vendor_v1",
+        _deactivated_registry_entry("sample_fashion_vendor_v1"),
+    )
+    app.dependency_overrides[get_session] = lambda: iter([object()])
+    monkeypatch.setattr(
+        etl_loads_route,
+        "read_s3_csv_object",
+        lambda key: (_ for _ in ()).throw(S3KeyNotAllowedError("not allowed")),
+    )
+
+    response = client.post(
+        ENDPOINT,
+        json={**REQUEST, "object_key": "forbidden/prefix/products.csv"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "inactive_profile"
+
+
+def test_unknown_profile_keeps_the_existing_source_error_precedence(monkeypatch):
+    # 이번 수정은 "allowlist에 있으면서 비활성"인 경우만 앞당깁니다. 없는 profile_id는
+    # 사전 검증하지 않으므로 기존처럼 source 오류가 먼저 나갑니다.
+    app.dependency_overrides[get_session] = lambda: iter([object()])
+    monkeypatch.setattr(
+        etl_loads_route,
+        "read_s3_csv_object",
+        lambda key: (_ for _ in ()).throw(S3ObjectNotFoundError("missing")),
+    )
+
+    response = client.post(ENDPOINT, json={**REQUEST, "profile_id": "not-exists"})
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "s3_object_not_found"

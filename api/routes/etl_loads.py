@@ -87,6 +87,7 @@ from etl.profile_loader import (
     ETLProfileInactiveError,
     ETLProfileNotFoundError,
     get_etl_profile_detail,
+    is_etl_profile_inactive,
     list_etl_profiles,
 )
 from config.settings import ETL_HTTP_FEED_SOURCE_REF
@@ -148,6 +149,7 @@ _LOGGER = logging.getLogger(LOGGER_NAME)
 CATALOG_PROMOTION_NOT_FOUND_MESSAGE = "Promotion run not found."
 CATALOG_PROMOTION_ROLLBACK_NOT_FOUND_MESSAGE = "Rollback run not found."
 ETL_LOAD_NOT_FOUND_MESSAGE = "ETL 적재 배치를 찾을 수 없습니다."
+SERVER_SIDE_INACTIVE_PROFILE_MESSAGE = "Supplier profile is inactive."
 
 
 @router.get(
@@ -880,6 +882,34 @@ def _upload_source_ref(filename: str | None) -> str | None:
     return leaf or None
 
 
+def _reject_inactive_profile_before_source_fetch(profile_id: str) -> None:
+    """Block a deactivated profile before any external source I/O happens.
+
+    S3/HTTP feed는 source adapter를 먼저 실행하는 구조입니다. 이 검사가 없으면 서버가
+    이미 비활성인 것을 알면서도 외부를 읽고, source가 먼저 실패할 경우 409
+    inactive_profile 대신 404/502/503 같은 source 오류를 돌려주게 됩니다. Phase 5A
+    정책은 비활성 프로필의 신규 실행을 막는 것이므로 읽기 전에 끊습니다.
+
+    여기서 막는 것은 "allowlist에 있으면서 비활성"인 경우뿐입니다. 없는 profile_id는
+    그대로 통과시켜 기존 source-error precedence와 400 unsupported_profile 계약을
+    유지합니다. 잘못된 active pointer도 통과시켜 기존대로 실행 시점에 실패합니다.
+    """
+    if not is_etl_profile_inactive(profile_id):
+        return
+
+    # 실행을 시도하다 막힌 것이므로 업로드 경로와 같은 실패 metric을 남깁니다.
+    # 이 시점에 끊었으니 _run_server_side_source_etl()은 호출되지 않고, 따라서
+    # failed는 정확히 한 번만 기록됩니다.
+    record_web_etl_run("failed")
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "inactive_profile",
+            "message": SERVER_SIDE_INACTIVE_PROFILE_MESSAGE,
+        },
+    )
+
+
 def _run_server_side_source_etl(
     session: Session,
     *,
@@ -917,14 +947,15 @@ def _run_server_side_source_etl(
             },
         ) from None
     except ETLProfileInactiveError:
-        # S3/HTTP도 업로드와 같은 정책입니다. 입력 경로가 달라도 비활성 프로필로는
-        # 신규 ETL을 실행하지 않습니다.
+        # 정상 흐름에서는 _reject_inactive_profile_before_source_fetch()가 이미 걸러
+        # 여기까지 오지 않습니다. 프로필이 그 사이에 바뀌는 경우까지 같은 응답을
+        # 주도록 남겨 둔 두 번째 방어선입니다.
         record_web_etl_run("failed")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "code": "inactive_profile",
-                "message": "Supplier profile is inactive.",
+                "message": SERVER_SIDE_INACTIVE_PROFILE_MESSAGE,
             },
         ) from None
     except (CsvUploadValidationError, ETLPipelineError) as error:
@@ -985,6 +1016,8 @@ def create_s3_etl_load_run(
     session: Session = Depends(get_session),
 ) -> ETLWebRunResponse:
     """Download a configured S3 CSV and pass it to the existing Web ETL service."""
+    _reject_inactive_profile_before_source_fetch(request.profile_id)
+
     try:
         source = read_s3_csv_object(request.object_key)
     except S3NotConfiguredError:
@@ -1063,6 +1096,8 @@ def create_http_feed_etl_load_run(
     The feed URL comes from server configuration only. Clients choose the supplier
     profile, never the host, so this endpoint cannot be turned into an SSRF probe.
     """
+    _reject_inactive_profile_before_source_fetch(request.profile_id)
+
     try:
         source = read_http_feed_csv()
     except HTTPFeedNotConfiguredError:

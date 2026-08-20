@@ -597,9 +597,13 @@ Policy H는 그대로다. 비활성 프로필에서 "가장 큰 버전으로 대
 | --- | --- | --- |
 | Web CSV Upload | `POST /api/v1/etl-loads` | `409 {"code": "inactive_profile"}` |
 | S3 source | `POST /api/v1/etl-loads/s3` | `409 {"code": "inactive_profile"}` |
-| HTTP feed | `POST /api/v1/etl-loads/http-feed` | `409 {"code": "inactive_profile"}` |
+| HTTP feed | `POST /api/v1/etl-loads/http` | `409 {"code": "inactive_profile"}` |
 
-응답 메시지는 archive 경로·파일명·registry 내부를 노출하지 않는다. 세 경로 모두 기존 실패 metric(`record_web_etl_run("failed")`)을 그대로 남긴다.
+응답 메시지는 archive 경로·파일명·registry 내부를 노출하지 않는다. 세 경로 모두 기존 실패 metric(`record_web_etl_run("failed")`)을 정확히 한 번 남긴다.
+
+**S3/HTTP feed는 외부 source를 읽기 전에 막는다.** 두 endpoint는 source adapter를 먼저 실행하는 구조라, 검사를 실행 시점으로 미루면 이미 비활성인 것을 알면서도 외부를 읽게 되고 source가 먼저 실패할 때 `409 inactive_profile` 대신 `404 s3_object_not_found`·`502 http_feed_read_failed`·`503 http_feed_not_configured` 같은 응답이 앞서 나간다. 그래서 두 handler는 source를 읽기 전에 `is_etl_profile_inactive()`로 확인한다. 이 순서 덕분에 비활성 프로필 요청은 나가지 않아야 할 외부 요청 자체를 만들지 않는다.
+
+사전 검사가 막는 것은 **"allowlist에 있으면서 비활성"인 경우뿐이다.** 없는 `profile_id`는 사전 검사하지 않고 그대로 통과시켜, 기존 source-error precedence와 `400 unsupported_profile` 계약을 바꾸지 않는다. 잘못된 active pointer도 마찬가지로 통과시켜 기존대로 실행 시점에 실패한다(자동 fallback 없음). `is_etl_profile_inactive()`는 registry를 읽기만 하는 조회 함수이며 activation을 바꾸지 않는다.
 
 ### 14.4 Profile 목록과 상세
 
