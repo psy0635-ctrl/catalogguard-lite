@@ -2764,6 +2764,228 @@ def test_other_get_endpoints_do_not_map_409_to_an_inactive_profile_error():
     assert not isinstance(error.value, client_module.ETLProfileInactiveError)
 
 
+CATALOG_RECONCILIATION_RESPONSE = {
+    "etl_load_run_id": 42,
+    "supplier_key": "sample_fashion_vendor",
+    "total_rows": 4,
+    "loaded_rows": 3,
+    "rejected_rows": 1,
+    "new_count": 1,
+    "changed_count": 1,
+    "unchanged_count": 1,
+    "not_observed_in_batch_count": 1,
+    "field_change_counts": {"stock": 1},
+    "items": [
+        {"external_product_id": "P002", "status": "new", "changed_fields": {}},
+        {
+            "external_product_id": "P001",
+            "status": "changed",
+            "changed_fields": {"stock": {"before": 10, "after": 7}},
+        },
+        {"external_product_id": "P003", "status": "unchanged", "changed_fields": {}},
+        {
+            "external_product_id": "P900",
+            "status": "not_observed_in_batch",
+            "changed_fields": {},
+        },
+    ],
+    "total": 4,
+    "limit": 50,
+    "offset": 0,
+}
+
+
+def test_get_catalog_reconciliation_returns_validated_response():
+    client, session = make_client(
+        response=FakeResponse(payload=CATALOG_RECONCILIATION_RESPONSE),
+        timeout_seconds=6.0,
+    )
+
+    data = client.get_catalog_reconciliation(42)
+
+    assert data == CATALOG_RECONCILIATION_RESPONSE
+    assert session.calls == [
+        {
+            "url": (
+                "https://api.example.com/api/v1/etl-loads/42/catalog-reconciliation"
+            ),
+            "params": {"limit": 50, "offset": 0},
+            "timeout": 6.0,
+        }
+    ]
+
+
+def test_get_catalog_reconciliation_passes_pagination_params():
+    client, session = make_client(
+        response=FakeResponse(
+            payload={**CATALOG_RECONCILIATION_RESPONSE, "limit": 10, "offset": 2}
+        )
+    )
+
+    client.get_catalog_reconciliation(42, limit=10, offset=2)
+
+    assert session.calls[0]["params"] == {"limit": 10, "offset": 2}
+
+
+@pytest.mark.parametrize(
+    ("limit", "offset"),
+    [(0, 0), (101, 0), (50, -1)],
+)
+def test_get_catalog_reconciliation_rejects_invalid_pagination(limit, offset):
+    client, session = make_client(
+        response=FakeResponse(payload=CATALOG_RECONCILIATION_RESPONSE)
+    )
+
+    with pytest.raises(ValueError):
+        client.get_catalog_reconciliation(42, limit=limit, offset=offset)
+    # 잘못된 인자는 요청을 보내기 전에 막습니다.
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("etl_load_run_id", [0, -1, "42"])
+def test_get_catalog_reconciliation_rejects_invalid_run_id(etl_load_run_id):
+    client, _ = make_client(
+        response=FakeResponse(payload=CATALOG_RECONCILIATION_RESPONSE)
+    )
+
+    with pytest.raises(ValueError):
+        client.get_catalog_reconciliation(etl_load_run_id)
+
+
+def test_get_catalog_reconciliation_accepts_legacy_null_quality_values():
+    # 품질 요약 저장 이전 배치는 total_rows/rejected_rows가 null입니다.
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={
+                **CATALOG_RECONCILIATION_RESPONSE,
+                "total_rows": None,
+                "rejected_rows": None,
+            }
+        )
+    )
+
+    data = client.get_catalog_reconciliation(42)
+
+    assert data["total_rows"] is None
+    assert data["rejected_rows"] is None
+    assert data["loaded_rows"] == 3
+
+
+@pytest.mark.parametrize(
+    "quality",
+    [
+        # loaded_rows는 서버에서 NOT NULL이므로 null을 받아들이면 안 됩니다.
+        {"loaded_rows": None},
+        {"loaded_rows": "3"},
+        {"loaded_rows": -1},
+        {"total_rows": "4"},
+        {"total_rows": -1},
+        {"rejected_rows": "1"},
+        {"rejected_rows": -1},
+        {"rejected_rows": 1.5},
+    ],
+)
+def test_get_catalog_reconciliation_rejects_invalid_quality_metadata(quality):
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(payload={**CATALOG_RECONCILIATION_RESPONSE, **quality})
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.get_catalog_reconciliation(42)
+
+
+def test_get_catalog_reconciliation_maps_404_to_etl_load_not_found():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(status_code=404, payload={"detail": "missing"})
+    )
+
+    with pytest.raises(client_module.ETLLoadNotFoundError):
+        client.get_catalog_reconciliation(42)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        # 필수 key 누락
+        {
+            key: value
+            for key, value in CATALOG_RECONCILIATION_RESPONSE.items()
+            if key != "field_change_counts"
+        },
+        # count가 음수
+        {**CATALOG_RECONCILIATION_RESPONSE, "new_count": -1},
+        # total이 상태 합계와 어긋남
+        {**CATALOG_RECONCILIATION_RESPONSE, "total": 99},
+        # 알 수 없는 status
+        {
+            **CATALOG_RECONCILIATION_RESPONSE,
+            "items": [
+                {"external_product_id": "P001", "status": "deleted", "changed_fields": {}}
+            ],
+            "total": 1,
+            "new_count": 1,
+            "changed_count": 0,
+            "unchanged_count": 0,
+            "not_observed_in_batch_count": 0,
+        },
+        # changed가 아닌데 변경 필드가 있음
+        {
+            **CATALOG_RECONCILIATION_RESPONSE,
+            "items": [
+                {
+                    "external_product_id": "P001",
+                    "status": "unchanged",
+                    "changed_fields": {"stock": {"before": 1, "after": 2}},
+                }
+            ],
+            "total": 1,
+            "new_count": 0,
+            "changed_count": 0,
+            "unchanged_count": 1,
+            "not_observed_in_batch_count": 0,
+        },
+        # changed인데 변경 필드가 없음
+        {
+            **CATALOG_RECONCILIATION_RESPONSE,
+            "items": [
+                {"external_product_id": "P001", "status": "changed", "changed_fields": {}}
+            ],
+            "total": 1,
+            "new_count": 0,
+            "changed_count": 1,
+            "unchanged_count": 0,
+            "not_observed_in_batch_count": 0,
+        },
+        # before/after가 빠진 변경 필드
+        {
+            **CATALOG_RECONCILIATION_RESPONSE,
+            "items": [
+                {
+                    "external_product_id": "P001",
+                    "status": "changed",
+                    "changed_fields": {"stock": {"before": 1}},
+                }
+            ],
+            "total": 1,
+            "new_count": 0,
+            "changed_count": 1,
+            "unchanged_count": 0,
+            "not_observed_in_batch_count": 0,
+        },
+        # 한 페이지가 limit보다 많음
+        {**CATALOG_RECONCILIATION_RESPONSE, "limit": 1},
+    ],
+)
+def test_get_catalog_reconciliation_rejects_invalid_response(response):
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload=response))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.get_catalog_reconciliation(42)
+
+
 LOGIN_RESPONSE = {
     "access_token": "a.b.c",
     "token_type": "bearer",

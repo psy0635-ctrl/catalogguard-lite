@@ -105,6 +105,33 @@ ETL_REJECTION_ITEM_KEYS = (
 ETL_REJECTION_ERROR_KEYS = ("code", "field", "message")
 ETL_SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 CATALOG_PROMOTION_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+CATALOG_RECONCILIATION_RESPONSE_KEYS = (
+    "etl_load_run_id",
+    "supplier_key",
+    "total_rows",
+    "loaded_rows",
+    "rejected_rows",
+    "new_count",
+    "changed_count",
+    "unchanged_count",
+    "not_observed_in_batch_count",
+    "field_change_counts",
+    "items",
+    "total",
+    "limit",
+    "offset",
+)
+CATALOG_RECONCILIATION_ITEM_KEYS = (
+    "external_product_id",
+    "status",
+    "changed_fields",
+)
+CATALOG_RECONCILIATION_STATUSES = (
+    "new",
+    "changed",
+    "unchanged",
+    "not_observed_in_batch",
+)
 CATALOG_PROMOTION_PREVIEW_RESPONSE_KEYS = (
     "etl_load_run_id",
     "supplier_key",
@@ -715,6 +742,78 @@ def _validate_catalog_promotion_preview_item(item: object) -> bool:
         and (action != "update" or bool(changed_fields))
         and (action != "unchanged" or not changed_fields)
     )
+
+
+def _validate_catalog_reconciliation_item(item: object) -> bool:
+    if not isinstance(item, dict) or any(
+        key not in item for key in CATALOG_RECONCILIATION_ITEM_KEYS
+    ):
+        return False
+    external_product_id = item["external_product_id"]
+    status = item["status"]
+    changed_fields = item["changed_fields"]
+    if (
+        not isinstance(external_product_id, str)
+        or not external_product_id
+        or status not in CATALOG_RECONCILIATION_STATUSES
+        or not isinstance(changed_fields, dict)
+    ):
+        return False
+    for change in changed_fields.values():
+        if not isinstance(change, dict) or {"before", "after"} - set(change):
+            return False
+    # changed만 변경 필드를 가집니다. 다른 상태에 변경 필드가 오면 서버 계약이 깨진 것입니다.
+    return bool(changed_fields) == (status == "changed")
+
+
+def _validate_catalog_reconciliation_response(data: dict[str, Any]) -> None:
+    if any(key not in data for key in CATALOG_RECONCILIATION_RESPONSE_KEYS):
+        raise _invalid_etl_response()
+    count_fields = (
+        "new_count",
+        "changed_count",
+        "unchanged_count",
+        "not_observed_in_batch_count",
+    )
+    items = data["items"]
+    field_change_counts = data["field_change_counts"]
+    # loaded_rows는 서버에서 NOT NULL입니다. total_rows/rejected_rows는 품질 요약
+    # 저장 이전 legacy 배치에서 null일 수 있으므로 None을 허용하되, 0으로 바꾸지
+    # 않습니다. "거부 행이 없었다"와 "알 수 없다"는 다른 사실입니다.
+    nullable_quality_fields = ("total_rows", "rejected_rows")
+    if (
+        type(data["etl_load_run_id"]) is not int
+        or data["etl_load_run_id"] < 1
+        or not isinstance(data["supplier_key"], str)
+        or not data["supplier_key"]
+        or type(data["loaded_rows"]) is not int
+        or data["loaded_rows"] < 0
+        or any(
+            data[field] is not None
+            and (type(data[field]) is not int or data[field] < 0)
+            for field in nullable_quality_fields
+        )
+        or any(type(data[field]) is not int or data[field] < 0 for field in count_fields)
+        or not isinstance(field_change_counts, dict)
+        or any(
+            not isinstance(field_name, str)
+            or type(count) is not int
+            or count < 1
+            for field_name, count in field_change_counts.items()
+        )
+        or not isinstance(items, list)
+        or any(not _validate_catalog_reconciliation_item(item) for item in items)
+        or not _validate_etl_list_metadata(data["total"], allow_limit_zero=True)
+        or not _validate_etl_list_metadata(data["limit"])
+        or not _validate_etl_list_metadata(data["offset"], allow_limit_zero=True)
+        or len(items) > data["limit"]
+        or data["total"]
+        != data["new_count"]
+        + data["changed_count"]
+        + data["unchanged_count"]
+        + data["not_observed_in_batch_count"]
+    ):
+        raise _invalid_etl_response()
 
 
 def _validate_catalog_promotion_preview_response(data: dict[str, Any]) -> None:
@@ -1648,6 +1747,27 @@ class CatalogGuardApiClient:
             not_found_message=CATALOG_PROMOTION_ROLLBACK_NOT_FOUND_MESSAGE,
         )
         _validate_catalog_promotion_rollback_change_list(data)
+        return data
+
+    def get_catalog_reconciliation(
+        self,
+        etl_load_run_id: int,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        # 읽기 전용 보고서입니다. 운영 카탈로그를 바꾸지 않습니다.
+        _validate_positive_etl_int(etl_load_run_id, "etl_load_run_id")
+        _validate_etl_pagination(limit, offset)
+
+        data = self._get_json(
+            f"/api/v1/etl-loads/{etl_load_run_id}/catalog-reconciliation",
+            params={"limit": limit, "offset": offset},
+            raise_not_found=True,
+            not_found_error=ETLLoadNotFoundError,
+            not_found_message="ETL 적재 배치를 찾을 수 없습니다.",
+        )
+        _validate_catalog_reconciliation_response(data)
         return data
 
     def get_catalog_promotion_preview(

@@ -30,6 +30,9 @@ from api.schemas import (
     CatalogPromotionRunListItemResponse,
     CatalogPromotionRunListResponse,
     CatalogPromotionRunStatus,
+    CatalogReconciliationChangedFieldResponse,
+    CatalogReconciliationItemResponse,
+    CatalogReconciliationResponse,
     CatalogPromotionRollbackBlockedReasonResponse,
     CatalogPromotionRollbackChangeListResponse,
     CatalogPromotionRollbackChangeResponse,
@@ -100,6 +103,13 @@ from etl.s3_source import (
     sanitized_object_ref,
 )
 from etl.web_service import ETLWebRunOutcome, run_web_etl
+from db.catalog_reconciliation_service import (
+    CatalogReconciliationDuplicateIdentityError,
+    CatalogReconciliationReport,
+    DEFAULT_ITEM_LIMIT as RECONCILIATION_DEFAULT_LIMIT,
+    MAX_ITEM_LIMIT as RECONCILIATION_MAX_LIMIT,
+    build_catalog_reconciliation_report,
+)
 from db.catalog_promotion_preview_service import (
     CatalogPromotionPreview,
     ETLLoadRunNotFoundError,
@@ -1203,6 +1213,78 @@ def list_etl_rejected_rows(
         limit=result.limit,
         offset=result.offset,
     )
+
+
+def _build_catalog_reconciliation_response(
+    result: CatalogReconciliationReport,
+) -> CatalogReconciliationResponse:
+    return CatalogReconciliationResponse(
+        etl_load_run_id=result.etl_load_run_id,
+        supplier_key=result.supplier_key,
+        total_rows=result.total_rows,
+        loaded_rows=result.loaded_rows,
+        rejected_rows=result.rejected_rows,
+        new_count=result.new_count,
+        changed_count=result.changed_count,
+        unchanged_count=result.unchanged_count,
+        not_observed_in_batch_count=result.not_observed_in_batch_count,
+        field_change_counts=dict(result.field_change_counts),
+        items=[
+            CatalogReconciliationItemResponse(
+                external_product_id=item.external_product_id,
+                status=item.status,
+                changed_fields={
+                    field_name: CatalogReconciliationChangedFieldResponse(
+                        before=change["before"],
+                        after=change["after"],
+                    )
+                    for field_name, change in item.changed_fields.items()
+                },
+            )
+            for item in result.items
+        ],
+        total=result.total,
+        limit=result.limit,
+        offset=result.offset,
+    )
+
+
+@router.get(
+    "/api/v1/etl-loads/{etl_load_run_id}/catalog-reconciliation",
+    response_model=CatalogReconciliationResponse,
+)
+def get_catalog_reconciliation_report(
+    etl_load_run_id: int = Path(..., ge=1),
+    limit: int = Query(default=RECONCILIATION_DEFAULT_LIMIT, ge=1, le=RECONCILIATION_MAX_LIMIT),
+    offset: int = Query(default=0, ge=0),
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> CatalogReconciliationResponse:
+    """Report how one staging batch differs from the live catalog. Read-only."""
+    try:
+        result = build_catalog_reconciliation_report(
+            session,
+            etl_load_run_id=etl_load_run_id,
+            limit=limit,
+            offset=offset,
+        )
+    except ETLLoadRunNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ETL_LOAD_NOT_FOUND_MESSAGE,
+        ) from None
+    except CatalogReconciliationDuplicateIdentityError:
+        # Promotion Preview와 같은 안전 철학입니다. 어느 행이 진짜인지 알 수 없으므로
+        # 임의로 고르지 않고 거부합니다. 내부 경로나 SQL은 노출하지 않습니다.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "duplicate_product_identity",
+                "message": "같은 공급사 상품 식별자가 배치 안에 중복되어 있습니다.",
+            },
+        ) from None
+
+    return _build_catalog_reconciliation_response(result)
 
 
 @router.post(

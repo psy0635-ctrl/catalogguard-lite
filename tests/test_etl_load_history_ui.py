@@ -489,6 +489,8 @@ class FakeEtlApiClient:
         quality_summary=None,
         quality_trend=None,
         quality_trend_error=None,
+        reconciliation_response=None,
+        reconciliation_error=None,
     ):
         self.list_calls = []
         self.detail_calls = []
@@ -548,6 +550,9 @@ class FakeEtlApiClient:
             "error_counts": {},
         }
         self.etl_run_error = etl_run_error
+        self.reconciliation_response = reconciliation_response
+        self.reconciliation_error = reconciliation_error
+        self.reconciliation_calls = []
         self.unknown_size_tokens = (
             [{"token": "4XL", "count": 8}, {"token": "OS", "count": 3}]
             if unknown_size_tokens is None
@@ -641,6 +646,14 @@ class FakeEtlApiClient:
         if self.etl_run_error is not None:
             raise self.etl_run_error
         return self.etl_run_response
+
+    def get_catalog_reconciliation(self, etl_load_run_id, *, limit=50, offset=0):
+        self.reconciliation_calls.append(
+            {"etl_load_run_id": etl_load_run_id, "limit": limit, "offset": offset}
+        )
+        if self.reconciliation_error is not None:
+            raise self.reconciliation_error
+        return self.reconciliation_response
 
     def list_etl_loads(self, **params):
         self.list_calls.append(params)
@@ -1634,6 +1647,204 @@ def test_submit_etl_web_run_success_invalidates_history_cache_but_keeps_promotio
     # Promotion cache must be left untouched by a successful ETL web run.
     assert session_state["catalog_promotion_preview_response"] == {"etl_load_run_id": 1}
     assert session_state["catalog_promotion_history_response"] == {"items": []}
+
+
+RECONCILIATION_RESPONSE = {
+    "etl_load_run_id": 42,
+    "supplier_key": "sample_fashion_vendor",
+    "total_rows": 15,
+    "loaded_rows": 13,
+    "rejected_rows": 2,
+    "new_count": 1,
+    "changed_count": 2,
+    "unchanged_count": 10,
+    "not_observed_in_batch_count": 1,
+    "field_change_counts": {"stock": 15, "price": 3, "sale_price": 2, "category": 1},
+    "items": [
+        {"external_product_id": "P002", "status": "new", "changed_fields": {}},
+        {
+            "external_product_id": "P001",
+            "status": "changed",
+            "changed_fields": {
+                "stock": {"before": 10, "after": 7},
+                "price": {"before": 1000, "after": 900},
+            },
+        },
+        {
+            "external_product_id": "P900",
+            "status": "not_observed_in_batch",
+            "changed_fields": {},
+        },
+    ],
+    "total": 14,
+    "limit": 50,
+    "offset": 0,
+}
+
+
+def test_build_catalog_reconciliation_field_dataframe_orders_by_count_then_name():
+    from ui.etl_load_history import build_catalog_reconciliation_field_dataframe
+
+    frame = build_catalog_reconciliation_field_dataframe(
+        RECONCILIATION_RESPONSE["field_change_counts"]
+    )
+
+    assert list(frame.columns) == ["변경 필드", "변경 건수"]
+    assert frame.to_dict("records") == [
+        {"변경 필드": "stock", "변경 건수": 15},
+        {"변경 필드": "price", "변경 건수": 3},
+        {"변경 필드": "sale_price", "변경 건수": 2},
+        {"변경 필드": "category", "변경 건수": 1},
+    ]
+
+
+def test_build_catalog_reconciliation_field_dataframe_handles_no_changes():
+    from ui.etl_load_history import build_catalog_reconciliation_field_dataframe
+
+    frame = build_catalog_reconciliation_field_dataframe({})
+
+    assert list(frame.columns) == ["변경 필드", "변경 건수"]
+    assert frame.empty
+
+
+def test_build_catalog_reconciliation_item_dataframe_labels_status_in_korean():
+    from ui.etl_load_history import build_catalog_reconciliation_item_dataframe
+
+    frame = build_catalog_reconciliation_item_dataframe(
+        RECONCILIATION_RESPONSE["items"]
+    )
+
+    assert list(frame.columns) == ["상품 ID", "상태", "변경 필드"]
+    # 서버가 준 순서를 그대로 유지합니다.
+    assert frame.to_dict("records") == [
+        {"상품 ID": "P002", "상태": "신규", "변경 필드": "-"},
+        {"상품 ID": "P001", "상태": "변경", "변경 필드": "price, stock"},
+        {"상품 ID": "P900", "상태": "이번 배치 미관측", "변경 필드": "-"},
+    ]
+
+
+def test_catalog_reconciliation_not_observed_notice_rejects_deletion_reading():
+    from ui.etl_load_history import CATALOG_RECONCILIATION_NOT_OBSERVED_NOTICE
+
+    notice = CATALOG_RECONCILIATION_NOT_OBSERVED_NOTICE
+
+    assert "관측되지 않은" in notice
+    assert "삭제 또는 판매 종료를 의미하지 않" in notice
+    assert "자동 삭제 대상으로 판단하지 않습니다" in notice
+
+
+def test_reject_notice_warns_that_rejected_rows_were_never_compared():
+    from ui.etl_load_history import build_catalog_reconciliation_reject_notice
+
+    notice = build_catalog_reconciliation_reject_notice(2)
+
+    assert notice is not None
+    assert "2개 행" in notice
+    assert "제외" in notice
+    # 미관측에 reject 상품이 섞일 수 있다는 점이 드러나야 합니다.
+    assert "이번 배치 미관측" in notice
+
+
+def test_reject_notice_is_absent_when_nothing_was_rejected():
+    from ui.etl_load_history import build_catalog_reconciliation_reject_notice
+
+    assert build_catalog_reconciliation_reject_notice(0) is None
+
+
+def test_reject_notice_for_a_legacy_batch_says_the_scope_is_unknown():
+    from ui.etl_load_history import (
+        CATALOG_RECONCILIATION_LEGACY_QUALITY_NOTICE,
+        build_catalog_reconciliation_reject_notice,
+    )
+
+    notice = build_catalog_reconciliation_reject_notice(None)
+
+    # None을 0으로 바꿔 "거부 행이 없었다"고 말하지 않습니다.
+    assert notice == CATALOG_RECONCILIATION_LEGACY_QUALITY_NOTICE
+    assert "확인할 수 없습니다" in notice
+    assert "0개" not in notice
+
+
+def test_not_observed_notice_is_independent_of_the_reject_notice():
+    # reject 경고가 생겨도 삭제/판매 종료가 아니라는 기존 경고는 그대로 유지됩니다.
+    from ui.etl_load_history import (
+        CATALOG_RECONCILIATION_NOT_OBSERVED_NOTICE,
+        build_catalog_reconciliation_reject_notice,
+    )
+
+    assert build_catalog_reconciliation_reject_notice(5) != (
+        CATALOG_RECONCILIATION_NOT_OBSERVED_NOTICE
+    )
+    assert "자동 삭제 대상으로 판단하지 않습니다" in (
+        CATALOG_RECONCILIATION_NOT_OBSERVED_NOTICE
+    )
+
+
+def test_fetch_catalog_reconciliation_caches_the_report_per_batch():
+    from ui.etl_load_history import _fetch_catalog_reconciliation
+
+    api_client = FakeEtlApiClient(reconciliation_response=RECONCILIATION_RESPONSE)
+    state = {"etl_load_selected_run_id": 42, "catalog_reconciliation_offset": 0}
+
+    first = _fetch_catalog_reconciliation(api_client, state)
+    second = _fetch_catalog_reconciliation(api_client, state)
+
+    assert first == RECONCILIATION_RESPONSE
+    assert second == RECONCILIATION_RESPONSE
+    assert api_client.reconciliation_calls == [
+        {"etl_load_run_id": 42, "limit": 50, "offset": 0}
+    ]
+    assert state["catalog_reconciliation_batch_id"] == 42
+
+
+def test_fetch_catalog_reconciliation_stores_api_errors_without_raising():
+    from clients.catalogguard_api import CatalogGuardApiResponseError
+    from ui.etl_load_history import _fetch_catalog_reconciliation
+
+    error = CatalogGuardApiResponseError("boom")
+    api_client = FakeEtlApiClient(reconciliation_error=error)
+    state = {"etl_load_selected_run_id": 42, "catalog_reconciliation_offset": 0}
+
+    assert _fetch_catalog_reconciliation(api_client, state) is None
+    assert state["catalog_reconciliation_error"] is error
+    # 오류를 캐시해 rerun마다 같은 실패 요청을 반복하지 않습니다.
+    assert _fetch_catalog_reconciliation(api_client, state) is None
+    assert len(api_client.reconciliation_calls) == 1
+
+
+def test_synchronize_catalog_reconciliation_batch_drops_a_stale_report():
+    from ui.etl_load_history import synchronize_catalog_reconciliation_batch
+
+    state = {
+        "etl_load_selected_run_id": 43,
+        "catalog_reconciliation_batch_id": 42,
+        "catalog_reconciliation_offset": 50,
+        "catalog_reconciliation_response": RECONCILIATION_RESPONSE,
+        "catalog_reconciliation_error": None,
+    }
+
+    synchronize_catalog_reconciliation_batch(state)
+
+    assert state["catalog_reconciliation_response"] is None
+    assert state["catalog_reconciliation_batch_id"] is None
+    assert state["catalog_reconciliation_offset"] == 0
+
+
+def test_synchronize_catalog_reconciliation_batch_keeps_a_matching_report():
+    from ui.etl_load_history import synchronize_catalog_reconciliation_batch
+
+    state = {
+        "etl_load_selected_run_id": 42,
+        "catalog_reconciliation_batch_id": 42,
+        "catalog_reconciliation_offset": 50,
+        "catalog_reconciliation_response": RECONCILIATION_RESPONSE,
+        "catalog_reconciliation_error": None,
+    }
+
+    synchronize_catalog_reconciliation_batch(state)
+
+    assert state["catalog_reconciliation_response"] == RECONCILIATION_RESPONSE
+    assert state["catalog_reconciliation_offset"] == 50
 
 
 def test_etl_web_run_error_message_names_the_inactive_profile_cause():

@@ -275,6 +275,41 @@ class CatalogPromotionPreviewResponse(BaseModel):
     items: list[CatalogPromotionPreviewItemResponse]
 
 
+class CatalogReconciliationChangedFieldResponse(BaseModel):
+    before: CatalogPromotionValue
+    after: CatalogPromotionValue
+
+
+class CatalogReconciliationItemResponse(BaseModel):
+    external_product_id: str
+    status: Literal["new", "changed", "unchanged", "not_observed_in_batch"]
+    # changed일 때만 채웁니다. 다른 상태는 빈 dict이며, 상품이 한쪽에만 있다는 뜻으로
+    # 빈 문자열 상품 객체를 만들어 내지 않습니다.
+    changed_fields: dict[str, CatalogReconciliationChangedFieldResponse] = Field(
+        default_factory=dict
+    )
+
+
+class CatalogReconciliationResponse(BaseModel):
+    etl_load_run_id: int
+    supplier_key: str
+    # 이 보고서는 원본 feed 전체가 아니라 staging에 정상 적재된 상품을 비교합니다.
+    # 그 범위를 읽는 쪽이 판단할 수 있도록 ETL 품질 요약을 함께 전달합니다.
+    # 품질 요약 저장 이전 legacy 배치는 total_rows/rejected_rows가 null입니다.
+    total_rows: int | None
+    loaded_rows: int
+    rejected_rows: int | None
+    new_count: int
+    changed_count: int
+    unchanged_count: int
+    not_observed_in_batch_count: int
+    field_change_counts: dict[str, int] = Field(default_factory=dict)
+    items: list[CatalogReconciliationItemResponse]
+    total: int
+    limit: int
+    offset: int
+
+
 class CatalogPromotionRequest(BaseModel):
     confirmation: bool
     expected_preview_hash: str = Field(
