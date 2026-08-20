@@ -13,6 +13,15 @@ class ETLProfileNotFoundError(ValueError):
     """Raised when a requested profile id is not in the server-side allowlist."""
 
 
+class ETLProfileInactiveError(ValueError):
+    """Raised when an allowlisted ETL profile has no active version.
+
+    ETLProfileNotFoundError와 일부러 상속 관계를 두지 않습니다. "없는 프로필"과
+    "있지만 비활성인 프로필"은 호출자가 다르게 다뤄야 하는 상태이고, 상속으로 묶으면
+    기존 except 절이 비활성 상태까지 조용히 삼켜 두 상태가 섞이기 때문입니다.
+    """
+
+
 # 웹 ETL 실행은 이 allowlist에 있는 profile_id만 받습니다.
 # 사용자가 보낸 파일 경로를 그대로 신뢰하지 않기 위한 유일한 진입점입니다.
 #
@@ -25,6 +34,12 @@ class ETLProfileNotFoundError(ValueError):
 # 이유는 docs/etl_profile_lifecycle.md Policy H에 있습니다. 버전 문자열은 임의 값을
 # 허용하므로 크기 비교가 성립하지 않고, 아직 검증하지 않은 버전이 파일을 추가하는
 # 것만으로 운영 실행에 들어가면 안 되기 때문입니다.
+#
+# active_version은 "버전 문자열" 또는 None입니다. None은 비활성(deactivated)이며
+# Policy G의 "Delete 대신 Deactivate"를 뜻합니다. 신규 ETL 실행만 막고 versions의
+# archive는 그대로 남으므로, 과거 배치가 참조하는 정의는 계속 읽을 수 있습니다.
+# ""나 "disabled" 같은 값은 비활성 표시가 아니며, 그런 값은 versions에 없는
+# pointer로서 그대로 실패해야 합니다.
 ETL_PROFILE_DIR = BASE_DIR / "config" / "etl"
 _ETL_PROFILE_REGISTRY: dict[str, dict] = {
     "sample_fashion_vendor_v1": {
@@ -49,10 +64,17 @@ _ETL_PROFILE_REGISTRY: dict[str, dict] = {
 
 
 def list_etl_profiles() -> list[dict[str, str]]:
-    """Return the allowlisted ETL profiles safe to expose to API/UI callers."""
+    """Return the allowlisted ETL profiles selectable for a new ETL run.
+
+    이 목록의 유일한 호출자는 GET /api/v1/etl-profiles이고, Streamlit은 그 응답으로
+    신규 ETL 실행용 selector를 그립니다. 즉 "관리용 전체 목록"이 아니라 "지금 실행할
+    수 있는 프로필 목록"이므로, 비활성(active_version=None) 프로필은 제외합니다.
+    서버 차단(get_profile_path())이 실제 방어선이고 이 필터는 그 앞단입니다.
+    """
     return [
         {"id": profile_id, "display_name": info["display_name"]}
         for profile_id, info in _ETL_PROFILE_REGISTRY.items()
+        if info["active_version"] is not None
     ]
 
 
@@ -109,9 +131,16 @@ def get_profile_path(profile_id: str) -> Path:
 
     Never accepts a filesystem path from the caller: profile_id must be an exact
     allowlist key, so arbitrary/relative paths can't reach load_profile().
+
+    active_version이 None이면 ETLProfileInactiveError를 냅니다. 여기서 다른 버전으로
+    대신 실행하지 않습니다. 비활성 프로필은 "무엇을 실행할지 정해지지 않은" 상태이지
+    "최신 버전으로 실행해도 되는" 상태가 아니기 때문입니다.
     """
     info = _registry_entry(profile_id)
-    return _archived_version_path(info, info["active_version"])
+    active_version = info["active_version"]
+    if active_version is None:
+        raise ETLProfileInactiveError(f"ETL profile is inactive: {profile_id}")
+    return _archived_version_path(info, active_version)
 
 
 def get_profile_version_path(profile_id: str, profile_version: str) -> Path:
@@ -119,6 +148,9 @@ def get_profile_version_path(profile_id: str, profile_version: str) -> Path:
 
     과거 정의를 읽기 위한 내부 helper입니다. 신규 ETL 실행은 여전히
     get_profile_path()의 active version만 사용합니다.
+
+    active_version이 None이어도 archive 조회는 계속 됩니다. Deactivate는 Delete가
+    아니므로, 과거 배치가 참조하는 정의를 여기서 막으면 안 됩니다.
     """
     return _archived_version_path(_registry_entry(profile_id), profile_version)
 

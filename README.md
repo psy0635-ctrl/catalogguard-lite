@@ -1884,7 +1884,7 @@ CSV 파일을 업로드해 검수하고, 검수 실행과 상세 결과를 Postg
 
 ### `GET /api/v1/etl-profiles`
 
-Streamlit이 웹 ETL 실행 화면에서 사용할 수 있는 ETL 프로필 목록을 서버 allowlist 기준으로 반환합니다. 서버 파일 경로는 노출하지 않고 `id`, `display_name`만 반환합니다.
+Streamlit이 웹 ETL 실행 화면에서 사용할 수 있는 ETL 프로필 목록을 서버 allowlist 기준으로 반환합니다. 서버 파일 경로는 노출하지 않고 `id`, `display_name`만 반환합니다. 이 목록은 **신규 ETL 실행에 고를 수 있는 프로필**이므로 비활성(`active_version = None`) 프로필은 제외합니다. 비활성 프로필에 `GET /api/v1/etl-profiles/{profile_id}`를 직접 요청하면 마지막 active 버전을 보여 주지 않고 HTTP `409`(`inactive_profile`)를 반환합니다.
 
 ```json
 {
@@ -1903,6 +1903,7 @@ Streamlit이 웹 ETL 실행 화면에서 사용할 수 있는 ETL 프로필 목�
 - 파일 필드명: `file`, 프로필 필드명: `profile_id`
 - 정상 응답: `etl_load_run_id`, `created`, `profile_name`, `profile_version`, `source_filename`, `total_rows`, `loaded_rows`, `rejected_rows`, `error_counts`, `actor_username`(요청한 JWT `current_user`의 username)
 - 지원하지 않는 `profile_id`: HTTP `400` (`unsupported_profile`)
+- 비활성 프로필(`active_version = None`): HTTP `409` (`inactive_profile`). 없는 프로필과 구분되는 별도 상태입니다
 - 빈 파일, 크기 초과, ETL 변환 실패 등 잘못된 업로드: HTTP `400` (`invalid_upload`)
 
 동일한 `input_file_sha256`·`profile_name`·`profile_version` 조합으로 다시 요청하면 새 배치를 만들지 않고 기존 배치를 `created: false`로 반환합니다. 내부적으로는 CLI의 `etl.cli`·`etl.load_cli`가 호출하는 `run_pipeline()`·`load_standard_csv()`를 그대로 실행합니다.
@@ -1925,6 +1926,7 @@ bucket과 허용 prefix는 요청이 아니라 서버 환경변수 `CATALOGGUARD
 | 상황 | HTTP | code |
 |---|---:|---|
 | 허용 prefix 밖 `object_key` | `400` | `s3_key_not_allowed` |
+| 비활성 프로필 | `409` | `inactive_profile` |
 | 파일명·크기 등 업로드 검증 실패 | `400` | `invalid_upload` |
 | S3가 객체 없음을 알린 경우 | `404` | `s3_object_not_found` |
 | S3 읽기 실패(권한 거부 포함) | `502` | `s3_read_failed` |
@@ -2510,7 +2512,8 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 웹 ETL의 ETL 프로필은 서버 allowlist로 고정되어 있으며, 사용자가 새 프로필을 업로드하거나 만드는 기능은 없습니다. 프로필 상세는 조회만 가능합니다. 프로필은 `config/etl/<profile_name>/v<번호>.json` 버전별 archive로 보존하고, 신규 실행에 쓸 버전은 registry의 명시적 `active_version`으로만 정합니다(가장 큰 번호를 자동 선택하지 않습니다). `profile_id`는 기존 그대로이며 현재 두 프로필의 active 버전은 모두 `"2"`입니다. 과거 `v1.json` 정의도 archive에 남아 있지만, 웹 ETL에서 실행 버전을 고르는 기능은 없습니다.
 - 이미 공개된 `profile_version`의 매핑이 같은 버전 번호를 유지한 채 바뀌면 pytest가 실패시킵니다(`tests/etl/test_profile_version_guardrail.py`). 현재 active 버전뿐 아니라 archive의 과거 버전까지 검사합니다. 다만 프로필 JSON과 기록된 fingerprint를 함께 고치는 경우와 `etl/transformer.py` 같은 코드 쪽 의미 변경은 자동으로 감지하지 못하며, 실행 중인 서버를 막는 런타임 가드도 아닙니다.
 - 과거 프로필 JSON 정의는 archive에서 읽을 수 있지만, 현재 코드로 과거 배치 결과를 그대로 재현하는 것은 보장하지 않습니다. `v1` → `v2` 전환에는 JSON 밖의 코드 변경도 있었고, `etl_load_runs`에는 프로필 snapshot이나 실행 당시 애플리케이션 버전이 저장되지 않습니다.
-- 프로필 활성 버전을 바꾸는 API·화면(Activation/Deactivation)과 Profile CRUD는 아직 없습니다. `active_version`은 코드 registry 값입니다.
+- `active_version`은 **버전 문자열 또는 `None`**입니다. `None`은 비활성이며 신규 ETL 실행(업로드·S3·HTTP feed 모두)만 HTTP `409`(`inactive_profile`)로 막고, 버전별 archive와 과거 이력은 삭제하지 않습니다(Deactivate ≠ Delete). 현재 두 프로필은 계속 active `"2"`입니다.
+- activation 변경은 **배포가 필요한 code configuration**입니다. `active_version`을 런타임에 바꾸는 관리자 API·Streamlit 화면·DB 플래그는 없고, Profile CRUD도 없습니다. 자세한 범위는 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)의 Phase 5A를 참고하세요.
 - `etl_load_runs`는 `profile_name`·`profile_version`만 기록하고 프로필 JSON snapshot이나 매핑 hash는 저장하지 않으므로, 어떤 버전을 썼는지는 알 수 있지만 그 버전의 당시 내용이 보존된다고 DB가 보장하지는 않습니다. 버전 증가 기준과 향후 방향은 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)에 정리했습니다.
 - S3 ingestion은 호출자가 `object_key` 하나를 지정하는 pull 방식입니다. S3 event 알림·Lambda·SQS 기반 자동 수집과 prefix 일괄 처리는 지원하지 않습니다.
 - S3 source를 실제로 호출하는 Streamlit 화면은 없습니다. 현재는 API 직접 호출로만 사용합니다.

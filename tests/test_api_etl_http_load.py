@@ -28,7 +28,7 @@ from etl.http_source import (
     HTTPFeedSourceObject,
 )
 from etl.pipeline import ETLPipelineError
-from etl.profile_loader import ETLProfileNotFoundError
+from etl.profile_loader import ETLProfileInactiveError, ETLProfileNotFoundError
 from etl.web_service import ETLWebRunOutcome
 
 
@@ -284,6 +284,7 @@ def test_http_csv_validation_error_is_invalid_upload_without_web_metric(monkeypa
     ("error", "expected_status", "expected_code"),
     [
         (ETLProfileNotFoundError("boom"), 400, "unsupported_profile"),
+        (ETLProfileInactiveError("boom"), 409, "inactive_profile"),
         (ETLPipelineError("boom"), 400, "invalid_upload"),
         (ETLLoadError("boom"), 500, "etl_load_failed"),
     ],

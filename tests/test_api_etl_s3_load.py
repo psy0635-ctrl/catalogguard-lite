@@ -23,7 +23,7 @@ from db.models import CatalogProductStaging, ETLLoadRun, User
 from db.session import create_database_engine, create_session_factory, get_session
 from etl.db_loader import ETLLoadError
 from etl.pipeline import ETLPipelineError
-from etl.profile_loader import ETLProfileNotFoundError
+from etl.profile_loader import ETLProfileInactiveError, ETLProfileNotFoundError
 from etl.s3_source import (
     S3KeyNotAllowedError,
     S3NotConfiguredError,
@@ -259,6 +259,7 @@ def test_s3_csv_validation_error_is_invalid_upload_without_web_metric(monkeypatc
     ("error", "expected_status", "expected_code"),
     [
         (ETLProfileNotFoundError("unknown"), 400, "unsupported_profile"),
+        (ETLProfileInactiveError("inactive"), 409, "inactive_profile"),
         (CsvUploadValidationError("invalid upload"), 400, "invalid_upload"),
         (ETLPipelineError("invalid pipeline"), 400, "invalid_upload"),
         (ETLLoadError("internal sha256 detail"), 500, "etl_load_failed"),
