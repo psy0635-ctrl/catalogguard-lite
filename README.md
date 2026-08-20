@@ -94,6 +94,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - `POST /api/v1/etl-loads`로 업로드 CSV와 profile_id를 받아 기존 `run_pipeline()`·`load_standard_csv()`를 그대로 실행하고 PostgreSQL staging까지 적재
 - 동일한 원본 파일 해시·프로필 이름·버전의 웹 ETL 요청은 새 배치를 만들지 않고 기존 배치를 `created=false`로 재사용
 - 웹 ETL 성공 후 ETL 적재 이력 캐시만 자동 무효화하고, 운영 상품 반영은 사용자가 이력에서 batch를 선택해 별도로 진행
+- `GET /api/v1/etl-loads/{id}/catalog-reconciliation`과 Streamlit `상품 동기화 차이` 영역에서 선택한 ETL 배치와 현재 운영 카탈로그를 공급사·상품 식별자 기준으로 비교해 신규/변경/동일/이번 배치 미관측 건수와 필드별 변경 건수를 조회(정상 staging 상품 기준의 읽기 전용 보고서이며, 미관측 상품을 자동 삭제 후보로 다루지 않음. [Catalog Reconciliation Report](docs/catalog_reconciliation.md))
 - `POST /api/v1/etl-loads/s3`로 서버에 설정된 private S3 bucket의 허용 prefix 객체만 읽어 같은 `run_web_etl()` 흐름으로 staging까지 적재(업로드 대신 S3를 입력원으로 사용하는 source adapter이며 별도 ETL pipeline이 아님)
 - S3 source는 bucket·prefix를 서버 환경변수로 고정하고 요청은 `object_key`만 받으며, prefix 밖 key 차단·HeadObject 기반 크기 제한·bounded read를 적용
 - `POST /api/v1/etl-loads/http`로 서버에 설정된 신뢰 공급사 HTTP feed의 CSV를 읽어 같은 `run_web_etl()` 흐름으로 staging까지 적재(세 번째 ETL pipeline이 아니라 세 번째 source adapter)

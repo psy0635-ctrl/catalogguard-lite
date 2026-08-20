@@ -54,6 +54,29 @@ ETL_INACTIVE_PROFILE_RUN_MESSAGE = (
 ETL_INACTIVE_PROFILE_DETAIL_MESSAGE = "선택한 ETL 프로필이 비활성화되었습니다."
 ETL_PROFILE_DEFAULTS_DISPLAY_COLUMNS = ["CatalogGuard 컬럼", "기본값"]
 ETL_REJECT_DISPLAY_COLUMNS = ["원본 행", "오류 코드", "오류 필드", "오류 메시지"]
+CATALOG_RECONCILIATION_LIMIT = 50
+CATALOG_RECONCILIATION_FIELD_COLUMNS = ["변경 필드", "변경 건수"]
+CATALOG_RECONCILIATION_ITEM_COLUMNS = ["상품 ID", "상태", "변경 필드"]
+CATALOG_RECONCILIATION_STATUS_LABELS = {
+    "new": "신규",
+    "changed": "변경",
+    "unchanged": "동일",
+    "not_observed_in_batch": "이번 배치 미관측",
+}
+# not_observed_in_batch를 삭제/판매 종료로 읽으면 안 됩니다. 지금 시스템은 공급사 피드가
+# 전체 snapshot인지 부분 feed인지 보장하지 않으므로, 이 상태는 "이번 배치에 없었다"는
+# 관측 사실일 뿐입니다.
+CATALOG_RECONCILIATION_NOT_OBSERVED_NOTICE = (
+    "이번 ETL 배치에서 관측되지 않은 운영 상품입니다. "
+    "삭제 또는 판매 종료를 의미하지 않으며, 자동 삭제 대상으로 판단하지 않습니다."
+)
+# 이 보고서는 원본 CSV가 아니라 staging에 정상 적재된 상품을 비교합니다. reject된 행은
+# 비교 대상에 없으므로, 원본에는 있었지만 거부된 상품이 "이번 배치 미관측"으로 보일 수
+# 있습니다. 공급사가 보내지 않은 것과 구분되도록 알려 줍니다.
+CATALOG_RECONCILIATION_LEGACY_QUALITY_NOTICE = (
+    "이 배치는 ETL 품질 요약 저장 기능이 추가되기 전에 생성되어 "
+    "원본 입력 대비 비교 범위를 확인할 수 없습니다."
+)
 UNKNOWN_SIZE_TOKEN_DISPLAY_COLUMNS = ["사이즈 토큰", "개수"]
 ETL_PRODUCT_DISPLAY_COLUMNS = [
     "staging 상품 ID",
@@ -154,6 +177,10 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_reject_offset": 0,
     "etl_reject_response": None,
     "etl_reject_error": None,
+    "catalog_reconciliation_batch_id": None,
+    "catalog_reconciliation_offset": 0,
+    "catalog_reconciliation_response": None,
+    "catalog_reconciliation_error": None,
     "catalog_promotion_preview_batch_id": None,
     "catalog_promotion_preview_response": None,
     "catalog_promotion_preview_hash": None,
@@ -249,6 +276,64 @@ def format_etl_quality_rate(
     if total_rows is None or loaded_rows is None or total_rows <= 0:
         return "—"
     return f"{loaded_rows / total_rows * 100:.1f}%"
+
+
+def build_catalog_reconciliation_field_dataframe(
+    field_change_counts: dict[str, int] | None,
+) -> pd.DataFrame:
+    """Field-level change counts, most frequent first."""
+    if not field_change_counts:
+        return pd.DataFrame(columns=CATALOG_RECONCILIATION_FIELD_COLUMNS)
+    rows = sorted(
+        field_change_counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return pd.DataFrame(
+        [{"변경 필드": field_name, "변경 건수": count} for field_name, count in rows],
+        columns=CATALOG_RECONCILIATION_FIELD_COLUMNS,
+    )
+
+
+def build_catalog_reconciliation_item_dataframe(
+    items: list[dict[str, Any]] | None,
+) -> pd.DataFrame:
+    """One row per product: id, human-readable status, changed field names.
+
+    서버가 준 순서를 그대로 유지합니다. 정렬은 서비스가 결정론적으로 정합니다.
+    """
+    if not items:
+        return pd.DataFrame(columns=CATALOG_RECONCILIATION_ITEM_COLUMNS)
+    rows = []
+    for item in items:
+        status = item.get("status", "")
+        changed_fields = item.get("changed_fields") or {}
+        rows.append(
+            {
+                "상품 ID": item.get("external_product_id", ""),
+                "상태": CATALOG_RECONCILIATION_STATUS_LABELS.get(status, status),
+                "변경 필드": ", ".join(sorted(changed_fields)) if changed_fields else "-",
+            }
+        )
+    return pd.DataFrame(rows, columns=CATALOG_RECONCILIATION_ITEM_COLUMNS)
+
+
+def build_catalog_reconciliation_reject_notice(
+    rejected_rows: int | None,
+) -> str | None:
+    """Warn that rejected rows were never compared, or None when there is nothing to say.
+
+    rejected_rows가 None이면 legacy 배치입니다. 0으로 바꿔 "거부 행이 없었다"고 말하지
+    않습니다. 알 수 없다는 사실은 그대로 알 수 없다고 알립니다.
+    """
+    if rejected_rows is None:
+        return CATALOG_RECONCILIATION_LEGACY_QUALITY_NOTICE
+    if rejected_rows <= 0:
+        return None
+    return (
+        f"원본 입력 중 {rejected_rows}개 행이 ETL 변환 과정에서 제외되었습니다. "
+        "이 보고서는 정상 staging 상품만 운영 카탈로그와 비교하므로, "
+        "'이번 배치 미관측'에는 reject 때문에 비교에서 빠진 상품이 포함될 수 있습니다."
+    )
 
 
 def build_etl_error_counts_dataframe(error_counts: dict[str, int] | None) -> pd.DataFrame:
@@ -1239,6 +1324,142 @@ def _render_etl_load_pagination(response: dict[str, Any]) -> None:
             st.rerun()
 
 
+def synchronize_catalog_reconciliation_batch(session_state) -> None:
+    """Drop a cached report that belongs to a previously selected batch."""
+    selected_run_id = session_state.get("etl_load_selected_run_id")
+    cached_batch_id = session_state.get("catalog_reconciliation_batch_id")
+    if cached_batch_id is None or cached_batch_id == selected_run_id:
+        return
+    session_state["catalog_reconciliation_batch_id"] = None
+    session_state["catalog_reconciliation_offset"] = 0
+    session_state["catalog_reconciliation_response"] = None
+    session_state["catalog_reconciliation_error"] = None
+
+
+def _fetch_catalog_reconciliation(api_client, session_state) -> dict[str, Any] | None:
+    if session_state.get("catalog_reconciliation_response") is not None:
+        return session_state["catalog_reconciliation_response"]
+    if session_state.get("catalog_reconciliation_error") is not None:
+        return None
+    selected_run_id = session_state.get("etl_load_selected_run_id")
+    if selected_run_id is None:
+        return None
+    try:
+        response = api_client.get_catalog_reconciliation(
+            int(selected_run_id),
+            limit=CATALOG_RECONCILIATION_LIMIT,
+            offset=session_state.get("catalog_reconciliation_offset", 0),
+        )
+        session_state["catalog_reconciliation_batch_id"] = selected_run_id
+        session_state["catalog_reconciliation_response"] = response
+        session_state["catalog_reconciliation_error"] = None
+        return response
+    except (
+        ETLLoadNotFoundError,
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        session_state["catalog_reconciliation_error"] = error
+        return None
+
+
+def _render_catalog_reconciliation(api_client) -> None:
+    """Show how this batch differs from the live catalog. Read-only."""
+    st.subheader("상품 동기화 차이")
+    st.caption(
+        "선택한 ETL 배치에서 정상 staging에 적재된 상품과 현재 운영 카탈로그를 비교한 "
+        "조회 전용 보고서입니다. 이 화면은 운영 상품을 변경하지 않습니다."
+    )
+
+    response = _fetch_catalog_reconciliation(api_client, st.session_state)
+    if response is None:
+        error = st.session_state.get("catalog_reconciliation_error")
+        if error is not None:
+            st.error(
+                build_etl_api_error_display_message(
+                    "상품 동기화 차이를 불러오지 못했습니다.", error
+                )
+            )
+        return
+
+    metric_columns = st.columns(4)
+    metric_columns[0].metric("신규", response.get("new_count", 0), border=True)
+    metric_columns[1].metric("변경", response.get("changed_count", 0), border=True)
+    metric_columns[2].metric("동일", response.get("unchanged_count", 0), border=True)
+    metric_columns[3].metric(
+        "이번 배치 미관측",
+        response.get("not_observed_in_batch_count", 0),
+        border=True,
+    )
+
+    if response.get("not_observed_in_batch_count", 0) > 0:
+        st.info(CATALOG_RECONCILIATION_NOT_OBSERVED_NOTICE)
+
+    reject_notice = build_catalog_reconciliation_reject_notice(
+        response.get("rejected_rows")
+    )
+    if reject_notice is not None:
+        st.warning(reject_notice)
+
+    field_change_counts = response.get("field_change_counts") or {}
+    if field_change_counts:
+        st.caption("필드별 변경 건수")
+        st.dataframe(
+            build_catalog_reconciliation_field_dataframe(field_change_counts),
+            width="stretch",
+            hide_index=True,
+        )
+    else:
+        st.info("변경된 상품 필드가 없습니다.")
+
+    items = response.get("items") or []
+    if not items:
+        st.info("비교할 상품이 없습니다.")
+        return
+
+    st.dataframe(
+        build_catalog_reconciliation_item_dataframe(items),
+        width="stretch",
+        hide_index=True,
+    )
+
+    total = max(0, int(response.get("total", 0)))
+    current_page, total_pages, has_previous, has_next = calculate_etl_pagination(
+        total=total,
+        limit=CATALOG_RECONCILIATION_LIMIT,
+        offset=st.session_state.get("catalog_reconciliation_offset", 0),
+    )
+    st.caption(f"상품 {current_page} / {total_pages} 페이지 · 전체 {total}개 상품")
+    previous_col, next_col = st.columns(2)
+    with previous_col:
+        if st.button(
+            "동기화 차이 이전",
+            disabled=not has_previous,
+            key="catalog_reconciliation_previous",
+            type="tertiary",
+        ):
+            st.session_state["catalog_reconciliation_offset"] -= (
+                CATALOG_RECONCILIATION_LIMIT
+            )
+            st.session_state["catalog_reconciliation_response"] = None
+            st.rerun()
+    with next_col:
+        if st.button(
+            "동기화 차이 다음",
+            disabled=not has_next,
+            key="catalog_reconciliation_next",
+            type="tertiary",
+        ):
+            st.session_state["catalog_reconciliation_offset"] += (
+                CATALOG_RECONCILIATION_LIMIT
+            )
+            st.session_state["catalog_reconciliation_response"] = None
+            st.rerun()
+
+
 def _render_etl_load_detail(api_client) -> None:
     selected_run_id = st.session_state.get("etl_load_selected_run_id")
     if selected_run_id is None:
@@ -1290,6 +1511,9 @@ def _render_etl_load_detail(api_client) -> None:
         else:
             st.info("변환 과정에서 거부된 행이 없습니다.")
     _render_etl_rejections(api_client, detail_response)
+
+    synchronize_catalog_reconciliation_batch(st.session_state)
+    _render_catalog_reconciliation(api_client)
 
     with st.expander("파일 SHA-256"):
         st.code(f"원본 파일 SHA-256: {detail_response.get('input_file_sha256', '')}")
