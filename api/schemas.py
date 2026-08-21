@@ -106,6 +106,42 @@ class ETLLoadQualityTrendResponse(BaseModel):
     items: list[ETLLoadQualityTrendItemResponse]
 
 
+# 방향만 말하고 위험 임계값은 정하지 않습니다. "몇 %부터 위험한가"는 공급사마다 달라서
+# API가 임의로 정하면 운영자가 잘못된 기준을 믿게 됩니다.
+ETLQualityObservabilityDirection = Literal[
+    "improved",
+    "unchanged",
+    "worsened",
+    "no_baseline",
+]
+
+
+class ETLQualityObservabilityErrorCodeResponse(BaseModel):
+    error_code: str
+    # 관찰 구간 전체에서 이 코드로 거부된 행 수의 합입니다.
+    total_count: int
+    # 이 코드가 나타난 배치 수입니다. 한 배치만의 사고인지 여러 배치의 문제인지 구분합니다.
+    affected_batch_count: int
+
+
+class ETLQualityObservabilityResponse(BaseModel):
+    # 비교 대상 공급사입니다. 서로 다른 공급사를 섞어 비교하지 않도록 항상 필수입니다.
+    profile_name: str
+    limit: int
+    # 관찰 구간에 들어온 quality-available 배치 수입니다(= recent_batches 길이).
+    batch_count: int
+    # 배치 표현은 quality-trend item과 같은 계약을 재사용합니다.
+    latest_batch: ETLLoadQualityTrendItemResponse | None
+    # 비교할 직전 배치가 없으면 null입니다.
+    previous_batch: ETLLoadQualityTrendItemResponse | None
+    # 퍼센트 포인트(%p) 차이입니다. 4.0% -> 9.0%이면 +5.0입니다.
+    rejection_rate_delta: float | None
+    direction: ETLQualityObservabilityDirection
+    error_codes: list[ETLQualityObservabilityErrorCodeResponse]
+    # 오래된 배치부터 최신 배치 순서입니다.
+    recent_batches: list[ETLLoadQualityTrendItemResponse]
+
+
 class ETLStagingProductResponse(BaseModel):
     staging_product_id: int
     product_group_id: str

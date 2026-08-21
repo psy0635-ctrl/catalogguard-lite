@@ -165,11 +165,43 @@ def _apply_etl_load_filters(
     return statement
 
 
-def _quality_available_condition():
+def quality_available_condition():
+    """SQL condition for batches that carry complete quality metadata.
+
+    Legacy batch는 total_rows/rejected_rows/error_counts가 모두 NULL입니다. 이 값을
+    0으로 읽으면 "거부가 한 건도 없던 완벽한 배치"라는 거짓말이 되므로, quality를
+    말하는 모든 조회는 이 조건으로 legacy batch를 아예 제외합니다.
+    """
     return (
         ETLLoadRun.total_rows.is_not(None)
         & ETLLoadRun.rejected_rows.is_not(None)
         & ETLLoadRun.error_counts.is_not(None)
+    )
+
+
+def compute_rejection_rate(*, rejected_rows: int, total_rows: int) -> float:
+    """Percent of rejected rows in one batch, rounded to two decimals.
+
+    total_rows가 0이면 나눌 수 없으므로 0.0을 씁니다. quality summary/trend/observability가
+    같은 배치에 대해 서로 다른 숫자를 말하지 않도록 계산은 이 helper 한 곳에만 둡니다.
+    """
+    if not total_rows:
+        return 0.0
+    return round(rejected_rows / total_rows * 100, 2)
+
+
+def to_quality_trend_item(load_run: ETLLoadRun) -> ETLLoadQualityTrendItem:
+    """Convert one quality-available load run into the shared quality item shape."""
+    return ETLLoadQualityTrendItem(
+        etl_load_run_id=load_run.id,
+        created_at=load_run.created_at,
+        total_rows=load_run.total_rows,
+        loaded_rows=load_run.loaded_rows,
+        rejected_rows=load_run.rejected_rows,
+        rejection_rate=compute_rejection_rate(
+            rejected_rows=load_run.rejected_rows,
+            total_rows=load_run.total_rows,
+        ),
     )
 
 
@@ -243,7 +275,7 @@ def get_etl_load_quality_summary(
     profile_name: str | None = None,
 ) -> ETLLoadQualitySummary:
     """Aggregate ETL quality only from batches with complete quality metadata."""
-    quality_available = _quality_available_condition()
+    quality_available = quality_available_condition()
     statement = _apply_etl_load_filters(
         select(
             func.count().label("batch_count"),
@@ -296,8 +328,9 @@ def get_etl_load_quality_summary(
         total_rows=total_rows,
         loaded_rows=int(row.loaded_rows or 0),
         rejected_rows=rejected_rows,
-        rejection_rate=(
-            round(rejected_rows / total_rows * 100, 2) if total_rows else 0.0
+        rejection_rate=compute_rejection_rate(
+            rejected_rows=rejected_rows,
+            total_rows=total_rows,
         ),
     )
 
@@ -312,28 +345,14 @@ def get_etl_load_quality_trend(
     statement = _apply_etl_load_filters(
         select(ETLLoadRun),
         profile_name=profile_name,
-    ).where(_quality_available_condition()).order_by(
+    ).where(quality_available_condition()).order_by(
         ETLLoadRun.created_at.desc(),
         ETLLoadRun.id.desc(),
     )
     load_runs = list(session.scalars(statement.limit(limit)).all())
     load_runs.reverse()
     return ETLLoadQualityTrend(
-        items=[
-            ETLLoadQualityTrendItem(
-                etl_load_run_id=load_run.id,
-                created_at=load_run.created_at,
-                total_rows=load_run.total_rows,
-                loaded_rows=load_run.loaded_rows,
-                rejected_rows=load_run.rejected_rows,
-                rejection_rate=(
-                    round(load_run.rejected_rows / load_run.total_rows * 100, 2)
-                    if load_run.total_rows
-                    else 0.0
-                ),
-            )
-            for load_run in load_runs
-        ]
+        items=[to_quality_trend_item(load_run) for load_run in load_runs]
     )
 
 

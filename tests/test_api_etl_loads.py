@@ -15,6 +15,7 @@ client = TestClient(app)
 ENDPOINT = "/api/v1/etl-loads"
 QUALITY_SUMMARY_ENDPOINT = f"{ENDPOINT}/quality-summary"
 QUALITY_TREND_ENDPOINT = f"{ENDPOINT}/quality-trend"
+QUALITY_OBSERVABILITY_ENDPOINT = f"{ENDPOINT}/quality-observability"
 ETL_PROFILES_ENDPOINT = "/api/v1/etl-profiles"
 
 
@@ -68,7 +69,7 @@ def _load(**overrides):
 def fake_etl_query_service(monkeypatch):
     fake_session = object()
     calls = []
-    state = SimpleNamespace(load_exists=True)
+    state = SimpleNamespace(load_exists=True, observability_empty=False)
     load = _load()
     detail = SimpleNamespace(
         etl_load_run_id=12,
@@ -135,6 +136,66 @@ def fake_etl_query_service(monkeypatch):
                 rejection_rate=16.67,
             )
         ]
+    )
+
+    quality_observability = SimpleNamespace(
+        profile_name="sample_fashion_vendor",
+        limit=10,
+        batch_count=2,
+        latest_batch=SimpleNamespace(
+            etl_load_run_id=12,
+            created_at=load.created_at,
+            total_rows=100,
+            loaded_rows=91,
+            rejected_rows=9,
+            rejection_rate=9.0,
+        ),
+        previous_batch=SimpleNamespace(
+            etl_load_run_id=11,
+            created_at=load.created_at,
+            total_rows=100,
+            loaded_rows=96,
+            rejected_rows=4,
+            rejection_rate=4.0,
+        ),
+        rejection_rate_delta=5.0,
+        direction="worsened",
+        error_codes=[
+            SimpleNamespace(
+                error_code="INVALID_PRICE",
+                total_count=8,
+                affected_batch_count=2,
+            )
+        ],
+        recent_batches=[
+            SimpleNamespace(
+                etl_load_run_id=11,
+                created_at=load.created_at,
+                total_rows=100,
+                loaded_rows=96,
+                rejected_rows=4,
+                rejection_rate=4.0,
+            ),
+            SimpleNamespace(
+                etl_load_run_id=12,
+                created_at=load.created_at,
+                total_rows=100,
+                loaded_rows=91,
+                rejected_rows=9,
+                rejection_rate=9.0,
+            ),
+        ],
+    )
+    empty_observability = SimpleNamespace(
+        profile_name="sample_fashion_vendor",
+        limit=10,
+        batch_count=0,
+        latest_batch=None,
+        previous_batch=None,
+        rejection_rate_delta=None,
+        direction="no_baseline",
+        error_codes=[],
+        recent_batches=[],
     )
 
     def override_session():
@@ -220,6 +281,19 @@ def fake_etl_query_service(monkeypatch):
         )
         return quality_trend
 
+    def fake_get_etl_quality_observability(session, *, profile_name, limit=10):
+        calls.append(
+            {
+                "operation": "quality-observability",
+                "session": session,
+                "profile_name": profile_name,
+                "limit": limit,
+            }
+        )
+        if state.observability_empty:
+            return empty_observability
+        return quality_observability
+
     app.dependency_overrides[get_session] = override_session
     monkeypatch.setattr(etl_loads_route, "list_etl_loads", fake_list_etl_loads)
     monkeypatch.setattr(etl_loads_route, "get_etl_load_detail", fake_get_etl_load_detail)
@@ -234,6 +308,12 @@ def fake_etl_query_service(monkeypatch):
         etl_loads_route,
         "get_etl_load_quality_trend",
         fake_get_etl_load_quality_trend,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        etl_loads_route,
+        "get_etl_quality_observability",
+        fake_get_etl_quality_observability,
         raising=False,
     )
     yield SimpleNamespace(calls=calls, state=state)
@@ -389,6 +469,168 @@ def test_quality_trend_passes_trimmed_profile_filter_and_limit(
     assert response.status_code == 200
     assert fake_etl_query_service.calls[-1]["profile_name"] == "fashion"
     assert fake_etl_query_service.calls[-1]["limit"] == 3
+
+
+def test_quality_observability_returns_comparison_and_static_route_wins(
+    fake_etl_query_service,
+):
+    response = client.get(
+        QUALITY_OBSERVABILITY_ENDPOINT,
+        params={"profile_name": "sample_fashion_vendor"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "profile_name": "sample_fashion_vendor",
+        "limit": 10,
+        "batch_count": 2,
+        "latest_batch": {
+            "etl_load_run_id": 12,
+            "created_at": "2026-07-25T12:00:00Z",
+            "total_rows": 100,
+            "loaded_rows": 91,
+            "rejected_rows": 9,
+            "rejection_rate": 9.0,
+        },
+        "previous_batch": {
+            "etl_load_run_id": 11,
+            "created_at": "2026-07-25T12:00:00Z",
+            "total_rows": 100,
+            "loaded_rows": 96,
+            "rejected_rows": 4,
+            "rejection_rate": 4.0,
+        },
+        "rejection_rate_delta": 5.0,
+        "direction": "worsened",
+        "error_codes": [
+            {
+                "error_code": "INVALID_PRICE",
+                "total_count": 8,
+                "affected_batch_count": 2,
+            }
+        ],
+        "recent_batches": [
+            {
+                "etl_load_run_id": 11,
+                "created_at": "2026-07-25T12:00:00Z",
+                "total_rows": 100,
+                "loaded_rows": 96,
+                "rejected_rows": 4,
+                "rejection_rate": 4.0,
+            },
+            {
+                "etl_load_run_id": 12,
+                "created_at": "2026-07-25T12:00:00Z",
+                "total_rows": 100,
+                "loaded_rows": 91,
+                "rejected_rows": 9,
+                "rejection_rate": 9.0,
+            },
+        ],
+    }
+    assert fake_etl_query_service.calls[-1] == {
+        "operation": "quality-observability",
+        "session": fake_etl_query_service.calls[-1]["session"],
+        "profile_name": "sample_fashion_vendor",
+        "limit": 10,
+    }
+
+
+def test_quality_observability_returns_nulls_when_no_batch_matches(
+    fake_etl_query_service,
+):
+    fake_etl_query_service.state.observability_empty = True
+
+    response = client.get(
+        QUALITY_OBSERVABILITY_ENDPOINT,
+        params={"profile_name": "sample_fashion_vendor"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "profile_name": "sample_fashion_vendor",
+        "limit": 10,
+        "batch_count": 0,
+        "latest_batch": None,
+        "previous_batch": None,
+        "rejection_rate_delta": None,
+        "direction": "no_baseline",
+        "error_codes": [],
+        "recent_batches": [],
+    }
+
+
+def test_quality_observability_passes_trimmed_profile_and_limit(
+    fake_etl_query_service,
+):
+    response = client.get(
+        QUALITY_OBSERVABILITY_ENDPOINT,
+        params={"profile_name": "  sample_fashion_vendor  ", "limit": 3},
+    )
+
+    assert response.status_code == 200
+    assert fake_etl_query_service.calls[-1]["profile_name"] == "sample_fashion_vendor"
+    assert fake_etl_query_service.calls[-1]["limit"] == 3
+
+
+@pytest.mark.parametrize("limit", [1, 50])
+def test_quality_observability_accepts_limit_boundaries(fake_etl_query_service, limit):
+    response = client.get(
+        QUALITY_OBSERVABILITY_ENDPOINT,
+        params={"profile_name": "sample_fashion_vendor", "limit": limit},
+    )
+
+    assert response.status_code == 200
+    assert fake_etl_query_service.calls[-1]["limit"] == limit
+
+
+@pytest.mark.parametrize("limit", [0, 51, "abc"])
+def test_quality_observability_rejects_invalid_limit(fake_etl_query_service, limit):
+    response = client.get(
+        QUALITY_OBSERVABILITY_ENDPOINT,
+        params={"profile_name": "sample_fashion_vendor", "limit": limit},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("params", [{}, {"profile_name": ""}, {"profile_name": "   "}])
+def test_quality_observability_requires_a_non_blank_profile_name(
+    fake_etl_query_service,
+    params,
+):
+    # profile_name이 없으면 서로 다른 공급사를 비교하게 되므로 조회 자체를 막습니다.
+    response = client.get(QUALITY_OBSERVABILITY_ENDPOINT, params=params)
+
+    assert response.status_code == 422
+    assert not any(
+        call["operation"] == "quality-observability"
+        for call in fake_etl_query_service.calls
+    )
+
+
+def test_quality_observability_allows_viewer_and_blocks_anonymous(
+    fake_etl_query_service,
+):
+    override_current_user(role="viewer")
+    viewer_response = client.get(
+        QUALITY_OBSERVABILITY_ENDPOINT,
+        params={"profile_name": "sample_fashion_vendor"},
+    )
+    override_current_user(role="operator")
+    operator_response = client.get(
+        QUALITY_OBSERVABILITY_ENDPOINT,
+        params={"profile_name": "sample_fashion_vendor"},
+    )
+    clear_current_user_override()
+    anonymous_response = client.get(
+        QUALITY_OBSERVABILITY_ENDPOINT,
+        params={"profile_name": "sample_fashion_vendor"},
+    )
+
+    assert viewer_response.status_code == 200
+    assert operator_response.status_code == 200
+    assert anonymous_response.status_code == 401
 
 
 def test_etl_profile_detail_returns_safe_allowlisted_metadata_and_list_still_works():

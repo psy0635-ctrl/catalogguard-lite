@@ -1050,6 +1050,63 @@ ETL_LOAD_QUALITY_TREND_RESPONSE = {
     ]
 }
 
+ETL_QUALITY_OBSERVABILITY_RESPONSE = {
+    "profile_name": "sample_fashion_vendor",
+    "limit": 10,
+    "batch_count": 2,
+    "latest_batch": {
+        "etl_load_run_id": 12,
+        "created_at": "2026-08-20T12:00:00Z",
+        "total_rows": 100,
+        "loaded_rows": 91,
+        "rejected_rows": 9,
+        "rejection_rate": 9.0,
+    },
+    "previous_batch": {
+        "etl_load_run_id": 11,
+        "created_at": "2026-08-19T12:00:00Z",
+        "total_rows": 100,
+        "loaded_rows": 96,
+        "rejected_rows": 4,
+        "rejection_rate": 4.0,
+    },
+    "rejection_rate_delta": 5.0,
+    "direction": "worsened",
+    "error_codes": [
+        {"error_code": "INVALID_PRICE", "total_count": 8, "affected_batch_count": 2}
+    ],
+    "recent_batches": [
+        {
+            "etl_load_run_id": 11,
+            "created_at": "2026-08-19T12:00:00Z",
+            "total_rows": 100,
+            "loaded_rows": 96,
+            "rejected_rows": 4,
+            "rejection_rate": 4.0,
+        },
+        {
+            "etl_load_run_id": 12,
+            "created_at": "2026-08-20T12:00:00Z",
+            "total_rows": 100,
+            "loaded_rows": 91,
+            "rejected_rows": 9,
+            "rejection_rate": 9.0,
+        },
+    ],
+}
+
+ETL_QUALITY_OBSERVABILITY_EMPTY_RESPONSE = {
+    "profile_name": "sample_fashion_vendor",
+    "limit": 10,
+    "batch_count": 0,
+    "latest_batch": None,
+    "previous_batch": None,
+    "rejection_rate_delta": None,
+    "direction": "no_baseline",
+    "error_codes": [],
+    "recent_batches": [],
+}
+
 ETL_LOAD_DETAIL_RESPONSE = {
     "etl_load_run_id": 12,
     "source_filename": "vendor_products.csv",
@@ -1228,6 +1285,129 @@ def test_get_etl_load_quality_trend_rejects_missing_item_field():
 
     with pytest.raises(import_client_module().CatalogGuardApiResponseError):
         client.get_etl_load_quality_trend()
+
+
+def test_get_etl_quality_observability_calls_endpoint_with_trimmed_profile():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_QUALITY_OBSERVABILITY_RESPONSE),
+    )
+
+    data = client.get_etl_quality_observability(
+        profile_name="  sample_fashion_vendor  ",
+        limit=3,
+    )
+
+    assert data == ETL_QUALITY_OBSERVABILITY_RESPONSE
+    assert session.calls == [
+        {
+            "url": (
+                "https://api.example.com/api/v1/etl-loads/quality-observability"
+            ),
+            "params": {"profile_name": "sample_fashion_vendor", "limit": 3},
+            "timeout": 5.0,
+        }
+    ]
+
+
+def test_get_etl_quality_observability_accepts_empty_no_baseline_response():
+    client, _ = make_client(
+        response=FakeResponse(payload=ETL_QUALITY_OBSERVABILITY_EMPTY_RESPONSE),
+    )
+
+    data = client.get_etl_quality_observability(profile_name="sample_fashion_vendor")
+
+    assert data["direction"] == "no_baseline"
+    assert data["latest_batch"] is None
+    assert data["rejection_rate_delta"] is None
+
+
+@pytest.mark.parametrize("profile_name", ["", "   "])
+def test_get_etl_quality_observability_rejects_blank_profile_without_request(
+    profile_name,
+):
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_QUALITY_OBSERVABILITY_RESPONSE),
+    )
+
+    with pytest.raises(ValueError):
+        client.get_etl_quality_observability(profile_name=profile_name)
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("limit", [0, 51, True, 2.0, "3"])
+def test_get_etl_quality_observability_rejects_invalid_limit_without_request(limit):
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_QUALITY_OBSERVABILITY_RESPONSE),
+    )
+
+    with pytest.raises(ValueError):
+        client.get_etl_quality_observability(
+            profile_name="sample_fashion_vendor",
+            limit=limit,
+        )
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        # 방향과 변화량의 부호가 서로 반대인 응답입니다.
+        {"direction": "improved"},
+        # 비교 대상이 없다면서 변화량은 남아 있는 응답입니다.
+        {"previous_batch": None},
+        # 변화량이 두 배치의 rejection_rate 차이와 맞지 않는 응답입니다.
+        {"rejection_rate_delta": 1.0},
+        # batch_count가 실제 목록 길이와 다른 응답입니다.
+        {"batch_count": 5},
+        # 관찰한 배치 수보다 많은 배치에서 나왔다고 주장하는 오류 코드입니다.
+        {
+            "error_codes": [
+                {
+                    "error_code": "INVALID_PRICE",
+                    "total_count": 8,
+                    "affected_batch_count": 7,
+                }
+            ]
+        },
+        # 합계보다 배치 수가 큰, 산술적으로 불가능한 오류 코드입니다.
+        {
+            "error_codes": [
+                {
+                    "error_code": "INVALID_PRICE",
+                    "total_count": 1,
+                    "affected_batch_count": 2,
+                }
+            ]
+        },
+        {"direction": "degraded"},
+        {"limit": 0},
+        {"profile_name": "   "},
+        {"recent_batches": [{"etl_load_run_id": 12}]},
+    ],
+)
+def test_get_etl_quality_observability_rejects_inconsistent_server_response(changes):
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={**ETL_QUALITY_OBSERVABILITY_RESPONSE, **changes}
+        ),
+    )
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_quality_observability(profile_name="sample_fashion_vendor")
+
+
+def test_get_etl_quality_observability_rejects_missing_top_level_field():
+    payload = {
+        key: value
+        for key, value in ETL_QUALITY_OBSERVABILITY_RESPONSE.items()
+        if key != "direction"
+    }
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_quality_observability(profile_name="sample_fashion_vendor")
 
 
 def test_get_etl_load_detail_calls_detail_endpoint_and_preserves_nullable_fields():

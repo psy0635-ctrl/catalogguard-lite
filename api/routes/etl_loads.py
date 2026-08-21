@@ -54,6 +54,8 @@ from api.schemas import (
     ETLProfileDetailResponse,
     ETLProfileListResponse,
     ETLProfileResponse,
+    ETLQualityObservabilityErrorCodeResponse,
+    ETLQualityObservabilityResponse,
     ETLRejectErrorResponse,
     ETLRejectedRowListResponse,
     ETLRejectedRowResponse,
@@ -67,11 +69,19 @@ from api.schemas import (
 from config.metrics import record_web_etl_run, record_web_etl_rows
 from config.logging import LOGGER_NAME, log_event
 from core.upload_validator import CsvUploadValidationError
+from db.etl_quality_observability_service import (
+    DEFAULT_BATCH_LIMIT as OBSERVABILITY_DEFAULT_LIMIT,
+    ETLQualityObservability,
+    MAX_BATCH_LIMIT as OBSERVABILITY_MAX_LIMIT,
+    MIN_BATCH_LIMIT as OBSERVABILITY_MIN_LIMIT,
+    get_etl_quality_observability,
+)
 from db.etl_query_service import (
     ETLLoadDetail,
     ETLLoadList,
     ETLLoadQualitySummary,
     ETLLoadQualityTrend,
+    ETLLoadQualityTrendItem,
     get_etl_load_detail,
     get_etl_load_quality_summary,
     get_etl_load_quality_trend,
@@ -233,6 +243,46 @@ def _build_quality_trend_response(
             )
             for item in result.items
         ]
+    )
+
+
+def _build_quality_item_response(
+    item: ETLLoadQualityTrendItem | None,
+) -> ETLLoadQualityTrendItemResponse | None:
+    if item is None:
+        return None
+    return ETLLoadQualityTrendItemResponse(
+        etl_load_run_id=item.etl_load_run_id,
+        created_at=item.created_at,
+        total_rows=item.total_rows,
+        loaded_rows=item.loaded_rows,
+        rejected_rows=item.rejected_rows,
+        rejection_rate=item.rejection_rate,
+    )
+
+
+def _build_quality_observability_response(
+    result: ETLQualityObservability,
+) -> ETLQualityObservabilityResponse:
+    return ETLQualityObservabilityResponse(
+        profile_name=result.profile_name,
+        limit=result.limit,
+        batch_count=result.batch_count,
+        latest_batch=_build_quality_item_response(result.latest_batch),
+        previous_batch=_build_quality_item_response(result.previous_batch),
+        rejection_rate_delta=result.rejection_rate_delta,
+        direction=result.direction,
+        error_codes=[
+            ETLQualityObservabilityErrorCodeResponse(
+                error_code=item.error_code,
+                total_count=item.total_count,
+                affected_batch_count=item.affected_batch_count,
+            )
+            for item in result.error_codes
+        ],
+        recent_batches=[
+            _build_quality_item_response(item) for item in result.recent_batches
+        ],
     )
 
 
@@ -723,6 +773,40 @@ def get_etl_load_quality_trend_route(
         limit=limit,
     )
     return _build_quality_trend_response(result)
+
+
+@router.get(
+    "/api/v1/etl-loads/quality-observability",
+    response_model=ETLQualityObservabilityResponse,
+)
+def get_etl_quality_observability_route(
+    # 다른 공급사끼리 비교하면 "품질이 나빠졌다"가 아니라 "공급사가 다르다"를 보게 되므로,
+    # profile_name은 선택 필터가 아니라 필수 입력입니다.
+    profile_name: str = Query(..., min_length=1),
+    limit: int = Query(
+        default=OBSERVABILITY_DEFAULT_LIMIT,
+        ge=OBSERVABILITY_MIN_LIMIT,
+        le=OBSERVABILITY_MAX_LIMIT,
+    ),
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> ETLQualityObservabilityResponse:
+    normalized_profile_name = normalize_etl_filter(profile_name)
+    if normalized_profile_name is None:
+        # min_length는 공백만 있는 값을 통과시키므로, 공백 입력도 여기서 같은 422로 막습니다.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "profile_name_required",
+                "message": "profile_name은 비어 있을 수 없습니다.",
+            },
+        )
+    result = get_etl_quality_observability(
+        session,
+        profile_name=normalized_profile_name,
+        limit=limit,
+    )
+    return _build_quality_observability_response(result)
 
 
 @router.get("/api/v1/etl-profiles", response_model=ETLProfileListResponse)
