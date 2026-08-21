@@ -4,7 +4,7 @@
 
 ## 6.1 프로젝트 한 줄 소개
 
-CatalogGuard Lite는 Python·FastAPI 백엔드와 PostgreSQL 저장 계층을 중심으로 상품 CSV의 데이터 품질을 검수하고, ETL staging 결과를 선택적으로 운영 상품에 반영하는 품질 검사 도구입니다. 공급사 CSV의 Profile 기반 표준화·적재는 CLI·Streamlit 웹 업로드·configured HTTP feed Airflow manual DAG가 같은 ETL Pipeline·loader를 공유하며, Streamlit은 저장된 batch를 선택해 preview·승인·promotion을 요청하고 FastAPI와 PostgreSQL이 반영·audit·conflict-safe rollback을 처리합니다.
+CatalogGuard Lite는 Python·FastAPI 백엔드와 PostgreSQL 저장 계층을 중심으로 상품 CSV의 데이터 품질을 검수하고, 적재된 결과를 운영 카탈로그와 비교하며, 공급사별 ETL 품질 변화와 주요 오류 원인을 관찰한 뒤 검증된 변경만 승인 기반으로 운영 상품에 반영하는 데이터 품질 서비스입니다. 공급사 CSV의 Profile 기반 표준화·적재는 CLI·Streamlit 웹 업로드·configured HTTP feed Airflow manual DAG가 같은 ETL Pipeline·loader를 공유하며, Streamlit은 저장된 batch를 선택해 preview·승인·promotion을 요청하고 FastAPI와 PostgreSQL이 반영·audit·conflict-safe rollback을 처리합니다.
 
 - 배포 URL: https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
 - 개발 언어: Python
@@ -21,7 +21,7 @@ CatalogGuard Lite
 
 ### 한 줄 요약
 
-Python·FastAPI와 PostgreSQL을 기반으로 상품 CSV의 형식·중복·가격·카테고리·개인정보 문제를 검수하고 결과 이력까지 관리하는 데이터 품질 서비스입니다.
+Python·FastAPI와 PostgreSQL을 기반으로 상품 CSV의 형식·중복·가격·카테고리·개인정보 문제를 검수하고, 운영 카탈로그와의 정합성 차이와 공급사별 ETL 품질 변화까지 조회 전용으로 관찰하는 데이터 품질 서비스입니다.
 
 ### 기술 스택
 
@@ -52,6 +52,9 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, 
 21. 같은 상품 그룹에서 `S/M/L` 같은 문자형 사이즈와 `95/100` 같은 숫자형 사이즈가 함께 쓰이는 사이즈 체계 혼재를 탐지하는 검수 규칙을 추가했습니다. 기존 `SIZE_ALIASES`·`find_standard_size()`를 재사용해 표준화 로직을 새로 만들지 않고 문자형(ALPHA)·숫자형(NUMERIC)만 구분했으며, `95`나 `270`을 특정 카테고리로 단정하지 않고 명확히 판별 가능한 체계 혼합만 탐지하도록 범위를 제한했습니다. FREE·사용자 정의 값·빈 값은 체계 판정에서 제외해 정상 데이터의 오탐을 줄이고, 브랜드 정책상 혼용 가능성을 고려해 오류가 아닌 `warning`으로 설계했습니다. 정상 그룹, 혼재 그룹, FREE·custom·빈 값 제외, 빈 `product_group_id`를 하나의 가짜 그룹으로 묶지 않는 경계까지 단위·통합 회귀 테스트로 검증했습니다.
 22. 상품명 키워드 사전과 카테고리 별칭 사전은 신발·가방을 이미 알고 있는데 공식 허용 카테고리는 `TOP`·`BOTTOM`·`OUTER` 3개뿐이어서, "남성 러닝 운동화 + SHOES"처럼 의미가 정확히 맞는 상품도 `카테고리 오류`가 나던 정합성 문제를 해결했습니다. 새 카테고리 체계를 만드는 대신 공식 허용 목록만 5개로 확장해 기존 matcher·detector·DB·API·ETL 구조를 그대로 두었고, 확장 전 전체 테스트를 확장 상태로 미리 돌려 영향받는 테스트가 3건뿐임을 확인한 뒤 진행했습니다. `shoes`·`신발` 같은 표기는 비교용 별칭으로만 유지하고 정식 입력값으로는 계속 거부해 입력 데이터의 표기를 하나로 관리하도록 했습니다. 후속 정책에서는 `BAG`의 `size`를 선택 값으로 두어 빈 값과 `FREE`를 모두 허용하되, 두 값을 같은 옵션으로 합치지 않습니다.
 23. HTTP 공급사 ETL을 API 재호출에만 의존하면 일시적 네트워크 오류 때 운영자가 재실행을 판단해야 한다는 문제를 확인했습니다. 기존 `read_http_feed_csv()`·`run_web_etl()`·`run_pipeline()`·`load_standard_csv()`는 그대로 두고 Airflow 3.3.0의 manual single-task DAG가 실행·상태·retry만 orchestration하도록 분리했습니다. HTTP timeout/network/DNS·429·5xx와 제한된 transient DB 오류만 retry하고, SHA-256·프로필 identity로 동일 bytes의 두 번째 실행을 `created=false`로 재사용해 staging 중복을 막았습니다. Airflow metadata PostgreSQL과 CatalogGuard application PostgreSQL을 분리하고, URL 원문 대신 안전한 lineage와 NULL actor를 저장했으며, Linux CI에서 image·migration·DAG processor·실제 HTTP staging load·중복 실행을 검증했습니다.
+24. ETL staging에 정상 적재된 공급사 상품과 현재 운영 카탈로그를 `profile_name`·상품 식별자 기준으로 비교해 `new`·`changed`·`unchanged`·`not_observed_in_batch`와 필드별 변경 건수를 보여 주는 조회 전용 보고서를 구현했습니다. 핵심 판단은 미관측 상품을 자동 삭제 후보로 다루지 않은 것입니다. 공급사 피드가 전체 snapshot인지 부분 delta인지 시스템이 확정할 수 없고, ETL에서 거부된 행 때문에도 카탈로그 상품이 미관측으로 보일 수 있어 두 경우를 구분할 수 없기 때문입니다. Promotion Preview와 상태 이름을 일부러 다르게(`insert`/`update`가 아니라 `new`/`changed`) 붙여 조회 보고서가 실행 계획처럼 읽히지 않게 했고, 배치 안 중복 상품 식별자는 임의로 한 행을 고르지 않고 `409`로 거부했으며, 카탈로그를 통째로 메모리에 올리지 않고 미관측 건수는 SQL `COUNT`, 목록은 `LIMIT`/`OFFSET`으로 처리했습니다.
+25. 누적 품질 요약과 배치별 Reject 비율 추이 위에, 같은 공급사의 최신 배치와 직전 배치를 직접 비교하는 품질 관찰 기능을 추가했습니다. 서로 다른 공급사를 비교하면 품질 변화가 아니라 공급사 차이가 품질로 보이므로 `profile_name`을 부분 검색이 아닌 필수·정확 일치로 두었고, 변화량은 퍼센트 변화율이 아니라 퍼센트 포인트(%p)로 계산했으며, 품질 metadata가 `NULL`인 legacy 배치를 Reject 0건으로 읽지 않고 비교에서 제외했습니다. 같은 관찰 구간의 `error_counts`를 오류 코드별 발생 건수와 발생 배치 수로 집계해, 한 배치에서만 터진 사고인지 여러 배치에 걸친 문제인지 구분할 수 있게 했습니다. `worsened`는 관찰 결과로만 두고 위험 임계값·자동 차단·자동 알림은 만들지 않았습니다.
+26. 위 품질 관찰의 공급사 선택 목록을 화면에 떠 있는 최근 적재 페이지에서 만들면, 오래전에만 데이터를 보낸 공급사는 백엔드 비교가 정상 동작하는데도 화면에서 고를 수 없다는 문제를 확인했습니다. 페이지네이션된 목록 API를 더 큰 `limit`으로 재호출하는 대신, 품질 metadata가 온전한 ETL 이력에서 `DISTINCT profile_name`을 DB가 직접 뽑아 정렬해 돌려주는 조회 전용 API로 분리했습니다. 기준을 설정 Registry가 아니라 실제 적재 이력으로 둔 덕분에 Registry에서 내려간 과거 공급사도 계속 관찰할 수 있고, API client가 이름의 공백·중복·정렬 계약까지 검증해 잘못된 응답이 선택 화면까지 흘러가지 않게 했습니다.
 
 ### Airflow ETL orchestration: 문제와 해결
 
@@ -218,6 +221,11 @@ catalogguard_ready.csv + etl_summary.json
 | AWS staging S3 ingestion 실제 E2E 검증 | 실제 private S3 -> EC2 Instance Role(`s3:GetObject` + 정확한 prefix) -> FastAPI `POST /api/v1/etl-loads/s3` -> 기존 ETL pipeline -> RDS PostgreSQL. 합성 fixture 1건 `created=true`/loaded 1/rejected 0, 재요청 `created=false`·동일 run, Actor Audit 일치, 401/403/400/502 경계, EC2 cold start 후 `/health`·`/ready` 200(pytest 범위 밖 수동 검증, CI 자동 재실행 없음) |
 | Rollback Change Audit 기능 완료 commit 기준 전체 pytest | `1451 passed`, `0 skipped`, `4 deselected`, `0 failed`, warnings 0(일회성 PostgreSQL·Redis 서비스 컨테이너. Chromium E2E는 `-m "not e2e"`로 제외되어 별도 job에서 실행) |
 | Rollback Change Audit 기능 완료 commit 기준 CI | commit `abcea748e299009b4889b0daa98ad4c9c97e770b`을 대상으로 한 GitHub Actions run `31487868946` success (`test`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate` 4개 job) |
+| Catalog Reconciliation 검증 | staging↔카탈로그 identity 매칭, 네 가지 상태 분류, `field_change_counts`, 미관측 상품을 삭제로 해석하지 않는 정책, 중복 identity `409`, 카탈로그 전체 미적재(`COUNT` + `LIMIT`/`OFFSET`)를 service·API·Streamlit 테스트로 확인 |
+| ETL 품질 관찰 검증 | 같은 `profile_name` 정확 일치 비교, legacy(`NULL`) 배치 제외, `total_rows=0` 처리, `created_at` 동률 시 `id` 정렬, %p delta와 `improved`/`unchanged`/`worsened`/`no_baseline`, 오류 코드 `total_count`·`affected_batch_count` 집계와 결정론적 정렬, 배치 0건·1건 구분을 service·API·RBAC·client·UI 테스트로 확인 |
+| 관찰 가능 공급사 목록 검증 | 품질 metadata가 온전한 이력 기준 `DISTINCT profile_name` 오름차순, legacy-only 프로필 제외, Registry에 없는 과거 프로필 포함, 원본 값 보존, client의 공백·중복·정렬 계약 검증을 PostgreSQL 통합·API·client·UI 테스트로 확인 |
+| Observability supplier profile listing 기능 완료 commit 기준 전체 pytest | PostgreSQL 통합 환경에서 `2256 passed`, `2 skipped`, `6 deselected`, `0 failed`. `2 skipped`는 전용 image에서만 도는 격리 Airflow DAG 테스트이며 pass가 아닙니다. `TEST_DATABASE_URL`이 없으면 `2038 passed`, `220 skipped`, `6 deselected`로 PostgreSQL 통합 테스트가 함께 skip됩니다 |
+| Observability supplier profile listing 기능 완료 commit 기준 CI | commit `de3933b5dec622fd54d2d8cbfc08506da721f918`을 대상으로 한 GitHub Actions run `32450500140` success (`test`·`airflow-smoke`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate` 5개 job) |
 | 최신 Alembic head | `20260813_0013`(ETL initial source lineage, single head) |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
 
@@ -783,6 +791,36 @@ EC2를 완전히 `stopped` 상태로 만든 뒤 다시 시작해, 사람이 개�
 #### 배운 것
 
 살아 있는 서버의 상태를 곧 재현 가능한 상태로 착각하지 않아야 한다는 점입니다. 배포 산출물(image)과 호스트에 남지 않고 실행 중인 컨테이너에만 존재하는 값이 있으면, 그 값은 다음 배포에서 사라집니다. 이후로는 runtime을 교체하기 전에 컨테이너의 mount와 image 내용을 먼저 대조해, 어디에도 기록되지 않은 상태가 있는지 확인합니다.
+
+### 운영 카탈로그와의 차이를 "삭제 후보"로 읽지 않기로 한 기준
+
+ETL 적재가 끝나면 운영자가 실제로 묻는 질문은 "이번 배치가 지금 운영 카탈로그와 어떻게 다른가"였는데, 기존 Promotion Preview는 반영 대상인 staging 상품만 보기 때문에 카탈로그에는 있는데 이번 배치에 없던 상품을 아예 보여 주지 못했습니다.
+
+조회 전용 Catalog Reconciliation Report를 추가하면서 가장 오래 고민한 것은 `not_observed_in_batch`를 무엇으로 해석할지였습니다. "카탈로그에 있는데 이번 피드에 없다"를 판매 종료나 삭제 후보로 읽으면 화면이 곧바로 유용해지지만, 그 해석이 성립하려면 공급사 피드가 항상 전체 snapshot이어야 합니다. 지금 시스템은 피드가 snapshot인지 부분 delta인지 보장하지 않습니다. 게다가 비교 기준이 정상 staging 상품이라, 원본 CSV에는 있었지만 ETL에서 거부된 행 때문에도 카탈로그 상품이 미관측으로 보일 수 있습니다. 두 경우를 데이터만으로 구분할 수 없어서 상태 이름을 관측 사실 그대로(`not_observed_in_batch`) 두고, API 문서와 화면 문구 양쪽에 삭제·판매 종료가 아니라고 명시했습니다.
+
+상태 이름도 Promotion Preview와 일부러 다르게 붙였습니다. `insert`/`update`는 "반영하면 이렇게 된다"는 행동이고 `new`/`changed`는 "지금 이렇게 다르다"는 관측입니다. 같은 단어를 쓰면 조회 보고서가 실행 계획처럼 읽힙니다. 배치 안에 같은 상품 식별자가 두 번 있으면 어느 행이 맞는지 알 수 없으므로 첫 행을 임의로 고르지 않고 `409`로 거부했고, 운영 카탈로그를 통째로 메모리에 올리는 대신 미관측 건수는 SQL `COUNT`, 목록은 요청한 페이지 구간만 `LIMIT`/`OFFSET`으로 읽도록 했습니다.
+
+### 품질 수치를 나열하는 것과 "좋아졌는가"에 답하는 것을 나눈 기준
+
+품질 요약은 여러 배치를 하나의 누적 비율로 합치고, 품질 추이는 배치별 비율을 나열합니다. 둘 다 숫자는 보여 주지만 "직전보다 좋아졌는가"와 "나빠졌다면 무엇 때문인가"에는 답하지 못해서, 운영자가 차트를 눈으로 비교해야 했습니다.
+
+품질 관찰을 추가하면서 정한 판단은 다음과 같습니다.
+
+**공급사를 섞지 않는다.** 목록 API의 `profile_name`은 부분 검색이라 `sample` 하나가 `sample_fashion_vendor`와 `sample_marketplace_vendor`를 함께 잡습니다. 그 상태로 최신·직전을 고르면 공급사 A(2%)와 공급사 B(8%)를 비교해 "6%p 악화"가 나오는데, 이건 품질 변화가 아니라 공급사 차이입니다. 이 조회에서만 `profile_name`을 필수·정확 일치로 두고, 부분 검색 문자열이 비교 입력으로 흘러가지 않는 것을 테스트로 고정했습니다.
+
+**모르는 값을 0으로 읽지 않는다.** 품질 요약 기능 도입 전 배치는 `total_rows`·`rejected_rows`·`error_counts`가 모두 `NULL`입니다. 이를 Reject 0건으로 읽으면 "거부가 한 건도 없던 완벽한 배치"라는 거짓 개선이 만들어지므로, 기존 요약·추이와 같은 조건으로 비교 대상에서 제외했습니다. 세 조회가 같은 배치에 다른 숫자를 말하지 않도록 비율 계산은 공용 helper 한 곳에만 두었습니다.
+
+**변화량 단위를 명확히 한다.** 4%에서 9%가 된 것을 "125% 증가"로 쓰면 실제 변화 크기를 완전히 잘못 읽게 됩니다. 퍼센트 포인트(%p)로 계산하고 화면에도 `+5.00%p`로 표시했습니다.
+
+**관찰을 판정으로 확대하지 않는다.** `worsened`는 Reject 비율이 올랐다는 관찰 결과이지 장애 판정이 아닙니다. "5% 이상 경고" 같은 임계값은 공급사·시즌·상품군마다 달라서 시스템이 임의로 정하면 운영자가 틀린 기준을 믿게 되므로, 방향만 말하고 임계값·자동 차단·자동 rollback·자동 알림은 만들지 않았습니다. 오류 코드 집계도 `total_count`와 `affected_batch_count`를 함께 보여 주어 한 배치의 사고와 여러 배치에 걸친 문제를 구분할 수 있게 하는 데까지이며, 근본 원인을 자동으로 확정한다고 말하지 않습니다.
+
+### 선택 후보를 화면 목록이 아니라 DB 질의로 분리한 기준
+
+품질 관찰을 처음 붙였을 때는 공급사 선택 후보를 화면에 이미 떠 있는 최근 적재 목록에서 만들었습니다. 추가 API 호출이 없어 가장 작은 변경이었지만, 그 목록은 한 페이지에 10건만 보여 주므로 오래전에만 데이터를 보낸 공급사는 후보에 나타나지 못했습니다. 백엔드 비교는 그 공급사에 대해 정상 동작하는데 화면에서 고를 방법만 없는 상태였습니다.
+
+목록 API를 더 큰 `limit`으로 재호출하는 방법도 검토했지만 세 가지 이유로 쓰지 않았습니다. 목록 `limit` 상한이 100이라 공급사 전체를 보장하지 못하고, 이름만 필요한데 파일명·해시·actor·lineage까지 전부 전송하며, 그 필터는 애초에 부분 검색 의미라 정확 일치 목적과 맞지 않습니다. 무엇보다 이력이 늘면 같은 문제가 다시 생깁니다.
+
+그래서 품질 metadata가 온전한 ETL 이력에서 `DISTINCT profile_name`을 뽑아 정렬까지 DB가 처리하는 조회 전용 API로 분리했습니다. 전체 행을 읽어 Python `set`으로 줄이지 않았고, 저장된 이름을 `strip`이나 `lower` 없이 그대로 반환해 정확 일치 비교에 다시 넣을 수 있게 했습니다. 후보 기준을 설정 Registry가 아니라 실제 적재 이력으로 둔 것도 의도적입니다. Registry에서 내려간 과거 공급사라도 품질 데이터가 남아 있으면 계속 비교할 수 있어야 하고, 반대로 Registry에 있어도 legacy 배치뿐이면 고를 이유가 없습니다. 화면 쪽에서는 선택한 공급사가 목록에서 사라졌을 때 첫 항목으로 자동 대체하지 않고 미선택으로 되돌리도록 했습니다. 자동으로 바꾸면 이전 공급사의 숫자가 다른 공급사 이름 아래 남을 수 있기 때문입니다.
 
 ## 6.14 면접 예상 질문과 답변
 

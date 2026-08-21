@@ -95,6 +95,10 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - 동일한 원본 파일 해시·프로필 이름·버전의 웹 ETL 요청은 새 배치를 만들지 않고 기존 배치를 `created=false`로 재사용
 - 웹 ETL 성공 후 ETL 적재 이력 캐시만 자동 무효화하고, 운영 상품 반영은 사용자가 이력에서 batch를 선택해 별도로 진행
 - `GET /api/v1/etl-loads/{id}/catalog-reconciliation`과 Streamlit `상품 동기화 차이` 영역에서 선택한 ETL 배치와 현재 운영 카탈로그를 공급사·상품 식별자 기준으로 비교해 신규/변경/동일/이번 배치 미관측 건수와 필드별 변경 건수를 조회(정상 staging 상품 기준의 읽기 전용 보고서이며, 미관측 상품을 자동 삭제 후보로 다루지 않음. [Catalog Reconciliation Report](docs/catalog_reconciliation.md))
+- `GET /api/v1/etl-loads/quality-summary`와 Streamlit `ETL 품질 요약` 영역에서 실행 배치 수·품질 집계 가능/불가 배치 수·전체 입력 행·정상 적재 행·변환 거부 행과 누적 Reject 비율을 조회. 품질 요약 기능 도입 전 배치는 `total_rows`·`rejected_rows`·`error_counts`가 모두 `NULL`이므로 Reject 0건으로 간주하지 않고 집계에서 제외합니다.
+- `GET /api/v1/etl-loads/quality-trend`와 Streamlit `최근 ETL 품질 추이` 차트에서 최근 품질 집계 가능 배치의 배치별 Reject 비율을 시간순으로 조회
+- `GET /api/v1/etl-loads/quality-observability`와 Streamlit `ETL 품질 관찰` 영역에서 같은 공급사의 최신 배치와 직전 배치 Reject 비율을 퍼센트 포인트(%p)로 비교하고, 같은 관찰 구간의 오류 코드별 발생 건수·발생 배치 수를 조회(읽기 전용 관찰이며 위험 임계값·자동 차단·자동 알림은 없음)
+- `GET /api/v1/etl-loads/quality-observability/profiles`로 품질 정보가 기록된 ETL 배치가 있는 공급사 `profile_name` 목록을 조회. 화면에 보이는 최근 적재 목록이 아니라 적재 이력 전체를 기준으로 하므로, 최근 페이지에 배치가 없는 과거 공급사도 관찰 대상으로 선택할 수 있습니다.
 - `POST /api/v1/etl-loads/s3`로 서버에 설정된 private S3 bucket의 허용 prefix 객체만 읽어 같은 `run_web_etl()` 흐름으로 staging까지 적재(업로드 대신 S3를 입력원으로 사용하는 source adapter이며 별도 ETL pipeline이 아님)
 - S3 source는 bucket·prefix를 서버 환경변수로 고정하고 요청은 `object_key`만 받으며, prefix 밖 key 차단·HeadObject 기반 크기 제한·bounded read를 적용
 - `POST /api/v1/etl-loads/http`로 서버에 설정된 신뢰 공급사 HTTP feed의 CSV를 읽어 같은 `run_web_etl()` 흐름으로 staging까지 적재(세 번째 ETL pipeline이 아니라 세 번째 source adapter)
@@ -178,6 +182,8 @@ API 오류 발생
 -> 오류 배열·마스킹된 reject 원본 저장
 -> 중복 적재 방지
 -> ETL 적재 배치 목록·상세 API 조회
+-> ETL 품질 요약·추이·품질 관찰로 공급사별 Reject 비율 변화와 주요 오류 코드 확인(조회 전용)
+-> 상품 동기화 차이(Catalog Reconciliation)로 운영 카탈로그와의 차이 확인(조회 전용)
 -> CatalogGuard 검수
 -> 검수 결과 PostgreSQL 저장
 -> FastAPI 조회
@@ -211,6 +217,8 @@ Streamlit ETL 실행 영역
 -> ETL 적재 이력 캐시 무효화
 -> ETL 적재 이력에서 새 배치 확인
 ```
+
+품질 요약·추이·품질 관찰과 상품 동기화 차이는 모두 조회 전용 관찰 단계입니다. promotion의 필수 gate가 아니며, 이 화면들이 반영을 막거나 자동으로 진행시키지 않습니다. 반영 가능 여부 판정은 계속 promotion preview의 `promotion_eligible`·`blocked_reasons`가 담당합니다.
 
 웹 ETL 성공이 운영 상품 반영을 자동으로 시작하지는 않습니다. 사용자가 ETL 적재 이력에서 새로 생성된 batch를 직접 선택한 뒤 기존 promotion preview·승인 흐름을 그대로 사용합니다. 배치 조회 API가 CatalogGuard 검수나 promotion을 자동으로 실행하는 것도 아닙니다. 생성된 표준 CSV의 검수, staging 적재 이력 조회, 선택한 batch의 promotion preview와 실제 반영은 각각의 API·CLI 호출로 구분합니다. Streamlit은 DB에 직접 쓰지 않고 `CatalogGuardApiClient`를 통해 FastAPI를 호출합니다.
 
@@ -1950,6 +1958,72 @@ PostgreSQL staging에 저장된 ETL 적재 배치 목록을 조회합니다. 목
 
 검색어의 앞뒤 공백은 제거하고 공백뿐인 값은 필터에서 제외합니다. `filename`과 `profile_name`을 함께 보내면 두 조건을 모두 만족하는 배치만 반환합니다. `%`, `_`, `\`는 SQL wildcard가 아니라 실제 문자로 검색하며, 목록과 `total`에는 같은 필터를 적용합니다. 정렬은 최신 적재가 먼저 오도록 `created_at DESC`, 같은 시각에는 `id DESC`입니다.
 
+### `GET /api/v1/etl-loads/quality-summary`
+
+저장된 ETL 배치 전체의 품질을 한 번에 집계합니다. 실행 배치 수(`batch_count`), 품질 집계가 가능한 배치 수(`quality_available_batch_count`)와 불가능한 배치 수(`quality_unavailable_batch_count`), 합산 `total_rows`·`loaded_rows`·`rejected_rows`, 누적 `rejection_rate`(%)를 반환합니다.
+
+| Query | 기본값 | 조건과 의미 |
+|---|---:|---|
+| `profile_name` | 없음 | 프로필 이름의 대소문자 구분 없는 부분 검색. 목록 API와 같은 필터 정책입니다 |
+
+품질 요약 기능 도입 전 배치는 `total_rows`·`rejected_rows`·`error_counts`가 모두 `NULL`입니다. 이 값을 Reject 0건으로 읽으면 "거부가 한 건도 없던 배치"라는 잘못된 집계가 되므로, 합계와 비율 계산에서 아예 제외하고 대신 `quality_unavailable_batch_count`로 몇 개가 제외됐는지 알립니다. `total_rows`가 0이면 `rejection_rate`는 `0.0`입니다.
+
+### `GET /api/v1/etl-loads/quality-trend`
+
+최근 품질 집계 가능 배치의 배치별 `rejection_rate`를 오래된 배치부터 시간순으로 반환합니다. 배치마다 `etl_load_run_id`·`created_at`·`total_rows`·`loaded_rows`·`rejected_rows`·`rejection_rate`를 포함합니다.
+
+| Query | 기본값 | 조건과 의미 |
+|---|---:|---|
+| `profile_name` | 없음 | 프로필 이름의 대소문자 구분 없는 부분 검색 |
+| `limit` | `10` | `1` 이상 `50` 이하. 최근 배치를 몇 개까지 볼지 정합니다 |
+
+배치 선택 정렬은 `created_at DESC`, 같은 시각에는 `id DESC`이며 응답은 오래된 배치가 먼저 오도록 뒤집어 반환합니다. `quality-summary`가 여러 배치를 하나의 누적 비율로 합치는 것과 달리, 여기서는 배치마다의 수치를 그대로 나열합니다.
+
+### `GET /api/v1/etl-loads/quality-observability`
+
+한 공급사의 **최신 배치와 직전 배치를 직접 비교**합니다. `quality-trend`가 배치별 수치를 나열하는 데서 그치는 반면, 이 조회는 "직전보다 좋아졌는가 나빠졌는가"와 "그 구간에 어떤 오류가 많았는가"를 함께 반환합니다.
+
+| Query | 기본값 | 조건과 의미 |
+|---|---:|---|
+| `profile_name` | **필수** | 공급사 프로필 이름의 **정확 일치**. 부분 검색이 아니며 공백뿐인 값은 HTTP `422`입니다 |
+| `limit` | `10` | `1` 이상 `50` 이하. 비교와 오류 집계에 쓸 최근 배치 수(관찰 구간) |
+
+응답에는 `latest_batch`·`previous_batch`(각각 배치 하나의 품질 지표), `rejection_rate_delta`, `direction`, `error_codes`, `recent_batches`가 들어갑니다.
+
+`profile_name`을 필수·정확 일치로 둔 이유는 서로 다른 공급사를 비교하면 거짓 품질 변화가 만들어지기 때문입니다. 공급사 A가 2%, 공급사 B가 8%일 때 이를 "6%p 악화"로 읽으면 품질 변화가 아니라 공급사 차이를 품질로 오해하게 됩니다. 목록 API의 `profile_name`은 부분 검색이라 `sample` 하나가 여러 공급사를 함께 잡으므로, 이 조회에서만 정확 일치를 씁니다.
+
+`rejection_rate_delta`의 단위는 퍼센트 변화율이 아니라 **퍼센트 포인트(%p)** 입니다. 직전 4%에서 최신 9%가 되면 "125% 증가"가 아니라 `+5.0`입니다.
+
+| `direction` | 조건 |
+|---|---|
+| `improved` | 최신 `rejection_rate` < 직전 |
+| `unchanged` | 최신 `rejection_rate` == 직전 |
+| `worsened` | 최신 `rejection_rate` > 직전 |
+| `no_baseline` | 비교할 직전 배치가 없음 |
+
+`worsened`는 장애 판정이 아니라 Reject 비율이 직전보다 올랐다는 관찰 결과입니다. "5% 이상 경고", "10% 이상 위험" 같은 임계값과 자동 차단·자동 rollback·공급사 자동 비활성화·자동 알림은 구현되어 있지 않습니다.
+
+`error_codes`는 관찰 구간 배치들의 `error_counts`를 코드별로 합산해 `error_code`·`total_count`(총 발생 건수)·`affected_batch_count`(그 코드가 나타난 서로 다른 배치 수)를 `total_count DESC`, 같은 값이면 `error_code ASC`로 반환합니다. 8건이 한 배치에서만 났는지 두 배치에 걸쳐 반복됐는지를 구분하는 용도이며, 원인을 자동으로 확정하지는 않습니다.
+
+품질 metadata가 불완전한 legacy 배치는 `quality-summary`와 같은 기준으로 비교 대상에서 제외합니다. 비교할 배치가 없으면 `batch_count`가 `0`이고 `latest_batch`·`previous_batch`·`rejection_rate_delta`가 `null`, `direction`이 `no_baseline`입니다.
+
+### `GET /api/v1/etl-loads/quality-observability/profiles`
+
+품질 관찰을 실제로 실행할 수 있는 공급사 `profile_name` 목록을 반환합니다. 선택에 필요한 이름만 담습니다.
+
+```json
+{
+  "items": [
+    { "profile_name": "sample_fashion_vendor" },
+    { "profile_name": "sample_marketplace_vendor" }
+  ]
+}
+```
+
+기준은 `GET /api/v1/etl-profiles`가 보여 주는 설정 Registry가 아니라 **실제 ETL 적재 이력**입니다. 품질 metadata가 온전한 배치의 `profile_name`을 DB에서 `DISTINCT`로 뽑아 `profile_name` 오름차순으로 정렬해 돌려주며, 저장된 원본 값을 그대로 반환합니다. 따라서 Registry에서 내려간 과거 공급사라도 품질 데이터가 남아 있으면 관찰할 수 있고, 반대로 legacy 배치만 있는 공급사는 비교할 것이 없으므로 목록에서 빠집니다. 조회 결과가 없으면 `{"items": []}`입니다.
+
+이 조회를 따로 둔 이유는, 이전에 Streamlit이 화면에 떠 있는 최근 적재 목록 한 페이지에서 공급사 후보를 만들었기 때문입니다. 그 목록은 페이지네이션되어 있어서 오래전에만 데이터를 보낸 공급사는 후보에 나타나지 못했고, 백엔드 비교는 정상 동작하는데도 화면에서 고를 수 없었습니다.
+
 ### `GET /api/v1/etl-loads/{etl_load_run_id}`
 
 적재 배치의 메타데이터와 해당 배치에 속한 staging 상품을 조회합니다. 목록에는 전체 행·정상 적재 행·변환 거부 행을 포함하고, 상세에는 여기에 오류 코드별 발생 건수와 원본·출력 파일 SHA-256을 추가합니다. 품질 요약 기능 도입 전 배치는 품질 필드를 `null`로 반환합니다.
@@ -1962,6 +2036,23 @@ PostgreSQL staging에 저장된 ETL 적재 배치 목록을 조회합니다. 목
 상품은 staging 상품 `id` 오름차순이며, DB 쿼리의 `LIMIT`·`OFFSET`으로 페이지를 나눕니다. 다른 배치의 상품은 포함하지 않고, 존재하지 않는 `etl_load_run_id`는 HTTP `404`를 반환합니다. 상세 구현과 검색 규칙은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.
 
 `etl_load_run_id`는 `1` 이상의 정수만 허용하며 `0`, 음수와 숫자가 아닌 값은 HTTP `422`를 반환합니다.
+
+### `GET /api/v1/etl-loads/{etl_load_run_id}/catalog-reconciliation`
+
+선택한 ETL 배치에서 **정상 staging에 적재된 상품**과 현재 운영 카탈로그를 같은 공급사 기준으로 비교하는 조회 전용 보고서입니다. 운영 상품을 변경하지 않습니다.
+
+identity는 두 값으로 맞춥니다. `supplier_key`는 `ETLLoadRun.profile_name`, 상품은 staging의 `product_id`와 카탈로그의 `external_product_id`입니다.
+
+| Query | 기본값 | 조건과 의미 |
+|---|---:|---|
+| `limit` | `50` | `1` 이상 `100` 이하 |
+| `offset` | `0` | 앞에서 건너뛸 상품 수, `0` 이상 |
+
+상태는 `new`·`changed`·`unchanged`·`not_observed_in_batch` 네 가지이며, 상태별 건수와 `field_change_counts`(어떤 필드가 몇 건 바뀌었는지), 상품별 변경 필드 목록을 반환합니다.
+
+가장 중요한 정책은 **`not_observed_in_batch`를 삭제로 읽지 않는다**는 것입니다. 이 상태는 "카탈로그에는 있는데 이번 배치에서는 관측되지 않았다"는 사실만 뜻하며, 판매 종료·품절·삭제 대상 어느 것도 의미하지 않습니다. 공급사 피드가 전체 snapshot인지 부분 delta인지 시스템이 확정할 수 없기 때문입니다. 또 비교 기준이 정상 staging 상품이므로, 원본 CSV에는 있었지만 ETL에서 거부된 행 때문에 카탈로그 상품이 미관측으로 보일 수도 있습니다. 이 두 경우를 구분할 수 없어 자동 삭제 판단을 하지 않습니다.
+
+같은 배치 안에 같은 상품 식별자가 두 번 있으면 어느 행이 맞는지 알 수 없으므로 임의로 고르지 않고 HTTP `409`(`duplicate_product_identity`)로 거부합니다. 존재하지 않는 `etl_load_run_id`는 `404`입니다. 상태 정의, 비교 필드, 미관측 해석과 현재 한계는 [Catalog Reconciliation Report](docs/catalog_reconciliation.md)에 정리했습니다.
 
 ### `POST /api/v1/etl-loads/{etl_load_run_id}/promotion-preview`
 
@@ -2300,6 +2391,8 @@ Terraform validate: terraform fmt·init·validate와 mock provider terraform tes
 Run tests: `1309 passed`, `0 skipped`, `4 deselected`, `0 failed`
 ```
 
+Catalog Reconciliation·ETL 품질 요약·추이·품질 관찰과 관찰 가능 공급사 목록을 추가한 뒤의 최신 수치는 commit `de3933b`를 대상으로 한 GitHub Actions run `32450500140`(`test`·`airflow-smoke`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate` 5개 job success) 시점 기준이며, 같은 commit을 PostgreSQL 통합 환경에서 실행하면 `2256 passed`, `2 skipped`, `6 deselected`, `0 failed`입니다. 여기서 `2 skipped`는 전용 image에서만 실행되는 격리 Airflow DAG 테스트이며 통과가 아닙니다. `TEST_DATABASE_URL`을 설정하지 않으면 PostgreSQL 통합 테스트가 함께 건너뛰어져 `2038 passed`, `220 skipped`, `6 deselected`가 됩니다.
+
 promotion preview의 응답 schema와 hash 형식, blocked reason, insert/update/unchanged 계산, confirmation 요구, stale preview, 안전한 오류 mapping, Streamlit 상태 초기화와 중복 제출 방지를 테스트했습니다. promotion E2E는 브라우저 성공 메시지에 의존하지 않고 `catalog_products`, `catalog_promotion_runs`, `catalog_product_changes`의 PostgreSQL 최종 상태와 `applying` 잔존 여부까지 확인합니다. rollback은 서비스·API 계층의 PostgreSQL 통합 테스트에 더해, 조회 계층(query service·API·client)과 Streamlit History/Detail/Change Audit AppTest, 실제 Chromium Browser E2E까지 검증합니다.
 
 ### 실제 브라우저 ETL E2E
@@ -2532,6 +2625,12 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 여러 promotion을 한 번에 되돌리는 일괄 rollback은 지원하지 않습니다.
 - 임의 시점으로 되돌리는 point-in-time recovery는 지원하지 않으며, rollback은 하나의 succeeded promotion run 단위로만 동작합니다.
 - reject 행은 `etl_rejected_rows`에 구조화된 오류와 마스킹된 원본으로 저장하며, 자동 공급사 감지는 지원하지 않습니다.
+- ETL 품질 요약·추이·품질 관찰과 상품 동기화 차이는 모두 조회 전용입니다. 실시간 이상 탐지, 위험 임계값 판정, 자동 알림, 공급사 자동 차단, 자동 rollback은 구현되어 있지 않습니다.
+- 품질 관찰의 `worsened`는 Reject 비율이 직전 배치보다 올랐다는 관찰 결과일 뿐 장애 판정이 아니며, 어느 값부터 문제인지는 운영자가 판단합니다.
+- 품질 관찰의 `error_codes`는 관찰 구간의 오류 코드별 발생 건수·발생 배치 수를 보여 주는 원인 후보이며, 근본 원인을 자동으로 확정하지 않습니다.
+- 품질 관찰 공급사 목록은 페이지네이션·검색 없이 관찰 가능한 전체를 한 번에 반환하며, `profile_name` 전용 index는 추가하지 않았습니다(실제 성능 문제를 측정한 뒤 판단할 항목입니다).
+- Streamlit 품질 관찰 화면의 공급사 목록은 렌더 시점 기준이라, 새 배치가 적재되어도 화면을 다시 그리기 전까지는 새 공급사가 즉시 나타나지 않습니다.
+- 상품 동기화 차이의 `not_observed_in_batch`는 삭제·판매 종료·품절을 뜻하지 않습니다. 공급사 피드가 snapshot인지 delta인지 확정할 수 없고 ETL reject 때문에도 미관측으로 보일 수 있어, 자동 삭제 후보로 다루지 않습니다.
 - 증분 ETL과 streaming을 지원하지 않습니다.
 - 운영 DB 적재는 검증하지 않았고, PostgreSQL 적재는 임시 테스트 환경에서만 검증했습니다.
 - `.env` 자동 로딩은 구현되어 있지 않으므로 로컬에서는 PowerShell 환경변수를 직접 설정해야 합니다.
