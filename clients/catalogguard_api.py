@@ -53,6 +53,27 @@ ETL_LOAD_QUALITY_TREND_ITEM_KEYS = (
     "rejected_rows",
     "rejection_rate",
 )
+ETL_QUALITY_OBSERVABILITY_RESPONSE_KEYS = (
+    "profile_name",
+    "limit",
+    "batch_count",
+    "latest_batch",
+    "previous_batch",
+    "rejection_rate_delta",
+    "direction",
+    "error_codes",
+    "recent_batches",
+)
+ETL_QUALITY_OBSERVABILITY_ERROR_CODE_KEYS = (
+    "error_code",
+    "total_count",
+    "affected_batch_count",
+)
+ETL_QUALITY_OBSERVABILITY_DIRECTIONS = frozenset(
+    {"improved", "unchanged", "worsened", "no_baseline"}
+)
+ETL_QUALITY_OBSERVABILITY_MIN_LIMIT = 1
+ETL_QUALITY_OBSERVABILITY_MAX_LIMIT = 50
 ETL_LOAD_ITEM_KEYS = (
     "etl_load_run_id",
     "source_filename",
@@ -487,6 +508,100 @@ def _validate_etl_load_quality_trend_item(item: object) -> bool:
         rejected_rows=item["rejected_rows"],
         error_counts=None,
     )
+
+
+def _validate_etl_quality_observability_error_code(item: object) -> bool:
+    if not isinstance(item, dict) or any(
+        key not in item for key in ETL_QUALITY_OBSERVABILITY_ERROR_CODE_KEYS
+    ):
+        return False
+    return (
+        isinstance(item["error_code"], str)
+        and bool(item["error_code"].strip())
+        and type(item["total_count"]) is int
+        and item["total_count"] >= 1
+        and type(item["affected_batch_count"]) is int
+        and item["affected_batch_count"] >= 1
+        # 한 배치에서 같은 코드가 두 번 집계될 수는 없으므로, 배치 수는 합계를 넘지 못합니다.
+        and item["affected_batch_count"] <= item["total_count"]
+    )
+
+
+def _validate_etl_quality_observability_response(data: dict[str, Any]) -> None:
+    """Reject observability payloads whose numbers contradict each other.
+
+    서버 응답을 그대로 믿으면 direction과 delta가 서로 반대인 화면을 그리게 됩니다.
+    여기서는 필드 타입뿐 아니라 값들 사이의 일관성(비교 대상 유무, 방향과 부호,
+    배치 수와 목록 길이)까지 확인합니다.
+    """
+    if any(key not in data for key in ETL_QUALITY_OBSERVABILITY_RESPONSE_KEYS):
+        raise _invalid_etl_response()
+
+    profile_name = data["profile_name"]
+    limit = data["limit"]
+    batch_count = data["batch_count"]
+    latest_batch = data["latest_batch"]
+    previous_batch = data["previous_batch"]
+    delta = data["rejection_rate_delta"]
+    direction = data["direction"]
+    error_codes = data["error_codes"]
+    recent_batches = data["recent_batches"]
+
+    if (
+        not isinstance(profile_name, str)
+        or not profile_name.strip()
+        or type(limit) is not int
+        or not ETL_QUALITY_OBSERVABILITY_MIN_LIMIT
+        <= limit
+        <= ETL_QUALITY_OBSERVABILITY_MAX_LIMIT
+        or type(batch_count) is not int
+        or batch_count < 0
+        or direction not in ETL_QUALITY_OBSERVABILITY_DIRECTIONS
+        or not isinstance(error_codes, list)
+        or not isinstance(recent_batches, list)
+        or any(
+            not _validate_etl_quality_observability_error_code(item)
+            for item in error_codes
+        )
+        or any(
+            not _validate_etl_load_quality_trend_item(item) for item in recent_batches
+        )
+        or len(recent_batches) != batch_count
+        or batch_count > limit
+    ):
+        raise _invalid_etl_response()
+
+    for batch in (latest_batch, previous_batch):
+        if batch is not None and not _validate_etl_load_quality_trend_item(batch):
+            raise _invalid_etl_response()
+
+    # 비교할 배치가 없으면 변화량과 방향도 반드시 "없음"이어야 합니다.
+    if (previous_batch is None) != (delta is None):
+        raise _invalid_etl_response()
+    if (previous_batch is None) != (direction == "no_baseline"):
+        raise _invalid_etl_response()
+    if latest_batch is None and previous_batch is not None:
+        raise _invalid_etl_response()
+    if (latest_batch is None) != (batch_count == 0):
+        raise _invalid_etl_response()
+    if any(item["affected_batch_count"] > batch_count for item in error_codes):
+        raise _invalid_etl_response()
+
+    if previous_batch is None:
+        return
+    if type(delta) not in (int, float):
+        raise _invalid_etl_response()
+    expected_delta = round(
+        latest_batch["rejection_rate"] - previous_batch["rejection_rate"], 2
+    )
+    if round(float(delta), 2) != expected_delta:
+        raise _invalid_etl_response()
+    if (
+        (direction == "improved" and delta >= 0)
+        or (direction == "worsened" and delta <= 0)
+        or (direction == "unchanged" and delta != 0)
+    ):
+        raise _invalid_etl_response()
 
 
 def _is_valid_etl_profile_detail_response(data: dict[str, Any]) -> bool:
@@ -1559,6 +1674,39 @@ class CatalogGuardApiClient:
             params=params,
         )
         _validate_etl_load_quality_trend_response(data)
+        return data
+
+    def get_etl_quality_observability(
+        self,
+        *,
+        profile_name: str,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Fetch one supplier's latest-vs-previous ETL quality comparison.
+
+        profile_name은 선택 필터가 아닙니다. 값을 비우면 서로 다른 공급사의 배치를
+        비교하게 되므로, 요청을 보내기 전에 여기서 막습니다.
+        """
+        normalized_profile_name = _normalize_optional_etl_filter(profile_name)
+        if not normalized_profile_name:
+            raise ValueError("profile_name must not be empty")
+        if (
+            type(limit) is not int
+            or not ETL_QUALITY_OBSERVABILITY_MIN_LIMIT
+            <= limit
+            <= ETL_QUALITY_OBSERVABILITY_MAX_LIMIT
+        ):
+            raise ValueError(
+                "limit must be between "
+                f"{ETL_QUALITY_OBSERVABILITY_MIN_LIMIT} and "
+                f"{ETL_QUALITY_OBSERVABILITY_MAX_LIMIT}"
+            )
+
+        data = self._get_json(
+            "/api/v1/etl-loads/quality-observability",
+            params={"profile_name": normalized_profile_name, "limit": limit},
+        )
+        _validate_etl_quality_observability_response(data)
         return data
 
     def list_unknown_size_tokens(self, *, limit: int = 20) -> dict[str, Any]:

@@ -150,6 +150,18 @@ def test_no_token_returns_401_on_etl_quality_trend_before_database(
     assert reject_route_database_dependency() == 0
 
 
+def test_no_token_returns_401_on_etl_quality_observability_before_database(
+    reject_route_database_dependency,
+):
+    response = client.get(
+        "/api/v1/etl-loads/quality-observability",
+        params={"profile_name": "sample_fashion_vendor"},
+    )
+
+    assert response.status_code == 401
+    assert reject_route_database_dependency() == 0
+
+
 def test_no_token_returns_401_on_etl_profile_detail_before_database(
     reject_route_database_dependency,
 ):
@@ -397,6 +409,19 @@ def test_operator_token_can_read_etl_quality_trend(operator_token):
     response = client.get(
         "/api/v1/etl-loads/quality-trend",
         headers=_auth_headers(operator_token),
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("token_fixture", ["viewer_token", "operator_token"])
+def test_viewer_and_operator_can_read_etl_quality_observability(request, token_fixture):
+    token = request.getfixturevalue(token_fixture)
+
+    response = client.get(
+        "/api/v1/etl-loads/quality-observability",
+        params={"profile_name": "sample_fashion_vendor"},
+        headers=_auth_headers(token),
     )
 
     assert response.status_code == 200
