@@ -28,6 +28,7 @@ from ui.etl_load_history import (
     build_etl_quality_observability_notice,
     build_etl_quality_observability_profile_options,
     build_etl_quality_recent_batch_dataframe,
+    resolve_etl_quality_observability_selection,
     format_etl_batch_rejection_rate,
     format_etl_quality_direction,
     format_etl_rejection_rate_delta,
@@ -575,6 +576,8 @@ class FakeEtlApiClient:
         quality_trend_error=None,
         observability_response=None,
         observability_error=None,
+        observability_profiles=None,
+        observability_profiles_error=None,
         reconciliation_response=None,
         reconciliation_error=None,
     ):
@@ -595,6 +598,7 @@ class FakeEtlApiClient:
         self.quality_summary_calls = []
         self.quality_trend_calls = []
         self.observability_calls = []
+        self.observability_profile_calls = 0
         self.etl_profiles = (
             [
                 {"id": "sample_fashion_vendor_v1", "display_name": "패션 공급사 샘플"},
@@ -676,6 +680,12 @@ class FakeEtlApiClient:
             else observability_response
         )
         self.observability_error = observability_error
+        self.observability_profiles = (
+            ["sample_fashion_vendor", "sample_marketplace_vendor"]
+            if observability_profiles is None
+            else observability_profiles
+        )
+        self.observability_profiles_error = observability_profiles_error
         self.detail_error = detail_error
         self.list_items = [make_load()] if list_items is None else list_items
         self.list_pages = list_pages
@@ -779,6 +789,17 @@ class FakeEtlApiClient:
         if self.quality_trend_error is not None:
             raise self.quality_trend_error
         return {"items": self.quality_trend}
+
+    def get_etl_quality_observability_profiles(self):
+        self.observability_profile_calls += 1
+        if self.observability_profiles_error is not None:
+            raise self.observability_profiles_error
+        return {
+            "items": [
+                {"profile_name": profile_name}
+                for profile_name in self.observability_profiles
+            ]
+        }
 
     def get_etl_quality_observability(self, *, profile_name, limit=10):
         self.observability_calls.append(
@@ -2182,30 +2203,43 @@ def test_build_etl_quality_observability_notice_separates_zero_and_one_batch():
     assert build_etl_quality_observability_notice(None) is None
 
 
-def test_build_etl_quality_observability_profile_options_uses_exact_names():
-    items = [
-        make_load(11) | {"profile_name": "sample_marketplace_vendor"},
-        make_load(12) | {"profile_name": "sample_fashion_vendor"},
-        make_load(13) | {"profile_name": "sample_fashion_vendor"},
-        make_load(14) | {"profile_name": "  "},
-        {"etl_load_run_id": 15},
-    ]
+def test_build_etl_quality_observability_profile_options_reads_the_profile_endpoint():
+    response = {
+        "items": [
+            {"profile_name": "sample_fashion_vendor"},
+            {"profile_name": "sample_marketplace_vendor"},
+        ]
+    }
 
-    assert build_etl_quality_observability_profile_options(items) == [
+    # 서버가 이미 중복 제거와 정렬을 마쳤으므로 화면에서 다시 손대지 않습니다.
+    assert build_etl_quality_observability_profile_options(response) == [
         "sample_fashion_vendor",
         "sample_marketplace_vendor",
     ]
-    assert build_etl_quality_observability_profile_options([]) == []
 
 
-def test_build_etl_quality_observability_profile_options_keeps_current_selection():
-    # 페이지를 넘겨 해당 배치가 목록에서 사라져도 선택이 조용히 풀리면 안 됩니다.
-    options = build_etl_quality_observability_profile_options(
-        [make_load(12) | {"profile_name": "sample_fashion_vendor"}],
-        selected="sample_marketplace_vendor",
+def test_build_etl_quality_observability_profile_options_handles_empty_and_missing():
+    assert build_etl_quality_observability_profile_options({"items": []}) == []
+    assert build_etl_quality_observability_profile_options(None) == []
+    assert build_etl_quality_observability_profile_options({}) == []
+
+
+def test_resolve_etl_quality_observability_selection_keeps_a_still_listed_profile():
+    options = ["sample_fashion_vendor", "sample_marketplace_vendor"]
+
+    assert (
+        resolve_etl_quality_observability_selection(options, "sample_marketplace_vendor")
+        == "sample_marketplace_vendor"
     )
 
-    assert options == ["sample_fashion_vendor", "sample_marketplace_vendor"]
+
+def test_resolve_etl_quality_observability_selection_clears_a_vanished_profile():
+    # 사라진 공급사를 첫 항목으로 바꾸면 이전 숫자가 다른 이름 아래 남을 수 있습니다.
+    assert resolve_etl_quality_observability_selection(
+        ["sample_fashion_vendor"], "retired_vendor"
+    ) is None
+    assert resolve_etl_quality_observability_selection([], "sample_fashion_vendor") is None
+    assert resolve_etl_quality_observability_selection(["a"], None) is None
 
 
 def test_invalidate_etl_quality_observability_drops_the_cached_comparison():
@@ -2475,4 +2509,209 @@ def test_etl_load_history_observability_is_readable_by_viewer_and_operator(monke
         assert {metric.label for metric in app.metric} >= {"방향", "변화량"}
         assert api_client.observability_calls == [
             {"profile_name": "sample_fashion_vendor", "limit": 10}
+        ]
+
+
+# ---- ETL 품질 관찰: 공급사 목록 전용 조회 -----------------------------------
+
+
+def test_fetch_observability_profiles_caches_within_one_render():
+    api_client = FakeEtlApiClient()
+    state = dict(etl_load_history.ETL_LOAD_STATE_DEFAULTS)
+
+    first = etl_load_history._fetch_etl_quality_observability_profiles(
+        api_client, state
+    )
+    second = etl_load_history._fetch_etl_quality_observability_profiles(
+        api_client, state
+    )
+
+    assert first == second
+    assert [item["profile_name"] for item in first["items"]] == [
+        "sample_fashion_vendor",
+        "sample_marketplace_vendor",
+    ]
+    assert api_client.observability_profile_calls == 1
+    assert state["etl_quality_observability_profiles_error"] is None
+
+
+def test_fetch_observability_profiles_stores_error_without_retrying():
+    api_client = FakeEtlApiClient(
+        observability_profiles_error=catalogguard_api.CatalogGuardApiResponseError(
+            "invalid"
+        )
+    )
+    state = dict(etl_load_history.ETL_LOAD_STATE_DEFAULTS)
+
+    assert (
+        etl_load_history._fetch_etl_quality_observability_profiles(api_client, state)
+        is None
+    )
+    assert isinstance(
+        state["etl_quality_observability_profiles_error"],
+        catalogguard_api.CatalogGuardApiResponseError,
+    )
+    etl_load_history._fetch_etl_quality_observability_profiles(api_client, state)
+    assert api_client.observability_profile_calls == 1
+
+
+def test_observability_offers_a_supplier_absent_from_the_current_history_page(
+    monkeypatch,
+):
+    # 이번 작업의 핵심: 최근 10건에 배치가 없는 공급사도 고를 수 있어야 합니다.
+    api_client = FakeEtlApiClient(
+        list_items=[make_load(12) | {"profile_name": "sample_fashion_vendor"}],
+        observability_profiles=[
+            "sample_fashion_vendor",
+            "sample_marketplace_vendor",
+        ],
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    selectbox = next(
+        widget
+        for widget in app.selectbox
+        if widget.key == "etl_quality_observability_selected_profile"
+    )
+
+    assert len(app.exception) == 0
+    assert api_client.observability_profile_calls >= 1
+    # ETL 이력 페이지에는 sample_fashion_vendor 배치만 있습니다.
+    assert [item["profile_name"] for item in api_client.list_items] == [
+        "sample_fashion_vendor"
+    ]
+    assert "sample_marketplace_vendor" in selectbox.options
+
+    app = _select_observability_profile(app, "sample_marketplace_vendor")
+    assert len(app.exception) == 0
+    assert api_client.observability_calls == [
+        {"profile_name": "sample_marketplace_vendor", "limit": 10}
+    ]
+
+
+def test_observability_profile_list_ignores_the_etl_history_search_text(monkeypatch):
+    api_client = FakeEtlApiClient(
+        observability_profiles=["sample_fashion_vendor", "sample_marketplace_vendor"]
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    next(widget for widget in app.text_input if widget.label == "공급사 프로필").set_value(
+        "sample"
+    ).run(timeout=10)
+    next(widget for widget in app.button if widget.label == "조회").click().run(timeout=10)
+    app = _select_observability_profile(app, "sample_marketplace_vendor")
+
+    assert len(app.exception) == 0
+    # 부분 검색어 "sample"은 비교 조회로 흘러가지 않습니다.
+    assert api_client.observability_calls == [
+        {"profile_name": "sample_marketplace_vendor", "limit": 10}
+    ]
+    assert app.session_state["etl_load_applied_profile"] == "sample"
+
+
+def test_observability_shows_no_quality_data_notice_and_skips_detail_call(monkeypatch):
+    api_client = FakeEtlApiClient(observability_profiles=[])
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert len(app.exception) == 0
+    assert etl_load_history.ETL_QUALITY_OBSERVABILITY_NO_PROFILE_MESSAGE in [
+        info.value for info in app.info
+    ]
+    # 고를 공급사가 없으면 비교 조회를 보내지 않습니다.
+    assert api_client.observability_calls == []
+    assert not any(
+        widget.key == "etl_quality_observability_selected_profile"
+        for widget in app.selectbox
+    )
+
+
+def test_observability_shows_profile_list_error_without_detail_call(monkeypatch):
+    api_client = FakeEtlApiClient(
+        observability_profiles_error=catalogguard_api.CatalogGuardApiResponseError(
+            "invalid"
+        )
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert len(app.exception) == 0
+    assert etl_load_history.ETL_QUALITY_OBSERVABILITY_PROFILE_ERROR_MESSAGE in [
+        error.value for error in app.error
+    ]
+    assert api_client.observability_calls == []
+
+
+def test_observability_keeps_a_selection_that_is_still_listed(monkeypatch):
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    app = _select_observability_profile(app, "sample_marketplace_vendor")
+    app = app.run(timeout=10)
+
+    assert len(app.exception) == 0
+    assert (
+        app.session_state["etl_quality_observability_selected_profile"]
+        == "sample_marketplace_vendor"
+    )
+    # 다시 그려도 같은 공급사 결과를 캐시에서 씁니다.
+    assert api_client.observability_calls == [
+        {"profile_name": "sample_marketplace_vendor", "limit": 10}
+    ]
+
+
+def test_observability_clears_a_selection_that_left_the_profile_list(monkeypatch):
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    app = _select_observability_profile(app, "sample_marketplace_vendor")
+    assert app.session_state["etl_quality_observability_response"] is not None
+
+    # 그 공급사가 더 이상 목록에 없는 상태로 다시 그립니다.
+    api_client.observability_profiles = ["sample_fashion_vendor"]
+    app.session_state["etl_quality_observability_profiles_initialized"] = False
+    app = app.run(timeout=10)
+
+    assert len(app.exception) == 0
+    assert app.session_state["etl_quality_observability_selected_profile"] is None
+    # 이전 공급사의 숫자가 남아 다른 이름 아래 보이면 안 됩니다.
+    assert app.session_state["etl_quality_observability_response"] is None
+    assert etl_load_history.ETL_QUALITY_OBSERVABILITY_SELECT_PROFILE_MESSAGE in [
+        info.value for info in app.info
+    ]
+
+
+def test_observability_invalidates_detail_cache_when_supplier_changes(monkeypatch):
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    app = _select_observability_profile(app, "sample_fashion_vendor")
+    app = _select_observability_profile(app, "sample_marketplace_vendor")
+
+    assert len(app.exception) == 0
+    assert api_client.observability_calls == [
+        {"profile_name": "sample_fashion_vendor", "limit": 10},
+        {"profile_name": "sample_marketplace_vendor", "limit": 10},
+    ]
+
+
+def test_observability_profile_list_works_for_viewer_and_operator(monkeypatch):
+    for role in ("viewer", "operator"):
+        api_client = FakeEtlApiClient()
+        _patch_etl_api_client(monkeypatch, api_client)
+
+        app = build_authenticated_app_test("app.py", role=role).run(timeout=10)
+        app = _select_observability_profile(app, "sample_marketplace_vendor")
+
+        assert len(app.exception) == 0
+        assert api_client.observability_profile_calls >= 1
+        assert api_client.observability_calls == [
+            {"profile_name": "sample_marketplace_vendor", "limit": 10}
         ]

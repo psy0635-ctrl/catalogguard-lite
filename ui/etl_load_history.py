@@ -65,7 +65,8 @@ ETL_QUALITY_DIRECTION_LABELS = {
 }
 ETL_QUALITY_DIRECTION_UNKNOWN_LABEL = "알 수 없음"
 ETL_QUALITY_OBSERVABILITY_NO_PROFILE_MESSAGE = (
-    "관찰할 수 있는 공급사가 없습니다. ETL 적재 이력이 있어야 품질 변화를 비교할 수 있습니다."
+    "관찰할 수 있는 ETL 품질 데이터가 없습니다. "
+    "품질 정보가 기록된 배치가 있어야 공급사별 변화를 비교할 수 있습니다."
 )
 ETL_QUALITY_OBSERVABILITY_SELECT_PROFILE_MESSAGE = (
     "공급사를 선택하면 최신 배치와 직전 배치의 Reject 비율을 비교합니다."
@@ -81,11 +82,14 @@ ETL_QUALITY_OBSERVABILITY_NO_ERROR_MESSAGE = (
 )
 ETL_QUALITY_OBSERVABILITY_ERROR_MESSAGE = "ETL 품질 관찰 정보를 불러오지 못했습니다."
 # 위 검색창의 "공급사 프로필"은 부분 검색어입니다. 그 문자열을 그대로 이 비교에 쓰면
-# 서로 다른 공급사가 한 묶음으로 비교되므로, 여기서는 적재 이력에 실제로 기록된 정확한
+# 서로 다른 공급사가 한 묶음으로 비교되므로, 여기서는 전용 조회가 돌려준 정확한
 # profile_name만 고를 수 있게 합니다.
 ETL_QUALITY_OBSERVABILITY_PROFILE_CAPTION = (
-    "조회된 ETL 적재 이력에 기록된 공급사입니다. 위 검색어가 아니라 정확한 공급사 "
-    "프로필 이름으로 비교합니다."
+    "품질 정보가 기록된 ETL 배치가 있는 공급사 전체입니다. 아래 목록이나 위 검색어의 "
+    "범위와 무관하며, 정확한 공급사 프로필 이름으로 비교합니다."
+)
+ETL_QUALITY_OBSERVABILITY_PROFILE_ERROR_MESSAGE = (
+    "관찰할 수 있는 공급사 목록을 불러오지 못했습니다."
 )
 ETL_PROFILE_MAPPING_DISPLAY_COLUMNS = ["공급사 원본 컬럼", "CatalogGuard 컬럼"]
 # 비활성 프로필 안내 문구입니다. 서버가 보낸 message 원문을 쓰지 않고 화면 문구는
@@ -212,6 +216,9 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_load_quality_trend_response": None,
     "etl_load_quality_trend_error": None,
     # 품질 관찰은 기존 summary/trend와 다른 공급사를 볼 수 있으므로 상태를 분리합니다.
+    "etl_quality_observability_profiles_initialized": False,
+    "etl_quality_observability_profiles_response": None,
+    "etl_quality_observability_profiles_error": None,
     "etl_quality_observability_selected_profile": None,
     "etl_quality_observability_initialized": False,
     "etl_quality_observability_response": None,
@@ -400,29 +407,34 @@ def build_etl_error_counts_dataframe(error_counts: dict[str, int] | None) -> pd.
 
 
 def build_etl_quality_observability_profile_options(
-    items: list[dict[str, Any]] | None,
-    *,
-    selected: object = None,
+    response: dict[str, Any] | None,
 ) -> list[str]:
-    """Exact profile_name values observable in the current ETL load history page.
+    """Exact profile_name values the comparison endpoint can actually be run for.
 
-    Observability API의 profile_name은 정확 일치입니다. 검색창의 부분 검색어를 넘기면
-    "sample"이 여러 공급사를 함께 잡아 서로 다른 공급사를 비교하게 되므로, 적재 이력에
-    실제로 기록된 profile_name만 후보로 씁니다.
+    후보는 화면에 지금 보이는 ETL 목록이 아니라 전용 조회의 응답에서 옵니다. 목록
+    페이지에서 만들면 최근 10건에 배치가 없는 공급사를 고를 수 없었습니다.
 
-    이미 선택한 공급사는 다음 페이지에 그 배치가 없더라도 후보에 남겨 둡니다. 그러지
-    않으면 페이지를 넘길 때마다 선택이 조용히 풀립니다.
+    서버가 이미 중복 제거와 정렬을 마쳤고 client가 그 계약을 검증하므로, 여기서
+    다시 정렬하거나 추려 내지 않습니다.
     """
-    profile_names = {
+    return [
         item["profile_name"]
-        for item in (items or [])
-        if isinstance(item, dict)
-        and isinstance(item.get("profile_name"), str)
-        and item["profile_name"].strip()
-    }
-    if isinstance(selected, str) and selected.strip():
-        profile_names.add(selected)
-    return sorted(profile_names)
+        for item in (response or {}).get("items") or []
+        if isinstance(item, dict) and isinstance(item.get("profile_name"), str)
+    ]
+
+
+def resolve_etl_quality_observability_selection(
+    options: list[str],
+    selected: object,
+) -> str | None:
+    """Keep the current supplier when it is still selectable, otherwise clear it.
+
+    사라진 공급사를 첫 번째 항목으로 슬쩍 바꾸지 않습니다. 그렇게 하면 이전 공급사의
+    숫자가 다른 공급사 이름 아래 그대로 남을 수 있어, 미선택으로 되돌려 사용자가
+    직접 고르게 합니다.
+    """
+    return selected if isinstance(selected, str) and selected in options else None
 
 
 def format_etl_quality_direction(direction: object) -> str:
@@ -1299,6 +1311,33 @@ def _render_etl_load_quality_trend(api_client) -> None:
     )
 
 
+def _fetch_etl_quality_observability_profiles(
+    api_client,
+    session_state,
+) -> dict[str, Any] | None:
+    if session_state.get("etl_quality_observability_profiles_initialized"):
+        cached_response = session_state.get(
+            "etl_quality_observability_profiles_response"
+        )
+        return cached_response if isinstance(cached_response, dict) else None
+
+    try:
+        response = api_client.get_etl_quality_observability_profiles()
+        session_state["etl_quality_observability_profiles_response"] = response
+        session_state["etl_quality_observability_profiles_error"] = None
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        session_state["etl_quality_observability_profiles_response"] = None
+        session_state["etl_quality_observability_profiles_error"] = error
+    session_state["etl_quality_observability_profiles_initialized"] = True
+    return session_state["etl_quality_observability_profiles_response"]
+
+
 def _on_etl_quality_observability_profile_change(session_state) -> None:
     invalidate_etl_quality_observability(session_state)
 
@@ -1331,7 +1370,7 @@ def _fetch_etl_quality_observability(api_client, session_state) -> dict[str, Any
     return session_state["etl_quality_observability_response"]
 
 
-def _render_etl_quality_observability(api_client, list_response) -> None:
+def _render_etl_quality_observability(api_client) -> None:
     """Compare one supplier's latest batch with the previous one, and show why."""
     st.subheader("ETL 품질 관찰")
     st.caption(
@@ -1339,16 +1378,41 @@ def _render_etl_quality_observability(api_client, list_response) -> None:
         "코드를 보여 줍니다."
     )
 
-    items = (
-        list_response.get("items") or [] if isinstance(list_response, dict) else []
+    profiles_response = _fetch_etl_quality_observability_profiles(
+        api_client,
+        st.session_state,
     )
+    if profiles_response is None:
+        error = st.session_state.get("etl_quality_observability_profiles_error")
+        if error is not None:
+            st.error(
+                build_etl_api_error_display_message(
+                    ETL_QUALITY_OBSERVABILITY_PROFILE_ERROR_MESSAGE,
+                    error,
+                )
+            )
+        return
+
     profile_options = build_etl_quality_observability_profile_options(
-        items,
-        selected=st.session_state.get("etl_quality_observability_selected_profile"),
+        profiles_response
     )
+    # 고를 공급사가 없으면 비교 조회를 보내 봐야 빈 결과뿐이므로 요청하지 않습니다.
     if not profile_options:
         st.info(ETL_QUALITY_OBSERVABILITY_NO_PROFILE_MESSAGE)
         return
+
+    resolved_profile = resolve_etl_quality_observability_selection(
+        profile_options,
+        st.session_state.get("etl_quality_observability_selected_profile"),
+    )
+    if resolved_profile != st.session_state.get(
+        "etl_quality_observability_selected_profile"
+    ):
+        # 더 이상 고를 수 없는 공급사였다면, 그 공급사로 받아 둔 결과도 함께 버립니다.
+        st.session_state["etl_quality_observability_selected_profile"] = (
+            resolved_profile
+        )
+        invalidate_etl_quality_observability(st.session_state)
 
     st.caption(ETL_QUALITY_OBSERVABILITY_PROFILE_CAPTION)
     st.selectbox(
@@ -2855,6 +2919,8 @@ def render_etl_load_history(api_client=None) -> None:
     _render_etl_search_controls()
     _render_etl_load_quality_summary(api_client)
     _render_etl_load_quality_trend(api_client)
+    # 공급사 후보를 전용 조회에서 받으므로 아래 목록 조회의 성공 여부와 무관합니다.
+    _render_etl_quality_observability(api_client)
 
     response = _fetch_etl_load_list(api_client, st.session_state)
     if response is None:
@@ -2862,8 +2928,6 @@ def render_etl_load_history(api_client=None) -> None:
         if error is not None:
             _render_etl_error(error)
         return
-
-    _render_etl_quality_observability(api_client, response)
 
     items = response.get("items") or []
     if not items:

@@ -116,6 +116,16 @@ ETLQualityObservabilityDirection = Literal[
 ]
 
 
+class ETLQualityObservabilityProfileResponse(BaseModel):
+    # 비교 조회에 그대로 넣을 수 있는 정확한 공급사 이름입니다.
+    profile_name: str
+
+
+class ETLQualityObservabilityProfileListResponse(BaseModel):
+    # 선택에 필요한 것은 이름뿐이라 batch 수나 최근 시각 같은 값은 넣지 않습니다.
+    items: list[ETLQualityObservabilityProfileResponse]
+
+
 class ETLQualityObservabilityErrorCodeResponse(BaseModel):
     error_code: str
     # 관찰 구간 전체에서 이 코드로 거부된 행 수의 합입니다.

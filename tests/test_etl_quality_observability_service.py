@@ -12,6 +12,7 @@ from db.etl_quality_observability_service import (
     MAX_BATCH_LIMIT,
     MIN_BATCH_LIMIT,
     get_etl_quality_observability,
+    list_etl_quality_observability_profiles,
 )
 from db.models import ETLLoadRun
 from db.session import create_database_engine, create_session_factory
@@ -438,4 +439,134 @@ def test_default_limit_matches_quality_trend_and_query_does_not_write(postgres_s
 
     assert result.limit == DEFAULT_BATCH_LIMIT == 10
     assert (MIN_BATCH_LIMIT, MAX_BATCH_LIMIT) == (1, 50)
+    assert session.scalar(select(func.count()).select_from(ETLLoadRun)) == before
+
+
+# ---- 비교 가능한 공급사 목록 -------------------------------------------------
+
+
+def _observable_profiles(session, prefix):
+    """이 테스트가 만든 profile만 남깁니다. 조회 자체는 전체 이력을 대상으로 합니다."""
+    result = list_etl_quality_observability_profiles(session)
+    return [
+        item.profile_name
+        for item in result.items
+        if item.profile_name.startswith(prefix)
+    ]
+
+
+def test_lists_profiles_that_have_quality_available_batches(postgres_session):
+    session, prefix = postgres_session
+    _add_run(
+        session,
+        profile_name=f"{prefix}_fashion",
+        minutes=1,
+        total_rows=100,
+        rejected_rows=4,
+        error_counts={"INVALID_PRICE": 4},
+    )
+
+    assert _observable_profiles(session, prefix) == [f"{prefix}_fashion"]
+
+
+def test_excludes_profiles_that_only_have_legacy_batches(postgres_session):
+    session, prefix = postgres_session
+    _add_run(
+        session,
+        profile_name=f"{prefix}_with_quality",
+        minutes=1,
+        total_rows=100,
+        rejected_rows=4,
+        error_counts={"INVALID_PRICE": 4},
+    )
+    # quality metadata가 없는 배치뿐이면 비교할 것이 없으므로 후보가 아닙니다.
+    _add_run(session, profile_name=f"{prefix}_legacy_only", minutes=2)
+
+    assert _observable_profiles(session, prefix) == [f"{prefix}_with_quality"]
+
+
+def test_returns_each_profile_once_regardless_of_batch_count(postgres_session):
+    session, prefix = postgres_session
+    profile_name = f"{prefix}_repeated"
+    for minutes in range(1, 4):
+        _add_run(
+            session,
+            profile_name=profile_name,
+            minutes=minutes,
+            total_rows=100,
+            rejected_rows=minutes,
+            error_counts={"INVALID_PRICE": minutes},
+        )
+
+    assert _observable_profiles(session, prefix) == [profile_name]
+
+
+def test_sorts_profiles_ascending_by_name(postgres_session):
+    session, prefix = postgres_session
+    for suffix in ("charlie", "alpha", "bravo"):
+        _add_run(
+            session,
+            profile_name=f"{prefix}_{suffix}",
+            minutes=1,
+            total_rows=100,
+            rejected_rows=1,
+            error_counts={"INVALID_PRICE": 1},
+        )
+
+    assert _observable_profiles(session, prefix) == [
+        f"{prefix}_alpha",
+        f"{prefix}_bravo",
+        f"{prefix}_charlie",
+    ]
+
+
+def test_returns_empty_list_when_no_quality_batch_exists(postgres_session):
+    session, prefix = postgres_session
+    _add_run(session, profile_name=f"{prefix}_legacy", minutes=1)
+
+    assert _observable_profiles(session, prefix) == []
+
+
+def test_includes_profiles_missing_from_the_configured_registry(postgres_session):
+    session, prefix = postgres_session
+    from etl.profile_loader import list_etl_profiles
+
+    retired_profile = f"{prefix}_retired_vendor"
+    _add_run(
+        session,
+        profile_name=retired_profile,
+        minutes=1,
+        total_rows=100,
+        rejected_rows=6,
+        error_counts={"INVALID_PRICE": 6},
+    )
+
+    # registry에서 내려간 공급사라도 품질 데이터가 남아 있으면 계속 비교할 수 있어야 합니다.
+    assert retired_profile not in {
+        profile["id"] for profile in list_etl_profiles()
+    }
+    assert _observable_profiles(session, prefix) == [retired_profile]
+
+
+def test_profile_listing_returns_exact_db_values_and_does_not_write(postgres_session):
+    session, prefix = postgres_session
+    # 대소문자와 좌우 공백을 그대로 보존해야 정확 일치 비교 조회에 다시 넣을 수 있습니다.
+    profile_name = f"{prefix}_Mixed_Case"
+    _add_run(
+        session,
+        profile_name=profile_name,
+        minutes=1,
+        total_rows=10,
+        rejected_rows=1,
+        error_counts={"INVALID_PRICE": 1},
+    )
+    session.commit()
+    before = session.scalar(select(func.count()).select_from(ETLLoadRun))
+
+    listed = _observable_profiles(session, prefix)
+
+    assert listed == [profile_name]
+    assert get_etl_quality_observability(
+        session, profile_name=listed[0]
+    ).batch_count == 1
     assert session.scalar(select(func.count()).select_from(ETLLoadRun)) == before

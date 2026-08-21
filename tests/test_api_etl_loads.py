@@ -16,6 +16,9 @@ ENDPOINT = "/api/v1/etl-loads"
 QUALITY_SUMMARY_ENDPOINT = f"{ENDPOINT}/quality-summary"
 QUALITY_TREND_ENDPOINT = f"{ENDPOINT}/quality-trend"
 QUALITY_OBSERVABILITY_ENDPOINT = f"{ENDPOINT}/quality-observability"
+QUALITY_OBSERVABILITY_PROFILES_ENDPOINT = (
+    f"{QUALITY_OBSERVABILITY_ENDPOINT}/profiles"
+)
 ETL_PROFILES_ENDPOINT = "/api/v1/etl-profiles"
 
 
@@ -69,7 +72,11 @@ def _load(**overrides):
 def fake_etl_query_service(monkeypatch):
     fake_session = object()
     calls = []
-    state = SimpleNamespace(load_exists=True, observability_empty=False)
+    state = SimpleNamespace(
+        load_exists=True,
+        observability_empty=False,
+        observability_profiles=["sample_fashion_vendor", "sample_marketplace_vendor"],
+    )
     load = _load()
     detail = SimpleNamespace(
         etl_load_run_id=12,
@@ -281,6 +288,15 @@ def fake_etl_query_service(monkeypatch):
         )
         return quality_trend
 
+    def fake_list_etl_quality_observability_profiles(session):
+        calls.append({"operation": "quality-observability-profiles", "session": session})
+        return SimpleNamespace(
+            items=[
+                SimpleNamespace(profile_name=profile_name)
+                for profile_name in state.observability_profiles
+            ]
+        )
+
     def fake_get_etl_quality_observability(session, *, profile_name, limit=10):
         calls.append(
             {
@@ -314,6 +330,12 @@ def fake_etl_query_service(monkeypatch):
         etl_loads_route,
         "get_etl_quality_observability",
         fake_get_etl_quality_observability,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        etl_loads_route,
+        "list_etl_quality_observability_profiles",
+        fake_list_etl_quality_observability_profiles,
         raising=False,
     )
     yield SimpleNamespace(calls=calls, state=state)
@@ -631,6 +653,57 @@ def test_quality_observability_allows_viewer_and_blocks_anonymous(
     assert viewer_response.status_code == 200
     assert operator_response.status_code == 200
     assert anonymous_response.status_code == 401
+
+
+def test_quality_observability_profiles_returns_sorted_names(fake_etl_query_service):
+    response = client.get(QUALITY_OBSERVABILITY_PROFILES_ENDPOINT)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {"profile_name": "sample_fashion_vendor"},
+            {"profile_name": "sample_marketplace_vendor"},
+        ]
+    }
+    assert fake_etl_query_service.calls[-1]["operation"] == (
+        "quality-observability-profiles"
+    )
+
+
+def test_quality_observability_profiles_returns_empty_items(fake_etl_query_service):
+    fake_etl_query_service.state.observability_profiles = []
+
+    response = client.get(QUALITY_OBSERVABILITY_PROFILES_ENDPOINT)
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+
+
+def test_quality_observability_profiles_allows_viewer_and_blocks_anonymous(
+    fake_etl_query_service,
+):
+    override_current_user(role="viewer")
+    viewer_response = client.get(QUALITY_OBSERVABILITY_PROFILES_ENDPOINT)
+    override_current_user(role="operator")
+    operator_response = client.get(QUALITY_OBSERVABILITY_PROFILES_ENDPOINT)
+    clear_current_user_override()
+    anonymous_response = client.get(QUALITY_OBSERVABILITY_PROFILES_ENDPOINT)
+
+    assert viewer_response.status_code == 200
+    assert operator_response.status_code == 200
+    assert anonymous_response.status_code == 401
+
+
+def test_quality_observability_profiles_route_wins_over_load_detail_route(
+    fake_etl_query_service,
+):
+    # 정적 경로가 /api/v1/etl-loads/{etl_load_run_id} 보다 먼저 매칭되어야 합니다.
+    response = client.get(QUALITY_OBSERVABILITY_PROFILES_ENDPOINT)
+
+    assert response.status_code == 200
+    assert not any(
+        call["operation"] == "detail" for call in fake_etl_query_service.calls
+    )
 
 
 def test_etl_profile_detail_returns_safe_allowlisted_metadata_and_list_still_works():

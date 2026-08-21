@@ -55,6 +55,8 @@ from api.schemas import (
     ETLProfileListResponse,
     ETLProfileResponse,
     ETLQualityObservabilityErrorCodeResponse,
+    ETLQualityObservabilityProfileListResponse,
+    ETLQualityObservabilityProfileResponse,
     ETLQualityObservabilityResponse,
     ETLRejectErrorResponse,
     ETLRejectedRowListResponse,
@@ -75,6 +77,7 @@ from db.etl_quality_observability_service import (
     MAX_BATCH_LIMIT as OBSERVABILITY_MAX_LIMIT,
     MIN_BATCH_LIMIT as OBSERVABILITY_MIN_LIMIT,
     get_etl_quality_observability,
+    list_etl_quality_observability_profiles,
 )
 from db.etl_query_service import (
     ETLLoadDetail,
@@ -807,6 +810,24 @@ def get_etl_quality_observability_route(
         limit=limit,
     )
     return _build_quality_observability_response(result)
+
+
+@router.get(
+    "/api/v1/etl-loads/quality-observability/profiles",
+    response_model=ETLQualityObservabilityProfileListResponse,
+)
+def list_etl_quality_observability_profiles_route(
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> ETLQualityObservabilityProfileListResponse:
+    """Suppliers that have at least one quality-available ETL batch to compare."""
+    result = list_etl_quality_observability_profiles(session)
+    return ETLQualityObservabilityProfileListResponse(
+        items=[
+            ETLQualityObservabilityProfileResponse(profile_name=item.profile_name)
+            for item in result.items
+        ]
+    )
 
 
 @router.get("/api/v1/etl-profiles", response_model=ETLProfileListResponse)
