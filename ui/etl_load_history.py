@@ -45,6 +45,48 @@ ETL_LOAD_DISPLAY_COLUMNS = [
     "실행 사용자",
 ]
 ETL_ERROR_DISPLAY_COLUMNS = ["오류 코드", "발생 건수"]
+ETL_QUALITY_OBSERVABILITY_LIMIT = 10
+ETL_QUALITY_OBSERVABILITY_ERROR_COLUMNS = ["오류 코드", "발생 건수", "발생 배치 수"]
+ETL_QUALITY_OBSERVABILITY_BATCH_COLUMNS = [
+    "적재 배치 ID",
+    "적재 시간",
+    "전체 행",
+    "정상 적재",
+    "Reject",
+    "Reject 비율",
+]
+# API의 direction을 화면 문구로 옮깁니다. "악화"는 Reject 비율이 올랐다는 관찰 결과일
+# 뿐이고 장애 판정이 아닙니다. 위험 임계값은 화면에서도 새로 만들지 않습니다.
+ETL_QUALITY_DIRECTION_LABELS = {
+    "improved": "개선",
+    "unchanged": "동일",
+    "worsened": "악화",
+    "no_baseline": "비교 데이터 없음",
+}
+ETL_QUALITY_DIRECTION_UNKNOWN_LABEL = "알 수 없음"
+ETL_QUALITY_OBSERVABILITY_NO_PROFILE_MESSAGE = (
+    "관찰할 수 있는 공급사가 없습니다. ETL 적재 이력이 있어야 품질 변화를 비교할 수 있습니다."
+)
+ETL_QUALITY_OBSERVABILITY_SELECT_PROFILE_MESSAGE = (
+    "공급사를 선택하면 최신 배치와 직전 배치의 Reject 비율을 비교합니다."
+)
+# 0건과 1건은 사용자가 해야 할 일이 다릅니다. 0건은 볼 데이터 자체가 없고, 1건은 최신
+# 배치는 있지만 비교 기준이 없는 상태라 다음 배치를 기다리면 됩니다.
+ETL_QUALITY_OBSERVABILITY_NO_BATCH_MESSAGE = "비교할 ETL 품질 데이터가 없습니다."
+ETL_QUALITY_OBSERVABILITY_SINGLE_BATCH_MESSAGE = (
+    "최신 배치는 있지만 직전 배치가 없어 비교할 수 없습니다."
+)
+ETL_QUALITY_OBSERVABILITY_NO_ERROR_MESSAGE = (
+    "최근 관찰 구간에 집계된 ETL 오류가 없습니다."
+)
+ETL_QUALITY_OBSERVABILITY_ERROR_MESSAGE = "ETL 품질 관찰 정보를 불러오지 못했습니다."
+# 위 검색창의 "공급사 프로필"은 부분 검색어입니다. 그 문자열을 그대로 이 비교에 쓰면
+# 서로 다른 공급사가 한 묶음으로 비교되므로, 여기서는 적재 이력에 실제로 기록된 정확한
+# profile_name만 고를 수 있게 합니다.
+ETL_QUALITY_OBSERVABILITY_PROFILE_CAPTION = (
+    "조회된 ETL 적재 이력에 기록된 공급사입니다. 위 검색어가 아니라 정확한 공급사 "
+    "프로필 이름으로 비교합니다."
+)
 ETL_PROFILE_MAPPING_DISPLAY_COLUMNS = ["공급사 원본 컬럼", "CatalogGuard 컬럼"]
 # 비활성 프로필 안내 문구입니다. 서버가 보낸 message 원문을 쓰지 않고 화면 문구는
 # 여기서 관리합니다. 실행 실패와 상세 조회 실패는 사용자가 처한 상황이 달라 나눕니다.
@@ -169,6 +211,11 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_load_quality_trend_initialized": False,
     "etl_load_quality_trend_response": None,
     "etl_load_quality_trend_error": None,
+    # 품질 관찰은 기존 summary/trend와 다른 공급사를 볼 수 있으므로 상태를 분리합니다.
+    "etl_quality_observability_selected_profile": None,
+    "etl_quality_observability_initialized": False,
+    "etl_quality_observability_response": None,
+    "etl_quality_observability_error": None,
     "etl_load_selected_run_id": None,
     "etl_load_detail_requested": False,
     "etl_load_detail_response": None,
@@ -350,6 +397,126 @@ def build_etl_error_counts_dataframe(error_counts: dict[str, int] | None) -> pd.
         ],
         columns=ETL_ERROR_DISPLAY_COLUMNS,
     )
+
+
+def build_etl_quality_observability_profile_options(
+    items: list[dict[str, Any]] | None,
+    *,
+    selected: object = None,
+) -> list[str]:
+    """Exact profile_name values observable in the current ETL load history page.
+
+    Observability API의 profile_name은 정확 일치입니다. 검색창의 부분 검색어를 넘기면
+    "sample"이 여러 공급사를 함께 잡아 서로 다른 공급사를 비교하게 되므로, 적재 이력에
+    실제로 기록된 profile_name만 후보로 씁니다.
+
+    이미 선택한 공급사는 다음 페이지에 그 배치가 없더라도 후보에 남겨 둡니다. 그러지
+    않으면 페이지를 넘길 때마다 선택이 조용히 풀립니다.
+    """
+    profile_names = {
+        item["profile_name"]
+        for item in (items or [])
+        if isinstance(item, dict)
+        and isinstance(item.get("profile_name"), str)
+        and item["profile_name"].strip()
+    }
+    if isinstance(selected, str) and selected.strip():
+        profile_names.add(selected)
+    return sorted(profile_names)
+
+
+def format_etl_quality_direction(direction: object) -> str:
+    return ETL_QUALITY_DIRECTION_LABELS.get(
+        direction if isinstance(direction, str) else "",
+        ETL_QUALITY_DIRECTION_UNKNOWN_LABEL,
+    )
+
+
+def format_etl_rejection_rate_delta(delta: object) -> str:
+    """Format the change as percentage points (%p), not as a percent change.
+
+    4% -> 9%는 "125% 증가"가 아니라 "+5.00%p"입니다. 두 표현을 섞으면 운영자가 변화
+    크기를 완전히 잘못 읽게 됩니다.
+    """
+    if delta is None or isinstance(delta, bool) or not isinstance(delta, (int, float)):
+        return "—"
+    if float(delta) == 0.0:
+        return "0.00%p"
+    return f"{float(delta):+.2f}%p"
+
+
+def format_etl_batch_rejection_rate(batch: object) -> str:
+    if not isinstance(batch, dict):
+        return "—"
+    rejection_rate = batch.get("rejection_rate")
+    if isinstance(rejection_rate, bool) or not isinstance(rejection_rate, (int, float)):
+        return "—"
+    return f"{float(rejection_rate):.2f}%"
+
+
+def build_etl_quality_error_code_dataframe(
+    error_codes: list[dict[str, Any]] | None,
+) -> pd.DataFrame:
+    """Aggregated error codes, kept in the order the API already guarantees.
+
+    API가 total_count DESC, error_code ASC로 정렬해서 보냅니다. 화면에서 다시 정렬하면
+    같은 데이터가 두 곳에서 다른 순서로 보이게 되므로 순서를 그대로 씁니다.
+    """
+    if not error_codes:
+        return pd.DataFrame(columns=ETL_QUALITY_OBSERVABILITY_ERROR_COLUMNS)
+    return pd.DataFrame(
+        [
+            {
+                "오류 코드": item.get("error_code"),
+                "발생 건수": item.get("total_count"),
+                "발생 배치 수": item.get("affected_batch_count"),
+            }
+            for item in error_codes
+        ],
+        columns=ETL_QUALITY_OBSERVABILITY_ERROR_COLUMNS,
+    )
+
+
+def build_etl_quality_recent_batch_dataframe(
+    recent_batches: list[dict[str, Any]] | None,
+) -> pd.DataFrame:
+    """Observed batches as a table, oldest first, in the order the API sends them."""
+    if not recent_batches:
+        return pd.DataFrame(columns=ETL_QUALITY_OBSERVABILITY_BATCH_COLUMNS)
+    return pd.DataFrame(
+        [
+            {
+                "적재 배치 ID": item.get("etl_load_run_id"),
+                "적재 시간": format_etl_datetime(item.get("created_at")),
+                "전체 행": item.get("total_rows"),
+                "정상 적재": item.get("loaded_rows"),
+                "Reject": item.get("rejected_rows"),
+                "Reject 비율": format_etl_batch_rejection_rate(item),
+            }
+            for item in recent_batches
+        ],
+        columns=ETL_QUALITY_OBSERVABILITY_BATCH_COLUMNS,
+    )
+
+
+def build_etl_quality_observability_notice(
+    response: dict[str, Any] | None,
+) -> str | None:
+    """Tell "no data at all" apart from "no batch to compare against yet"."""
+    if not isinstance(response, dict):
+        return None
+    if response.get("batch_count") == 0:
+        return ETL_QUALITY_OBSERVABILITY_NO_BATCH_MESSAGE
+    if response.get("direction") == "no_baseline":
+        return ETL_QUALITY_OBSERVABILITY_SINGLE_BATCH_MESSAGE
+    return None
+
+
+def invalidate_etl_quality_observability(session_state) -> None:
+    """Drop the cached comparison so another supplier's numbers are never reused."""
+    session_state["etl_quality_observability_initialized"] = False
+    session_state["etl_quality_observability_response"] = None
+    session_state["etl_quality_observability_error"] = None
 
 
 def build_etl_profile_mapping_dataframe(
@@ -1130,6 +1297,146 @@ def _render_etl_load_quality_trend(api_client) -> None:
         y_label="Reject 비율 (%)",
         width="stretch",
     )
+
+
+def _on_etl_quality_observability_profile_change(session_state) -> None:
+    invalidate_etl_quality_observability(session_state)
+
+
+def _fetch_etl_quality_observability(api_client, session_state) -> dict[str, Any] | None:
+    profile_name = session_state.get("etl_quality_observability_selected_profile")
+    if not isinstance(profile_name, str) or not profile_name.strip():
+        return None
+    if session_state.get("etl_quality_observability_initialized"):
+        cached_response = session_state.get("etl_quality_observability_response")
+        return cached_response if isinstance(cached_response, dict) else None
+
+    try:
+        response = api_client.get_etl_quality_observability(
+            profile_name=profile_name,
+            limit=ETL_QUALITY_OBSERVABILITY_LIMIT,
+        )
+        session_state["etl_quality_observability_response"] = response
+        session_state["etl_quality_observability_error"] = None
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        session_state["etl_quality_observability_response"] = None
+        session_state["etl_quality_observability_error"] = error
+    session_state["etl_quality_observability_initialized"] = True
+    return session_state["etl_quality_observability_response"]
+
+
+def _render_etl_quality_observability(api_client, list_response) -> None:
+    """Compare one supplier's latest batch with the previous one, and show why."""
+    st.subheader("ETL 품질 관찰")
+    st.caption(
+        "같은 공급사의 최신 배치를 직전 배치와 비교해 Reject 비율 변화와 주요 오류 "
+        "코드를 보여 줍니다."
+    )
+
+    items = (
+        list_response.get("items") or [] if isinstance(list_response, dict) else []
+    )
+    profile_options = build_etl_quality_observability_profile_options(
+        items,
+        selected=st.session_state.get("etl_quality_observability_selected_profile"),
+    )
+    if not profile_options:
+        st.info(ETL_QUALITY_OBSERVABILITY_NO_PROFILE_MESSAGE)
+        return
+
+    st.caption(ETL_QUALITY_OBSERVABILITY_PROFILE_CAPTION)
+    st.selectbox(
+        "관찰할 공급사",
+        options=[None, *profile_options],
+        format_func=lambda profile_name: (
+            "공급사를 선택하세요." if profile_name is None else profile_name
+        ),
+        key="etl_quality_observability_selected_profile",
+        on_change=_on_etl_quality_observability_profile_change,
+        args=(st.session_state,),
+    )
+
+    response = _fetch_etl_quality_observability(api_client, st.session_state)
+    if response is None:
+        error = st.session_state.get("etl_quality_observability_error")
+        if error is not None:
+            st.error(
+                build_etl_api_error_display_message(
+                    ETL_QUALITY_OBSERVABILITY_ERROR_MESSAGE,
+                    error,
+                )
+            )
+        else:
+            st.info(ETL_QUALITY_OBSERVABILITY_SELECT_PROFILE_MESSAGE)
+        return
+
+    notice = build_etl_quality_observability_notice(response)
+    if response.get("batch_count") == 0:
+        st.info(notice or ETL_QUALITY_OBSERVABILITY_NO_BATCH_MESSAGE)
+        return
+
+    metric_columns = st.columns(4)
+    metric_columns[0].metric(
+        "최신 Reject 비율",
+        format_etl_batch_rejection_rate(response.get("latest_batch")),
+        border=True,
+    )
+    metric_columns[1].metric(
+        "직전 Reject 비율",
+        format_etl_batch_rejection_rate(response.get("previous_batch")),
+        border=True,
+    )
+    metric_columns[2].metric(
+        "변화량",
+        format_etl_rejection_rate_delta(response.get("rejection_rate_delta")),
+        border=True,
+    )
+    metric_columns[3].metric(
+        "방향",
+        format_etl_quality_direction(response.get("direction")),
+        border=True,
+    )
+
+    direction = response.get("direction")
+    if direction == "improved":
+        st.success("Reject 비율이 직전 배치보다 낮아졌습니다.")
+    elif direction == "worsened":
+        # 비율이 올랐다는 관찰 결과일 뿐입니다. 장애 판정이나 자동 조치는 하지 않습니다.
+        st.warning("Reject 비율이 직전 배치보다 높아졌습니다.")
+    elif direction == "unchanged":
+        st.info("Reject 비율이 직전 배치와 같습니다.")
+    if notice is not None:
+        st.info(notice)
+
+    st.markdown("#### 주요 오류 코드")
+    error_codes = response.get("error_codes") or []
+    if not error_codes:
+        st.info(ETL_QUALITY_OBSERVABILITY_NO_ERROR_MESSAGE)
+    else:
+        st.dataframe(
+            build_etl_quality_error_code_dataframe(error_codes),
+            width="stretch",
+            hide_index=True,
+        )
+
+    recent_batches = response.get("recent_batches") or []
+    if recent_batches:
+        st.markdown("#### 관찰한 배치")
+        st.caption(
+            f"품질 정보가 있는 최근 {len(recent_batches)}개 배치입니다. "
+            "오래된 배치부터 표시합니다."
+        )
+        st.dataframe(
+            build_etl_quality_recent_batch_dataframe(recent_batches),
+            width="stretch",
+            hide_index=True,
+        )
 
 
 def _fetch_etl_load_detail(api_client, session_state) -> dict[str, Any] | None:
@@ -2555,6 +2862,8 @@ def render_etl_load_history(api_client=None) -> None:
         if error is not None:
             _render_etl_error(error)
         return
+
+    _render_etl_quality_observability(api_client, response)
 
     items = response.get("items") or []
     if not items:

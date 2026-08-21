@@ -20,7 +20,20 @@ from ui.etl_load_history import (
     build_etl_error_counts_dataframe,
     build_etl_rejection_dataframe,
     format_etl_quality_rate,
+    ETL_QUALITY_OBSERVABILITY_ERROR_COLUMNS,
+    ETL_QUALITY_OBSERVABILITY_NO_BATCH_MESSAGE,
+    ETL_QUALITY_OBSERVABILITY_NO_ERROR_MESSAGE,
+    ETL_QUALITY_OBSERVABILITY_SINGLE_BATCH_MESSAGE,
+    build_etl_quality_error_code_dataframe,
+    build_etl_quality_observability_notice,
+    build_etl_quality_observability_profile_options,
+    build_etl_quality_recent_batch_dataframe,
+    format_etl_batch_rejection_rate,
+    format_etl_quality_direction,
+    format_etl_rejection_rate_delta,
+    invalidate_etl_quality_observability,
 )
+from conftest import build_authenticated_app_test
 
 
 def make_load(run_id=12):
@@ -53,6 +66,77 @@ def make_product():
         "description": None,
         "seller": None,
         "created_at": "2026-07-25T12:00:00Z",
+    }
+
+
+def make_quality_observability_batch(
+    run_id=12,
+    created_at="2026-08-20T12:00:00Z",
+    total_rows=100,
+    rejected_rows=9,
+    rejection_rate=9.0,
+):
+    return {
+        "etl_load_run_id": run_id,
+        "created_at": created_at,
+        "total_rows": total_rows,
+        "loaded_rows": total_rows - rejected_rows,
+        "rejected_rows": rejected_rows,
+        "rejection_rate": rejection_rate,
+    }
+
+
+def make_quality_observability(
+    *,
+    profile_name="sample_fashion_vendor",
+    batches=None,
+    error_codes=None,
+):
+    """Default payload: 4% -> 9% (worsened, +5.00%p) for one supplier."""
+    if batches is None:
+        batches = [
+            make_quality_observability_batch(
+                run_id=11,
+                created_at="2026-08-19T12:00:00Z",
+                rejected_rows=4,
+                rejection_rate=4.0,
+            ),
+            make_quality_observability_batch(),
+        ]
+    latest = batches[-1] if batches else None
+    previous = batches[-2] if len(batches) >= 2 else None
+    if previous is None:
+        delta, direction = None, "no_baseline"
+    else:
+        delta = round(latest["rejection_rate"] - previous["rejection_rate"], 2)
+        direction = (
+            "worsened" if delta > 0 else "improved" if delta < 0 else "unchanged"
+        )
+    return {
+        "profile_name": profile_name,
+        "limit": 10,
+        "batch_count": len(batches),
+        "latest_batch": latest,
+        "previous_batch": previous,
+        "rejection_rate_delta": delta,
+        "direction": direction,
+        "error_codes": (
+            [
+                {
+                    "error_code": "INVALID_PRICE",
+                    "total_count": 8,
+                    "affected_batch_count": 2,
+                },
+                {
+                    "error_code": "MISSING_CATEGORY",
+                    "total_count": 3,
+                    "affected_batch_count": 1,
+                },
+            ]
+            if error_codes is None
+            else error_codes
+        ),
+        "recent_batches": batches,
     }
 
 
@@ -489,6 +573,8 @@ class FakeEtlApiClient:
         quality_summary=None,
         quality_trend=None,
         quality_trend_error=None,
+        observability_response=None,
+        observability_error=None,
         reconciliation_response=None,
         reconciliation_error=None,
     ):
@@ -508,6 +594,7 @@ class FakeEtlApiClient:
         self.unknown_size_token_calls = []
         self.quality_summary_calls = []
         self.quality_trend_calls = []
+        self.observability_calls = []
         self.etl_profiles = (
             [
                 {"id": "sample_fashion_vendor_v1", "display_name": "패션 공급사 샘플"},
@@ -583,6 +670,12 @@ class FakeEtlApiClient:
             else quality_trend
         )
         self.quality_trend_error = quality_trend_error
+        self.observability_response = (
+            make_quality_observability()
+            if observability_response is None
+            else observability_response
+        )
+        self.observability_error = observability_error
         self.detail_error = detail_error
         self.list_items = [make_load()] if list_items is None else list_items
         self.list_pages = list_pages
@@ -686,6 +779,14 @@ class FakeEtlApiClient:
         if self.quality_trend_error is not None:
             raise self.quality_trend_error
         return {"items": self.quality_trend}
+
+    def get_etl_quality_observability(self, *, profile_name, limit=10):
+        self.observability_calls.append(
+            {"profile_name": profile_name, "limit": limit}
+        )
+        if self.observability_error is not None:
+            raise self.observability_error
+        return self.observability_response
 
     def list_inspections(self, **params):
         return {
@@ -1985,3 +2086,393 @@ def test_submit_etl_web_run_failure_stores_error_and_leaves_history_cache_alone(
     assert isinstance(state["etl_web_run_error"], ETLUnsupportedProfileError)
     assert state["etl_load_list_response"] == {"items": [], "total": 0}
     assert state["etl_load_initialized"] is True
+
+
+# ---- ETL 품질 관찰: 순수 helper 단위 테스트 --------------------------------
+
+
+def test_format_etl_quality_direction_maps_every_api_value_to_korean():
+    assert format_etl_quality_direction("improved") == "개선"
+    assert format_etl_quality_direction("unchanged") == "동일"
+    assert format_etl_quality_direction("worsened") == "악화"
+    assert format_etl_quality_direction("no_baseline") == "비교 데이터 없음"
+    # API 계약에 없는 값이 들어와도 화면이 깨지지 않아야 합니다.
+    assert format_etl_quality_direction("degraded") == "알 수 없음"
+    assert format_etl_quality_direction(None) == "알 수 없음"
+
+
+def test_format_etl_rejection_rate_delta_uses_percentage_points():
+    # 4% -> 9%는 "125% 증가"가 아니라 +5.00%p입니다.
+    assert format_etl_rejection_rate_delta(5.0) == "+5.00%p"
+    assert format_etl_rejection_rate_delta(-2.3) == "-2.30%p"
+    assert format_etl_rejection_rate_delta(0.0) == "0.00%p"
+
+
+def test_format_etl_rejection_rate_delta_shows_dash_without_baseline():
+    assert format_etl_rejection_rate_delta(None) == "—"
+    assert format_etl_rejection_rate_delta("5.0") == "—"
+    assert format_etl_rejection_rate_delta(True) == "—"
+
+
+def test_format_etl_batch_rejection_rate_handles_missing_batch():
+    assert format_etl_batch_rejection_rate(make_quality_observability_batch()) == "9.00%"
+    assert format_etl_batch_rejection_rate(None) == "—"
+    assert format_etl_batch_rejection_rate({"rejection_rate": None}) == "—"
+
+
+def test_build_etl_quality_error_code_dataframe_keeps_the_api_order():
+    error_codes = [
+        {"error_code": "INVALID_PRICE", "total_count": 8, "affected_batch_count": 2},
+        {"error_code": "AAA_TIE", "total_count": 3, "affected_batch_count": 1},
+        {"error_code": "MISSING_CATEGORY", "total_count": 3, "affected_batch_count": 2},
+    ]
+
+    dataframe = build_etl_quality_error_code_dataframe(error_codes)
+
+    assert list(dataframe.columns) == ETL_QUALITY_OBSERVABILITY_ERROR_COLUMNS
+    # API가 이미 total_count DESC, error_code ASC로 보내므로 다시 정렬하지 않습니다.
+    assert list(dataframe["오류 코드"]) == [
+        "INVALID_PRICE",
+        "AAA_TIE",
+        "MISSING_CATEGORY",
+    ]
+    assert list(dataframe["발생 건수"]) == [8, 3, 3]
+    assert list(dataframe["발생 배치 수"]) == [2, 1, 2]
+
+
+def test_build_etl_quality_error_code_dataframe_returns_empty_frame():
+    for empty in ([], None):
+        dataframe = build_etl_quality_error_code_dataframe(empty)
+        assert list(dataframe.columns) == ETL_QUALITY_OBSERVABILITY_ERROR_COLUMNS
+        assert dataframe.empty
+
+
+def test_build_etl_quality_recent_batch_dataframe_formats_rows():
+    dataframe = build_etl_quality_recent_batch_dataframe(
+        make_quality_observability()["recent_batches"]
+    )
+
+    assert list(dataframe["적재 배치 ID"]) == [11, 12]
+    assert list(dataframe["Reject 비율"]) == ["4.00%", "9.00%"]
+    assert list(dataframe["적재 시간"]) == [
+        "2026-08-19 12:00:00",
+        "2026-08-20 12:00:00",
+    ]
+    assert build_etl_quality_recent_batch_dataframe([]).empty
+
+
+def test_build_etl_quality_observability_notice_separates_zero_and_one_batch():
+    empty = make_quality_observability(batches=[])
+    assert (
+        build_etl_quality_observability_notice(empty)
+        == ETL_QUALITY_OBSERVABILITY_NO_BATCH_MESSAGE
+    )
+
+    single = make_quality_observability(
+        batches=[make_quality_observability_batch()],
+        error_codes=[],
+    )
+    assert single["direction"] == "no_baseline"
+    assert (
+        build_etl_quality_observability_notice(single)
+        == ETL_QUALITY_OBSERVABILITY_SINGLE_BATCH_MESSAGE
+    )
+
+    assert build_etl_quality_observability_notice(make_quality_observability()) is None
+    assert build_etl_quality_observability_notice(None) is None
+
+
+def test_build_etl_quality_observability_profile_options_uses_exact_names():
+    items = [
+        make_load(11) | {"profile_name": "sample_marketplace_vendor"},
+        make_load(12) | {"profile_name": "sample_fashion_vendor"},
+        make_load(13) | {"profile_name": "sample_fashion_vendor"},
+        make_load(14) | {"profile_name": "  "},
+        {"etl_load_run_id": 15},
+    ]
+
+    assert build_etl_quality_observability_profile_options(items) == [
+        "sample_fashion_vendor",
+        "sample_marketplace_vendor",
+    ]
+    assert build_etl_quality_observability_profile_options([]) == []
+
+
+def test_build_etl_quality_observability_profile_options_keeps_current_selection():
+    # 페이지를 넘겨 해당 배치가 목록에서 사라져도 선택이 조용히 풀리면 안 됩니다.
+    options = build_etl_quality_observability_profile_options(
+        [make_load(12) | {"profile_name": "sample_fashion_vendor"}],
+        selected="sample_marketplace_vendor",
+    )
+
+    assert options == ["sample_fashion_vendor", "sample_marketplace_vendor"]
+
+
+def test_invalidate_etl_quality_observability_drops_the_cached_comparison():
+    state = {
+        "etl_quality_observability_initialized": True,
+        "etl_quality_observability_response": make_quality_observability(),
+        "etl_quality_observability_error": ValueError("boom"),
+    }
+
+    invalidate_etl_quality_observability(state)
+
+    assert state == {
+        "etl_quality_observability_initialized": False,
+        "etl_quality_observability_response": None,
+        "etl_quality_observability_error": None,
+    }
+
+
+# ---- ETL 품질 관찰: fetch/state 단위 테스트 --------------------------------
+
+
+def test_fetch_etl_quality_observability_sends_the_exact_selected_profile():
+    api_client = FakeEtlApiClient()
+    state = dict(etl_load_history.ETL_LOAD_STATE_DEFAULTS)
+    state["etl_quality_observability_selected_profile"] = "sample_fashion_vendor"
+
+    response = etl_load_history._fetch_etl_quality_observability(api_client, state)
+
+    assert api_client.observability_calls == [
+        {"profile_name": "sample_fashion_vendor", "limit": 10}
+    ]
+    assert response["direction"] == "worsened"
+    assert state["etl_quality_observability_initialized"] is True
+    assert state["etl_quality_observability_error"] is None
+
+
+def test_fetch_etl_quality_observability_skips_request_without_a_selection():
+    api_client = FakeEtlApiClient()
+    state = dict(etl_load_history.ETL_LOAD_STATE_DEFAULTS)
+
+    assert etl_load_history._fetch_etl_quality_observability(api_client, state) is None
+    # 부분 검색어가 남아 있어도 그것으로 조회하지 않습니다.
+    state["etl_load_applied_profile"] = "sample"
+    assert etl_load_history._fetch_etl_quality_observability(api_client, state) is None
+    assert api_client.observability_calls == []
+
+
+def test_fetch_etl_quality_observability_stores_api_error_without_response():
+    api_client = FakeEtlApiClient(
+        observability_error=catalogguard_api.CatalogGuardApiResponseError("invalid")
+    )
+    state = dict(etl_load_history.ETL_LOAD_STATE_DEFAULTS)
+    state["etl_quality_observability_selected_profile"] = "sample_fashion_vendor"
+
+    response = etl_load_history._fetch_etl_quality_observability(api_client, state)
+
+    assert response is None
+    assert isinstance(
+        state["etl_quality_observability_error"],
+        catalogguard_api.CatalogGuardApiResponseError,
+    )
+    # 실패한 조회를 같은 화면에서 계속 재시도하지 않습니다.
+    assert etl_load_history._fetch_etl_quality_observability(api_client, state) is None
+    assert len(api_client.observability_calls) == 1
+
+
+def test_changing_the_supplier_clears_the_previous_supplier_response():
+    api_client = FakeEtlApiClient()
+    state = dict(etl_load_history.ETL_LOAD_STATE_DEFAULTS)
+    state["etl_quality_observability_selected_profile"] = "sample_fashion_vendor"
+    etl_load_history._fetch_etl_quality_observability(api_client, state)
+
+    state["etl_quality_observability_selected_profile"] = "sample_marketplace_vendor"
+    etl_load_history._on_etl_quality_observability_profile_change(state)
+
+    # 공급사를 바꾼 직후에는 이전 공급사의 숫자가 화면에 남아 있으면 안 됩니다.
+    assert state["etl_quality_observability_response"] is None
+    api_client.observability_response = make_quality_observability(
+        profile_name="sample_marketplace_vendor"
+    )
+    etl_load_history._fetch_etl_quality_observability(api_client, state)
+    assert api_client.observability_calls == [
+        {"profile_name": "sample_fashion_vendor", "limit": 10},
+        {"profile_name": "sample_marketplace_vendor", "limit": 10},
+    ]
+
+
+# ---- ETL 품질 관찰: 화면 통합 테스트 ---------------------------------------
+
+
+def _select_observability_profile(app, profile_name):
+    return next(
+        widget
+        for widget in app.selectbox
+        if widget.key == "etl_quality_observability_selected_profile"
+    ).select(profile_name).run(timeout=10)
+
+
+def test_etl_load_history_renders_quality_observability_section(monkeypatch):
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert len(app.exception) == 0
+    assert "ETL 품질 관찰" in [subheader.value for subheader in app.subheader]
+    # 공급사를 고르기 전에는 조회하지 않습니다.
+    assert api_client.observability_calls == []
+    assert any(
+        widget.key == "etl_quality_observability_selected_profile"
+        for widget in app.selectbox
+    )
+
+
+def test_etl_load_history_observability_uses_exact_profile_not_search_text(
+    monkeypatch,
+):
+    api_client = FakeEtlApiClient(
+        list_items=[make_load(12) | {"profile_name": "sample_fashion_vendor"}]
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    next(widget for widget in app.text_input if widget.label == "공급사 프로필").set_value(
+        "sample"
+    ).run(timeout=10)
+    next(widget for widget in app.button if widget.label == "조회").click().run(timeout=10)
+    app = _select_observability_profile(app, "sample_fashion_vendor")
+
+    assert len(app.exception) == 0
+    # 부분 검색어 "sample"이 아니라 적재 이력의 정확한 profile_name을 보냅니다.
+    assert api_client.observability_calls == [
+        {"profile_name": "sample_fashion_vendor", "limit": 10}
+    ]
+    assert "sample" not in [
+        call["profile_name"] for call in api_client.observability_calls
+    ]
+
+
+def test_etl_load_history_shows_comparison_metrics_and_error_codes(monkeypatch):
+    api_client = FakeEtlApiClient(
+        list_items=[make_load(12) | {"profile_name": "sample_fashion_vendor"}]
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    app = _select_observability_profile(app, "sample_fashion_vendor")
+
+    assert len(app.exception) == 0
+    metrics = {metric.label: metric.value for metric in app.metric}
+    assert metrics["최신 Reject 비율"] == "9.00%"
+    assert metrics["직전 Reject 비율"] == "4.00%"
+    assert metrics["변화량"] == "+5.00%p"
+    assert metrics["방향"] == "악화"
+    assert "Reject 비율이 직전 배치보다 높아졌습니다." in [
+        warning.value for warning in app.warning
+    ]
+    assert any(
+        list(dataframe.value.columns) == ETL_QUALITY_OBSERVABILITY_ERROR_COLUMNS
+        for dataframe in app.dataframe
+    )
+
+
+def test_etl_load_history_shows_improved_direction_as_success(monkeypatch):
+    improved = make_quality_observability(
+        batches=[
+            make_quality_observability_batch(
+                run_id=11,
+                created_at="2026-08-19T12:00:00Z",
+                rejected_rows=9,
+                rejection_rate=9.0,
+            ),
+            make_quality_observability_batch(
+                run_id=12,
+                rejected_rows=4,
+                rejection_rate=4.0,
+            ),
+        ]
+    )
+    api_client = FakeEtlApiClient(
+        list_items=[make_load(12) | {"profile_name": "sample_fashion_vendor"}],
+        observability_response=improved,
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    app = _select_observability_profile(app, "sample_fashion_vendor")
+
+    assert len(app.exception) == 0
+    metrics = {metric.label: metric.value for metric in app.metric}
+    assert metrics["변화량"] == "-5.00%p"
+    assert metrics["방향"] == "개선"
+    assert "Reject 비율이 직전 배치보다 낮아졌습니다." in [
+        success.value for success in app.success
+    ]
+
+
+def test_etl_load_history_shows_single_batch_no_baseline_notice(monkeypatch):
+    api_client = FakeEtlApiClient(
+        list_items=[make_load(12) | {"profile_name": "sample_fashion_vendor"}],
+        observability_response=make_quality_observability(
+            batches=[make_quality_observability_batch()],
+            error_codes=[],
+        ),
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    app = _select_observability_profile(app, "sample_fashion_vendor")
+
+    assert len(app.exception) == 0
+    infos = [info.value for info in app.info]
+    metrics = {metric.label: metric.value for metric in app.metric}
+    assert metrics["직전 Reject 비율"] == "—"
+    assert metrics["변화량"] == "—"
+    assert metrics["방향"] == "비교 데이터 없음"
+    assert ETL_QUALITY_OBSERVABILITY_SINGLE_BATCH_MESSAGE in infos
+    assert ETL_QUALITY_OBSERVABILITY_NO_BATCH_MESSAGE not in infos
+    assert ETL_QUALITY_OBSERVABILITY_NO_ERROR_MESSAGE in infos
+
+
+def test_etl_load_history_shows_zero_batch_notice_without_metrics(monkeypatch):
+    api_client = FakeEtlApiClient(
+        list_items=[make_load(12) | {"profile_name": "sample_fashion_vendor"}],
+        observability_response=make_quality_observability(batches=[], error_codes=[]),
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    app = _select_observability_profile(app, "sample_fashion_vendor")
+
+    assert len(app.exception) == 0
+    infos = [info.value for info in app.info]
+    assert ETL_QUALITY_OBSERVABILITY_NO_BATCH_MESSAGE in infos
+    assert ETL_QUALITY_OBSERVABILITY_SINGLE_BATCH_MESSAGE not in infos
+    assert "최신 Reject 비율" not in {metric.label for metric in app.metric}
+
+
+def test_etl_load_history_shows_observability_api_error(monkeypatch):
+    api_client = FakeEtlApiClient(
+        list_items=[make_load(12) | {"profile_name": "sample_fashion_vendor"}],
+        observability_error=catalogguard_api.CatalogGuardApiResponseError("invalid"),
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    app = _select_observability_profile(app, "sample_fashion_vendor")
+
+    assert len(app.exception) == 0
+    assert "ETL 품질 관찰 정보를 불러오지 못했습니다." in [
+        error.value for error in app.error
+    ]
+
+
+def test_etl_load_history_observability_is_readable_by_viewer_and_operator(monkeypatch):
+    for role in ("viewer", "operator"):
+        api_client = FakeEtlApiClient(
+            list_items=[make_load(12) | {"profile_name": "sample_fashion_vendor"}]
+        )
+        _patch_etl_api_client(monkeypatch, api_client)
+
+        app = build_authenticated_app_test("app.py", role=role).run(timeout=10)
+        app = _select_observability_profile(app, "sample_fashion_vendor")
+
+        assert len(app.exception) == 0
+        assert "ETL 품질 관찰" in [subheader.value for subheader in app.subheader]
+        assert {metric.label for metric in app.metric} >= {"방향", "변화량"}
+        assert api_client.observability_calls == [
+            {"profile_name": "sample_fashion_vendor", "limit": 10}
+        ]

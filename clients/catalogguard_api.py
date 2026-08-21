@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone
 import re
 from typing import Any
 from urllib.parse import quote
@@ -527,12 +527,46 @@ def _validate_etl_quality_observability_error_code(item: object) -> bool:
     )
 
 
+def _parse_etl_created_at(value: object) -> datetime | None:
+    """Parse an API created_at string, or return None when it is not usable."""
+    if not isinstance(value, str):
+        return None
+    # API는 UTC를 'Z'로 끝내는데, fromisoformat은 이 표기를 오래된 Python에서 읽지 못합니다.
+    normalized = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    # naive와 aware datetime을 그대로 비교하면 TypeError가 나므로 시간대를 채워 둡니다.
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _is_etl_quality_batches_in_chronological_order(
+    recent_batches: list[dict[str, Any]],
+) -> bool:
+    """Check the server contract that recent_batches runs oldest -> newest.
+
+    서버 service는 created_at ASC, 같은 시각이면 id ASC로 정렬해서 보냅니다. 순서가
+    뒤집힌 응답을 그대로 그리면 "직전"과 "최신"이 바뀐 화면이 되므로 여기서 막습니다.
+    """
+    sort_keys = []
+    for item in recent_batches:
+        created_at = _parse_etl_created_at(item["created_at"])
+        if created_at is None:
+            return False
+        sort_keys.append((created_at, item["etl_load_run_id"]))
+    return all(
+        earlier < later for earlier, later in zip(sort_keys, sort_keys[1:])
+    )
+
+
 def _validate_etl_quality_observability_response(data: dict[str, Any]) -> None:
     """Reject observability payloads whose numbers contradict each other.
 
     서버 응답을 그대로 믿으면 direction과 delta가 서로 반대인 화면을 그리게 됩니다.
     여기서는 필드 타입뿐 아니라 값들 사이의 일관성(비교 대상 유무, 방향과 부호,
-    배치 수와 목록 길이)까지 확인합니다.
+    배치 수와 목록 길이, 그리고 latest/previous가 실제로 recent_batches의 마지막 두
+    배치인지)까지 확인합니다.
     """
     if any(key not in data for key in ETL_QUALITY_OBSERVABILITY_RESPONSE_KEYS):
         raise _invalid_etl_response()
@@ -585,6 +619,15 @@ def _validate_etl_quality_observability_response(data: dict[str, Any]) -> None:
     if (latest_batch is None) != (batch_count == 0):
         raise _invalid_etl_response()
     if any(item["affected_batch_count"] > batch_count for item in error_codes):
+        raise _invalid_etl_response()
+    if not _is_etl_quality_batches_in_chronological_order(recent_batches):
+        raise _invalid_etl_response()
+
+    # latest/previous는 recent_batches와 다른 출처가 아니라 그 목록의 마지막 두 배치입니다.
+    # 값이 어긋나면 요약 지표와 아래 목록이 서로 다른 배치를 가리키게 됩니다.
+    if latest_batch != (recent_batches[-1] if batch_count >= 1 else None):
+        raise _invalid_etl_response()
+    if previous_batch != (recent_batches[-2] if batch_count >= 2 else None):
         raise _invalid_etl_response()
 
     if previous_batch is None:
