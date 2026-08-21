@@ -72,6 +72,8 @@ ETL_QUALITY_OBSERVABILITY_ERROR_CODE_KEYS = (
 ETL_QUALITY_OBSERVABILITY_DIRECTIONS = frozenset(
     {"improved", "unchanged", "worsened", "no_baseline"}
 )
+ETL_QUALITY_OBSERVABILITY_PROFILE_LIST_KEYS = ("items",)
+ETL_QUALITY_OBSERVABILITY_PROFILE_KEYS = ("profile_name",)
 ETL_QUALITY_OBSERVABILITY_MIN_LIMIT = 1
 ETL_QUALITY_OBSERVABILITY_MAX_LIMIT = 50
 ETL_LOAD_ITEM_KEYS = (
@@ -508,6 +510,38 @@ def _validate_etl_load_quality_trend_item(item: object) -> bool:
         rejected_rows=item["rejected_rows"],
         error_counts=None,
     )
+
+
+def _validate_etl_quality_observability_profile_list_response(
+    data: dict[str, Any],
+) -> None:
+    """Reject a supplier list that is not a deduplicated, ascending set of names.
+
+    이 목록은 그대로 selectbox가 되고, 고른 값이 비교 조회의 정확 일치 입력이 됩니다.
+    중복이 있으면 같은 공급사가 두 번 보이고, 정렬이 깨지면 화면마다 순서가 달라지므로
+    서버 계약을 여기서 확인합니다.
+    """
+    items = data.get("items")
+    if any(
+        key not in data for key in ETL_QUALITY_OBSERVABILITY_PROFILE_LIST_KEYS
+    ) or not isinstance(items, list):
+        raise _invalid_etl_response()
+
+    profile_names: list[str] = []
+    for item in items:
+        if not isinstance(item, dict) or any(
+            key not in item for key in ETL_QUALITY_OBSERVABILITY_PROFILE_KEYS
+        ):
+            raise _invalid_etl_response()
+        profile_name = item["profile_name"]
+        if not isinstance(profile_name, str) or not profile_name.strip():
+            raise _invalid_etl_response()
+        profile_names.append(profile_name)
+
+    if len(set(profile_names)) != len(profile_names):
+        raise _invalid_etl_response()
+    if profile_names != sorted(profile_names):
+        raise _invalid_etl_response()
 
 
 def _validate_etl_quality_observability_error_code(item: object) -> bool:
@@ -1717,6 +1751,16 @@ class CatalogGuardApiClient:
             params=params,
         )
         _validate_etl_load_quality_trend_response(data)
+        return data
+
+    def get_etl_quality_observability_profiles(self) -> dict[str, Any]:
+        """List suppliers that have quality data to compare.
+
+        후보는 ETL Profile Registry가 아니라 실제 적재 이력에서 옵니다. registry에서
+        내려간 과거 공급사라도 품질 정보가 있는 배치가 남아 있으면 비교할 수 있습니다.
+        """
+        data = self._get_json("/api/v1/etl-loads/quality-observability/profiles")
+        _validate_etl_quality_observability_profile_list_response(data)
         return data
 
     def get_etl_quality_observability(

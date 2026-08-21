@@ -63,6 +63,18 @@ class ETLQualityErrorCodeCount:
 
 
 @dataclass(frozen=True)
+class ETLQualityObservabilityProfile:
+    # ETLLoadRun에 기록된 원본 profile_name 그대로입니다. 이 값이 그대로 비교 조회의
+    # 정확 일치 입력이 되므로 strip이나 lower로 identity를 바꾸지 않습니다.
+    profile_name: str
+
+
+@dataclass(frozen=True)
+class ETLQualityObservabilityProfileList:
+    items: list[ETLQualityObservabilityProfile]
+
+
+@dataclass(frozen=True)
 class ETLQualityObservability:
     profile_name: str
     limit: int
@@ -171,4 +183,34 @@ def get_etl_quality_observability(
         direction=_resolve_direction(latest, previous),
         error_codes=_aggregate_error_codes(newest_first),
         recent_batches=list(reversed(items)),
+    )
+
+
+def list_etl_quality_observability_profiles(
+    session: Session,
+) -> ETLQualityObservabilityProfileList:
+    """List the supplier profiles that this comparison can actually be run for.
+
+    후보 근거는 ETL Profile Registry가 아니라 ETLLoadRun 이력입니다. registry에서
+    사라진 과거 공급사라도 quality-available 배치가 남아 있으면 비교할 수 있고,
+    반대로 registry에 있어도 품질 정보가 있는 배치가 없으면 비교할 것이 없습니다.
+
+    그래서 get_etl_quality_observability()와 같은 quality_available_condition()을
+    씁니다. 두 조회가 다른 기준을 쓰면 목록에 보이는데 고르면 빈 결과가 나오는
+    공급사가 생깁니다.
+
+    DISTINCT와 정렬은 DB가 합니다. 모든 ETLLoadRun을 읽어 Python에서 set으로 줄이면
+    배치가 늘어날수록 필요 없는 행을 전부 전송하게 됩니다.
+    """
+    statement = (
+        select(ETLLoadRun.profile_name)
+        .where(quality_available_condition())
+        .distinct()
+        .order_by(ETLLoadRun.profile_name.asc())
+    )
+    return ETLQualityObservabilityProfileList(
+        items=[
+            ETLQualityObservabilityProfile(profile_name=profile_name)
+            for profile_name in session.scalars(statement).all()
+        ]
     )

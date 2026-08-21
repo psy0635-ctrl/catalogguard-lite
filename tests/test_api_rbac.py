@@ -162,6 +162,15 @@ def test_no_token_returns_401_on_etl_quality_observability_before_database(
     assert reject_route_database_dependency() == 0
 
 
+def test_no_token_returns_401_on_etl_quality_observability_profiles_before_database(
+    reject_route_database_dependency,
+):
+    response = client.get("/api/v1/etl-loads/quality-observability/profiles")
+
+    assert response.status_code == 401
+    assert reject_route_database_dependency() == 0
+
+
 def test_no_token_returns_401_on_etl_profile_detail_before_database(
     reject_route_database_dependency,
 ):
@@ -425,6 +434,22 @@ def test_viewer_and_operator_can_read_etl_quality_observability(request, token_f
     )
 
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize("token_fixture", ["viewer_token", "operator_token"])
+def test_viewer_and_operator_can_read_etl_quality_observability_profiles(
+    request,
+    token_fixture,
+):
+    token = request.getfixturevalue(token_fixture)
+
+    response = client.get(
+        "/api/v1/etl-loads/quality-observability/profiles",
+        headers=_auth_headers(token),
+    )
+
+    assert response.status_code == 200
+    assert isinstance(response.json()["items"], list)
 
 
 def test_viewer_token_can_read_etl_profiles(viewer_token):

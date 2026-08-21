@@ -1287,6 +1287,75 @@ def test_get_etl_load_quality_trend_rejects_missing_item_field():
         client.get_etl_load_quality_trend()
 
 
+ETL_QUALITY_OBSERVABILITY_PROFILES_RESPONSE = {
+    "items": [
+        {"profile_name": "sample_fashion_vendor"},
+        {"profile_name": "sample_marketplace_vendor"},
+    ]
+}
+
+
+def test_get_etl_quality_observability_profiles_calls_endpoint():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_QUALITY_OBSERVABILITY_PROFILES_RESPONSE),
+    )
+
+    data = client.get_etl_quality_observability_profiles()
+
+    assert data == ETL_QUALITY_OBSERVABILITY_PROFILES_RESPONSE
+    assert session.calls == [
+        {
+            "url": (
+                "https://api.example.com"
+                "/api/v1/etl-loads/quality-observability/profiles"
+            ),
+            "params": None,
+            "timeout": 5.0,
+        }
+    ]
+
+
+def test_get_etl_quality_observability_profiles_accepts_empty_items():
+    client, _ = make_client(response=FakeResponse(payload={"items": []}))
+
+    assert client.get_etl_quality_observability_profiles() == {"items": []}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # profile_name이 비어 있으면 정확 일치 비교 조회에 넣을 수 없습니다.
+        {"items": [{"profile_name": ""}]},
+        {"items": [{"profile_name": "   "}]},
+        {"items": [{"profile_name": None}]},
+        # 같은 공급사가 두 번 보이면 선택 목록이 망가집니다.
+        {
+            "items": [
+                {"profile_name": "sample_fashion_vendor"},
+                {"profile_name": "sample_fashion_vendor"},
+            ]
+        },
+        # 서버 계약은 profile_name ASC입니다.
+        {
+            "items": [
+                {"profile_name": "sample_marketplace_vendor"},
+                {"profile_name": "sample_fashion_vendor"},
+            ]
+        },
+        {"items": {}},
+        {"items": None},
+        {"items": ["sample_fashion_vendor"]},
+        {"items": [{"name": "sample_fashion_vendor"}]},
+        {},
+    ],
+)
+def test_get_etl_quality_observability_profiles_rejects_broken_payload(payload):
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_quality_observability_profiles()
+
+
 def test_get_etl_quality_observability_calls_endpoint_with_trimmed_profile():
     client, session = make_client(
         response=FakeResponse(payload=ETL_QUALITY_OBSERVABILITY_RESPONSE),
