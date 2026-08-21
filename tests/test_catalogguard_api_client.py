@@ -1398,6 +1398,169 @@ def test_get_etl_quality_observability_rejects_inconsistent_server_response(chan
         client.get_etl_quality_observability(profile_name="sample_fashion_vendor")
 
 
+def _observability_batch(**overrides):
+    values = {
+        "etl_load_run_id": 20,
+        "created_at": "2026-08-21T12:00:00Z",
+        "total_rows": 100,
+        "loaded_rows": 99,
+        "rejected_rows": 1,
+        "rejection_rate": 1.0,
+    }
+    values.update(overrides)
+    return values
+
+
+def test_get_etl_quality_observability_rejects_latest_batch_not_matching_last_item():
+    # 요약 지표와 아래 목록이 서로 다른 배치를 가리키면 화면 전체가 거짓말이 됩니다.
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={
+                **ETL_QUALITY_OBSERVABILITY_RESPONSE,
+                "latest_batch": _observability_batch(
+                    etl_load_run_id=99,
+                    rejected_rows=9,
+                    loaded_rows=91,
+                    rejection_rate=9.0,
+                ),
+            }
+        )
+    )
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_quality_observability(profile_name="sample_fashion_vendor")
+
+
+def test_get_etl_quality_observability_rejects_previous_batch_not_matching_second_last():
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={
+                **ETL_QUALITY_OBSERVABILITY_RESPONSE,
+                "previous_batch": _observability_batch(
+                    etl_load_run_id=98,
+                    rejected_rows=4,
+                    loaded_rows=96,
+                    rejection_rate=4.0,
+                ),
+            }
+        )
+    )
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_quality_observability(profile_name="sample_fashion_vendor")
+
+
+def test_get_etl_quality_observability_accepts_single_batch_matching_latest():
+    only_batch = _observability_batch()
+    payload = {
+        "profile_name": "sample_fashion_vendor",
+        "limit": 10,
+        "batch_count": 1,
+        "latest_batch": dict(only_batch),
+        "previous_batch": None,
+        "rejection_rate_delta": None,
+        "direction": "no_baseline",
+        "error_codes": [],
+        "recent_batches": [dict(only_batch)],
+    }
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    data = client.get_etl_quality_observability(profile_name="sample_fashion_vendor")
+
+    assert data["batch_count"] == 1
+    assert data["latest_batch"] == data["recent_batches"][-1]
+    assert data["previous_batch"] is None
+
+
+def test_get_etl_quality_observability_rejects_single_batch_with_a_previous_batch():
+    only_batch = _observability_batch()
+    payload = {
+        "profile_name": "sample_fashion_vendor",
+        "limit": 10,
+        "batch_count": 1,
+        "latest_batch": dict(only_batch),
+        # 목록에 배치가 하나뿐인데 비교 대상이 따로 있다고 주장하는 응답입니다.
+        "previous_batch": _observability_batch(etl_load_run_id=19, rejection_rate=0.5),
+        "rejection_rate_delta": 0.5,
+        "direction": "worsened",
+        "error_codes": [],
+        "recent_batches": [dict(only_batch)],
+    }
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_quality_observability(profile_name="sample_fashion_vendor")
+
+
+def test_get_etl_quality_observability_rejects_batches_not_in_chronological_order():
+    # 서버는 과거 -> 최신 순서로 보냅니다. 뒤집힌 목록은 "직전"과 "최신"이 바뀐 화면이 됩니다.
+    reversed_batches = list(
+        reversed(ETL_QUALITY_OBSERVABILITY_RESPONSE["recent_batches"])
+    )
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={
+                **ETL_QUALITY_OBSERVABILITY_RESPONSE,
+                "recent_batches": reversed_batches,
+                "latest_batch": reversed_batches[-1],
+                "previous_batch": reversed_batches[-2],
+                "rejection_rate_delta": -5.0,
+                "direction": "improved",
+            }
+        )
+    )
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_quality_observability(profile_name="sample_fashion_vendor")
+
+
+def test_get_etl_quality_observability_rejects_same_timestamp_batches_out_of_id_order():
+    same_moment = "2026-08-21T12:00:00Z"
+    newer = _observability_batch(
+        etl_load_run_id=30,
+        created_at=same_moment,
+        rejected_rows=9,
+        loaded_rows=91,
+        rejection_rate=9.0,
+    )
+    older = _observability_batch(
+        etl_load_run_id=29,
+        created_at=same_moment,
+        rejected_rows=4,
+        loaded_rows=96,
+        rejection_rate=4.0,
+    )
+    payload = {
+        "profile_name": "sample_fashion_vendor",
+        "limit": 10,
+        "batch_count": 2,
+        # created_at이 같으면 id 오름차순이어야 하는데 뒤집혀 있습니다.
+        "recent_batches": [newer, older],
+        "latest_batch": older,
+        "previous_batch": newer,
+        "rejection_rate_delta": -5.0,
+        "direction": "improved",
+        "error_codes": [],
+    }
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_quality_observability(profile_name="sample_fashion_vendor")
+
+
+def test_get_etl_quality_observability_rejects_unparsable_created_at():
+    broken = list(ETL_QUALITY_OBSERVABILITY_RESPONSE["recent_batches"])
+    broken[0] = {**broken[0], "created_at": "not-a-timestamp"}
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={**ETL_QUALITY_OBSERVABILITY_RESPONSE, "recent_batches": broken}
+        )
+    )
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_quality_observability(profile_name="sample_fashion_vendor")
+
+
 def test_get_etl_quality_observability_rejects_missing_top_level_field():
     payload = {
         key: value
