@@ -828,7 +828,7 @@ activation 조회는 SELECT라 session을 autobegin시킨다. 그 상태로 두�
 - Profile CRUD(등록·수정·삭제)가 없다
 - activation 변경 **이력**이 없다. 표는 현재 상태 한 줄만 들고 있어 "언제 누가 내렸다가 언제 올렸는가"는 남지 않는다. append-only audit이 필요해지면 별도 표가 필요하다
 - 과거 배치의 **런타임 재현**은 여전히 없다. 버전 전환이 쉬워졌을 뿐, 실행되는 코드는 언제나 현재 코드다(16.4)
-- Airflow DAG는 비활성 프로필을 `catalogguard_etl_unexpected`로 실패시킨다. `ETLProfileInactiveError`를 전용 코드로 구분하지 않은 것은 Phase 5A부터의 상태이며 이번에 바꾸지 않았다
+- ~~Airflow DAG는 비활성 프로필을 `catalogguard_etl_unexpected`로 실패시킨다~~ → 전용 코드 `etl_profile_inactive`(non-retryable)로 구분한다. 다만 DAG에는 API의 S3/HTTP route와 달리 fetch 전 사전 검사가 없어, 비활성 프로필도 HTTP 피드를 한 번 읽은 뒤 `run_web_etl()`에서 판별된다. 분류는 정확하지만 그 읽기는 낭비이며, 피드 자체가 실패하면 여전히 피드 오류 코드가 먼저 보고된다
 
 ---
 

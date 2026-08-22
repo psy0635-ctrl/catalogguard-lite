@@ -43,10 +43,13 @@ def run_configured_http_feed_to_staging(profile_id: str) -> dict[str, int | bool
         read_http_feed_csv,
     )
     from etl.pipeline import ETLPipelineError
-    from etl.profile_loader import ETLProfileNotFoundError
+    from etl.profile_loader import ETLProfileInactiveError, ETLProfileNotFoundError
     from etl.web_service import run_web_etl
 
     try:
+        # API의 S3/HTTP route와 달리 여기에는 fetch 전 활성 여부 사전 검사가 없다.
+        # 비활성 프로필은 아래 run_web_etl()의 get_profile_path()에서 걸리므로,
+        # 피드를 한 번 읽은 뒤에야 판별된다. 분류는 정확하지만 읽기는 낭비다.
         source = read_http_feed_csv()
         with get_session_factory()() as session:
             outcome = run_web_etl(
@@ -67,6 +70,17 @@ def run_configured_http_feed_to_staging(profile_id: str) -> dict[str, int | bool
         _safe_airflow_failure("http_feed_not_configured", retryable=False)
     except CsvUploadValidationError:
         _safe_airflow_failure("http_feed_csv_invalid", retryable=False)
+    except ETLProfileInactiveError:
+        # 운영자가 의도적으로 내린 프로필이다. 설정 오류(etl_profile_invalid)도,
+        # 예기치 못한 장애(catalogguard_etl_unexpected)도 아니라서 전용 코드를 준다.
+        # 두 상태는 운영자가 할 일이 다르다: 앞은 설정을 고쳐야 하고, 뒤는 사람이
+        # 다시 켜기 전까지 그대로 두는 것이 맞다. 그래서 재시도하지 않는다.
+        #
+        # ETLProfileInactiveError와 ETLProfileNotFoundError는 상속 관계가 아니라
+        # ValueError 형제다(profile_loader가 일부러 그렇게 뒀다). 따라서 이 순서
+        # 자체가 정확성을 좌우하지는 않으며, 프로필 상태를 다루는 두 분기를 붙여
+        # 두려고 여기에 놓았다.
+        _safe_airflow_failure("etl_profile_inactive", retryable=False)
     except ETLProfileNotFoundError:
         _safe_airflow_failure("etl_profile_invalid", retryable=False)
     except (ETLPipelineError, ETLLoadError):
