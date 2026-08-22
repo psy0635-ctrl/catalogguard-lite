@@ -120,6 +120,7 @@ from etl.s3_source import (
 )
 from db.etl_profile_activation_service import (
     ETLProfileVersionNotFoundError,
+    end_activation_read_transaction,
     get_etl_profile_activation,
     set_etl_profile_activation,
 )
@@ -1125,6 +1126,9 @@ def _reject_inactive_profile_before_source_fetch(
     실행이 외부를 먼저 읽고 나서야 막힙니다.
     """
     if not is_etl_profile_inactive(profile_id, session=session):
+        # 이 조회도 session을 autobegin시킵니다. 뒤따르는 run_web_etl()이 쓰기
+        # 트랜잭션을 열기 전에 끝내 둡니다.
+        end_activation_read_transaction(session)
         return
 
     # 실행을 시도하다 막힌 것이므로 업로드 경로와 같은 실패 metric을 남깁니다.

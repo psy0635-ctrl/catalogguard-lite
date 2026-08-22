@@ -21,12 +21,23 @@ class FakeSessionWithoutRuntimeOverrides:
     ETL 프로필 route는 runtime activation override가 있는지 SELECT 한 번으로 확인합니다.
     DB 없이 도는 테스트에도 그 질의에 "override 없음"으로 답해 줄 최소 객체가 필요합니다.
 
-    scalars() 외의 API는 일부러 구현하지 않습니다. 아무 호출에나 빈 결과를 돌려주면
-    실제로 DB를 써야 하는 코드가 테스트에서 조용히 통과하게 됩니다.
+    조회 뒤에는 실행 경로가 읽기 트랜잭션을 정리하므로(end_activation_read_transaction)
+    보류 중인 쓰기가 없다는 사실과 rollback()도 함께 흉내 냅니다.
+
+    그 밖의 API는 일부러 구현하지 않습니다. 아무 호출에나 빈 결과를 돌려주면 실제로
+    DB를 써야 하는 코드가 테스트에서 조용히 통과하게 됩니다.
     """
+
+    # 이 stub은 읽기만 흉내 내므로 보류 중인 쓰기가 있을 수 없습니다.
+    new: tuple = ()
+    dirty: tuple = ()
+    deleted: tuple = ()
 
     def scalars(self, statement):
         return _NoRowsScalarResult()
+
+    def rollback(self) -> None:
+        return None
 
 
 def fake_session_without_runtime_overrides():

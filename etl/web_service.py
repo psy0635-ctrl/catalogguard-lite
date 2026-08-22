@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from config.settings import ETL_INITIAL_SOURCE_TYPE_UNKNOWN
 from core.upload_validator import validate_csv_file_size, validate_csv_filename
 from db.models import ETLLoadRun
+from db.etl_profile_activation_service import end_activation_read_transaction
 from etl.db_loader import load_standard_csv
 from etl.pipeline import run_pipeline
 from etl.profile_loader import get_profile_path
@@ -56,14 +57,10 @@ def run_web_etl(
     # effective active version을 봅니다. 여기서 session을 빠뜨리면 그 경로만 배포
     # 기본값으로 실행되어 "내렸는데 계속 돈다"가 됩니다.
     profile_path = get_profile_path(profile_id, session=session)
-    # 위 조회가 session을 autobegin시킵니다. 그대로 두면 아래 load_standard_csv()의
-    # with session.begin()이 "A transaction is already begun"으로 실패합니다.
-    # 읽기 전용 조회였으므로 여기서 끝내도 잃을 것이 없고, 뒤따르는 run_pipeline()은
-    # 파일 I/O라 그동안 idle 트랜잭션을 붙들고 있을 이유도 없습니다.
-    #
-    # api/routes/inspections.py는 같은 충돌을 별도 session으로 피했지만, 여기서는
-    # 호출자(Airflow 포함)가 session 하나만 넘기므로 그 방식을 쓸 수 없습니다.
-    session.rollback()
+    # 위 조회가 autobegin시킨 읽기 트랜잭션을 끝냅니다. 그대로 두면 아래
+    # load_standard_csv()의 with session.begin()이 실패합니다. 보류 중인 쓰기가 있으면
+    # 조용히 버리지 않고 먼저 소리를 냅니다.
+    end_activation_read_transaction(session)
 
     validate_csv_filename(source_filename)
     validate_csv_file_size(input_bytes)
