@@ -483,3 +483,56 @@ def test_deactivated_profile_is_not_selectable_but_archives_stay_readable(
         assert load_profile(
             get_profile_version_path(MARKETPLACE_PROFILE_ID, version)
         ).version == version
+
+
+# ---- activation 조회가 뒤따르는 쓰기 트랜잭션을 막지 않는다 --------------------
+
+
+def test_activation_read_leaves_the_session_ready_for_a_write_transaction(
+    session_factory, clean_activations
+):
+    """조회가 autobegin시킨 트랜잭션을 정리하지 않으면 ETL 적재가 통째로 실패합니다.
+
+    load_standard_csv()가 `with session.begin()`으로 자기 트랜잭션을 열기 때문에,
+    activation 조회가 session을 붙들고 있으면 "A transaction is already begun"이 됩니다.
+    """
+    from db.etl_profile_activation_service import end_activation_read_transaction
+
+    with session_factory() as session:
+        get_profile_path(MARKETPLACE_PROFILE_ID, session=session)
+        assert session.in_transaction() is True
+
+        end_activation_read_transaction(session)
+
+        assert session.in_transaction() is False
+        # 이제 쓰기 경로가 자기 트랜잭션을 열 수 있습니다.
+        with session.begin():
+            pass
+
+
+def test_a_pending_write_is_reported_instead_of_being_silently_discarded(
+    session_factory, clean_activations
+):
+    """호출자가 쓰기를 들고 있으면 조용히 버리지 않고 소리를 냅니다.
+
+    지금은 Web/S3/HTTP/Airflow 어느 경로도 이 시점에 쓰기를 들고 있지 않지만, 나중에
+    누군가 앞에 쓰기를 추가했을 때 그것이 흔적 없이 사라지면 안 됩니다.
+    """
+    from db.etl_profile_activation_service import (
+        PendingWriteBeforeActivationReadError,
+        end_activation_read_transaction,
+    )
+
+    orphan_profile_id = f"pending_write_{uuid4().hex[:8]}"
+    with session_factory() as session:
+        session.add(
+            ETLProfileActivation(profile_id=orphan_profile_id, active_version="1")
+        )
+
+        with pytest.raises(PendingWriteBeforeActivationReadError):
+            end_activation_read_transaction(session)
+
+        # 보류 중이던 쓰기는 rollback되지 않고 그대로 남아 있습니다.
+        assert any(
+            obj.profile_id == orphan_profile_id for obj in session.new
+        )

@@ -34,6 +34,40 @@ from etl.profile_loader import (
 )
 
 
+class PendingWriteBeforeActivationReadError(RuntimeError):
+    """Raised when a caller hands over a session that already holds pending writes.
+
+    아래 end_activation_read_transaction()이 왜 필요한지와 함께 읽어야 합니다.
+    """
+
+
+def end_activation_read_transaction(session: Session) -> None:
+    """End the read-only transaction that an activation lookup autobegan.
+
+    신규 ETL 실행 경로는 activation을 확인한 뒤 곧바로 쓰기 트랜잭션을 엽니다
+    (load_standard_csv()의 `with session.begin()`). 확인 SELECT가 session을 autobegin
+    시킨 채로 두면 그 begin()이 "A transaction is already begun"으로 실패합니다.
+    조회는 읽기 전용이므로 여기서 끝내도 잃을 것이 없고, 그 사이에 끼는 run_pipeline()은
+    파일 I/O라 idle 트랜잭션을 붙들고 있을 이유도 없습니다.
+
+    그냥 rollback()만 하면 위험이 하나 생깁니다. 나중에 누군가 이 앞에 쓰기를 추가하면
+    그 쓰기가 **조용히** 사라집니다. 지금까지 같은 상황은 load_standard_csv()의 begin()이
+    InvalidRequestError로 시끄럽게 실패시켜 줬는데, rollback이 그 신호를 지웁니다.
+    그래서 rollback 전에 보류 중인 ORM 쓰기가 있으면 먼저 소리를 냅니다.
+
+    한계를 정확히 적어 둡니다. 이 검사는 ORM 단위 작업(new/dirty/deleted)만 봅니다.
+    session.execute(insert(...)) 같은 Core 쓰기는 여기서 감지되지 않고 함께 rollback
+    됩니다. 다만 그런 호출자는 원래도 허용되지 않았습니다 — load_standard_csv()가 자기
+    트랜잭션을 여는 구조라, run_web_etl()에 넘기는 session은 트랜잭션이 열려 있지 않아야
+    한다는 것이 이 함수 이전부터의 계약입니다.
+    """
+    if session.new or session.dirty or session.deleted:
+        raise PendingWriteBeforeActivationReadError(
+            "run_web_etl() requires a session without pending writes."
+        )
+    session.rollback()
+
+
 class ETLProfileVersionNotFoundError(ValueError):
     """Raised when the requested active version is not a preserved version.
 

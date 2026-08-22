@@ -2,15 +2,24 @@
 
 ## 이 문서의 목적
 
-ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**, 프로필 버전을 어떻게 다룰지 먼저 고정하기 위한 문서다. 코드를 바꾸는 문서가 아니라, 앞으로 코드를 바꿀 때 지켜야 할 규칙을 정하는 문서다.
+ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**, 프로필 버전을 어떻게 다룰지 먼저 고정하기 위해 시작한 문서다. 처음에는 정책만 정하는 설계 gate였고(Phase 2), 그 뒤 Phase 3·4·5A·5A.1·5B.1이 실제로 구현되면서 **그 정책과 구현 결과를 함께 기록하는 문서**로 자랐다.
 
 이 문서는 다음 세 가지를 **명확히 구분해서** 쓴다. 아직 없는 기능을 이미 있는 것처럼 쓰지 않는다.
 
 - `[현재 구현]` — 지금 저장소 코드에 실제로 있는 동작
-- `[정책 결정]` — 이번 단계에서 확정하는 규칙(코드 변경 없음)
+- `[정책 결정]` — 지켜야 할 규칙. 그 자체로는 코드를 규정하지 않고, 강제 장치는 별도 Phase에서 만든다
 - `[향후 구현]` — 아직 없고, 나중에 만들 때 따를 방향
 
-이번 작업에서 production code는 한 줄도 바꾸지 않았다. 변경 대상은 이 문서와 README의 최소 반영뿐이다.
+**시점 표기 규칙**: 각 Phase 절은 그 Phase 시점의 사실을 기록한다. 뒤 Phase가 그것을 바꿨으면 해당 절에 갱신 표시를 남기고, 지금 무엇이 사실인지는 가장 나중 Phase 절이 말한다. 현재 최신은 **Phase 5B.1(16장)** 이다.
+
+| Phase | 무엇이 바뀌었나 | 절 |
+| --- | --- | --- |
+| Phase 2 | 정책만 확정. production code 무변경 | 4~11장 |
+| Phase 3 | Published version guardrail (CI) | 12장 |
+| Phase 4 | 버전별 archive + active pointer | 13장 |
+| Phase 5A | 배포 기반 Activation / Deactivation | 14장 |
+| Phase 5A.1 | 클라이언트/UI의 inactive 처리 | 15장 |
+| Phase 5B.1 | Persistent Runtime Activation API | 16장 |
 
 ---
 
@@ -349,7 +358,7 @@ registry: sample_fashion_vendor_v1 -> active_version "3"
 ```
 
 - **장점**: Policy A·F·H를 구조 자체로 표현한다. 과거 버전을 애플리케이션이 읽을 수 있어 재현성이 실제로 생긴다. 파일 기반이라 git diff로 변경이 그대로 드러난다. allowlist 보안 모델(`get_profile_path()`의 경로 검증)을 그대로 유지할 수 있다.
-- **단점**: `get_profile_path()`와 registry 구조를 바꿔야 한다. 파일이 계속 늘어난다. active pointer를 코드에 두면 활성 버전 전환에 배포가 필요하다.
+- **단점**: `get_profile_path()`와 registry 구조를 바꿔야 한다. 파일이 계속 늘어난다. active pointer를 코드에 두면 활성 버전 전환에 배포가 필요하다. → 마지막 항목은 Phase 5B.1이 해소했다. archive와 registry는 그대로 두고 activation 상태만 DB로 분리해, 전환에 배포가 필요 없어졌다(16장).
 - **구현 복잡도**: 중간. DB 마이그레이션은 필요 없다.
 - **MVP 적합성**: 좋음. 현재 구조의 자연스러운 확장이다.
 - **확장성**: 좋음. 나중에 Option C로 옮길 때도 archive가 그대로 이관 대상이 된다.
@@ -430,16 +439,18 @@ Full CRUD는 로드맵의 마지막이며, 그마저도 조건부다. 프로필�
 
 ---
 
-## 11. 이번 작업이 바꾸지 않은 것
+## 11. `[Phase 2 시점]` 정책 확정 단계가 바꾸지 않은 것
 
-- production code 변경 없음: `etl/*`, `api/*`, `clients/*`, `ui/*`, `db/*`, `config/etl/*.json` 모두 그대로
-- `INSPECTION_VERSION = "13"` 유지
-- 두 샘플 프로필의 `profile_version = "2"` 유지
-- Alembic head `20260813_0013` 유지, DB 스키마·migration 변경 없음
-- 의존성·GitHub Actions workflow 변경 없음
-- `profile_version` validation 동작 변경 없음(임의 문자열 허용 상태 그대로)
+> 아래는 **Phase 2(정책 확정) 시점**의 기록이다. 이후 Phase들은 실제로 코드와 스키마를 바꿨으므로, 지금의 사실은 각 Phase 절을 봐야 한다.
 
-이 문서는 **정책을 고정하는 설계 gate**이며, 여기서 정한 규칙을 실제로 강제하는 장치는 Phase 3에서 만들었다(12장).
+- production code 변경 없음: `etl/*`, `api/*`, `clients/*`, `ui/*`, `db/*`, `config/etl/*.json` 모두 그대로 → 이후 Phase 4가 `profile_loader`와 archive 구조를, Phase 5A가 실행 차단을, Phase 5B.1이 API·DB 상태를 바꿨다
+- `INSPECTION_VERSION = "13"` 유지 → **지금도 유지된다**
+- 두 샘플 프로필의 `profile_version = "2"` 유지 → **지금도 유지된다**
+- Alembic head `20260813_0013` 유지, DB 스키마·migration 변경 없음 → Phase 5B.1이 `20260822_0014`를 추가했다(16장)
+- 의존성·GitHub Actions workflow 변경 없음 → **지금도 유지된다**
+- `profile_version` validation 동작 변경 없음(임의 문자열 허용 상태 그대로) → **지금도 유지된다**. 다만 activation API는 registry `versions`에 있는 값만 활성화할 수 있게 따로 검증한다(16.3)
+
+Phase 2는 **정책을 고정하는 설계 gate**였고, 여기서 정한 규칙을 실제로 강제하는 장치는 Phase 3에서 만들었다(12장).
 
 ---
 
@@ -561,9 +572,11 @@ Phase 3 guardrail이 이제 **archive 전체**를 검사한다. 등록된 모든
 
 **아직 보장하지 않는 것** — 현재 코드로 v1.json을 실행해도 **과거 v1 배치의 결과를 그대로 재현한다고 말할 수 없다.** v1 → v2 전환에는 JSON 밖의 코드 변경(카테고리별 필수 속성 정책)이 포함됐고, 지금 실행되는 것은 언제나 현재 코드다. `ETLLoadRun`에는 여전히 profile snapshot도, application commit SHA도, transformer 코드 버전도 저장하지 않는다(2.3, 2.5). git 이력을 함께 보면 개발자가 당시 코드를 찾을 수는 있지만, 런타임이 자동으로 재현해 주는 기능은 아니다.
 
-### 13.9 아직 없는 것
+### 13.9 `[Phase 4 시점]` 아직 없던 것
 
-Phase 4 시점에는 Activation / Deactivation이 **미구현**이었다. 이후 Phase 5A에서 비활성 상태(`active_version = None`)를 코드에 추가했다(14장). 그래도 `active_version`은 여전히 코드 registry의 값이고, 이를 **런타임에** 바꾸는 API·UI·DB 플래그는 없다. Profile CRUD도 없다.
+Phase 4 시점에는 Activation / Deactivation이 **미구현**이었다. 이후 Phase 5A에서 비활성 상태(`active_version = None`)를 코드에 추가했고(14장), Phase 5B.1에서 그 값을 **런타임에** 바꾸는 API와 DB 상태를 만들었다(16장).
+
+지금 기준으로 남아 있는 것은 Streamlit 관리 UI(Phase 5B.2)와 Profile CRUD 부재다.
 
 ---
 
@@ -745,7 +758,19 @@ Phase 5A까지 activation은 코드 상수였다. 바꾸려면 코드 수정 →
 
 **비활성 프로필도 이 GET에서는 200으로 조회된다.** 이 endpoint의 목적이 "지금 활성인가"를 묻는 것이므로, 비활성이라고 409를 내면 상태를 확인할 방법이 사라진다. 목록(`GET /api/v1/etl-profiles`)이 비활성을 숨기는 것과는 목적이 다르다.
 
-### 16.4 신규 실행 차단
+### 16.4 과거 버전을 다시 활성화한다는 것의 의미
+
+이제 `{"active_version": "1"}` 한 번으로 과거 버전으로 되돌릴 수 있다. 그래서 **무엇이 되돌아가고 무엇이 되돌아가지 않는지**를 여기서 다시 분명히 해 둔다. 13.8의 한계는 그대로이며, 전환이 쉬워진 만큼 오해하기도 쉬워졌다.
+
+**되돌아가는 것**: 그 버전의 프로필 JSON 정의. `source_columns`, `required_source_columns`, `defaults`가 archive에 보존된 그대로 쓰인다. 새 배치의 `profile_version`도 그 값으로 기록된다.
+
+**되돌아가지 않는 것**: 애플리케이션 코드. 실행되는 것은 **언제나 현재 코드**다. v1을 다시 활성화해도 "현재 코드 + v1.json"이 돌아가지, 과거 v1 배치가 돌던 런타임 전체가 재현되지는 않는다.
+
+이 차이가 실제로 문제가 되는 선례가 이미 있다. v1 → v2 전환에서 실제로 바뀐 것은 JSON이 아니라 **카테고리별 필수 속성 정책 코드**였다(`80e8ea4`, 5장). 그 코드는 지금도 v2 시점의 것이므로, v1.json을 활성화해도 그 정책은 v1 시절로 돌아가지 않는다.
+
+`ETLLoadRun`에는 여전히 profile snapshot도, application commit SHA도, transformer 코드 버전도 저장하지 않는다(2.3, 2.5). 따라서 activation API는 **"어떤 매핑 정의로 실행할지"를 고르는 기능**이지 "과거 배치를 재현하는 기능"이 아니다. 재현이 목적이라면 코드 버전까지 함께 고정해야 하고, 그것은 이 문서의 어떤 Phase도 아직 제공하지 않는다.
+
+### 16.5 신규 실행 차단
 
 Phase 5A의 `409 inactive_profile` 계약은 **그대로다.** runtime에서 내렸든 배포로 내렸든 응답은 같고, Python client의 `ETLProfileInactiveError`도 그대로 동작한다.
 
@@ -762,17 +787,29 @@ S3/HTTP는 외부를 읽기 전에 막는다는 14.3의 순서도 그대로다. 
 
 `etl.cli`는 `profile_id`가 아니라 파일 경로를 직접 받으므로 이 resolver를 지나지 않는다. 의도적이다. CLI의 `--profile`은 "이 파일로 실행하라"는 명시적 지시이지 "활성 버전으로 실행하라"가 아니다.
 
-### 16.5 막히지 않는 것
+### 16.6 막히지 않는 것
 
 비활성은 **신규 실행 하나만** 막는다. 과거 데이터 조회는 그대로다 — ETL 이력·상세·품질 요약/추이/관찰·상품 동기화 차이·Promotion 이력·audit·Rollback 이력. `versions` archive와 과거 `etl_load_runs`도 그대로 남는다(Policy G, 14.5).
 
-### 16.6 동시성
+### 16.7 조회와 쓰기 트랜잭션
+
+activation 조회는 SELECT라 session을 autobegin시킨다. 그 상태로 두면 바로 뒤 `load_standard_csv()`의 `with session.begin()`이 "A transaction is already begun"으로 실패한다. 실제로 PostgreSQL 통합 테스트에서 이 충돌이 먼저 드러났다.
+
+그래서 조회 직후 `end_activation_read_transaction()`으로 읽기 트랜잭션을 끝낸다. 읽기 전용이라 잃을 것이 없고, 그 사이에 끼는 `run_pipeline()`은 파일 I/O라 idle 트랜잭션을 붙들고 있을 이유도 없다.
+
+단순히 `rollback()`만 하지 않는다. 나중에 누군가 이 앞에 쓰기를 추가하면 그 쓰기가 **조용히** 사라지기 때문이다. 지금까지 같은 상황은 `session.begin()`이 시끄럽게 실패시켜 줬는데, rollback이 그 신호를 지운다. 그래서 rollback 전에 보류 중인 ORM 쓰기가 있으면 `PendingWriteBeforeActivationReadError`를 먼저 낸다.
+
+한계도 적어 둔다. 이 검사는 ORM 단위 작업(`new`/`dirty`/`deleted`)만 본다. `session.execute(insert(...))` 같은 Core 쓰기는 감지되지 않고 함께 rollback된다. 다만 그런 호출자는 원래도 허용되지 않았다 — `load_standard_csv()`가 자기 트랜잭션을 여는 구조라, `run_web_etl()`에 넘기는 session은 트랜잭션이 열려 있지 않아야 한다는 것이 이 함수 이전부터의 계약이다.
+
+현재 네 경로 모두 이 시점에 쓰기를 들고 있지 않다. Web upload는 `await file.read()`만, S3/HTTP는 비활성 사전 검사(읽기)와 source fetch만, Airflow는 session을 만든 직후 호출한다.
+
+### 16.8 동시성
 
 `profile_id` unique index가 중복 row를 막고, 쓰기는 `INSERT ... ON CONFLICT (profile_id) DO UPDATE` 한 문장이라 동시 요청이 `IntegrityError`로 사용자에게 새지 않는다. 결과는 **last-write-wins**다.
 
 분산 lock이나 낙관적 버전 필드는 두지 않았다. 이 상태는 프로필당 값 하나이고 변경 빈도가 낮아, lock의 복잡도가 그것이 막는 위험보다 크다. 대신 진 쪽의 결정이 흔적 없이 사라지지 않도록 `actor_username`과 `updated_at`을 남긴다. 조회하면 마지막으로 누가 언제 바꿨는지 보인다.
 
-### 16.7 이번에 바뀌지 않은 것
+### 16.9 이번에 바뀌지 않은 것
 
 - `INSPECTION_VERSION = "13"`, `PREVIEW_SCHEMA_VERSION = 1`, 두 프로필의 semantic `profile_version = "2"`
 - ETL dedup identity `(input_file_sha256, profile_name, profile_version)`. activation 변경 자체는 dedup을 바꾸지 않는다. 다만 활성 버전을 v1으로 바꾼 뒤 같은 CSV를 실행하면 `profile_version`이 달라 다른 배치가 된다 — 기존 dedup 정책 그대로의 결과다
@@ -780,11 +817,12 @@ S3/HTTP는 외부를 읽기 전에 막는다는 14.3의 순서도 그대로다. 
 - `400 unsupported_profile` / `404` / `409 inactive_profile`의 기존 응답 계약
 - Streamlit 화면. 실행 화면의 inactive 안내(15장)가 runtime deactivation에도 그대로 동작한다
 
-### 16.8 아직 없는 것
+### 16.10 아직 없는 것
 
 - **Streamlit 관리 UI가 없다**(Phase 5B.2). 지금은 API를 직접 호출해야 한다
 - Profile CRUD(등록·수정·삭제)가 없다
 - activation 변경 **이력**이 없다. 표는 현재 상태 한 줄만 들고 있어 "언제 누가 내렸다가 언제 올렸는가"는 남지 않는다. append-only audit이 필요해지면 별도 표가 필요하다
+- 과거 배치의 **런타임 재현**은 여전히 없다. 버전 전환이 쉬워졌을 뿐, 실행되는 코드는 언제나 현재 코드다(16.4)
 - Airflow DAG는 비활성 프로필을 `catalogguard_etl_unexpected`로 실패시킨다. `ETLProfileInactiveError`를 전용 코드로 구분하지 않은 것은 Phase 5A부터의 상태이며 이번에 바꾸지 않았다
 
 ---
