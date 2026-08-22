@@ -2,6 +2,38 @@
 from streamlit.testing.v1 import AppTest
 
 
+class _NoRowsScalarResult:
+    """Answers "no rows" for the few shapes route code uses."""
+
+    def one_or_none(self):
+        return None
+
+    def all(self):
+        return []
+
+    def first(self):
+        return None
+
+
+class FakeSessionWithoutRuntimeOverrides:
+    """A stand-in Session for route tests that never reach a real database.
+
+    ETL 프로필 route는 runtime activation override가 있는지 SELECT 한 번으로 확인합니다.
+    DB 없이 도는 테스트에도 그 질의에 "override 없음"으로 답해 줄 최소 객체가 필요합니다.
+
+    scalars() 외의 API는 일부러 구현하지 않습니다. 아무 호출에나 빈 결과를 돌려주면
+    실제로 DB를 써야 하는 코드가 테스트에서 조용히 통과하게 됩니다.
+    """
+
+    def scalars(self, statement):
+        return _NoRowsScalarResult()
+
+
+def fake_session_without_runtime_overrides():
+    """FastAPI get_session dependency override that yields the stub above."""
+    yield FakeSessionWithoutRuntimeOverrides()
+
+
 class FakeAuthenticatedUser:
     """get_current_user() dependency override에 쓰는 최소 가짜 사용자입니다."""
 

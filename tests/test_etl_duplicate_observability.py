@@ -16,7 +16,7 @@ from api.main import app
 from api.routes import etl_loads as etl_loads_route
 from config.database import get_optional_database_url
 from config.logging import LOGGER_NAME
-from conftest import override_current_user
+from conftest import fake_session_without_runtime_overrides, override_current_user
 from core.security import create_access_token
 from db.auth_service import create_user
 from db.models import ETLLoadRun, User
@@ -62,7 +62,7 @@ LEAKED_VALUES = (
 @pytest.fixture(autouse=True)
 def operator_and_fake_session():
     override_current_user(role="operator")
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     yield
     app.dependency_overrides.clear()
 

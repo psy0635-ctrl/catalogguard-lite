@@ -29,6 +29,9 @@ from etl.db_loader import ETLLoadError, load_standard_csv
 
 MIGRATION_REVISION = "20260813_0013"
 PREVIOUS_REVISION = "20260810_0012"
+# 새 migration이 올라올 때마다 함께 갱신합니다. 이 파일이 확인하려는 것은 "lineage
+# migration이 하나뿐인 head 사슬 안에 그대로 있는가"이지 "그것이 head인가"가 아닙니다.
+CURRENT_HEAD_REVISION = "20260822_0014"
 
 CSV_COLUMNS = [
     "product_group_id",
@@ -144,10 +147,10 @@ def test_initial_source_type_check_constraint_exists() -> None:
     assert "ck_etl_load_runs_initial_source_type" in constraint_names
 
 
-def test_lineage_migration_is_the_single_alembic_head() -> None:
+def test_lineage_migration_stays_in_the_single_alembic_head_chain() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert list(script.get_heads()) == [MIGRATION_REVISION]
+    assert list(script.get_heads()) == [CURRENT_HEAD_REVISION]
     revision = script.get_revision(MIGRATION_REVISION)
     assert revision is not None
     assert revision.down_revision == PREVIOUS_REVISION

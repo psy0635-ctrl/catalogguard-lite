@@ -51,6 +51,8 @@ from api.schemas import (
     ETLLoadQualitySummaryResponse,
     ETLLoadQualityTrendItemResponse,
     ETLLoadQualityTrendResponse,
+    ETLProfileActivationResponse,
+    ETLProfileActivationUpdateRequest,
     ETLProfileDetailResponse,
     ETLProfileListResponse,
     ETLProfileResponse,
@@ -105,6 +107,7 @@ from etl.profile_loader import (
     get_etl_profile_detail,
     is_etl_profile_inactive,
     list_etl_profiles,
+    registered_profile_versions,
 )
 from config.settings import ETL_HTTP_FEED_SOURCE_REF
 from etl.s3_source import (
@@ -114,6 +117,11 @@ from etl.s3_source import (
     S3ReadError,
     read_s3_csv_object,
     sanitized_object_ref,
+)
+from db.etl_profile_activation_service import (
+    ETLProfileVersionNotFoundError,
+    get_etl_profile_activation,
+    set_etl_profile_activation,
 )
 from etl.web_service import ETLWebRunOutcome, run_web_etl
 from db.catalog_reconciliation_service import (
@@ -833,9 +841,15 @@ def list_etl_quality_observability_profiles_route(
 @router.get("/api/v1/etl-profiles", response_model=ETLProfileListResponse)
 def list_etl_profile_options(
     _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
 ) -> ETLProfileListResponse:
+    # session을 넘겨 runtime override까지 반영합니다. 배포 기본값만 보면 운영자가
+    # 방금 내린 프로필이 selector에 남아, 고를 수는 있는데 실행만 409로 막힙니다.
     return ETLProfileListResponse(
-        items=[ETLProfileResponse(**profile) for profile in list_etl_profiles()]
+        items=[
+            ETLProfileResponse(**profile)
+            for profile in list_etl_profiles(session=session)
+        ]
     )
 
 
@@ -846,9 +860,10 @@ def list_etl_profile_options(
 def get_etl_profile_detail_route(
     profile_id: str,
     _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
 ) -> ETLProfileDetailResponse:
     try:
-        detail = get_etl_profile_detail(profile_id)
+        detail = get_etl_profile_detail(profile_id, session=session)
     except ETLProfileNotFoundError as error:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -916,6 +931,99 @@ def _log_duplicate_ingestion(
         # http_request_completed 로그와 이어지지 않습니다.
         request_id=getattr(http_request.state, "request_id", None),
     )
+
+
+ETL_PROFILE_NOT_FOUND_MESSAGE = "ETL profile not found."
+
+
+def _build_profile_activation_response(view) -> ETLProfileActivationResponse:
+    return ETLProfileActivationResponse(
+        profile_id=view.profile_id,
+        display_name=view.display_name,
+        deployment_active_version=view.deployment_active_version,
+        runtime_override_exists=view.runtime_override_exists,
+        runtime_active_version=view.runtime_active_version,
+        effective_active_version=view.effective_active_version,
+        is_active=view.is_active,
+        available_versions=list(view.available_versions),
+        actor_username=view.actor_username,
+        updated_at=view.updated_at,
+    )
+
+
+@router.get(
+    "/api/v1/etl-profiles/{profile_id}/activation",
+    response_model=ETLProfileActivationResponse,
+)
+def get_etl_profile_activation_route(
+    profile_id: str,
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> ETLProfileActivationResponse:
+    """Show the deployment default, the runtime override, and what actually applies.
+
+    비활성 프로필도 200으로 조회됩니다. 이 endpoint의 목적이 바로 "지금 활성인가"를
+    묻는 것이므로, 비활성이라고 409를 내면 운영자가 상태를 확인할 방법이 없어집니다.
+    같은 이유로 목록 필터(list_etl_profiles)와 달리 여기서는 숨기지 않습니다.
+    """
+    try:
+        view = get_etl_profile_activation(session, profile_id=profile_id)
+    except ETLProfileNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ETL_PROFILE_NOT_FOUND_MESSAGE,
+        ) from error
+    return _build_profile_activation_response(view)
+
+
+@router.put(
+    "/api/v1/etl-profiles/{profile_id}/activation",
+    response_model=ETLProfileActivationResponse,
+)
+def set_etl_profile_activation_route(
+    request: ETLProfileActivationUpdateRequest,
+    profile_id: str,
+    current_user=Depends(require_operator),
+    session: Session = Depends(get_session),
+) -> ETLProfileActivationResponse:
+    """Set the runtime active version, or deactivate with a null version.
+
+    PUT을 쓰는 이유는 이 요청이 새 자원을 만드는 것이 아니라 하나뿐인 상태를 통째로
+    바꾸기 때문입니다. 같은 body를 두 번 보내면 결과가 같습니다.
+
+    이 endpoint는 Profile Update API가 아닙니다. source_columns/required_source_columns/
+    defaults는 여기서 바꿀 수 없고, 바꾸는 것은 "이미 보존된 어떤 버전을 신규 실행에
+    쓸 것인가" 하나뿐입니다(Policy A).
+
+    actor는 인증된 current_user에서만 가져옵니다. 요청 body에는 사용자 이름을 넣을
+    자리가 없습니다.
+    """
+    try:
+        view = set_etl_profile_activation(
+            session,
+            profile_id=profile_id,
+            active_version=request.active_version,
+            actor_user_id=current_user.id,
+            actor_username=current_user.username,
+        )
+    except ETLProfileNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ETL_PROFILE_NOT_FOUND_MESSAGE,
+        ) from error
+    except ETLProfileVersionNotFoundError as error:
+        # 프로필은 있는데 그 버전이 보존 목록에 없는 경우입니다. 404(프로필 없음)와
+        # 구분되도록 422로 답하고, 고를 수 있는 버전을 함께 알려 줍니다. archive 경로나
+        # registry 내부 값은 노출하지 않습니다.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "unknown_profile_version",
+                "message": "요청한 ETL 프로필 버전이 없습니다.",
+                "available_versions": registered_profile_versions(profile_id),
+            },
+        ) from error
+    return _build_profile_activation_response(view)
 
 
 @router.post("/api/v1/etl-loads", response_model=ETLWebRunResponse)
@@ -997,7 +1105,10 @@ def _upload_source_ref(filename: str | None) -> str | None:
     return leaf or None
 
 
-def _reject_inactive_profile_before_source_fetch(profile_id: str) -> None:
+def _reject_inactive_profile_before_source_fetch(
+    session: Session,
+    profile_id: str,
+) -> None:
     """Block a deactivated profile before any external source I/O happens.
 
     S3/HTTP feed는 source adapter를 먼저 실행하는 구조입니다. 이 검사가 없으면 서버가
@@ -1008,8 +1119,12 @@ def _reject_inactive_profile_before_source_fetch(profile_id: str) -> None:
     여기서 막는 것은 "allowlist에 있으면서 비활성"인 경우뿐입니다. 없는 profile_id는
     그대로 통과시켜 기존 source-error precedence와 400 unsupported_profile 계약을
     유지합니다. 잘못된 active pointer도 통과시켜 기존대로 실행 시점에 실패합니다.
+
+    비활성 판단은 배포 기본값이 아니라 runtime override까지 반영한 effective 상태입니다.
+    그래서 route의 session을 받습니다. 이것이 없으면 runtime에서 내린 프로필의 S3/HTTP
+    실행이 외부를 먼저 읽고 나서야 막힙니다.
     """
-    if not is_etl_profile_inactive(profile_id):
+    if not is_etl_profile_inactive(profile_id, session=session):
         return
 
     # 실행을 시도하다 막힌 것이므로 업로드 경로와 같은 실패 metric을 남깁니다.
@@ -1131,7 +1246,7 @@ def create_s3_etl_load_run(
     session: Session = Depends(get_session),
 ) -> ETLWebRunResponse:
     """Download a configured S3 CSV and pass it to the existing Web ETL service."""
-    _reject_inactive_profile_before_source_fetch(request.profile_id)
+    _reject_inactive_profile_before_source_fetch(session, request.profile_id)
 
     try:
         source = read_s3_csv_object(request.object_key)
@@ -1211,7 +1326,7 @@ def create_http_feed_etl_load_run(
     The feed URL comes from server configuration only. Clients choose the supplier
     profile, never the host, so this endpoint cannot be turned into an SSRF probe.
     """
-    _reject_inactive_profile_before_source_fetch(request.profile_id)
+    _reject_inactive_profile_before_source_fetch(session, request.profile_id)
 
     try:
         source = read_http_feed_csv()

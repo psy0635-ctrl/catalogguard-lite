@@ -50,7 +50,20 @@ def run_web_etl(
 ) -> ETLWebRunOutcome:
     # run_pipeline/load_standard_csv are the same functions etl.cli/etl.load_cli call;
     # this only bridges an in-memory upload into their existing file-based contract.
-    profile_path = get_profile_path(profile_id)
+    #
+    # session을 함께 넘겨 runtime activation override까지 반영합니다. Web upload,
+    # S3, HTTP feed, Airflow DAG가 모두 이 함수 하나를 지나므로, 네 경로가 같은
+    # effective active version을 봅니다. 여기서 session을 빠뜨리면 그 경로만 배포
+    # 기본값으로 실행되어 "내렸는데 계속 돈다"가 됩니다.
+    profile_path = get_profile_path(profile_id, session=session)
+    # 위 조회가 session을 autobegin시킵니다. 그대로 두면 아래 load_standard_csv()의
+    # with session.begin()이 "A transaction is already begun"으로 실패합니다.
+    # 읽기 전용 조회였으므로 여기서 끝내도 잃을 것이 없고, 뒤따르는 run_pipeline()은
+    # 파일 I/O라 그동안 idle 트랜잭션을 붙들고 있을 이유도 없습니다.
+    #
+    # api/routes/inspections.py는 같은 충돌을 별도 session으로 피했지만, 여기서는
+    # 호출자(Airflow 포함)가 session 하나만 넘기므로 그 방식을 쓸 수 없습니다.
+    session.rollback()
 
     validate_csv_filename(source_filename)
     validate_csv_file_size(input_bytes)

@@ -15,7 +15,7 @@ from api.main import app
 from api.routes import etl_loads as etl_loads_route
 from config.database import get_optional_database_url
 from config.logging import LOGGER_NAME
-from conftest import clear_current_user_override, override_current_user
+from conftest import clear_current_user_override, fake_session_without_runtime_overrides, override_current_user
 from core.security import create_access_token
 from core.upload_validator import CsvUploadValidationError
 from db.auth_service import create_user
@@ -114,7 +114,7 @@ def test_s3_endpoint_passes_downloaded_leaf_and_authenticated_actor_to_web_etl(m
             initial_source_ref=initial_source_ref,
         )
 
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_s3_csv_object",
@@ -131,7 +131,7 @@ def test_s3_endpoint_passes_downloaded_leaf_and_authenticated_actor_to_web_etl(m
 
 def test_s3_endpoint_rejects_client_selected_bucket_without_reading_adapter(monkeypatch):
     calls: list[str] = []
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_s3_csv_object",
@@ -185,7 +185,7 @@ def test_viewer_s3_endpoint_returns_403_without_reading_s3(monkeypatch):
 def test_s3_adapter_failures_are_safe_and_do_not_record_web_etl_metrics(
     monkeypatch, error, expected_status, expected_code
 ):
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_s3_csv_object",
@@ -215,7 +215,7 @@ def test_s3_read_failure_logs_only_safe_structured_fields(
 ):
     raw_sdk_message = "AccessDenied secret=request-123"
     object_key = "incoming/vendor/private-products.csv"
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_s3_csv_object",
@@ -238,7 +238,7 @@ def test_s3_read_failure_logs_only_safe_structured_fields(
 
 
 def test_s3_csv_validation_error_is_invalid_upload_without_web_metric(monkeypatch):
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_s3_csv_object",
@@ -270,7 +270,7 @@ def test_s3_download_then_web_etl_errors_keep_existing_mapping_and_record_failur
     monkeypatch, error, expected_status, expected_code
 ):
     metrics: list[str] = []
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_s3_csv_object",
@@ -294,7 +294,7 @@ def test_s3_download_then_web_etl_errors_keep_existing_mapping_and_record_failur
 def test_s3_success_records_same_created_metrics_as_multipart_endpoint(monkeypatch):
     run_metrics: list[str] = []
     row_metrics: list[dict[str, int | None]] = []
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_s3_csv_object",
@@ -324,7 +324,7 @@ def test_s3_success_records_same_created_metrics_as_multipart_endpoint(monkeypat
 
 def test_s3_duplicate_success_records_only_duplicate_run_metric(monkeypatch):
     run_metrics: list[str] = []
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_s3_csv_object",
@@ -510,7 +510,7 @@ def test_inactive_profile_is_rejected_before_any_s3_read(monkeypatch):
         "sample_fashion_vendor_v1",
         _deactivated_registry_entry("sample_fashion_vendor_v1"),
     )
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_s3_csv_object",
@@ -538,7 +538,7 @@ def test_inactive_profile_outranks_a_source_error_that_would_fire_first(monkeypa
         "sample_fashion_vendor_v1",
         _deactivated_registry_entry("sample_fashion_vendor_v1"),
     )
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_s3_csv_object",
@@ -557,7 +557,7 @@ def test_inactive_profile_outranks_a_source_error_that_would_fire_first(monkeypa
 def test_unknown_profile_keeps_the_existing_source_error_precedence(monkeypatch):
     # 이번 수정은 "allowlist에 있으면서 비활성"인 경우만 앞당깁니다. 없는 profile_id는
     # 사전 검증하지 않으므로 기존처럼 source 오류가 먼저 나갑니다.
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_s3_csv_object",

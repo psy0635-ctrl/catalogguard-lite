@@ -1,7 +1,12 @@
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
 from config.settings import BASE_DIR, CSV_TEMPLATE_COLUMNS, REQUIRED_COLUMNS
+from db.models import ETLProfileActivation
 from etl.models import ETLProfile
 
 
@@ -63,23 +68,155 @@ _ETL_PROFILE_REGISTRY: dict[str, dict] = {
 }
 
 
-def list_etl_profiles() -> list[dict[str, str]]:
+def get_profile_display_name(profile_id: str) -> str:
+    """Return the human-readable name of one allowlisted profile.
+
+    registry dict를 모듈 밖으로 넘기지 않기 위한 접근자입니다. 호출자가 registry
+    자체를 들고 가면 어디서든 활성 상태를 직접 읽거나 고칠 수 있게 됩니다.
+    """
+    return _registry_entry(profile_id)["display_name"]
+
+
+def registered_profile_versions(profile_id: str) -> list[str]:
+    """Return every preserved version of one profile, in registry order.
+
+    activation 쓰기 경로가 "요청한 버전이 실제로 보존된 버전인가"를 물어보는 곳입니다.
+    이 목록에 없는 값은 활성화할 수 없습니다. Policy H대로 여기서 "가장 큰 버전"을
+    고르지 않고 후보만 돌려줍니다.
+    """
+    return list(_registry_entry(profile_id)["versions"])
+
+
+@dataclass(frozen=True)
+class ETLProfileActivationState:
+    """The resolved activation of one profile: deployment default + runtime override.
+
+    세 값을 따로 들고 다니는 이유는, 이 셋이 서로 다른 질문에 답하기 때문입니다.
+
+    * deployment_active_version — 코드/배포가 정한 기본값
+    * runtime_active_version — 운영자가 API로 정한 값 (override가 있을 때만 의미 있음)
+    * effective_active_version — 실제로 신규 실행에 쓰이는 값
+
+    화면이나 API가 이 셋을 하나로 뭉개면 "왜 이 프로필이 지금 비활성인가"에 답할 수
+    없습니다. 배포가 그렇게 정한 것과 운영자가 내린 것은 다음에 해야 할 일이 다릅니다.
+    """
+
+    profile_id: str
+    deployment_active_version: str | None
+    runtime_override_exists: bool
+    runtime_active_version: str | None
+    effective_active_version: str | None
+
+    @property
+    def is_active(self) -> bool:
+        return self.effective_active_version is not None
+
+
+def _runtime_activation_row(
+    session: Session | None,
+    profile_id: str,
+) -> ETLProfileActivation | None:
+    """Read this profile's runtime override row, or None when there is none.
+
+    session이 None이면 조회하지 않고 None을 돌려줍니다. 이는 "override가 없다"가
+    아니라 "runtime 상태를 물어볼 수 없는 호출자"라는 뜻이며, 그런 호출자는 배포
+    기본값만 보게 됩니다. etl.cli처럼 profile_id가 아니라 파일 경로를 직접 받는
+    경로는 애초에 이 resolver를 지나지 않습니다.
+    """
+    if session is None:
+        return None
+    return session.scalars(
+        select(ETLProfileActivation).where(
+            ETLProfileActivation.profile_id == profile_id
+        )
+    ).one_or_none()
+
+
+def resolve_etl_profile_activation(
+    profile_id: str,
+    *,
+    session: Session | None = None,
+) -> ETLProfileActivationState:
+    """Combine the deployment default with an optional runtime override.
+
+    **effective active version을 계산하는 곳은 여기 한 곳뿐입니다.** Web/S3/HTTP/
+    Airflow가 각자 DB를 읽어 각자 판단하면 같은 프로필이 경로마다 다르게 활성으로
+    보일 수 있습니다.
+
+    | runtime row | active_version | effective |
+    | --- | --- | --- |
+    | 없음 | — | 배포 registry의 active_version |
+    | 있음 | "2" | "2" |
+    | 있음 | NULL | None (비활성) |
+
+    "row 없음"과 "row 있음 + NULL"을 구분합니다. 전자는 아무도 손대지 않아 배포
+    기본값을 따르는 상태이고, 후자는 운영자가 명시적으로 내린 상태입니다. 둘을 합치면
+    배포 기본값이 바뀔 때 운영자의 결정이 조용히 뒤집힙니다.
+
+    없는 profile_id는 ETLProfileNotFoundError입니다. runtime row만 남아 있고 registry
+    에서 사라진 프로필도 마찬가지입니다. registry가 allowlist이고, 그 밖의 값을 DB row
+    하나로 되살리면 allowlist가 방어선이 아니게 됩니다.
+    """
+    info = _registry_entry(profile_id)
+    deployment_active_version = info["active_version"]
+
+    row = _runtime_activation_row(session, profile_id)
+    if row is None:
+        return ETLProfileActivationState(
+            profile_id=profile_id,
+            deployment_active_version=deployment_active_version,
+            runtime_override_exists=False,
+            runtime_active_version=None,
+            effective_active_version=deployment_active_version,
+        )
+    return ETLProfileActivationState(
+        profile_id=profile_id,
+        deployment_active_version=deployment_active_version,
+        runtime_override_exists=True,
+        runtime_active_version=row.active_version,
+        effective_active_version=row.active_version,
+    )
+
+
+def list_etl_profiles(*, session: Session | None = None) -> list[dict[str, str]]:
     """Return the allowlisted ETL profiles selectable for a new ETL run.
 
     이 목록의 유일한 호출자는 GET /api/v1/etl-profiles이고, Streamlit은 그 응답으로
     신규 ETL 실행용 selector를 그립니다. 즉 "관리용 전체 목록"이 아니라 "지금 실행할
-    수 있는 프로필 목록"이므로, 비활성(active_version=None) 프로필은 제외합니다.
-    서버 차단(get_profile_path())이 실제 방어선이고 이 필터는 그 앞단입니다.
+    수 있는 프로필 목록"이므로, 비활성 프로필은 제외합니다. 서버 차단
+    (get_profile_path())이 실제 방어선이고 이 필터는 그 앞단입니다.
+
+    활성 여부는 배포 기본값이 아니라 **effective** 상태로 판단합니다. runtime에서
+    내린 프로필이 selector에 계속 보이면 사용자는 고를 수 있는데 실행만 409로 막히는
+    화면을 보게 됩니다.
+
+    runtime override를 한 번에 읽고 메모리에서 맞춥니다. 프로필마다 따로 질의하면
+    프로필 수만큼 왕복이 생깁니다.
     """
+    overrides: dict[str, str | None] = {}
+    if session is not None:
+        overrides = {
+            row.profile_id: row.active_version
+            for row in session.scalars(select(ETLProfileActivation)).all()
+        }
     return [
         {"id": profile_id, "display_name": info["display_name"]}
         for profile_id, info in _ETL_PROFILE_REGISTRY.items()
-        if info["active_version"] is not None
+        if (
+            overrides[profile_id]
+            if profile_id in overrides
+            else info["active_version"]
+        )
+        is not None
     ]
 
 
-def is_etl_profile_inactive(profile_id: str) -> bool:
-    """Return True only for an allowlisted profile whose active_version is None.
+def is_etl_profile_inactive(
+    profile_id: str,
+    *,
+    session: Session | None = None,
+) -> bool:
+    """Return True only for an allowlisted profile whose effective version is None.
 
     S3/HTTP feed는 source adapter가 먼저 실행되는 구조라, 외부를 읽기 전에 비활성
     여부만 값싸게 물어볼 곳이 필요합니다. 이 함수는 registry를 읽기만 하며 경로를
@@ -90,18 +227,35 @@ def is_etl_profile_inactive(profile_id: str) -> bool:
     함께 처리하면 호출자가 기존 unsupported_profile 계약을 우회하게 되기 때문입니다.
     잘못된 active pointer("999" 등)도 False입니다. 비활성이 아니라 잘못된 설정이므로
     기존대로 get_profile_path()에서 실패해야 합니다.
+
+    판단 기준은 resolve_etl_profile_activation()의 effective 값입니다. 여기서만 배포
+    기본값을 보면 runtime에서 내린 프로필의 S3/HTTP 실행이 외부를 먼저 읽고 나서야
+    막히게 됩니다.
     """
-    info = _ETL_PROFILE_REGISTRY.get(profile_id)
-    return info is not None and info["active_version"] is None
+    if profile_id not in _ETL_PROFILE_REGISTRY:
+        return False
+    return not resolve_etl_profile_activation(
+        profile_id,
+        session=session,
+    ).is_active
 
 
-def get_etl_profile_detail(profile_id: str) -> dict[str, object]:
-    """Return safe metadata for one allowlisted ETL profile."""
+def get_etl_profile_detail(
+    profile_id: str,
+    *,
+    session: Session | None = None,
+) -> dict[str, object]:
+    """Return safe metadata for the effective active version of one profile.
+
+    runtime override가 있으면 그 버전의 detail을 보여 줍니다. 이 endpoint의 계약은
+    "지금 이 프로필로 실행하면 쓰이는 정의"이므로, 배포 기본값을 보여 주면 runtime에서
+    버전을 바꾼 뒤 화면과 실제 실행이 어긋납니다.
+    """
     info = _ETL_PROFILE_REGISTRY.get(profile_id)
     if info is None:
         raise ETLProfileNotFoundError(f"Unknown ETL profile: {profile_id}")
 
-    profile = load_profile(get_profile_path(profile_id))
+    profile = load_profile(get_profile_path(profile_id, session=session))
     return {
         "id": profile_id,
         "display_name": info["display_name"],
@@ -143,21 +297,27 @@ def _archived_version_path(info: dict, profile_version: str) -> Path:
     return candidate_path
 
 
-def get_profile_path(profile_id: str) -> Path:
-    """Resolve a profile_id to the config file of its active version.
+def get_profile_path(profile_id: str, *, session: Session | None = None) -> Path:
+    """Resolve a profile_id to the config file of its effective active version.
 
     Never accepts a filesystem path from the caller: profile_id must be an exact
     allowlist key, so arbitrary/relative paths can't reach load_profile().
 
-    active_version이 None이면 ETLProfileInactiveError를 냅니다. 여기서 다른 버전으로
-    대신 실행하지 않습니다. 비활성 프로필은 "무엇을 실행할지 정해지지 않은" 상태이지
-    "최신 버전으로 실행해도 되는" 상태가 아니기 때문입니다.
+    effective active version이 None이면 ETLProfileInactiveError를 냅니다. 여기서 다른
+    버전으로 대신 실행하지 않습니다. 비활성 프로필은 "무엇을 실행할지 정해지지 않은"
+    상태이지 "최신 버전으로 실행해도 되는" 상태가 아니기 때문입니다.
+
+    session을 주면 runtime override까지 반영합니다. 신규 ETL 실행 경로(Web/S3/HTTP/
+    Airflow)는 모두 run_web_etl()을 지나며 그 session을 그대로 넘기므로, 네 경로가
+    같은 activation을 봅니다.
     """
-    info = _registry_entry(profile_id)
-    active_version = info["active_version"]
-    if active_version is None:
+    activation = resolve_etl_profile_activation(profile_id, session=session)
+    if activation.effective_active_version is None:
         raise ETLProfileInactiveError(f"ETL profile is inactive: {profile_id}")
-    return _archived_version_path(info, active_version)
+    return _archived_version_path(
+        _registry_entry(profile_id),
+        activation.effective_active_version,
+    )
 
 
 def get_profile_version_path(profile_id: str, profile_version: str) -> Path:
