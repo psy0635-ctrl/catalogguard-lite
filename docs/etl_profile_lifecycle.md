@@ -243,7 +243,9 @@ sample_fashion_vendor
 
 **현재 상태**: Profile을 담는 DB 모델 자체가 없으므로 이번 단계에서 구현하지 않는다. DELETE API도 없다(현재 프로필 관련 API는 목록·상세 조회 2개뿐이다).
 
-> **갱신(Phase 5A)**: 비활성 상태 자체는 이제 코드에 있다. `active_version = None`이 Deactivate이며, `versions`의 archive는 그대로 남는다(14장). 다만 이 값을 바꾸는 DELETE/deactivate **API는 여전히 없다.** 변경하려면 코드를 고쳐 배포해야 한다.
+> **갱신(Phase 5A)**: 비활성 상태 자체는 이제 코드에 있다. `active_version = None`이 Deactivate이며, `versions`의 archive는 그대로 남는다(14장).
+>
+> **갱신(Phase 5B.1)**: 이 값을 바꾸는 API가 생겼다. `PUT /api/v1/etl-profiles/{profile_id}/activation`에 `active_version: null`을 보내면 배포 없이 비활성화된다(16장). DELETE API는 여전히 없다 — Policy G대로 삭제가 아니라 비활성이 기본 동작이기 때문이다.
 
 ### Policy H — Active Version (채택, `[향후 구현]`, 단 자동 추론 금지)
 
@@ -385,7 +387,8 @@ registry: sample_fashion_vendor_v1 -> active_version "3"
 | Phase 4 | Versioned archive + active pointer — 버전별 JSON 보존, registry가 활성 버전을 명시 (Option B) | **완료** (13장) |
 | Phase 5A | Deployment-based Activation / Deactivation — `active_version`이 버전 문자열 또는 `None`. `None`이면 신규 ETL 실행만 막는다 | **완료** (14장) |
 | Phase 5A.1 | 클라이언트/UI의 inactive 처리 — Python client가 `inactive_profile`을 전용 예외로 매핑하고 Streamlit이 원인을 안내한다 | **완료** (15장) |
-| Phase 5B | Runtime/Admin activation management — activation을 바꾸는 API·Streamlit UI·권한 | **미구현** |
+| Phase 5B.1 | Persistent Runtime Activation API — activation을 바꾸는 API·권한·DB 지속 상태 (16장) | **완료** |
+| Phase 5B.2 | Streamlit Admin UI — 활성 버전 선택·활성화·비활성화 화면 | **미구현** |
 | Phase 6 | 필요할 때만 DB-backed Profile / ProfileVersion (Option C) | 조건부 |
 
 Phase 4가 끝나기 전에는 새 프로필 **등록** 기능을 만들지 않는다. 등록을 먼저 만들면 보존 구조 없이 프로필 수만 늘어 3.2의 위험이 프로필 수만큼 곱해진다.
@@ -634,15 +637,15 @@ archive 버전을 조회하는 **공개 API는 만들지 않았다.** 과거 정
 
 ### 14.7 아직 없는 것 (Phase 5B)
 
-activation 변경은 **배포가 필요한 code configuration**이다. `active_version`을 바꾸려면 코드 변경 → 테스트 → 배포를 거쳐야 하고, 그래서 변경이 git diff와 리뷰에 그대로 남는다.
+> **이 절은 Phase 5B.1(16장)이 일부를 해소했다.** 아래는 Phase 5A 시점의 상태이며, 무엇이 바뀌었는지는 각 항목에 적었다.
 
-없는 것을 분명히 적어 둔다.
+Phase 5A 시점에 activation 변경은 **배포가 필요한 code configuration**이었다. `active_version`을 바꾸려면 코드 변경 → 테스트 → 배포를 거쳐야 했다.
 
-- activation/deactivation을 바꾸는 **관리자 API가 없다**
-- Streamlit **활성/비활성 버튼이 없다**
-- DB-backed active flag가 없다(Phase 6, 조건부)
-- Profile CRUD(등록·수정·삭제)가 없다
-- 런타임 메모리의 registry를 API로 고치는 기능은 **의도적으로** 만들지 않았다. 재시작하면 사라지는 상태는 "관리 기능처럼 보이지만 관리되지 않는" 더 나쁜 상태를 만든다
+- ~~activation/deactivation을 바꾸는 **관리자 API가 없다**~~ → Phase 5B.1에서 추가됐다(16장)
+- Streamlit **활성/비활성 버튼이 없다** → 여전히 없다(Phase 5B.2)
+- ~~DB-backed active flag가 없다~~ → Phase 5B.1이 **activation 상태만** DB로 옮겼다. 프로필 정의 자체를 DB로 옮기는 것은 여전히 Phase 6(조건부)이다
+- Profile CRUD(등록·수정·삭제)가 없다 → 여전히 없다
+- 런타임 메모리의 registry를 API로 고치는 기능은 **의도적으로** 만들지 않았다. 재시작하면 사라지는 상태는 "관리 기능처럼 보이지만 관리되지 않는" 더 나쁜 상태를 만든다. Phase 5B.1도 이 판단을 그대로 지켜, 메모리 registry를 고치지 않고 **DB에 저장되는 별도 상태**를 얹었다
 
 ---
 
@@ -675,7 +678,114 @@ Profile Detail의 409 매핑은 **opt-in**이다. `_get_json()`/`_get_response()
 
 ### 15.3 여전히 없는 것
 
-Phase 5A.1은 **표시와 오류 분류만** 바꾼다. 14.7의 목록은 그대로 유효하다. runtime activation API·Streamlit 활성/비활성 버튼·DB-backed active flag·Profile CRUD는 없고, activation 상태를 바꾸려면 여전히 코드 변경 → 테스트 → 배포가 필요하다.
+Phase 5A.1은 **표시와 오류 분류만** 바꾼다. 이 시점에는 runtime activation API·Streamlit 활성/비활성 버튼·DB-backed active flag·Profile CRUD가 모두 없었고, activation 상태를 바꾸려면 코드 변경 → 테스트 → 배포가 필요했다. 그중 API와 DB 상태는 Phase 5B.1(16장)에서 생겼고, Streamlit 버튼과 Profile CRUD는 여전히 없다.
+
+---
+
+## 16. `[현재 구현]` Phase 5B.1 — Persistent Runtime Activation API
+
+Phase 5A까지 activation은 코드 상수였다. 바꾸려면 코드 수정 → 테스트 → 배포가 필요했고, 그래서 "공급사 피드가 깨졌으니 지금 내려 달라"에 배포 한 번이 필요했다. Phase 5B.1은 그 상태를 API로 바꿀 수 있게 하되 **DB에 저장**한다.
+
+메모리의 registry를 API로 고치는 방식은 14.7에서 의도적으로 거부했던 것이고, 여기서도 하지 않는다. 재시작하면 사라지고 worker마다 달라지는 상태는 관리 기능처럼 보이지만 관리되지 않는다.
+
+### 16.1 무엇을 저장하는가
+
+프로필 **정의**는 옮기지 않았다. `config/etl`의 버전별 archive와 코드 registry가 계속 source of truth이고, Policy A(Published Version Immutable)도 그대로다. DB에 있는 것은 "이미 보존된 어떤 버전을 신규 실행에 쓸 것인가" 하나뿐이다.
+
+`etl_profile_activations` (Alembic `20260822_0014`)
+
+| 컬럼 | 뜻 |
+| --- | --- |
+| `profile_id` | registry의 allowlist key. unique index가 프로필당 row 하나를 보장한다 |
+| `active_version` | 활성 버전 문자열, 또는 `NULL`(비활성) |
+| `actor_user_id` / `actor_username` | 마지막으로 바꾼 로그인 사용자 |
+| `updated_at` | 마지막으로 바꾼 시각 |
+
+`profile_id`에 FK를 걸지 않았다. 프로필은 아직 DB entity가 아니라 코드 registry의 key이므로, 존재하지 않는 대상을 가리키는 FK를 만들 수 없다. 대신 쓰기 경로가 allowlist와 `versions`를 검증한다.
+
+### 16.2 배포 기본값과 runtime override
+
+**"row 없음"과 "row 있음 + `active_version` NULL"은 다른 상태다.**
+
+| runtime row | `active_version` | effective |
+| --- | --- | --- |
+| 없음 | — | 배포 registry의 `active_version` |
+| 있음 | `"2"` | `"2"` |
+| 있음 | `NULL` | 비활성 |
+
+둘을 하나로 합치면 배포 기본값이 바뀔 때 운영자의 결정이 조용히 뒤집힌다. "아직 아무도 손대지 않았다"와 "운영자가 명시적으로 내렸다"는 다음에 해야 할 일이 다르다.
+
+계산은 `etl.profile_loader.resolve_etl_profile_activation()` **한 곳**에서만 한다. Web/S3/HTTP/Airflow가 각자 DB를 읽어 각자 판단하면 같은 프로필이 경로마다 다르게 활성으로 보인다.
+
+### 16.3 API
+
+| method | path | 권한 |
+| --- | --- | --- |
+| `GET` | `/api/v1/etl-profiles/{profile_id}/activation` | viewer |
+| `PUT` | `/api/v1/etl-profiles/{profile_id}/activation` | operator |
+
+`PUT`을 쓰는 이유는 이 요청이 새 자원을 만드는 것이 아니라 하나뿐인 상태를 통째로 바꾸기 때문이다. 같은 body를 두 번 보내면 결과가 같다. 저장소의 다른 endpoint가 모두 `POST`인 것은 그것들이 실행·발급·생성이기 때문이고, 여기서만 성격이 다르다.
+
+요청 body는 `{"active_version": "2"}` 또는 `{"active_version": null}` 하나뿐이다. **actor를 body로 받지 않는다.** 받아 두고 무시하면 다음 사람이 "왜 반영되지 않지"를 디버깅하게 되므로, 받을 자리 자체를 두지 않고 `extra="forbid"`로 거부한다. 이 endpoint를 Profile Update API로 오해해 `source_columns`를 보내면 조용히 무시되지 않고 422가 된다.
+
+응답은 세 값을 나눠서 준다. `effective` 하나만 주면 지금 상태가 배포 때문인지 운영자 때문인지 알 수 없다.
+
+```json
+{
+  "deployment_active_version": "2",
+  "runtime_override_exists": true,
+  "runtime_active_version": null,
+  "effective_active_version": null,
+  "is_active": false,
+  "available_versions": ["1", "2"]
+}
+```
+
+`available_versions`가 없으면 호출자가 무엇을 고를 수 있는지 몰라 존재하지 않는 버전을 추측해 보내게 된다. 보존 목록에 없는 값은 `422 unknown_profile_version`으로 거부하고, 없는 `profile_id`는 `404`다. 둘을 같은 코드로 뭉개지 않는 이유는 운영자가 고쳐야 할 대상이 다르기 때문이다.
+
+**비활성 프로필도 이 GET에서는 200으로 조회된다.** 이 endpoint의 목적이 "지금 활성인가"를 묻는 것이므로, 비활성이라고 409를 내면 상태를 확인할 방법이 사라진다. 목록(`GET /api/v1/etl-profiles`)이 비활성을 숨기는 것과는 목적이 다르다.
+
+### 16.4 신규 실행 차단
+
+Phase 5A의 `409 inactive_profile` 계약은 **그대로다.** runtime에서 내렸든 배포로 내렸든 응답은 같고, Python client의 `ETLProfileInactiveError`도 그대로 동작한다.
+
+네 입력 경로가 모두 같은 resolver를 지난다.
+
+| 경로 | 어떻게 지나는가 |
+| --- | --- |
+| Web CSV Upload | `run_web_etl()` → `get_profile_path(session=...)` |
+| S3 source | source를 읽기 전 `is_etl_profile_inactive(session=...)`, 그 뒤 `run_web_etl()` |
+| HTTP feed | 위와 같다 |
+| Airflow DAG | `run_web_etl()`에 자기 session을 넘긴다 |
+
+S3/HTTP는 외부를 읽기 전에 막는다는 14.3의 순서도 그대로다. 이 사전 검사가 이제 session을 받는 이유는, 배포 기본값만 보면 runtime에서 내린 프로필이 외부를 먼저 읽고 나서야 막히기 때문이다.
+
+`etl.cli`는 `profile_id`가 아니라 파일 경로를 직접 받으므로 이 resolver를 지나지 않는다. 의도적이다. CLI의 `--profile`은 "이 파일로 실행하라"는 명시적 지시이지 "활성 버전으로 실행하라"가 아니다.
+
+### 16.5 막히지 않는 것
+
+비활성은 **신규 실행 하나만** 막는다. 과거 데이터 조회는 그대로다 — ETL 이력·상세·품질 요약/추이/관찰·상품 동기화 차이·Promotion 이력·audit·Rollback 이력. `versions` archive와 과거 `etl_load_runs`도 그대로 남는다(Policy G, 14.5).
+
+### 16.6 동시성
+
+`profile_id` unique index가 중복 row를 막고, 쓰기는 `INSERT ... ON CONFLICT (profile_id) DO UPDATE` 한 문장이라 동시 요청이 `IntegrityError`로 사용자에게 새지 않는다. 결과는 **last-write-wins**다.
+
+분산 lock이나 낙관적 버전 필드는 두지 않았다. 이 상태는 프로필당 값 하나이고 변경 빈도가 낮아, lock의 복잡도가 그것이 막는 위험보다 크다. 대신 진 쪽의 결정이 흔적 없이 사라지지 않도록 `actor_username`과 `updated_at`을 남긴다. 조회하면 마지막으로 누가 언제 바꿨는지 보인다.
+
+### 16.7 이번에 바뀌지 않은 것
+
+- `INSPECTION_VERSION = "13"`, `PREVIEW_SCHEMA_VERSION = 1`, 두 프로필의 semantic `profile_version = "2"`
+- ETL dedup identity `(input_file_sha256, profile_name, profile_version)`. activation 변경 자체는 dedup을 바꾸지 않는다. 다만 활성 버전을 v1으로 바꾼 뒤 같은 CSV를 실행하면 `profile_version`이 달라 다른 배치가 된다 — 기존 dedup 정책 그대로의 결과다
+- 프로필 JSON, fingerprint baseline, transform 의미
+- `400 unsupported_profile` / `404` / `409 inactive_profile`의 기존 응답 계약
+- Streamlit 화면. 실행 화면의 inactive 안내(15장)가 runtime deactivation에도 그대로 동작한다
+
+### 16.8 아직 없는 것
+
+- **Streamlit 관리 UI가 없다**(Phase 5B.2). 지금은 API를 직접 호출해야 한다
+- Profile CRUD(등록·수정·삭제)가 없다
+- activation 변경 **이력**이 없다. 표는 현재 상태 한 줄만 들고 있어 "언제 누가 내렸다가 언제 올렸는가"는 남지 않는다. append-only audit이 필요해지면 별도 표가 필요하다
+- Airflow DAG는 비활성 프로필을 `catalogguard_etl_unexpected`로 실패시킨다. `ETLProfileInactiveError`를 전용 코드로 구분하지 않은 것은 Phase 5A부터의 상태이며 이번에 바꾸지 않았다
 
 ---
 

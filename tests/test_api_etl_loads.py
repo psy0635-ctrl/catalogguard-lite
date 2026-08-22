@@ -6,7 +6,11 @@ from fastapi.testclient import TestClient
 
 from api.main import app
 from api.routes import etl_loads as etl_loads_route
-from conftest import clear_current_user_override, override_current_user
+from conftest import (
+    FakeSessionWithoutRuntimeOverrides,
+    clear_current_user_override,
+    override_current_user,
+)
 from db.session import get_session
 import etl.profile_loader as profile_loader
 
@@ -70,7 +74,9 @@ def _load(**overrides):
 
 @pytest.fixture(autouse=True)
 def fake_etl_query_service(monkeypatch):
-    fake_session = object()
+    # 프로필 route가 runtime activation override를 조회하므로, DB 없이 도는 이 fixture도
+    # 그 질의에 "override 없음"으로 답할 수 있어야 합니다.
+    fake_session = FakeSessionWithoutRuntimeOverrides()
     calls = []
     state = SimpleNamespace(
         load_exists=True,

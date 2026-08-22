@@ -265,6 +265,42 @@ class ETLProfileDetailResponse(BaseModel):
     defaults: dict[str, str]
 
 
+class ETLProfileActivationResponse(BaseModel):
+    """Deployment default, runtime override, and the value that actually applies.
+
+    세 값을 함께 돌려주는 이유는 "지금 왜 이 상태인가"에 답하기 위해서입니다.
+    effective 하나만 주면 운영자가 내린 것인지 배포가 그렇게 정한 것인지 알 수 없고,
+    다음에 무엇을 해야 하는지도 달라집니다.
+    """
+
+    profile_id: str
+    display_name: str
+    deployment_active_version: str | None
+    runtime_override_exists: bool
+    runtime_active_version: str | None
+    effective_active_version: str | None
+    is_active: bool
+    available_versions: list[str]
+    actor_username: str | None
+    updated_at: datetime | None
+
+
+class ETLProfileActivationUpdateRequest(BaseModel):
+    """Set the runtime active version, or null to deactivate.
+
+    body에는 active_version 하나만 둡니다. actor는 인증된 사용자에서만 가져오므로
+    요청이 사용자 이름을 보내도 무시되는 것이 아니라 **받을 자리 자체가 없습니다.**
+    받아 두고 무시하면 다음 사람이 "왜 반영되지 않지"를 디버깅하게 됩니다.
+
+    extra="forbid"로 모르는 필드를 거부합니다. 이 endpoint를 Profile Update API로
+    오해해 source_columns 같은 값을 보내면 조용히 무시되지 않고 422로 실패합니다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    active_version: str | None = None
+
+
 CatalogPromotionValue = str | int | None
 
 

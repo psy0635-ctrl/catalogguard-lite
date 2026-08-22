@@ -9,7 +9,7 @@ from sqlalchemy import delete, select
 from api.dependencies import get_current_user
 from api.main import app
 from api.routes import etl_loads as etl_loads_route
-from conftest import override_current_user
+from conftest import fake_session_without_runtime_overrides, override_current_user
 from config.database import get_optional_database_url
 from config.settings import MAX_UPLOAD_SIZE_BYTES
 from core.security import create_access_token
@@ -76,7 +76,7 @@ def test_success_returns_etl_web_run_contract(monkeypatch):
             initial_source_ref=initial_source_ref,
         )
 
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(etl_loads_route, "run_web_etl", fake_run_web_etl)
 
     response = client.post(
@@ -107,7 +107,7 @@ def test_unsupported_profile_returns_safe_400_without_leaking_paths(monkeypatch)
     def fake_run_web_etl(session, **kwargs):
         raise ETLProfileNotFoundError("Unknown ETL profile: ../../etc/passwd")
 
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(etl_loads_route, "run_web_etl", fake_run_web_etl)
 
     response = client.post(
@@ -132,7 +132,7 @@ def test_inactive_profile_returns_409_without_leaking_paths(monkeypatch):
             "ETL profile is inactive: sample_fashion_vendor_v1"
         )
 
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(etl_loads_route, "run_web_etl", fake_run_web_etl)
     monkeypatch.setattr(etl_loads_route, "record_web_etl_run", metrics.append)
 
@@ -154,7 +154,7 @@ def test_inactive_profile_returns_409_without_leaking_paths(monkeypatch):
 def test_inactive_profile_is_not_reported_as_unsupported_profile(monkeypatch):
     # 없는 프로필(400 unsupported_profile)과 비활성 프로필(409 inactive_profile)이
     # 섞이면 호출자가 "오타"와 "운영이 내린 프로필"을 구분할 수 없습니다.
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "run_web_etl",
@@ -175,7 +175,7 @@ def test_empty_upload_returns_safe_400(monkeypatch):
     def fake_run_web_etl(session, **kwargs):
         raise CsvUploadValidationError("업로드한 파일이 비어 있습니다.")
 
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(etl_loads_route, "run_web_etl", fake_run_web_etl)
 
     response = client.post(
@@ -192,7 +192,7 @@ def test_pipeline_failure_returns_safe_400_without_traceback(monkeypatch):
     def fake_run_web_etl(session, **kwargs):
         raise ETLPipelineError("Input CSV is missing required source columns")
 
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(etl_loads_route, "run_web_etl", fake_run_web_etl)
 
     response = client.post(
@@ -211,7 +211,7 @@ def test_staging_load_failure_returns_safe_500_without_internals(monkeypatch):
     def fake_run_web_etl(session, **kwargs):
         raise ETLLoadError("표준 CSV와 요약 JSON의 output_file_sha256가 일치하지 않습니다")
 
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(etl_loads_route, "run_web_etl", fake_run_web_etl)
 
     response = client.post(
@@ -228,7 +228,7 @@ def test_staging_load_failure_returns_safe_500_without_internals(monkeypatch):
 
 def test_missing_profile_id_returns_422_without_calling_service(monkeypatch):
     calls = []
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "run_web_etl",
@@ -243,7 +243,7 @@ def test_missing_profile_id_returns_422_without_calling_service(monkeypatch):
 
 def test_missing_file_returns_422_without_calling_service(monkeypatch):
     calls = []
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "run_web_etl",

@@ -15,7 +15,7 @@ from api.main import app
 from api.routes import etl_loads as etl_loads_route
 from config.database import get_optional_database_url
 from config.logging import LOGGER_NAME
-from conftest import clear_current_user_override, override_current_user
+from conftest import clear_current_user_override, fake_session_without_runtime_overrides, override_current_user
 from core.security import create_access_token
 from core.upload_validator import CsvUploadValidationError
 from db.auth_service import create_user
@@ -117,7 +117,7 @@ def test_http_endpoint_passes_configured_filename_and_authenticated_actor_to_web
             initial_source_ref=initial_source_ref,
         )
 
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_http_feed_csv",
@@ -154,7 +154,7 @@ def test_http_endpoint_passes_configured_filename_and_authenticated_actor_to_web
 def test_http_endpoint_rejects_client_selected_source_without_reading_feed(
     monkeypatch, extra_field
 ):
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_http_feed_csv",
@@ -209,7 +209,7 @@ def test_http_adapter_failures_are_safe_and_do_not_record_web_etl_metrics(
     def raise_error():
         raise error
 
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(etl_loads_route, "read_http_feed_csv", raise_error)
     monkeypatch.setattr(
         etl_loads_route,
@@ -236,7 +236,7 @@ def test_http_read_failure_logs_only_safe_structured_fields(
     def raise_error():
         raise HTTPFeedReadError(SECRET_FEED_URL)
 
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(etl_loads_route, "read_http_feed_csv", raise_error)
 
     response = client.post(ENDPOINT, json=REQUEST)
@@ -267,7 +267,7 @@ def test_http_csv_validation_error_is_invalid_upload_without_web_metric(monkeypa
     def raise_error():
         raise CsvUploadValidationError("업로드한 파일이 비어 있습니다.")
 
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(etl_loads_route, "read_http_feed_csv", raise_error)
     monkeypatch.setattr(
         etl_loads_route,
@@ -294,7 +294,7 @@ def test_http_download_then_web_etl_errors_keep_existing_mapping_and_record_fail
     monkeypatch, error, expected_status, expected_code
 ):
     run_metrics: list[str] = []
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_http_feed_csv",
@@ -317,7 +317,7 @@ def test_http_download_then_web_etl_errors_keep_existing_mapping_and_record_fail
 def test_http_success_records_same_created_metrics_as_multipart_endpoint(monkeypatch):
     run_metrics: list[str] = []
     row_metrics: list[dict[str, int | None]] = []
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_http_feed_csv",
@@ -347,7 +347,7 @@ def test_http_success_records_same_created_metrics_as_multipart_endpoint(monkeyp
 
 def test_http_duplicate_success_records_only_duplicate_run_metric(monkeypatch):
     run_metrics: list[str] = []
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_http_feed_csv",
@@ -555,7 +555,7 @@ def test_inactive_profile_is_rejected_before_any_http_feed_read(monkeypatch):
         "sample_fashion_vendor_v1",
         _deactivated_registry_entry("sample_fashion_vendor_v1"),
     )
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_http_feed_csv",
@@ -582,7 +582,7 @@ def test_inactive_profile_outranks_a_source_error_that_would_fire_first(monkeypa
         "sample_fashion_vendor_v1",
         _deactivated_registry_entry("sample_fashion_vendor_v1"),
     )
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_http_feed_csv",
@@ -596,7 +596,7 @@ def test_inactive_profile_outranks_a_source_error_that_would_fire_first(monkeypa
 
 
 def test_unknown_profile_keeps_the_existing_source_error_precedence(monkeypatch):
-    app.dependency_overrides[get_session] = lambda: iter([object()])
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
     monkeypatch.setattr(
         etl_loads_route,
         "read_http_feed_csv",

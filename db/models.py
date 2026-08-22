@@ -802,3 +802,70 @@ class CatalogPromotionRollbackChange(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     rollback_run: Mapped[CatalogPromotionRollback] = relationship(back_populates="changes")
+
+
+class ETLProfileActivation(Base):
+    """Runtime activation state for one allowlisted ETL profile.
+
+    이 표는 프로필 **정의**를 담지 않습니다. source_columns/required_source_columns/
+    defaults의 source of truth는 계속 config/etl의 버전별 archive와 코드 registry이며,
+    Policy A(Published Version Immutable)에 따라 그 내용은 여기서 바뀌지 않습니다.
+    여기 있는 것은 "이미 보존된 어떤 버전을 신규 실행에 쓸 것인가" 하나뿐입니다.
+
+    row가 없는 것과 row가 있고 active_version이 NULL인 것은 **다른 상태**입니다.
+
+    | 상태 | 뜻 |
+    | --- | --- |
+    | row 없음 | runtime override 없음. 배포 registry의 active_version을 그대로 쓴다 |
+    | row 있음 + active_version = '2' | runtime override로 v2 활성 |
+    | row 있음 + active_version = NULL | runtime override로 비활성(Policy G의 Deactivate) |
+
+    두 상태를 하나로 합치면 "운영자가 명시적으로 내린 프로필"과 "아직 아무도 손대지
+    않은 프로필"을 구분할 수 없게 되고, 배포 기본값이 바뀔 때 운영자의 결정이 조용히
+    덮이거나 조용히 되살아납니다.
+
+    profile_id에 FK를 걸지 않습니다. 프로필은 아직 DB entity가 아니라 코드 registry의
+    key이므로, 존재하지 않는 대상을 가리키는 FK를 만들 수 없습니다. 대신 쓰기 경로가
+    registry allowlist와 versions를 검증합니다.
+    """
+
+    __tablename__ = "etl_profile_activations"
+    __table_args__ = (
+        CheckConstraint(
+            "length(trim(profile_id)) > 0",
+            name="ck_etl_profile_activations_profile_id_not_blank",
+        ),
+        # 비활성을 뜻하는 값은 NULL 하나뿐입니다. ''나 '  '을 허용하면 Phase 5A가
+        # registry에서 막아 둔 "placeholder 문자열은 비활성 표시가 아니다" 규칙이
+        # DB 쪽으로 뚫립니다.
+        CheckConstraint(
+            "active_version IS NULL OR length(trim(active_version)) > 0",
+            name="ck_etl_profile_activations_active_version_not_blank",
+        ),
+        # 한 프로필의 runtime 상태는 정확히 하나입니다. 중복 row가 생기면 어느 것이
+        # 진짜인지 코드가 임의로 골라야 하므로 DB에서 막습니다.
+        Index(
+            "ux_etl_profile_activations_profile_id",
+            "profile_id",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    profile_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    # NULL = 비활성. 값이 있으면 registry versions의 정확한 key여야 하며, 쓰기 경로가
+    # 그것을 검증합니다. DB는 임의 문자열을 알지 못하므로 형식만 제약합니다.
+    active_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Actor audit: 이 상태를 마지막으로 바꾼 로그인 사용자입니다. 요청 body가 아니라
+    # 인증된 current_user에서만 채웁니다.
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    actor_username: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
