@@ -362,6 +362,9 @@ def test_repeated_writes_keep_exactly_one_row_per_profile(
 
     unique index가 중복 row를 막고, ON CONFLICT DO UPDATE가 IntegrityError를 사용자에게
     노출하지 않고 갱신으로 바꿉니다.
+
+    이 표는 append-only history가 아니라 current-state row 하나이므로, 중간 단계의
+    결정은 보존되지 않는다는 사실도 함께 고정합니다.
     """
     for version, actor in [("1", "operator_a"), (None, "operator_b"), ("2", "operator_a")]:
         with session_factory() as session:
@@ -381,8 +384,9 @@ def test_repeated_writes_keep_exactly_one_row_per_profile(
         ).all()
 
     assert len(rows) == 1
+    # 마지막 쓰기의 상태와 actor만 남습니다. 중간의 operator_b가 만든 비활성 상태는
+    # 어디에도 보존되지 않습니다 — 이 표는 현재 상태 한 줄이지 변경 이력이 아닙니다.
     assert rows[0].active_version == "2"
-    # 진 쪽이 흔적 없이 사라지지 않도록 마지막으로 누가 바꿨는지 남습니다.
     assert rows[0].actor_username == "operator_a"
 
 

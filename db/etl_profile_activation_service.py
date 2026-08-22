@@ -192,9 +192,16 @@ def set_etl_profile_activation(
 
     동시에 두 operator가 같은 프로필을 바꾸면 INSERT가 unique index에서 충돌합니다.
     ON CONFLICT DO UPDATE로 한 문장에서 처리해 IntegrityError를 사용자에게 노출하지
-    않으며, 결과는 last-write-wins입니다. 이 MVP에서는 그것으로 충분합니다. 진 쪽의
-    결정이 흔적 없이 사라지지 않도록 actor_username과 updated_at을 함께 남기므로,
-    조회하면 마지막으로 누가 언제 바꿨는지 볼 수 있습니다.
+    않으며, 결과는 last-write-wins입니다.
+
+    **이 표는 append-only history가 아니라 프로필당 current-state row 하나입니다.**
+    A가 deactivate하고 B가 v2를 activate하면 최종 row에는 B의 active_version과
+    actor_username, updated_at만 남습니다. A의 이전 결정은 보존되지 않습니다.
+    actor_username과 updated_at은 "현재 상태를 마지막으로 만든 것이 누구/언제인가"일
+    뿐이고, 그것으로 activation 변경 이력을 되짚을 수는 없습니다.
+
+    append-only activation audit/history는 Phase 5B.1 범위 밖입니다. 필요해지면 별도
+    표가 있어야 하며, 이 표를 그 용도로 읽으면 안 됩니다.
     """
     # 검증을 트랜잭션 밖에서 먼저 합니다. 잘못된 입력이 쓰기 트랜잭션을 열지 않게 하고,
     # 없는 profile_id는 여기서 ETLProfileNotFoundError로 끝납니다.
