@@ -296,6 +296,23 @@ ETL_WEB_RUN_RESPONSE_KEYS = (
 )
 ETL_PROFILE_LIST_KEYS = ("items",)
 ETL_PROFILE_ITEM_KEYS = ("id", "display_name")
+ETL_PROFILE_NOT_FOUND_MESSAGE = "ETL 프로필을 찾을 수 없습니다."
+# 서버 message 원문을 그대로 쓰지 않고 클라이언트가 화면 문구를 관리합니다.
+UNKNOWN_PROFILE_VERSION_MESSAGE = (
+    "현재 배포에서 사용할 수 없는 버전입니다. 상태를 새로고침한 뒤 다시 선택하세요."
+)
+ETL_PROFILE_ACTIVATION_RESPONSE_KEYS = (
+    "profile_id",
+    "display_name",
+    "deployment_active_version",
+    "runtime_override_exists",
+    "runtime_active_version",
+    "effective_active_version",
+    "is_active",
+    "available_versions",
+    "actor_username",
+    "updated_at",
+)
 ETL_PROFILE_DETAIL_RESPONSE_KEYS = (
     "id",
     "display_name",
@@ -679,6 +696,70 @@ def _validate_etl_quality_observability_response(data: dict[str, Any]) -> None:
         or (direction == "unchanged" and delta != 0)
     ):
         raise _invalid_etl_response()
+
+
+def _is_valid_etl_profile_activation_response(data: dict[str, Any]) -> bool:
+    """Reject an activation payload the management screen could misread.
+
+    이 응답 하나로 화면이 "지금 활성인가", "무엇을 고를 수 있는가", "배포 기본값인가
+    운영자가 정한 값인가"를 모두 말합니다. 서로 어긋난 응답을 그리면 사용자가 잘못된
+    상태를 보고 조작하게 되므로, 서버 계약이 보장하는 불변식을 여기서 확인합니다.
+    """
+    if not isinstance(data.get("profile_id"), str) or not data["profile_id"].strip():
+        return False
+    if not isinstance(data.get("display_name"), str) or not data["display_name"].strip():
+        return False
+
+    for key in ("runtime_override_exists", "is_active"):
+        if not isinstance(data.get(key), bool):
+            return False
+
+    versions = data.get("available_versions")
+    if (
+        not isinstance(versions, list)
+        or not versions
+        or any(not isinstance(v, str) or not v.strip() for v in versions)
+        or len(set(versions)) != len(versions)
+    ):
+        return False
+
+    for key in (
+        "deployment_active_version",
+        "runtime_active_version",
+        "effective_active_version",
+    ):
+        value = data.get(key)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            return False
+
+    for key in ("actor_username", "updated_at"):
+        value = data.get(key)
+        if value is not None and not isinstance(value, str):
+            return False
+
+    effective = data["effective_active_version"]
+    # is_active는 effective의 다른 표현일 뿐입니다. 둘이 어긋나면 화면의 상태 배지와
+    # 실제 실행 가능 여부가 달라집니다.
+    if data["is_active"] is not (effective is not None):
+        return False
+
+    # override가 없으면 effective는 배포 기본값이고, 있으면 runtime 값입니다.
+    # 이 관계가 깨지면 "왜 이 상태인가"를 화면이 잘못 설명하게 됩니다.
+    if data["runtime_override_exists"]:
+        if effective != data["runtime_active_version"]:
+            return False
+    else:
+        if effective != data["deployment_active_version"]:
+            return False
+        # override가 없는데 runtime 값이 붙어 있으면 두 상태가 섞인 응답입니다.
+        if data["runtime_active_version"] is not None:
+            return False
+
+    # 실제로 쓰이는 버전은 고를 수 있는 버전 안에 있어야 합니다. 배포 기본값은 잘못된
+    # pointer일 수 있으므로(서버가 실행 시점에 실패시킴) effective만 확인합니다.
+    if effective is not None and effective not in versions:
+        return False
+    return True
 
 
 def _is_valid_etl_profile_detail_response(data: dict[str, Any]) -> bool:
@@ -1412,6 +1493,28 @@ class ETLProfileInactiveError(ETLWebRunApiError):
     """
 
 
+class ETLProfileActivationVersionError(CatalogGuardApiResponseError):
+    """Raised when the requested active version is not a preserved version.
+
+    서버가 422 unknown_profile_version으로 답하는 경우입니다. 사용자가 고칠 수 있는
+    상태(다른 버전을 고르거나 상태를 새로고침)이므로 일반 서버 오류와 구분합니다.
+    available_versions를 함께 들고 다녀, 화면이 지금 고를 수 있는 버전을 그대로 보여
+    줄 수 있게 합니다.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        request_id: str | None = None,
+        available_versions: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message, request_id=request_id)
+        self.code = code
+        self.available_versions = available_versions
+
+
 class ETLInvalidUploadError(ETLWebRunApiError):
     pass
 
@@ -1594,8 +1697,16 @@ class CatalogGuardApiClient:
         self._validate_response_keys(data, ETL_WEB_RUN_RESPONSE_KEYS)
         return data
 
-    def list_etl_profiles(self) -> dict[str, Any]:
-        data = self._get_json("/api/v1/etl-profiles")
+    def list_etl_profiles(self, *, include_inactive: bool = False) -> dict[str, Any]:
+        """List allowlisted profiles; by default only the runnable ones.
+
+        include_inactive=True는 운영 관리 화면 전용입니다. 기본값은 기존 계약 그대로라
+        query parameter 자체를 보내지 않습니다.
+        """
+        data = self._get_json(
+            "/api/v1/etl-profiles",
+            params={"include_inactive": "true"} if include_inactive else None,
+        )
         self._validate_response_keys(data, ETL_PROFILE_LIST_KEYS)
         items = data.get("items")
         if not isinstance(items, list) or any(
@@ -1606,6 +1717,59 @@ class CatalogGuardApiClient:
             raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
         return data
 
+    def get_etl_profile_activation(self, profile_id: str) -> dict[str, Any]:
+        """Read the deployment default, the runtime override, and what applies now."""
+        data = self._get_json(
+            self._activation_path(profile_id),
+            raise_not_found=True,
+            not_found_error=ETLProfileNotFoundError,
+            not_found_message=ETL_PROFILE_NOT_FOUND_MESSAGE,
+        )
+        self._validate_response_keys(data, ETL_PROFILE_ACTIVATION_RESPONSE_KEYS)
+        if not _is_valid_etl_profile_activation_response(data):
+            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+        return data
+
+    def update_etl_profile_activation(
+        self,
+        profile_id: str,
+        *,
+        active_version: str | None,
+    ) -> dict[str, Any]:
+        """Set the runtime active version, or deactivate new runs with None.
+
+        active_version=None은 **명시적 비활성화**이지 "runtime override 제거"가
+        아닙니다. 서버에는 override를 지우고 배포 기본값으로 돌아가는 API가 없습니다.
+        호출자가 두 개념을 섞지 않도록 여기에 적어 둡니다.
+
+        actor는 body에 넣지 않습니다. 서버가 인증된 사용자에서만 가져옵니다.
+        """
+        normalized_version = (
+            active_version if active_version is None else str(active_version).strip()
+        )
+        if normalized_version is not None and not normalized_version:
+            raise ValueError("active_version must not be blank")
+
+        data = self._put_json(
+            self._activation_path(profile_id),
+            json_body={"active_version": normalized_version},
+        )
+        self._validate_response_keys(data, ETL_PROFILE_ACTIVATION_RESPONSE_KEYS)
+        if not _is_valid_etl_profile_activation_response(data):
+            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+        return data
+
+    @staticmethod
+    def _activation_path(profile_id: str) -> str:
+        normalized_profile_id = str(profile_id).strip()
+        if not normalized_profile_id:
+            raise ValueError("profile_id must not be empty")
+        # profile_id를 경로 조각으로 그대로 넣지 않습니다. quote(safe='')가 '/'까지
+        # 인코딩해 다른 endpoint로 새지 않게 합니다.
+        return (
+            f"/api/v1/etl-profiles/{quote(normalized_profile_id, safe='')}/activation"
+        )
+
     def get_etl_profile_detail(self, profile_id: str) -> dict[str, Any]:
         normalized_profile_id = str(profile_id).strip()
         if not normalized_profile_id:
@@ -1615,7 +1779,7 @@ class CatalogGuardApiClient:
             f"/api/v1/etl-profiles/{quote(normalized_profile_id, safe='')}",
             raise_not_found=True,
             not_found_error=ETLProfileNotFoundError,
-            not_found_message="ETL 프로필을 찾을 수 없습니다.",
+            not_found_message=ETL_PROFILE_NOT_FOUND_MESSAGE,
             # 이 endpoint만 409 inactive_profile을 전용 오류로 구분합니다.
             map_inactive_profile=True,
         )
@@ -2163,6 +2327,116 @@ class CatalogGuardApiClient:
                 request_id=_get_response_request_id(response),
             )
         return data
+
+    def _put_json(
+        self,
+        path: str,
+        *,
+        json_body: dict[str, Any],
+    ) -> dict[str, Any]:
+        response = self._put_response(path, json_body=json_body)
+
+        try:
+            data = response.json()
+        except ValueError as error:
+            raise CatalogGuardApiResponseError(
+                INVALID_RESPONSE_MESSAGE,
+                request_id=_get_response_request_id(response),
+            ) from error
+
+        if not isinstance(data, dict):
+            raise CatalogGuardApiResponseError(
+                INVALID_RESPONSE_MESSAGE,
+                request_id=_get_response_request_id(response),
+            )
+        return data
+
+    def _put_response(self, path: str, *, json_body: dict[str, Any]):
+        """PUT one idempotent state, mapping the errors the caller must distinguish.
+
+        지금 PUT을 쓰는 곳은 activation 하나뿐이라 오류 매핑도 그 계약에 맞춥니다.
+        404는 없는 프로필, 422 unknown_profile_version은 고를 수 없는 버전입니다.
+        운영자가 해야 할 일이 다르므로 같은 오류로 뭉개지 않습니다.
+        """
+        url = f"{self._base_url}{path}"
+
+        try:
+            response = self._session.put(
+                url,
+                json=json_body,
+                timeout=self._timeout_seconds,
+            )
+            response.raise_for_status()
+        except requests.Timeout as error:
+            raise CatalogGuardApiTimeoutError(TIMEOUT_ERROR_MESSAGE) from error
+        except requests.ConnectionError as error:
+            raise CatalogGuardApiConnectionError(CONNECTION_ERROR_MESSAGE) from error
+        except requests.HTTPError as error:
+            error_response = getattr(error, "response", None)
+            request_id = _get_response_request_id(error_response)
+            status_code = getattr(error_response, "status_code", None)
+            if status_code == 404:
+                raise ETLProfileNotFoundError(
+                    ETL_PROFILE_NOT_FOUND_MESSAGE,
+                    request_id=request_id,
+                ) from error
+            if status_code == 422:
+                version_error = self._build_activation_version_error(
+                    error_response,
+                    request_id=request_id,
+                )
+                if version_error is not None:
+                    raise version_error from error
+            auth_error = self._build_auth_error(
+                status_code,
+                error_response,
+                request_id=request_id,
+            )
+            if auth_error is not None:
+                raise auth_error from error
+            raise CatalogGuardApiResponseError(
+                SERVER_ERROR_MESSAGE,
+                request_id=request_id,
+            ) from error
+        except requests.RequestException as error:
+            raise CatalogGuardApiResponseError(SERVER_ERROR_MESSAGE) from error
+
+        return response
+
+    @staticmethod
+    def _build_activation_version_error(
+        response: object,
+        *,
+        request_id: str | None,
+    ) -> "ETLProfileActivationVersionError | None":
+        """Map 422 unknown_profile_version, or None to keep the generic error.
+
+        payload의 code가 실제로 unknown_profile_version일 때만 전용 오류로 바꿉니다.
+        FastAPI의 일반 검증 실패(422)도 같은 status를 쓰므로, code를 보지 않으면
+        관계없는 요청 오류까지 "버전이 없다"로 잘못 설명하게 됩니다.
+        """
+        try:
+            payload = response.json()
+        except (AttributeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        detail = payload.get("detail")
+        if not isinstance(detail, dict) or detail.get("code") != "unknown_profile_version":
+            return None
+
+        raw_versions = detail.get("available_versions")
+        available_versions = (
+            tuple(v for v in raw_versions if isinstance(v, str) and v.strip())
+            if isinstance(raw_versions, list)
+            else ()
+        )
+        return ETLProfileActivationVersionError(
+            UNKNOWN_PROFILE_VERSION_MESSAGE,
+            code="unknown_profile_version",
+            request_id=request_id,
+            available_versions=available_versions,
+        )
 
     def _get_response(
         self,

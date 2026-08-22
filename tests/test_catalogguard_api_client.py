@@ -153,6 +153,12 @@ class FakeSession:
             raise self.error
         return self.response
 
+    def put(self, url, *, json=None, timeout=None):
+        self.calls.append({"url": url, "json": json, "timeout": timeout})
+        if self.error is not None:
+            raise self.error
+        return self.response
+
     def post(self, url, *, files=None, data=None, json=None, timeout=None):
         call = {
             "url": url,
@@ -3555,3 +3561,271 @@ def test_constructor_access_token_sets_authorization_header():
     )
 
     assert session.headers["Authorization"] == "Bearer constructor-token"
+
+
+# ---- Phase 5B.2: activation 조회/변경과 관리용 목록 --------------------------
+
+
+ETL_PROFILE_ACTIVATION_RESPONSE = {
+    "profile_id": "sample_fashion_vendor_v1",
+    "display_name": "패션 공급사 샘플",
+    "deployment_active_version": "2",
+    "runtime_override_exists": False,
+    "runtime_active_version": None,
+    "effective_active_version": "2",
+    "is_active": True,
+    "available_versions": ["1", "2"],
+    "actor_username": None,
+    "updated_at": None,
+}
+
+
+def _activation(**overrides):
+    payload = dict(ETL_PROFILE_ACTIVATION_RESPONSE)
+    payload.update(overrides)
+    return payload
+
+
+def test_list_etl_profiles_sends_include_inactive_only_when_requested():
+    client, session = make_client(response=FakeResponse(payload=ETL_PROFILE_LIST_RESPONSE))
+
+    client.list_etl_profiles()
+    client.list_etl_profiles(include_inactive=True)
+
+    # 기본 호출은 query parameter 자체를 보내지 않아 기존 요청과 완전히 같습니다.
+    assert session.calls[0]["params"] is None
+    assert session.calls[1]["params"] == {"include_inactive": "true"}
+
+
+def test_get_etl_profile_activation_uses_the_activation_path_and_escapes_the_id():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_PROFILE_ACTIVATION_RESPONSE),
+        timeout_seconds=6.0,
+    )
+
+    data = client.get_etl_profile_activation(" sample_fashion_vendor_v1 ")
+
+    assert data == ETL_PROFILE_ACTIVATION_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/etl-profiles/sample_fashion_vendor_v1/activation",
+            "params": None,
+            "timeout": 6.0,
+        }
+    ]
+
+
+def test_activation_path_percent_encodes_path_separator():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_PROFILE_ACTIVATION_RESPONSE)
+    )
+
+    client.get_etl_profile_activation("../secret")
+
+    assert session.calls[0]["url"].endswith("/etl-profiles/..%2Fsecret/activation")
+
+
+def test_update_etl_profile_activation_puts_the_selected_version():
+    client, session = make_client(
+        response=FakeResponse(
+            payload=_activation(
+                runtime_override_exists=True,
+                runtime_active_version="1",
+                effective_active_version="1",
+            )
+        ),
+        timeout_seconds=6.0,
+    )
+
+    client.update_etl_profile_activation("sample_fashion_vendor_v1", active_version="1")
+
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/etl-profiles/sample_fashion_vendor_v1/activation",
+            "json": {"active_version": "1"},
+            "timeout": 6.0,
+        }
+    ]
+
+
+def test_update_etl_profile_activation_puts_null_to_deactivate():
+    client, session = make_client(
+        response=FakeResponse(
+            payload=_activation(
+                runtime_override_exists=True,
+                runtime_active_version=None,
+                effective_active_version=None,
+                is_active=False,
+            )
+        )
+    )
+
+    client.update_etl_profile_activation("sample_fashion_vendor_v1", active_version=None)
+
+    assert session.calls[0]["json"] == {"active_version": None}
+
+
+def test_update_etl_profile_activation_rejects_a_blank_version():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_PROFILE_ACTIVATION_RESPONSE)
+    )
+
+    with pytest.raises(ValueError):
+        client.update_etl_profile_activation("sample_fashion_vendor_v1", active_version="   ")
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # available_versions 이상
+        _activation(available_versions=[]),
+        _activation(available_versions=["1", "1"]),
+        _activation(available_versions=["1", ""]),
+        _activation(available_versions="1,2"),
+        # is_active와 effective가 어긋남
+        _activation(is_active=False),
+        _activation(
+            runtime_override_exists=True,
+            runtime_active_version=None,
+            effective_active_version=None,
+            is_active=True,
+        ),
+        # override 없음인데 effective가 배포 기본값과 다름
+        _activation(effective_active_version="1"),
+        # override 없음인데 runtime 값이 붙어 있음
+        _activation(runtime_active_version="2"),
+        # override 있는데 effective가 runtime과 다름
+        _activation(
+            runtime_override_exists=True,
+            runtime_active_version="1",
+            effective_active_version="2",
+        ),
+        # effective가 available_versions 밖
+        _activation(
+            runtime_override_exists=True,
+            runtime_active_version="9",
+            effective_active_version="9",
+        ),
+        # 식별자 결측
+        _activation(profile_id=""),
+        _activation(display_name="   "),
+    ],
+)
+def test_activation_response_validation_rejects_inconsistent_payloads(payload):
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.get_etl_profile_activation("sample_fashion_vendor_v1")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        ETL_PROFILE_ACTIVATION_RESPONSE,
+        _activation(
+            runtime_override_exists=True,
+            runtime_active_version="1",
+            effective_active_version="1",
+            actor_username="operator_user",
+            updated_at="2026-08-22T04:00:00Z",
+        ),
+        _activation(
+            runtime_override_exists=True,
+            runtime_active_version=None,
+            effective_active_version=None,
+            is_active=False,
+        ),
+        # 배포 기본값이 잘못된 pointer라도 override가 정상이면 받아들입니다.
+        _activation(
+            deployment_active_version="9",
+            runtime_override_exists=True,
+            runtime_active_version="2",
+            effective_active_version="2",
+        ),
+    ],
+)
+def test_activation_response_validation_accepts_every_contract_state(payload):
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    assert client.get_etl_profile_activation("sample_fashion_vendor_v1") == payload
+
+
+def test_activation_update_maps_unknown_version_to_a_dedicated_error():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=422,
+            payload={
+                "detail": {
+                    "code": "unknown_profile_version",
+                    "message": "요청한 ETL 프로필 버전이 없습니다.",
+                    "available_versions": ["1", "2"],
+                }
+            },
+        )
+    )
+
+    with pytest.raises(client_module.ETLProfileActivationVersionError) as error:
+        client.update_etl_profile_activation("sample_fashion_vendor_v1", active_version="9")
+
+    assert error.value.code == "unknown_profile_version"
+    assert error.value.available_versions == ("1", "2")
+    # 서버 message 원문이 아니라 클라이언트 문구를 씁니다.
+    assert "새로고침" in str(error.value)
+
+
+def test_activation_update_keeps_a_generic_422_generic():
+    """FastAPI의 일반 검증 실패도 422입니다. code를 보지 않으면 잘못 분류됩니다."""
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=422, payload={"detail": [{"loc": ["body"], "msg": "bad"}]}
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.update_etl_profile_activation("sample_fashion_vendor_v1", active_version="1")
+
+    assert not isinstance(error.value, client_module.ETLProfileActivationVersionError)
+
+
+def test_activation_update_maps_missing_profile_to_not_found():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(status_code=404, payload={"detail": "nope"})
+    )
+
+    with pytest.raises(client_module.ETLProfileNotFoundError):
+        client.update_etl_profile_activation("gone", active_version="1")
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_attribute"),
+    [
+        (401, "CatalogGuardApiAuthenticationError"),
+        (403, "CatalogGuardApiAuthorizationError"),
+    ],
+)
+def test_activation_update_reuses_the_existing_auth_errors(status_code, expected_attribute):
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(status_code=status_code, payload={"detail": {"code": "x"}})
+    )
+
+    with pytest.raises(getattr(client_module, expected_attribute)):
+        client.update_etl_profile_activation("sample_fashion_vendor_v1", active_version="1")
+
+
+def test_activation_update_maps_connection_and_timeout_errors():
+    client_module = import_client_module()
+
+    client, _ = make_client(error=requests.ConnectionError("boom"))
+    with pytest.raises(client_module.CatalogGuardApiConnectionError):
+        client.update_etl_profile_activation("sample_fashion_vendor_v1", active_version="1")
+
+    client, _ = make_client(error=requests.Timeout("slow"))
+    with pytest.raises(client_module.CatalogGuardApiTimeoutError):
+        client.update_etl_profile_activation("sample_fashion_vendor_v1", active_version="1")

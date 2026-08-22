@@ -470,3 +470,113 @@ def test_runtime_deactivation_blocks_http_feed_before_any_source_read(api, monke
 
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["code"] == "inactive_profile"
+
+
+# ---- include_inactive: 관리 화면이 비활성 프로필을 다시 고를 수 있어야 한다 --------
+
+
+def test_profile_list_default_hides_a_deactivated_profile(api):
+    """기본값은 기존 계약 그대로입니다. 실행 selector는 활성 프로필만 봅니다."""
+    token = api("operator")
+    client.put(ACTIVATION_ENDPOINT, json={"active_version": None}, headers=_headers(token))
+
+    ids = [
+        item["id"]
+        for item in client.get(ETL_PROFILES_ENDPOINT, headers=_headers(token)).json()["items"]
+    ]
+
+    assert PROFILE_ID not in ids
+    assert OTHER_PROFILE_ID in ids
+
+
+def test_include_inactive_keeps_a_deactivated_profile_selectable(api):
+    """이것이 Phase 5B.2의 핵심 회귀입니다.
+
+    비활성 프로필이 관리 목록에서도 사라지면 한 번 내린 프로필을 다시 고를 수 없어
+    영영 되살릴 수 없게 됩니다.
+    """
+    token = api("operator")
+    client.put(ACTIVATION_ENDPOINT, json={"active_version": None}, headers=_headers(token))
+
+    response = client.get(
+        ETL_PROFILES_ENDPOINT,
+        params={"include_inactive": "true"},
+        headers=_headers(token),
+    )
+
+    assert response.status_code == 200, response.text
+    items = response.json()["items"]
+    ids = [item["id"] for item in items]
+    assert PROFILE_ID in ids
+    assert OTHER_PROFILE_ID in ids
+    # 응답 shape은 기존과 같습니다. 상태는 activation endpoint로 따로 봅니다.
+    assert all(sorted(item) == ["display_name", "id"] for item in items)
+
+
+def test_include_inactive_false_matches_the_default(api):
+    token = api("operator")
+    client.put(ACTIVATION_ENDPOINT, json={"active_version": None}, headers=_headers(token))
+
+    default = client.get(ETL_PROFILES_ENDPOINT, headers=_headers(token)).json()
+    explicit_false = client.get(
+        ETL_PROFILES_ENDPOINT,
+        params={"include_inactive": "false"},
+        headers=_headers(token),
+    ).json()
+
+    assert default == explicit_false
+
+
+def test_include_inactive_is_readable_by_viewer(api):
+    response = client.get(
+        ETL_PROFILES_ENDPOINT,
+        params={"include_inactive": "true"},
+        headers=_headers(api("viewer")),
+    )
+
+    assert response.status_code == 200, response.text
+
+
+def test_include_inactive_still_requires_authentication(api):
+    response = client.get(ETL_PROFILES_ENDPOINT, params={"include_inactive": "true"})
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "authentication_required"
+
+
+def test_include_inactive_never_exposes_a_profile_outside_the_allowlist(api):
+    """필터를 끄는 것이지 후보를 넓히는 것이 아닙니다."""
+    items = client.get(
+        ETL_PROFILES_ENDPOINT,
+        params={"include_inactive": "true"},
+        headers=_headers(api("viewer")),
+    ).json()["items"]
+
+    assert sorted(item["id"] for item in items) == [
+        OTHER_PROFILE_ID,
+        PROFILE_ID,
+    ]
+
+
+def test_deactivate_then_reactivate_round_trip_through_the_management_list(api):
+    """관리 목록 → 비활성 → 관리 목록에 남음 → 다시 활성화 → 실행 목록 복귀."""
+    token = api("operator")
+    client.put(ACTIVATION_ENDPOINT, json={"active_version": None}, headers=_headers(token))
+
+    admin_ids = [
+        item["id"]
+        for item in client.get(
+            ETL_PROFILES_ENDPOINT,
+            params={"include_inactive": "true"},
+            headers=_headers(token),
+        ).json()["items"]
+    ]
+    assert PROFILE_ID in admin_ids
+
+    client.put(ACTIVATION_ENDPOINT, json={"active_version": "1"}, headers=_headers(token))
+
+    run_ids = [
+        item["id"]
+        for item in client.get(ETL_PROFILES_ENDPOINT, headers=_headers(token)).json()["items"]
+    ]
+    assert PROFILE_ID in run_ids

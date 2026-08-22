@@ -178,21 +178,38 @@ def resolve_etl_profile_activation(
     )
 
 
-def list_etl_profiles(*, session: Session | None = None) -> list[dict[str, str]]:
-    """Return the allowlisted ETL profiles selectable for a new ETL run.
+def list_etl_profiles(
+    *,
+    session: Session | None = None,
+    include_inactive: bool = False,
+) -> list[dict[str, str]]:
+    """Return allowlisted ETL profiles, by default only the ones runnable right now.
 
-    이 목록의 유일한 호출자는 GET /api/v1/etl-profiles이고, Streamlit은 그 응답으로
-    신규 ETL 실행용 selector를 그립니다. 즉 "관리용 전체 목록"이 아니라 "지금 실행할
-    수 있는 프로필 목록"이므로, 비활성 프로필은 제외합니다. 서버 차단
+    기본값(include_inactive=False)은 기존 계약 그대로입니다. 이 목록의 주 호출자는
+    Streamlit의 신규 ETL 실행 selector이므로 "관리용 전체 목록"이 아니라 "지금 실행할
+    수 있는 프로필 목록"이고, 비활성 프로필은 제외합니다. 서버 차단
     (get_profile_path())이 실제 방어선이고 이 필터는 그 앞단입니다.
 
     활성 여부는 배포 기본값이 아니라 **effective** 상태로 판단합니다. runtime에서
     내린 프로필이 selector에 계속 보이면 사용자는 고를 수 있는데 실행만 409로 막히는
     화면을 보게 됩니다.
 
+    include_inactive=True는 **운영 관리 화면 전용**입니다. 비활성 프로필을 목록에서
+    감추면 한 번 내린 프로필을 다시 고를 수 없어 영영 되살릴 수 없게 됩니다. 관리
+    화면은 "무엇을 실행할 수 있는가"가 아니라 "무엇을 관리할 수 있는가"를 묻습니다.
+
+    두 경우 모두 registry allowlist 밖의 항목은 절대 나오지 않고, registry 정의
+    순서도 그대로입니다. include_inactive는 필터를 끄는 것이지 후보를 넓히지 않습니다.
+
     runtime override를 한 번에 읽고 메모리에서 맞춥니다. 프로필마다 따로 질의하면
     프로필 수만큼 왕복이 생깁니다.
     """
+    if include_inactive:
+        return [
+            {"id": profile_id, "display_name": info["display_name"]}
+            for profile_id, info in _ETL_PROFILE_REGISTRY.items()
+        ]
+
     overrides: dict[str, str | None] = {}
     if session is not None:
         overrides = {
