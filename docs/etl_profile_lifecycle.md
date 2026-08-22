@@ -807,7 +807,11 @@ activation 조회는 SELECT라 session을 autobegin시킨다. 그 상태로 두�
 
 `profile_id` unique index가 중복 row를 막고, 쓰기는 `INSERT ... ON CONFLICT (profile_id) DO UPDATE` 한 문장이라 동시 요청이 `IntegrityError`로 사용자에게 새지 않는다. 결과는 **last-write-wins**다.
 
-분산 lock이나 낙관적 버전 필드는 두지 않았다. 이 상태는 프로필당 값 하나이고 변경 빈도가 낮아, lock의 복잡도가 그것이 막는 위험보다 크다. 대신 진 쪽의 결정이 흔적 없이 사라지지 않도록 `actor_username`과 `updated_at`을 남긴다. 조회하면 마지막으로 누가 언제 바꿨는지 보인다.
+분산 lock이나 낙관적 버전 필드는 두지 않았다. 이 상태는 프로필당 값 하나이고 변경 빈도가 낮아, lock의 복잡도가 그것이 막는 위험보다 크다.
+
+**진 쪽의 결정은 보존되지 않는다.** 이 표는 append-only history가 아니라 프로필당 current-state row 하나다. A가 deactivate하고 B가 v2를 activate하면 최종 row에는 B의 `active_version`·`actor_username`·`updated_at`만 남고, A의 이전 결정은 사라진다.
+
+`actor_username`과 `updated_at`은 **현재 상태를 마지막으로 만든 것이 누구/언제인가**를 말할 뿐이며, 그것으로 activation 변경 이력을 되짚을 수는 없다. append-only activation audit/history는 Phase 5B.1 범위 밖이고(16.10), 필요해지면 별도 표가 있어야 한다.
 
 ### 16.9 이번에 바뀌지 않은 것
 
