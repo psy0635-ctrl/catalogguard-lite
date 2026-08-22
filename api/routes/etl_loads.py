@@ -841,6 +841,13 @@ def list_etl_quality_observability_profiles_route(
 
 @router.get("/api/v1/etl-profiles", response_model=ETLProfileListResponse)
 def list_etl_profile_options(
+    # 기본값 False가 기존 계약입니다. 이 값을 넘기지 않는 기존 호출자는 지금까지와
+    # 완전히 같은 응답(활성 프로필만)을 받습니다.
+    #
+    # True는 운영 관리 화면 전용입니다. 비활성 프로필을 목록에서 감추면 한 번 내린
+    # 프로필을 다시 고를 수 없어 되살릴 방법이 없어집니다. 응답 shape은 그대로이고,
+    # 각 프로필의 실제 상태는 .../activation으로 따로 조회합니다.
+    include_inactive: bool = Query(default=False),
     _current_user=Depends(require_viewer),
     session: Session = Depends(get_session),
 ) -> ETLProfileListResponse:
@@ -849,7 +856,10 @@ def list_etl_profile_options(
     return ETLProfileListResponse(
         items=[
             ETLProfileResponse(**profile)
-            for profile in list_etl_profiles(session=session)
+            for profile in list_etl_profiles(
+                session=session,
+                include_inactive=include_inactive,
+            )
         ]
     )
 

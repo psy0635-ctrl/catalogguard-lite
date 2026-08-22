@@ -10,7 +10,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 - `[정책 결정]` — 지켜야 할 규칙. 그 자체로는 코드를 규정하지 않고, 강제 장치는 별도 Phase에서 만든다
 - `[향후 구현]` — 아직 없고, 나중에 만들 때 따를 방향
 
-**시점 표기 규칙**: 각 Phase 절은 그 Phase 시점의 사실을 기록한다. 뒤 Phase가 그것을 바꿨으면 해당 절에 갱신 표시를 남기고, 지금 무엇이 사실인지는 가장 나중 Phase 절이 말한다. 현재 최신은 **Phase 5B.1(16장)** 이다.
+**시점 표기 규칙**: 각 Phase 절은 그 Phase 시점의 사실을 기록한다. 뒤 Phase가 그것을 바꿨으면 해당 절에 갱신 표시를 남기고, 지금 무엇이 사실인지는 가장 나중 Phase 절이 말한다. 현재 최신은 **Phase 5B.2(17장)** 이다.
 
 | Phase | 무엇이 바뀌었나 | 절 |
 | --- | --- | --- |
@@ -20,6 +20,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 | Phase 5A | 배포 기반 Activation / Deactivation | 14장 |
 | Phase 5A.1 | 클라이언트/UI의 inactive 처리 | 15장 |
 | Phase 5B.1 | Persistent Runtime Activation API | 16장 |
+| Phase 5B.2 | Streamlit 운영 관리 화면 | 17장 |
 
 ---
 
@@ -397,7 +398,7 @@ registry: sample_fashion_vendor_v1 -> active_version "3"
 | Phase 5A | Deployment-based Activation / Deactivation — `active_version`이 버전 문자열 또는 `None`. `None`이면 신규 ETL 실행만 막는다 | **완료** (14장) |
 | Phase 5A.1 | 클라이언트/UI의 inactive 처리 — Python client가 `inactive_profile`을 전용 예외로 매핑하고 Streamlit이 원인을 안내한다 | **완료** (15장) |
 | Phase 5B.1 | Persistent Runtime Activation API — activation을 바꾸는 API·권한·DB 지속 상태 (16장) | **완료** |
-| Phase 5B.2 | Streamlit Admin UI — 활성 버전 선택·활성화·비활성화 화면 | **미구현** |
+| Phase 5B.2 | Streamlit Admin UI — 활성 버전 선택·활성화·비활성화 화면 (17장) | **완료** |
 | Phase 6 | 필요할 때만 DB-backed Profile / ProfileVersion (Option C) | 조건부 |
 
 Phase 4가 끝나기 전에는 새 프로필 **등록** 기능을 만들지 않는다. 등록을 먼저 만들면 보존 구조 없이 프로필 수만 늘어 3.2의 위험이 프로필 수만큼 곱해진다.
@@ -576,7 +577,7 @@ Phase 3 guardrail이 이제 **archive 전체**를 검사한다. 등록된 모든
 
 Phase 4 시점에는 Activation / Deactivation이 **미구현**이었다. 이후 Phase 5A에서 비활성 상태(`active_version = None`)를 코드에 추가했고(14장), Phase 5B.1에서 그 값을 **런타임에** 바꾸는 API와 DB 상태를 만들었다(16장).
 
-지금 기준으로 남아 있는 것은 Streamlit 관리 UI(Phase 5B.2)와 Profile CRUD 부재다.
+그 뒤 Phase 5B.2에서 Streamlit 운영 관리 화면까지 생겼다(17장). 지금 기준으로 남아 있는 것은 Profile CRUD 부재다.
 
 ---
 
@@ -655,7 +656,7 @@ archive 버전을 조회하는 **공개 API는 만들지 않았다.** 과거 정
 Phase 5A 시점에 activation 변경은 **배포가 필요한 code configuration**이었다. `active_version`을 바꾸려면 코드 변경 → 테스트 → 배포를 거쳐야 했다.
 
 - ~~activation/deactivation을 바꾸는 **관리자 API가 없다**~~ → Phase 5B.1에서 추가됐다(16장)
-- Streamlit **활성/비활성 버튼이 없다** → 여전히 없다(Phase 5B.2)
+- ~~Streamlit **활성/비활성 버튼이 없다**~~ → Phase 5B.2에서 추가됐다(17장)
 - ~~DB-backed active flag가 없다~~ → Phase 5B.1이 **activation 상태만** DB로 옮겼다. 프로필 정의 자체를 DB로 옮기는 것은 여전히 Phase 6(조건부)이다
 - Profile CRUD(등록·수정·삭제)가 없다 → 여전히 없다
 - 런타임 메모리의 registry를 API로 고치는 기능은 **의도적으로** 만들지 않았다. 재시작하면 사라지는 상태는 "관리 기능처럼 보이지만 관리되지 않는" 더 나쁜 상태를 만든다. Phase 5B.1도 이 판단을 그대로 지켜, 메모리 registry를 고치지 않고 **DB에 저장되는 별도 상태**를 얹었다
@@ -691,7 +692,7 @@ Profile Detail의 409 매핑은 **opt-in**이다. `_get_json()`/`_get_response()
 
 ### 15.3 여전히 없는 것
 
-Phase 5A.1은 **표시와 오류 분류만** 바꾼다. 이 시점에는 runtime activation API·Streamlit 활성/비활성 버튼·DB-backed active flag·Profile CRUD가 모두 없었고, activation 상태를 바꾸려면 코드 변경 → 테스트 → 배포가 필요했다. 그중 API와 DB 상태는 Phase 5B.1(16장)에서 생겼고, Streamlit 버튼과 Profile CRUD는 여전히 없다.
+Phase 5A.1은 **표시와 오류 분류만** 바꾼다. 이 시점에는 runtime activation API·Streamlit 활성/비활성 버튼·DB-backed active flag·Profile CRUD가 모두 없었고, activation 상태를 바꾸려면 코드 변경 → 테스트 → 배포가 필요했다. 그중 API와 DB 상태는 Phase 5B.1(16장), Streamlit 관리 화면은 Phase 5B.2(17장)에서 생겼다. Profile CRUD는 여전히 없다.
 
 ---
 
@@ -823,11 +824,129 @@ activation 조회는 SELECT라 session을 autobegin시킨다. 그 상태로 두�
 
 ### 16.10 아직 없는 것
 
-- **Streamlit 관리 UI가 없다**(Phase 5B.2). 지금은 API를 직접 호출해야 한다
+- ~~**Streamlit 관리 UI가 없다**(Phase 5B.2). 지금은 API를 직접 호출해야 한다~~ → Phase 5B.2에서 추가됐다(17장)
 - Profile CRUD(등록·수정·삭제)가 없다
 - activation 변경 **이력**이 없다. 표는 현재 상태 한 줄만 들고 있어 "언제 누가 내렸다가 언제 올렸는가"는 남지 않는다. append-only audit이 필요해지면 별도 표가 필요하다
 - 과거 배치의 **런타임 재현**은 여전히 없다. 버전 전환이 쉬워졌을 뿐, 실행되는 코드는 언제나 현재 코드다(16.4)
 - Airflow DAG는 비활성 프로필을 `catalogguard_etl_unexpected`로 실패시킨다. `ETLProfileInactiveError`를 전용 코드로 구분하지 않은 것은 Phase 5A부터의 상태이며 이번에 바꾸지 않았다
+
+---
+
+## 17. `[현재 구현]` Phase 5B.2 — Streamlit 운영 관리 화면
+
+Phase 5B.1이 만든 activation API를 운영자가 화면에서 쓸 수 있게 한다. 서버 계약·DB 스키마·동시성 정책은 **한 줄도 바꾸지 않았다.** Alembic head도 `20260822_0014` 그대로다.
+
+### 17.1 먼저 걸린 것: 비활성 프로필이 목록에서 사라진다
+
+`GET /api/v1/etl-profiles`는 활성 프로필만 돌려준다. 실행 selector에는 맞는 동작이지만, 관리 화면이 같은 목록을 쓰면 **한 번 내린 프로필을 다시 고를 수 없어 영영 되살릴 수 없다.**
+
+Streamlit이 registry를 직접 import해서 우회하지 않는다. UI는 API 경계를 지켜야 하고, 그러지 않으면 화면이 서버와 다른 allowlist를 갖게 된다.
+
+그래서 목록 endpoint에 **optional query parameter 하나**만 더했다.
+
+| 호출 | 결과 |
+| --- | --- |
+| `GET /api/v1/etl-profiles` | 활성 프로필만 (**기존 계약 그대로**) |
+| `GET /api/v1/etl-profiles?include_inactive=true` | allowlist 전체 |
+
+기본값이 `false`라 기존 호출자는 지금까지와 완전히 같은 응답을 받는다. 응답 shape도 그대로 `{id, display_name}`이고, 각 프로필의 실제 상태는 이미 있는 `.../activation`으로 따로 조회한다. 프로필이 두 개뿐인 지금 bulk endpoint를 새로 만드는 것보다 단순하다.
+
+`include_inactive=true`는 **필터를 끄는 것이지 후보를 넓히지 않는다.** registry allowlist 밖의 항목은 어느 경우에도 나오지 않고 정의 순서도 같다.
+
+### 17.2 화면
+
+`ETL 적재 이력` 탭의 `ETL 실행` 바로 아래에 `ETL 프로필 운영 관리` 구획을 둔다. divider로 나눠 일반 실행 흐름을 복잡하게 만들지 않는다.
+
+**selector와 상태 key를 실행 화면과 분리했다.** 관리 화면에서 프로필을 바꾸는 것이 "지금 실행할 프로필" 선택을 건드리면 안 되기 때문이다.
+
+| 용도 | 목록 | state key |
+| --- | --- | --- |
+| 신규 ETL 실행 | 활성만 | `etl_web_run_selected_profile_id` |
+| 운영 관리 | `include_inactive=true` | `etl_profile_admin_selected_profile_id` |
+
+### 17.3 세 상태를 절대 뭉개지 않는다
+
+화면에서 가장 중요한 부분이다. `런타임 override 없음`은 **비활성이 아니다.**
+
+| 화면 문구 | 뜻 |
+| --- | --- |
+| `런타임 override 없음 (배포 기본값 사용)` | 아무도 손대지 않았고 배포 registry 값을 따른다 |
+| `런타임에서 v2 활성으로 지정` | 운영자가 명시적으로 그 버전을 고정했다 |
+| `런타임에서 비활성으로 지정` | 운영자가 명시적으로 내렸다 |
+
+`상태`(활성/비활성), `실제 적용 버전`, `배포 기본 버전`을 함께 보여 줘서 "왜 지금 이 상태인가"에 답한다.
+
+`마지막 변경 사용자`와 `마지막 변경 시각`은 **runtime override가 있을 때만** 보여 준다. override가 없는데 표시하면 아무도 바꾼 적 없는 상태를 누군가 바꾼 것처럼 읽힌다. 그 값이 변경 이력이 아니라 현재 상태를 만든 마지막 정보라는 점도 화면에 적는다(16.8).
+
+### 17.4 활성화 버튼을 언제 막는가
+
+단순히 `effective == selected`로 막으면 **틀린다.**
+
+override가 없는 상태에서 배포 기본값과 같은 버전을 고르는 것은 의미가 다른 조작이다. 누르면 배포 기본값을 따르던 프로필이 그 버전으로 **고정**되어, 나중에 배포 기본값이 바뀌어도 따라가지 않는다. 그래서 그 경우 활성화를 허용하고, 무엇이 달라지는지 화면에 적는다.
+
+| 상태 | 활성화 버튼 |
+| --- | --- |
+| override 없음 (배포 기본값 v2), `v2` 선택 | **가능** — 배포 기본값 추종 → 명시적 고정으로 바뀐다 |
+| override `v1`, `v1` 선택 | 막음 — 진짜 no-op이라 `updated_at`만 갱신된다 |
+| override `v1`, `v2` 선택 | 가능 |
+| 명시적 비활성, 아무 버전 선택 | 가능 (되살리기) |
+
+버전 목록은 항상 activation 응답의 `available_versions`에서만 만든다. UI가 버전을 하드코딩하지 않는다.
+
+### 17.5 비활성화는 확인을 거친다
+
+신규 ETL을 즉시 막는 조작이라 checkbox 확인 전에는 버튼이 disabled다. 확인 값은 전송 직전에 한 번 더 본다. `disabled`는 화면 안내이고 최종 보장은 서버의 operator RBAC이다. 비밀번호 재입력 같은 절차는 만들지 않았다.
+
+이미 비활성인 프로필에는 비활성화 버튼을 보여 주지 않는다. 대신 버전을 골라 다시 활성화할 수 있다.
+
+### 17.6 권한
+
+`ui.auth.is_operator()`를 그대로 쓴다. UI에서 role 문자열을 새로 비교하지 않는다.
+
+- viewer: 상태·배포 기본값·런타임 설정·사용 가능한 버전을 **볼 수 있다**
+- viewer: 버전 selectbox와 활성화/비활성화 버튼이 **아예 없다**
+- operator: 전부 가능
+
+### 17.7 캐시와 rerun
+
+성공/실패 판정 뒤에만 로컬 상태를 건드린다. 서버가 거절했는데 화면만 바뀌면 운영자가 내리지 않은 프로필을 내렸다고 믿게 된다.
+
+성공하면 관리 목록·실행 목록·실행 화면의 프로필 상세 캐시를 함께 비운다. 그래야 방금 내린 프로필이 실행 selector에서 사라지고, 다시 올리면 되돌아온다.
+
+버튼을 누른 뒤에만 `st.rerun()`을 부른다. 결과 메시지가 이 구획보다 위에서 그려지기 때문에 rerun 없이는 이번 화면에 반영되지 않는다. 렌더링 도중 무조건 rerun하지 않으므로 Phase 5A.1이 피한 무한 rerun은 생기지 않는다.
+
+### 17.8 보안
+
+- actor 입력칸이 **없다.** 서버가 인증된 `current_user`에서만 가져온다
+- `profile_id`와 버전은 자유 입력이 아니라 API가 준 선택지에서만 고른다
+- 서버 `message` 원문을 그대로 쓰지 않고 클라이언트가 화면 문구를 관리한다
+
+### 17.9 이번에 바뀌지 않은 것
+
+activation API 계약, DB 스키마, Alembic head(`20260822_0014`), 동시성 정책(last-write-wins), `INSPECTION_VERSION`, `PREVIEW_SCHEMA_VERSION`, profile semantic version, dedup identity, 프로필 JSON, Observability/Reconciliation/Promotion/Rollback, 의존성.
+
+### 17.10 아직 없는 것
+
+- **runtime override 제거(배포 기본값 복귀) 기능이 없다.** 아래 17.11에서 따로 다룬다
+- activation 변경 이력(append-only audit)이 없다(16.10)
+- Profile CRUD가 없다
+- 이 화면의 Chromium E2E가 없다. AppTest로만 검증한다
+
+### 17.11 `[한계]` runtime override는 되돌릴 수 없다
+
+현재 API로 만들 수 있는 상태 전환은 셋뿐이다.
+
+```text
+배포 기본값 사용  --PUT version-->  명시적 활성 override
+배포 기본값 사용  --PUT null----->  명시적 비활성 override
+명시적 비활성     --PUT version-->  명시적 활성 override
+```
+
+**없는 전환**: `명시적 override → 배포 기본값 사용`. runtime row를 지우는 DELETE/reset endpoint가 없기 때문이다.
+
+`PUT {"active_version": null}`은 **override 제거가 아니라 명시적 비활성**이다. 두 개념을 섞으면 안 된다. 그래서 화면에 "배포 기본값으로 되돌리기" 버튼을 만들지 않았다. 있지도 않은 동작을 버튼으로 보여 주는 것이 기능이 없는 것보다 나쁘다.
+
+한 번 override를 만들면 그 프로필은 계속 명시적으로 관리된다. Phase 5B.2의 목표(상태 확인·활성화·비활성화)에는 이 전환이 필요 없어서 blocker는 아니지만, 실제 운영에서 필요해지면 별도 endpoint를 설계해야 한다.
 
 ---
 
