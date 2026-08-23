@@ -18,13 +18,13 @@ ETL 품질 요약 / 최근 품질 추이 / 직전 배치 대비 변화·주요 �
 - staging은 운영 상품을 직접 덮어쓰지 않으며, promotion·rollback 모두 로그인한 `operator`의 확인이 필요하다.
 - `ETL 품질 관찰`과 `상품 동기화 차이`는 **조회 전용**이다. promotion을 차단하거나 자동으로 되돌리지 않고, 임계값 판정·자동 알림도 하지 않는다. 반영 가능 여부는 기존 Promotion Preview 정책만 판단한다.
 - Airflow HTTP feed DAG는 자동 실행이 아닌 선택적 manual trigger다.
-- ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl` JSON archive와 코드 registry가 source of truth다. PostgreSQL에 저장하는 것은 신규 실행에 적용할 **runtime activation 상태**뿐이며, 비활성화는 신규 ETL 실행만 막고 과거 이력과 조회 화면은 그대로 둔다.
+- ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl` JSON archive와 코드 registry가 source of truth다. PostgreSQL에 저장하는 것은 신규 실행에 적용할 **runtime current-state**와 **성공한 운영 명령의 append-only 이력** 두 가지뿐이며, 비활성화는 신규 ETL 실행만 막고 과거 이력과 조회 화면은 그대로 둔다.
 
 | 구간 | 시간 | 핵심 |
 |---|---:|---|
 | A. Quick Demo | 3분 | 품질 관찰 → reject 이유 → clean batch 승인 → rollback |
 | B. Full Demo | 6–8분 | Inspection → ETL/staging → 품질 관찰 → promotion → 동기화 차이 → rollback |
-| C. Optional Profile Ops | 1–2분 | 프로필 runtime activation 조회·비활성화·런타임 설정 초기화 |
+| C. Optional Profile Ops | 1–2분 | 프로필 runtime activation 조회·비활성화·reset·운영 이력 확인 |
 | D. Optional Airflow | 1–2분 | configured HTTP feed의 manual orchestration |
 
 C와 D는 선택 구간이다. Quick Demo 3분을 늘리지 않으며, 핵심 품질·promotion 흐름을 밀어내지 않는다.
@@ -210,9 +210,9 @@ promotion으로 운영 catalog에 같은 공급사 상품이 생긴 뒤에 보�
 - **설명:** rollback은 undo 버튼이 아니라 현재 상태를 다시 확인하는 안전한 변경 절차다.
 - **정상 결과:** `succeeded` rollback run과 original audit에 연결된 delete/restore 기록이 남는다.
 
-## C. Optional Profile Ops: runtime activation (1–2분)
+## C. Optional Profile Ops: runtime activation과 운영 이력 (1–2분)
 
-선택 구간이다. Quick Demo에 넣지 않는다. 보여 주는 것은 "프로필을 운영자가 재배포 없이 내리고 되돌릴 수 있다"는 한 가지이며, 프로필 JSON을 편집하는 화면이 아니다. 마지막 두 단계에서 **Deactivate와 Reset이 다른 동작**이라는 점이 함께 드러난다.
+선택 구간이다. Quick Demo에 넣지 않는다. 보여 주는 것은 "프로필을 운영자가 재배포 없이 내리고 되돌릴 수 있고, 그 명령이 기록으로 남는다"는 것이며, 프로필 JSON을 편집하는 화면이 아니다. 중간에 **Deactivate와 Reset이 다른 동작**이라는 점이 드러나고, 마지막에 두 명령이 이력에 어떻게 남는지 확인한다.
 
 | 단계 | 실행 · 화면에서 확인 | 설명 |
 |---|---|---|
@@ -229,6 +229,9 @@ promotion으로 운영 catalog에 같은 공급사 상품이 생긴 뒤에 보�
 | 11 | `런타임 설정 초기화` 구획의 안내를 읽는다. | `되돌린 뒤 실제 적용 버전: v2 — 지금 비활성인 이 프로필이 다시 활성화됩니다.` 누르기 전에 결과를 먼저 보여 준다. |
 | 12 | 확인 checkbox를 선택하고 `배포 기본값으로 되돌리기`를 누른다. | `DELETE .../activation`이 나간다. 비활성화와 달리 **override row 자체를 지운다**. |
 | 13 | `런타임 설정`과 `실제 적용 버전`을 다시 본다. | `런타임 override 없음 (배포 기본값 사용)` / `v2`. 배포 기본값이 `v2`이므로 프로필이 다시 활성이고, 다음 구간을 이어서 시연할 수 있는 상태다. |
+| 14 | 아래 `Activation 운영 이력`을 본다. | 방금 실행한 두 명령이 최신순으로 보인다. `배포 기본값으로 되돌리기`가 위, `비활성화`가 그 아래다. |
+| 15 | 이력의 `사용자`와 `시각`을 짚는다. | 누가 언제 그 명령을 실행했는지 남는다. reset은 current-state row를 지우지만, 명령 자체는 이 이력에 보존된다. |
+| 16 | reset 행의 `실제 적용 버전`을 짚는다. | `v2`다. 되돌리기는 비활성화가 **아니라** override 제거이므로, 배포 기본값이 활성이면 실제 적용 버전이 남는다. |
 
 대사 예시: “프로필 정의 JSON을 수정한 것이 아니라 PostgreSQL에 신규 실행 상태만 저장했습니다. 서버를 재시작해도 같은 상태를 사용합니다.”
 
@@ -236,7 +239,13 @@ promotion으로 운영 catalog에 같은 공급사 상품이 생긴 뒤에 보�
 
 reset을 누르기 전 대사: “이 버튼은 단순한 정리가 아닙니다. 지금 이 프로필은 운영자가 명시적으로 내려 둔 상태인데, override를 지우면 배포 기본값 `v2`가 다시 적용되어 **바로 실행 가능해집니다.** 그래서 화면이 되돌린 뒤 적용될 버전을 먼저 보여 주고, 비활성화와 같은 확인 절차를 거칩니다.”
 
-viewer 계정으로 로그인해 같은 화면을 열면 상태는 모두 보이지만 변경 컨트롤이 없다는 점을 함께 보여 줄 수 있다. 화면에서 감추는 것은 편의 기능이고 실제 차단은 FastAPI가 한다.
+운영 이력에 대한 대사: “위쪽 현재 상태는 지금 무엇이 적용되는지를 보여 주고, 아래 운영 이력은 누가 어떤 성공한 명령을 실행했는지를 보여 줍니다. reset은 현재 상태 row를 지우기 때문에 위쪽 `마지막 변경 사용자`는 비지만, 그 reset을 누가 실행했는지는 아래 이력에 남습니다.”
+
+새 DB이거나 `20260823_0015`를 막 적용한 직후라면 이력이 비어 있을 수 있다. 그때는 화면 안내 그대로 “**이 기능이 추가된 이후의 성공한 운영 명령부터 기록됩니다**”라고 말한다. 과거 기록이 자동으로 복원됐다고 말하지 않는다. 위 12~13단계를 먼저 실행하면 이력 두 줄이 생기므로, 비어 있는 상태로 시작했다면 그 순서로 보여 준다.
+
+면접에서 더 물어보면 답할 내용(발표 대사로는 길다): 기록 단위가 “상태가 달라진 순간”이 아니라 “서버가 성공으로 처리한 운영 명령”이라, 같은 값을 다시 저장하거나 override가 없는 상태에서 reset해도 이력 한 줄이 남는다. 실패한 요청은 남지 않는다.
+
+viewer 계정으로 로그인해 같은 화면을 열면 상태와 운영 이력은 모두 보이지만 변경 컨트롤이 없다는 점을 함께 보여 줄 수 있다. 화면에서 감추는 것은 편의 기능이고 실제 차단은 FastAPI가 한다.
 
 ### 말하면 안 되는 표현
 
@@ -246,9 +255,11 @@ viewer 계정으로 로그인해 같은 화면을 열면 상태는 모두 보이
 | “비활성화하면 과거 ETL 이력도 안 보입니다.” | 과거 적재 이력·품질·동기화·promotion/rollback 조회는 모두 유지된다. |
 | “`null`을 보내면 deployment default로 reset됩니다.” | `null`은 명시적 비활성이다. 배포 기본값으로 되돌리려면 별도 `DELETE .../activation`을 쓴다. |
 | “reset은 그냥 프로필을 끄는 기능입니다.” | 반대다. reset은 override를 **제거**하는 것이라, 배포 기본값이 활성이면 프로필이 다시 활성화된다. |
-| “reset하면 그동안의 activation 변경 기록이 남습니다.” | 지우는 것은 current-state row 하나뿐이고, 그 row의 마지막 변경자·시각도 함께 사라진다. append-only audit은 없다. |
+| “reset하면 현재 상태 화면에 마지막 변경자가 그대로 남습니다.” | 지우는 것은 current-state row 하나이므로 그 row의 마지막 변경자·시각은 함께 사라진다. 그 reset 명령을 누가 실행했는지는 아래 `Activation 운영 이력`에 남는다. |
 | “프로필 정의를 PostgreSQL에서 CRUD합니다.” | 정의와 버전 archive는 계속 `config/etl` JSON과 코드 registry다. Profile CRUD는 없다. |
-| “Activation 변경 전체가 append-only audit으로 남습니다.” | 프로필당 current-state row 한 건뿐이다. 마지막 변경자·시각만 남고 이전 결정은 보존되지 않는다. |
+| “`0015`를 적용하면 과거 activation 명령까지 복원됩니다.” | backfill하지 않는다. 이력은 `20260823_0015` 적용 이후의 성공한 명령부터 기록한다. current-state row 하나로는 과거에 무슨 일이 있었는지 알 수 없어 추측해 채우지 않았다. |
+| “append-only라 DB에서 누구도 절대 수정·삭제할 수 없습니다.” | 애플리케이션에 이력 수정·삭제·purge API가 없다는 MVP 계약이다. DB superuser의 직접 `UPDATE`/`DELETE`까지 막는 WORM 저장소를 구현한 것은 아니다. |
+| “같은 상태로 다시 저장하면 이력에는 아무것도 남지 않습니다.” | 기록 단위가 성공한 운영 명령이라 event가 추가된다. 상태 idempotency와 이력 idempotency는 다른 개념이다. |
 | “Airflow도 HTTP feed를 읽기 전에 inactive를 차단합니다.” | 외부 읽기 전 차단은 FastAPI의 S3·HTTP route만이다. Airflow는 feed를 한 번 읽은 뒤 판별한다. |
 
 ## D. Optional Airflow: manual trigger only
@@ -299,7 +310,7 @@ CatalogGuard HTTP feed ingestion failed [etl_profile_inactive]
 
 **B. Web ETL CSV 업로드 브라우저 E2E** — `tests/e2e/test_web_etl_upload_browser_e2e.py`. operator 로그인, `ETL 실행 프로필` 선택(`sample_marketplace_vendor` v2), 공급사 CSV 파일 업로드, ETL 실행, 성공 batch ID 확인, PostgreSQL `ETLLoadRun`과 staging 상품 2건 확인, ETL 이력 검색, 배치 상세 조회를 Chromium으로 확인한다. `scripts/run_etl_browser_e2e.py`가 A와 함께 실행한다. 업로드 화면의 모든 기능이 아니라 위 경로만 검증한다.
 
-**C. ETL 프로필 runtime activation** — 검증 근거는 API integration test(`tests/test_api_etl_profile_activation.py`), API Client test(`tests/test_catalogguard_api_client.py`), Streamlit AppTest(`tests/test_etl_load_history_ui.py`), PostgreSQL 통합 테스트(`tests/test_etl_profile_activation_service.py`, `tests/etl/test_profile_activation.py`)다. **운영 관리 화면 전용 Chromium E2E는 아직 없다.** 이 구간을 “브라우저 E2E로 검증 완료”라고 말하지 않는다. Airflow의 `etl_profile_inactive` 분류는 `airflow/tests/test_catalogguard_http_feed_to_staging.py`에 있고, 전용 `airflow-smoke` job의 격리 Airflow image에서 실행된다(Airflow가 없는 일반 pytest run에서는 module 단위로 skip된다).
+**C. ETL 프로필 runtime activation과 운영 이력** — 검증 근거는 API integration test(`tests/test_api_etl_profile_activation.py`), API Client test(`tests/test_catalogguard_api_client.py`), Streamlit AppTest(`tests/test_etl_load_history_ui.py`), PostgreSQL 통합 테스트(`tests/test_etl_profile_activation_service.py`, `tests/etl/test_profile_activation.py`)다. 운영 이력은 여기에 더해 migration 테스트(`tests/test_etl_profile_activation_history_migration.py`, upgrade/downgrade와 backfill 없음 확인)와 service 테스트(`tests/test_etl_profile_activation_history_service.py`, 성공 명령 기록·실패 요청 미기록·상태와 이력의 same-transaction rollback·DB 제약)로 검증했다. **운영 관리 화면과 운영 이력 화면 전용 Chromium E2E는 아직 없다.** 이 구간을 “브라우저 E2E로 검증 완료”라고 말하지 않는다. Airflow의 `etl_profile_inactive` 분류는 `airflow/tests/test_catalogguard_http_feed_to_staging.py`에 있고, 전용 `airflow-smoke` job의 격리 Airflow image에서 실행된다(Airflow가 없는 일반 pytest run에서는 module 단위로 skip된다).
 
 **D. ETL 품질 관찰 · 상품 동기화 차이** — 이 두 화면은 현재 Chromium E2E가 명시적으로 확인하지 않는다. 검증 근거는 service 단위 테스트(`tests/test_etl_quality_observability_service.py`, `tests/test_catalog_reconciliation_service.py`, `tests/test_etl_query_service.py`), API 테스트(`tests/test_api_etl_loads.py`, `tests/test_api_catalog_reconciliation.py`), Streamlit AppTest 기반 UI 테스트(`tests/test_etl_load_history_ui.py`)다. 이 구간을 “브라우저 E2E로 검증 완료”라고 말하지 않는다.
 
@@ -339,7 +350,7 @@ docker compose --env-file .env -f airflow/compose.yaml down
 6. 품질 관찰과 동기화 차이는 조회 전용으로 두어, 판단은 사람이 하고 시스템은 근거만 남긴다.
 7. 프로필의 신규 실행 여부는 운영자가 재배포 없이 바꿀 수 있게 하되, 프로필 정의는 계속 code/config에 두고 비활성화는 삭제가 아니라 신규 실행 차단으로만 다룬다.
 
-이 프로젝트는 검증된 MVP다. 대용량 운영 데이터·실제 외부 공급사·운영 catalog 반영을 검증했다고 주장하지 않는다. 규칙 기반 검수는 AI 자동 수정이나 최종 업무 판단을 대체하지 않으며, 의심 패턴 탐지는 오탐·미탐 가능성이 있다. 품질 관찰과 동기화 차이는 변화를 보여 줄 뿐 위험 임계값을 정하지 않고, 자동 차단·자동 rollback·자동 알림도 하지 않는다. Runtime activation은 신규 실행 상태만 다루며, activation 변경 이력을 쌓는 append-only audit은 아직 없다. Airflow는 비활성 프로필을 정확히 분류하지만 feed를 읽은 뒤에 차단하므로, 외부 fetch 전 차단이라고 말하지 않는다.
+이 프로젝트는 검증된 MVP다. 대용량 운영 데이터·실제 외부 공급사·운영 catalog 반영을 검증했다고 주장하지 않는다. 규칙 기반 검수는 AI 자동 수정이나 최종 업무 판단을 대체하지 않으며, 의심 패턴 탐지는 오탐·미탐 가능성이 있다. 품질 관찰과 동기화 차이는 변화를 보여 줄 뿐 위험 임계값을 정하지 않고, 자동 차단·자동 rollback·자동 알림도 하지 않는다. Runtime activation은 신규 실행 상태만 다룬다. 성공한 activate·deactivate·reset 명령은 append-only 이력으로 남지만, 그 기록은 마이그레이션 `20260823_0015` 적용 이후의 명령부터이며 과거 이력을 backfill하지 않았다. 이력 화면 전용 Chromium E2E도 아직 없다. Airflow는 비활성 프로필을 정확히 분류하지만 feed를 읽은 뒤에 차단하므로, 외부 fetch 전 차단이라고 말하지 않는다.
 
 최신 main에서는 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 CI job의 success를 확인한다. 세부 설계와 최신 실행 결과는 아래 문서를 기준으로 한다.
 
