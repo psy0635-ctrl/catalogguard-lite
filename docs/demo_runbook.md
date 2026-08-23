@@ -24,7 +24,7 @@ ETL 품질 요약 / 최근 품질 추이 / 직전 배치 대비 변화·주요 �
 |---|---:|---|
 | A. Quick Demo | 3분 | 품질 관찰 → reject 이유 → clean batch 승인 → rollback |
 | B. Full Demo | 6–8분 | Inspection → ETL/staging → 품질 관찰 → promotion → 동기화 차이 → rollback |
-| C. Optional Profile Ops | 1–2분 | 프로필 runtime activation 조회·비활성화·재활성화 |
+| C. Optional Profile Ops | 1–2분 | 프로필 runtime activation 조회·비활성화·런타임 설정 초기화 |
 | D. Optional Airflow | 1–2분 | configured HTTP feed의 manual orchestration |
 
 C와 D는 선택 구간이다. Quick Demo 3분을 늘리지 않으며, 핵심 품질·promotion 흐름을 밀어내지 않는다.
@@ -136,7 +136,7 @@ Quick Demo와 Full Demo가 모두 `sample_marketplace_vendor_v1` 프로필을 �
 | 배포 기본 버전 | `v2` |
 | 런타임 설정 | `런타임 override 없음 (배포 기본값 사용)` 또는 `v2` |
 
-아래 `C. Optional Profile Ops`를 시연하지 않는다면, **데모 시작 직전에 이 프로필을 비활성화하지 않는다.** C를 시연했다면 마지막 단계에서 v2로 재활성화했는지 확인하고 다음 구간으로 넘어간다.
+아래 `C. Optional Profile Ops`를 시연하지 않는다면, **데모 시작 직전에 이 프로필을 비활성화하지 않는다.** C를 시연했다면 마지막 단계에서 `실제 적용 버전`이 `v2`로 돌아왔는지 확인하고 다음 구간으로 넘어간다.
 
 ## A. 3-minute Quick Demo
 
@@ -212,7 +212,7 @@ promotion으로 운영 catalog에 같은 공급사 상품이 생긴 뒤에 보�
 
 ## C. Optional Profile Ops: runtime activation (1–2분)
 
-선택 구간이다. Quick Demo에 넣지 않는다. 보여 주는 것은 "프로필을 운영자가 재배포 없이 내리고 다시 켤 수 있다"는 한 가지이며, 프로필 JSON을 편집하는 화면이 아니다.
+선택 구간이다. Quick Demo에 넣지 않는다. 보여 주는 것은 "프로필을 운영자가 재배포 없이 내리고 되돌릴 수 있다"는 한 가지이며, 프로필 JSON을 편집하는 화면이 아니다. 마지막 두 단계에서 **Deactivate와 Reset이 다른 동작**이라는 점이 함께 드러난다.
 
 | 단계 | 실행 · 화면에서 확인 | 설명 |
 |---|---|---|
@@ -226,11 +226,15 @@ promotion으로 운영 catalog에 같은 공급사 상품이 생긴 뒤에 보�
 | 8 | `비활성화`를 누른다. | `PUT .../activation`에 `active_version: null`을 보낸다. |
 | 9 | 무엇이 막히는지 설명한다. | 막히는 것은 **신규 ETL 실행**뿐이다(업로드·S3·HTTP feed·Airflow). |
 | 10 | 무엇이 남는지 설명한다. | 과거 적재 이력, staging 조회, 품질 요약·추이·관찰, 동기화 차이, promotion·rollback 이력, 버전 archive는 그대로다. |
-| 11 | `활성화할 보존 버전`에서 `v2`를 고르고 `선택한 버전 활성화`를 누른다. | 상태가 다시 `🟢 활성` / `v2`로 돌아온다. 다음 구간을 이어서 시연할 수 있는 상태다. |
+| 11 | `런타임 설정 초기화` 구획의 안내를 읽는다. | `되돌린 뒤 실제 적용 버전: v2 — 지금 비활성인 이 프로필이 다시 활성화됩니다.` 누르기 전에 결과를 먼저 보여 준다. |
+| 12 | 확인 checkbox를 선택하고 `배포 기본값으로 되돌리기`를 누른다. | `DELETE .../activation`이 나간다. 비활성화와 달리 **override row 자체를 지운다**. |
+| 13 | `런타임 설정`과 `실제 적용 버전`을 다시 본다. | `런타임 override 없음 (배포 기본값 사용)` / `v2`. 배포 기본값이 `v2`이므로 프로필이 다시 활성이고, 다음 구간을 이어서 시연할 수 있는 상태다. |
 
 대사 예시: “프로필 정의 JSON을 수정한 것이 아니라 PostgreSQL에 신규 실행 상태만 저장했습니다. 서버를 재시작해도 같은 상태를 사용합니다.”
 
-`런타임 설정`에 대한 대사: “값을 `null`로 보낸 것은 배포 기본값으로 되돌리는 reset이 아니라 ‘운영자가 명시적으로 내렸다’는 별도 상태입니다. override 자체를 지워 배포 기본값으로 복귀하는 기능은 아직 없습니다.”
+`런타임 설정`에 대한 대사: “값을 `null`로 보낸 것은 배포 기본값으로 되돌리는 reset이 아니라 ‘운영자가 명시적으로 내렸다’는 별도 상태입니다. 배포 기본값으로 되돌리는 것은 override row 자체를 지우는 별도 `DELETE`이고, 그래서 두 동작을 다른 버튼으로 나눴습니다.”
+
+reset을 누르기 전 대사: “이 버튼은 단순한 정리가 아닙니다. 지금 이 프로필은 운영자가 명시적으로 내려 둔 상태인데, override를 지우면 배포 기본값 `v2`가 다시 적용되어 **바로 실행 가능해집니다.** 그래서 화면이 되돌린 뒤 적용될 버전을 먼저 보여 주고, 비활성화와 같은 확인 절차를 거칩니다.”
 
 viewer 계정으로 로그인해 같은 화면을 열면 상태는 모두 보이지만 변경 컨트롤이 없다는 점을 함께 보여 줄 수 있다. 화면에서 감추는 것은 편의 기능이고 실제 차단은 FastAPI가 한다.
 
@@ -240,7 +244,9 @@ viewer 계정으로 로그인해 같은 화면을 열면 상태는 모두 보이
 |---|---|
 | “비활성화하면 프로필이 삭제됩니다.” | Deactivate ≠ Delete. registry 항목과 버전 archive는 그대로 남는다. |
 | “비활성화하면 과거 ETL 이력도 안 보입니다.” | 과거 적재 이력·품질·동기화·promotion/rollback 조회는 모두 유지된다. |
-| “`null`을 보내면 deployment default로 reset됩니다.” | `null`은 명시적 비활성이다. reset endpoint는 없다. |
+| “`null`을 보내면 deployment default로 reset됩니다.” | `null`은 명시적 비활성이다. 배포 기본값으로 되돌리려면 별도 `DELETE .../activation`을 쓴다. |
+| “reset은 그냥 프로필을 끄는 기능입니다.” | 반대다. reset은 override를 **제거**하는 것이라, 배포 기본값이 활성이면 프로필이 다시 활성화된다. |
+| “reset하면 그동안의 activation 변경 기록이 남습니다.” | 지우는 것은 current-state row 하나뿐이고, 그 row의 마지막 변경자·시각도 함께 사라진다. append-only audit은 없다. |
 | “프로필 정의를 PostgreSQL에서 CRUD합니다.” | 정의와 버전 archive는 계속 `config/etl` JSON과 코드 registry다. Profile CRUD는 없다. |
 | “Activation 변경 전체가 append-only audit으로 남습니다.” | 프로필당 current-state row 한 건뿐이다. 마지막 변경자·시각만 남고 이전 결정은 보존되지 않는다. |
 | “Airflow도 HTTP feed를 읽기 전에 inactive를 차단합니다.” | 외부 읽기 전 차단은 FastAPI의 S3·HTTP route만이다. Airflow는 feed를 한 번 읽은 뒤 판별한다. |
@@ -333,7 +339,7 @@ docker compose --env-file .env -f airflow/compose.yaml down
 6. 품질 관찰과 동기화 차이는 조회 전용으로 두어, 판단은 사람이 하고 시스템은 근거만 남긴다.
 7. 프로필의 신규 실행 여부는 운영자가 재배포 없이 바꿀 수 있게 하되, 프로필 정의는 계속 code/config에 두고 비활성화는 삭제가 아니라 신규 실행 차단으로만 다룬다.
 
-이 프로젝트는 검증된 MVP다. 대용량 운영 데이터·실제 외부 공급사·운영 catalog 반영을 검증했다고 주장하지 않는다. 규칙 기반 검수는 AI 자동 수정이나 최종 업무 판단을 대체하지 않으며, 의심 패턴 탐지는 오탐·미탐 가능성이 있다. 품질 관찰과 동기화 차이는 변화를 보여 줄 뿐 위험 임계값을 정하지 않고, 자동 차단·자동 rollback·자동 알림도 하지 않는다. Runtime activation은 신규 실행 상태만 다루며, runtime override를 지워 배포 기본값으로 되돌리는 reset도, activation 변경 이력을 쌓는 append-only audit도 아직 없다. Airflow는 비활성 프로필을 정확히 분류하지만 feed를 읽은 뒤에 차단하므로, 외부 fetch 전 차단이라고 말하지 않는다.
+이 프로젝트는 검증된 MVP다. 대용량 운영 데이터·실제 외부 공급사·운영 catalog 반영을 검증했다고 주장하지 않는다. 규칙 기반 검수는 AI 자동 수정이나 최종 업무 판단을 대체하지 않으며, 의심 패턴 탐지는 오탐·미탐 가능성이 있다. 품질 관찰과 동기화 차이는 변화를 보여 줄 뿐 위험 임계값을 정하지 않고, 자동 차단·자동 rollback·자동 알림도 하지 않는다. Runtime activation은 신규 실행 상태만 다루며, activation 변경 이력을 쌓는 append-only audit은 아직 없다. Airflow는 비활성 프로필을 정확히 분류하지만 feed를 읽은 뒤에 차단하므로, 외부 fetch 전 차단이라고 말하지 않는다.
 
 최신 main에서는 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 CI job의 success를 확인한다. 세부 설계와 최신 실행 결과는 아래 문서를 기준으로 한다.
 
