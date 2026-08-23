@@ -18,12 +18,16 @@ ETL 품질 요약 / 최근 품질 추이 / 직전 배치 대비 변화·주요 �
 - staging은 운영 상품을 직접 덮어쓰지 않으며, promotion·rollback 모두 로그인한 `operator`의 확인이 필요하다.
 - `ETL 품질 관찰`과 `상품 동기화 차이`는 **조회 전용**이다. promotion을 차단하거나 자동으로 되돌리지 않고, 임계값 판정·자동 알림도 하지 않는다. 반영 가능 여부는 기존 Promotion Preview 정책만 판단한다.
 - Airflow HTTP feed DAG는 자동 실행이 아닌 선택적 manual trigger다.
+- ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl` JSON archive와 코드 registry가 source of truth다. PostgreSQL에 저장하는 것은 신규 실행에 적용할 **runtime activation 상태**뿐이며, 비활성화는 신규 ETL 실행만 막고 과거 이력과 조회 화면은 그대로 둔다.
 
 | 구간 | 시간 | 핵심 |
 |---|---:|---|
 | A. Quick Demo | 3분 | 품질 관찰 → reject 이유 → clean batch 승인 → rollback |
 | B. Full Demo | 6–8분 | Inspection → ETL/staging → 품질 관찰 → promotion → 동기화 차이 → rollback |
-| C. Optional Airflow | 1–2분 | configured HTTP feed의 manual orchestration |
+| C. Optional Profile Ops | 1–2분 | 프로필 runtime activation 조회·비활성화·재활성화 |
+| D. Optional Airflow | 1–2분 | configured HTTP feed의 manual orchestration |
+
+C와 D는 선택 구간이다. Quick Demo 3분을 늘리지 않으며, 핵심 품질·promotion 흐름을 밀어내지 않는다.
 
 준비 시간은 시연 시간에 포함하지 않는다.
 
@@ -119,6 +123,21 @@ python -m etl.load_cli --input .\output\demo\catalogguard_promotion_ready.csv --
 
 이미 다른 batch가 들어 있는 DB에서는 값이 달라진다. 숫자를 외워 말하지 말고 화면에 보이는 값을 그대로 읽는다.
 
+### ETL 프로필 activation 확인 (타이머 시작 전)
+
+Quick Demo와 Full Demo가 모두 `sample_marketplace_vendor_v1` 프로필을 쓰므로, 시작 전에 이 프로필의 **effective activation이 active v2인지** 확인한다. 비활성 상태로 남아 있으면 준비 단계의 `etl.load_cli`는 통과하더라도 화면에서 신규 ETL 실행이 `409`로 막힌다.
+
+`ETL 적재 이력` 탭 → `ETL 프로필 운영 관리`에서 다음을 본다.
+
+| 항목 | 기대 값 |
+|---|---|
+| 상태 | `🟢 활성` |
+| 실제 적용 버전 | `v2` |
+| 배포 기본 버전 | `v2` |
+| 런타임 설정 | `런타임 override 없음 (배포 기본값 사용)` 또는 `v2` |
+
+아래 `C. Optional Profile Ops`를 시연하지 않는다면, **데모 시작 직전에 이 프로필을 비활성화하지 않는다.** C를 시연했다면 마지막 단계에서 v2로 재활성화했는지 확인하고 다음 구간으로 넘어간다.
+
 ## A. 3-minute Quick Demo
 
 시작 전 두 ETL batch와 로그인은 준비한다. 장면은 네 개로 유지한다. `상품 동기화 차이`는 Full Demo에서만 보여 준다. 운영 catalog가 비어 있는 상태에서는 보여 줄 차이가 거의 없기 때문이다.
@@ -191,7 +210,42 @@ promotion으로 운영 catalog에 같은 공급사 상품이 생긴 뒤에 보�
 - **설명:** rollback은 undo 버튼이 아니라 현재 상태를 다시 확인하는 안전한 변경 절차다.
 - **정상 결과:** `succeeded` rollback run과 original audit에 연결된 delete/restore 기록이 남는다.
 
-## C. Optional Airflow: manual trigger only
+## C. Optional Profile Ops: runtime activation (1–2분)
+
+선택 구간이다. Quick Demo에 넣지 않는다. 보여 주는 것은 "프로필을 운영자가 재배포 없이 내리고 다시 켤 수 있다"는 한 가지이며, 프로필 JSON을 편집하는 화면이 아니다.
+
+| 단계 | 실행 · 화면에서 확인 | 설명 |
+|---|---|---|
+| 1 | `ETL 적재 이력` 탭에서 `ETL 프로필 운영 관리`를 연다. | 실행 화면과 분리된 별도 관리 구획이다. |
+| 2 | `관리할 ETL 프로필`에서 `마켓플레이스 공급사 샘플`(`sample_marketplace_vendor_v1`)을 고른다. | 이 목록은 비활성 프로필까지 포함한다. 위쪽 `ETL 실행 프로필` selector는 함께 바뀌지 않는다. |
+| 3 | `상태`를 본다. | 지금 활성인지 비활성인지. |
+| 4 | `배포 기본 버전`을 본다. | 코드/배포 registry가 정한 기본값이다. |
+| 5 | `실제 적용 버전`을 본다. | 지금 신규 실행에 실제로 쓰이는 값이다. |
+| 6 | `런타임 설정`을 본다. | override가 없는지, 특정 버전인지, 명시적 비활성인지. |
+| 7 | operator 확인 checkbox를 선택한다. | 신규 ETL을 즉시 막는 조작이라 확인을 한 번 더 받는다. |
+| 8 | `비활성화`를 누른다. | `PUT .../activation`에 `active_version: null`을 보낸다. |
+| 9 | 무엇이 막히는지 설명한다. | 막히는 것은 **신규 ETL 실행**뿐이다(업로드·S3·HTTP feed·Airflow). |
+| 10 | 무엇이 남는지 설명한다. | 과거 적재 이력, staging 조회, 품질 요약·추이·관찰, 동기화 차이, promotion·rollback 이력, 버전 archive는 그대로다. |
+| 11 | `활성화할 보존 버전`에서 `v2`를 고르고 `선택한 버전 활성화`를 누른다. | 상태가 다시 `🟢 활성` / `v2`로 돌아온다. 다음 구간을 이어서 시연할 수 있는 상태다. |
+
+대사 예시: “프로필 정의 JSON을 수정한 것이 아니라 PostgreSQL에 신규 실행 상태만 저장했습니다. 서버를 재시작해도 같은 상태를 사용합니다.”
+
+`런타임 설정`에 대한 대사: “값을 `null`로 보낸 것은 배포 기본값으로 되돌리는 reset이 아니라 ‘운영자가 명시적으로 내렸다’는 별도 상태입니다. override 자체를 지워 배포 기본값으로 복귀하는 기능은 아직 없습니다.”
+
+viewer 계정으로 로그인해 같은 화면을 열면 상태는 모두 보이지만 변경 컨트롤이 없다는 점을 함께 보여 줄 수 있다. 화면에서 감추는 것은 편의 기능이고 실제 차단은 FastAPI가 한다.
+
+### 말하면 안 되는 표현
+
+| 하지 말 것 | 실제 |
+|---|---|
+| “비활성화하면 프로필이 삭제됩니다.” | Deactivate ≠ Delete. registry 항목과 버전 archive는 그대로 남는다. |
+| “비활성화하면 과거 ETL 이력도 안 보입니다.” | 과거 적재 이력·품질·동기화·promotion/rollback 조회는 모두 유지된다. |
+| “`null`을 보내면 deployment default로 reset됩니다.” | `null`은 명시적 비활성이다. reset endpoint는 없다. |
+| “프로필 정의를 PostgreSQL에서 CRUD합니다.” | 정의와 버전 archive는 계속 `config/etl` JSON과 코드 registry다. Profile CRUD는 없다. |
+| “Activation 변경 전체가 append-only audit으로 남습니다.” | 프로필당 current-state row 한 건뿐이다. 마지막 변경자·시각만 남고 이전 결정은 보존되지 않는다. |
+| “Airflow도 HTTP feed를 읽기 전에 inactive를 차단합니다.” | 외부 읽기 전 차단은 FastAPI의 S3·HTTP route만이다. Airflow는 feed를 한 번 읽은 뒤 판별한다. |
+
+## D. Optional Airflow: manual trigger only
 
 Airflow는 configured HTTP feed를 기존 ETL/staging 경로로 orchestration하는 선택 기능이다. `catalogguard_http_feed_to_staging`은 `schedule=None`인 manual DAG이며, application DB와 Airflow metadata DB는 분리된다. promotion을 자동화하지 않는다.
 
@@ -207,6 +261,30 @@ docker compose --env-file .env -f airflow/compose.yaml exec airflow-scheduler ai
 - **설명:** configured feed만 읽고 기존 ETL을 재사용한다. retry는 transient HTTP/network와 제한적인 transient DB 오류만 대상으로 한다.
 - **정상 결과:** 같은 bytes면 기존 staging batch를 재사용한다. Airflow는 기본 데모와 독립적으로 종료한다.
 
+### 비활성 프로필과 retry 정책
+
+이 DAG는 `sample_fashion_vendor_v1`을 trigger하므로, C 구간에서 내린 `sample_marketplace_vendor_v1`과는 다른 프로필이다. 같은 동작을 실제로 보이려면 관리 화면에서 `패션 공급사 샘플`을 먼저 비활성화한 뒤 trigger하고, 끝나면 v2로 되돌린다.
+
+비활성 프로필로 이 DAG를 trigger하면 task는 전용 코드 `etl_profile_inactive`로 실패하고 **재시도하지 않는다**(`AirflowFailException`).
+
+```text
+inactive profile
+-> etl_profile_inactive
+-> no retry
+```
+
+Airflow와 로그에 노출되는 메시지는 안전한 코드 하나뿐이다.
+
+```text
+CatalogGuard HTTP feed ingestion failed [etl_profile_inactive]
+```
+
+`profile_id`, feed URL과 query, token, DB URL, 원본 예외는 노출하지 않는다.
+
+대사 예시: “운영자가 일부러 내린 프로필은 network timeout이나 HTTP 5xx 같은 일시 장애와 다릅니다. 사람이 다시 켜기 전까지 재시도로 회복되지 않으므로 재시도하지 않습니다.”
+
+**현재 한계를 함께 말한다.** 이 DAG는 `read_http_feed_csv()`로 feed를 먼저 읽고 그다음 `run_web_etl()`에서 activation을 판별한다. 즉 비활성이어도 feed를 한 번 읽은 뒤 차단된다. 따라서 "Airflow도 외부 fetch 전에 inactive를 차단한다"고 말하지 않는다. 외부 읽기 전 차단은 FastAPI의 S3·HTTP source route만 해당한다. 검사를 앞으로 옮기면 activation 실패와 feed 실패가 겹칠 때 failure precedence가 달라지므로, 두 항목을 함께 후속 설계 과제로 남겨 두었다.
+
 ## 3. 검증 근거와 최소 troubleshooting
 
 사전 검증 근거는 세 갈래다. 모두 수동 demo의 근거일 뿐이고, E2E 전용 setup을 면접 시연의 필수 조건으로 만들지는 않는다.
@@ -215,7 +293,9 @@ docker compose --env-file .env -f airflow/compose.yaml exec airflow-scheduler ai
 
 **B. Web ETL CSV 업로드 브라우저 E2E** — `tests/e2e/test_web_etl_upload_browser_e2e.py`. operator 로그인, `ETL 실행 프로필` 선택(`sample_marketplace_vendor` v2), 공급사 CSV 파일 업로드, ETL 실행, 성공 batch ID 확인, PostgreSQL `ETLLoadRun`과 staging 상품 2건 확인, ETL 이력 검색, 배치 상세 조회를 Chromium으로 확인한다. `scripts/run_etl_browser_e2e.py`가 A와 함께 실행한다. 업로드 화면의 모든 기능이 아니라 위 경로만 검증한다.
 
-**C. ETL 품질 관찰 · 상품 동기화 차이** — 이 두 화면은 현재 Chromium E2E가 명시적으로 확인하지 않는다. 검증 근거는 service 단위 테스트(`tests/test_etl_quality_observability_service.py`, `tests/test_catalog_reconciliation_service.py`, `tests/test_etl_query_service.py`), API 테스트(`tests/test_api_etl_loads.py`, `tests/test_api_catalog_reconciliation.py`), Streamlit AppTest 기반 UI 테스트(`tests/test_etl_load_history_ui.py`)다. 이 구간을 “브라우저 E2E로 검증 완료”라고 말하지 않는다.
+**C. ETL 프로필 runtime activation** — 검증 근거는 API integration test(`tests/test_api_etl_profile_activation.py`), API Client test(`tests/test_catalogguard_api_client.py`), Streamlit AppTest(`tests/test_etl_load_history_ui.py`), PostgreSQL 통합 테스트(`tests/test_etl_profile_activation_service.py`, `tests/etl/test_profile_activation.py`)다. **운영 관리 화면 전용 Chromium E2E는 아직 없다.** 이 구간을 “브라우저 E2E로 검증 완료”라고 말하지 않는다. Airflow의 `etl_profile_inactive` 분류는 `airflow/tests/test_catalogguard_http_feed_to_staging.py`에 있고, 전용 `airflow-smoke` job의 격리 Airflow image에서 실행된다(Airflow가 없는 일반 pytest run에서는 module 단위로 skip된다).
+
+**D. ETL 품질 관찰 · 상품 동기화 차이** — 이 두 화면은 현재 Chromium E2E가 명시적으로 확인하지 않는다. 검증 근거는 service 단위 테스트(`tests/test_etl_quality_observability_service.py`, `tests/test_catalog_reconciliation_service.py`, `tests/test_etl_query_service.py`), API 테스트(`tests/test_api_etl_loads.py`, `tests/test_api_catalog_reconciliation.py`), Streamlit AppTest 기반 UI 테스트(`tests/test_etl_load_history_ui.py`)다. 이 구간을 “브라우저 E2E로 검증 완료”라고 말하지 않는다.
 
 | 증상 | 확인 / 조치 |
 |---|---|
@@ -224,6 +304,9 @@ docker compose --env-file .env -f airflow/compose.yaml exec airflow-scheduler ai
 | promotion 차단 | reject·품질 조건·duplicate identity의 차단 사유를 보여 주고 clean fixture를 사용한다. DB를 직접 수정하지 않는다. |
 | rollback 충돌 | 새 preview를 열고 conflict count를 설명한다. 강제 재시도하지 않는다. |
 | Airflow DAG 미노출 | `airflow dags list-import-errors`와 DAG processor를 확인한다. raw URL·secret을 CLI argument로 넘기지 않는다. |
+| 신규 ETL 실행이 `inactive_profile`(`409`)로 막힘 | `ETL 프로필 운영 관리`에서 해당 프로필의 effective activation을 먼저 확인한다. DB를 직접 `UPDATE`하지 않는다. operator로 로그인해 보존 버전 중 하나를 다시 활성화한다. |
+| 내린 프로필이 실행 selector에서 사라짐 | 정상 동작이다. 실행 목록은 지금 실행할 수 있는 프로필만 보여 준다. 관리 목록(`include_inactive=true`)에는 계속 남아 있으므로 거기서 다시 활성화한다. |
+| Airflow task가 `etl_profile_inactive`로 실패 | retry 대상이 아니다. 장애가 아니라 의도적으로 내린 상태인지 관리 화면에서 확인하고, 맞다면 그대로 두거나 operator로 재활성화한 뒤 다시 trigger한다. |
 | `ETL 품질 관찰`의 공급사 목록이 비어 있음 | 품질 정보가 기록된 ETL batch가 있는지 확인한다. 품질 요약 저장 이전 legacy batch만 있으면 후보에 나오지 않는다. |
 | 방향이 `비교 데이터 없음`(no_baseline) | 같은 공급사 이름으로 품질 집계가 가능한 batch가 1개뿐인지 확인한다. 준비 명령 두 개를 모두 실행했는지 본다. |
 | `이번 배치 미관측`이 많음 | reject 건수와 이 feed가 전체 snapshot인지 부분 feed인지 함께 확인한다. 삭제·판매 종료로 단정하지 않는다. |
@@ -248,8 +331,9 @@ docker compose --env-file .env -f airflow/compose.yaml down
 4. preview와 명시적 승인으로 변경을 통제한다.
 5. rollback과 append-only audit으로 변경·복구 이력을 남긴다.
 6. 품질 관찰과 동기화 차이는 조회 전용으로 두어, 판단은 사람이 하고 시스템은 근거만 남긴다.
+7. 프로필의 신규 실행 여부는 운영자가 재배포 없이 바꿀 수 있게 하되, 프로필 정의는 계속 code/config에 두고 비활성화는 삭제가 아니라 신규 실행 차단으로만 다룬다.
 
-이 프로젝트는 검증된 MVP다. 대용량 운영 데이터·실제 외부 공급사·운영 catalog 반영을 검증했다고 주장하지 않는다. 규칙 기반 검수는 AI 자동 수정이나 최종 업무 판단을 대체하지 않으며, 의심 패턴 탐지는 오탐·미탐 가능성이 있다. 품질 관찰과 동기화 차이는 변화를 보여 줄 뿐 위험 임계값을 정하지 않고, 자동 차단·자동 rollback·자동 알림도 하지 않는다.
+이 프로젝트는 검증된 MVP다. 대용량 운영 데이터·실제 외부 공급사·운영 catalog 반영을 검증했다고 주장하지 않는다. 규칙 기반 검수는 AI 자동 수정이나 최종 업무 판단을 대체하지 않으며, 의심 패턴 탐지는 오탐·미탐 가능성이 있다. 품질 관찰과 동기화 차이는 변화를 보여 줄 뿐 위험 임계값을 정하지 않고, 자동 차단·자동 rollback·자동 알림도 하지 않는다. Runtime activation은 신규 실행 상태만 다루며, runtime override를 지워 배포 기본값으로 되돌리는 reset도, activation 변경 이력을 쌓는 append-only audit도 아직 없다. Airflow는 비활성 프로필을 정확히 분류하지만 feed를 읽은 뒤에 차단하므로, 외부 fetch 전 차단이라고 말하지 않는다.
 
 최신 main에서는 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 CI job의 success를 확인한다. 세부 설계와 최신 실행 결과는 아래 문서를 기준으로 한다.
 

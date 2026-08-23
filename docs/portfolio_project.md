@@ -55,6 +55,9 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, 
 24. ETL staging에 정상 적재된 공급사 상품과 현재 운영 카탈로그를 `profile_name`·상품 식별자 기준으로 비교해 `new`·`changed`·`unchanged`·`not_observed_in_batch`와 필드별 변경 건수를 보여 주는 조회 전용 보고서를 구현했습니다. 핵심 판단은 미관측 상품을 자동 삭제 후보로 다루지 않은 것입니다. 공급사 피드가 전체 snapshot인지 부분 delta인지 시스템이 확정할 수 없고, ETL에서 거부된 행 때문에도 카탈로그 상품이 미관측으로 보일 수 있어 두 경우를 구분할 수 없기 때문입니다. Promotion Preview와 상태 이름을 일부러 다르게(`insert`/`update`가 아니라 `new`/`changed`) 붙여 조회 보고서가 실행 계획처럼 읽히지 않게 했고, 배치 안 중복 상품 식별자는 임의로 한 행을 고르지 않고 `409`로 거부했으며, 카탈로그를 통째로 메모리에 올리지 않고 미관측 건수는 SQL `COUNT`, 목록은 `LIMIT`/`OFFSET`으로 처리했습니다.
 25. 누적 품질 요약과 배치별 Reject 비율 추이 위에, 같은 공급사의 최신 배치와 직전 배치를 직접 비교하는 품질 관찰 기능을 추가했습니다. 서로 다른 공급사를 비교하면 품질 변화가 아니라 공급사 차이가 품질로 보이므로 `profile_name`을 부분 검색이 아닌 필수·정확 일치로 두었고, 변화량은 퍼센트 변화율이 아니라 퍼센트 포인트(%p)로 계산했으며, 품질 metadata가 `NULL`인 legacy 배치를 Reject 0건으로 읽지 않고 비교에서 제외했습니다. 같은 관찰 구간의 `error_counts`를 오류 코드별 발생 건수와 발생 배치 수로 집계해, 한 배치에서만 터진 사고인지 여러 배치에 걸친 문제인지 구분할 수 있게 했습니다. `worsened`는 관찰 결과로만 두고 위험 임계값·자동 차단·자동 알림은 만들지 않았습니다.
 26. 위 품질 관찰의 공급사 선택 목록을 화면에 떠 있는 최근 적재 페이지에서 만들면, 오래전에만 데이터를 보낸 공급사는 백엔드 비교가 정상 동작하는데도 화면에서 고를 수 없다는 문제를 확인했습니다. 페이지네이션된 목록 API를 더 큰 `limit`으로 재호출하는 대신, 품질 metadata가 온전한 ETL 이력에서 `DISTINCT profile_name`을 DB가 직접 뽑아 정렬해 돌려주는 조회 전용 API로 분리했습니다. 기준을 설정 Registry가 아니라 실제 적재 이력으로 둔 덕분에 Registry에서 내려간 과거 공급사도 계속 관찰할 수 있고, API client가 이름의 공백·중복·정렬 계약까지 검증해 잘못된 응답이 선택 화면까지 흘러가지 않게 했습니다.
+27. 프로필 activation이 코드 상수여서 공급사 하나를 내리거나 되돌리는 데도 코드 수정 → 테스트 → 배포가 필요하다는 한계를 확인한 뒤, 프로필 **정의**는 그대로 두고 **runtime activation 상태만** PostgreSQL `etl_profile_activations`로 분리했습니다. 프로세스 메모리에 두면 재시작하면 사라지고 worker마다 상태가 갈라지므로 DB 공용 상태로 저장했고, "row 없음(배포 기본값 사용)"과 "row 있음 + `active_version = NULL`(운영자의 명시적 비활성)"을 서로 다른 상태로 유지해 배포 기본값이 바뀔 때 운영자의 결정이 조용히 덮이거나 되살아나지 않게 했습니다. activation 조회 SELECT가 SQLAlchemy Session을 autobegin시켜 뒤따르는 loader의 `with session.begin()`과 충돌하는 문제는, 무조건 `rollback()`하는 대신 보류 중인 ORM 쓰기(`session.new`·`dirty`·`deleted`)가 있으면 먼저 실패시키고 안전한 read 트랜잭션만 정리하는 전용 함수로 해결했습니다.
+28. 위 activation을 운영자가 실제로 다룰 수 있도록 `GET`/`PUT /api/v1/etl-profiles/{profile_id}/activation`과 Streamlit `ETL 프로필 운영 관리` 화면을 연결했습니다. 조회는 viewer, 변경은 operator로 나누고 actor는 요청 body가 아니라 인증된 `current_user`에서만 기록했습니다. 관리 목록은 `include_inactive=true`로 조회해 비활성 프로필을 계속 노출했는데, 감추면 한 번 내린 프로필을 다시 고를 수 없어 되살릴 방법이 사라지기 때문입니다. 실행 selector 상태(`etl_web_run_*`)와 관리 화면 상태(`etl_profile_admin_*`)의 session key를 분리해 관리 화면에서 프로필을 골라도 실행 selector가 함께 바뀌지 않게 했고, `active_version: null`이 배포 기본값 reset이 아니라 명시적 비활성임을 API·화면 문구 양쪽에 남겼습니다(reset endpoint는 현재 없습니다).
+29. Airflow HTTP feed DAG가 비활성 프로필을 generic `catalogguard_etl_unexpected`로 실패시키던 것을 전용 코드 `etl_profile_inactive`(non-retryable)로 분리했습니다. 운영자가 의도적으로 내린 프로필은 network timeout·HTTP 5xx·일시적 DB 오류와 달리 재시도로 회복되지 않기 때문입니다. Airflow와 로그에는 `CatalogGuard HTTP feed ingestion failed [etl_profile_inactive]`처럼 안전한 코드 하나만 남기고 `profile_id`·feed URL·raw 예외는 노출하지 않았습니다. 다만 현재 DAG는 feed를 먼저 읽고 나서 activation을 판별하므로 FastAPI의 S3·HTTP route와 달리 외부 I/O 전 차단은 아니며, 검사를 앞으로 옮기면 activation 실패와 feed 실패가 겹칠 때 failure precedence가 달라지므로 두 항목을 함께 후속 설계 과제로 남겼습니다.
 
 ### Airflow ETL orchestration: 문제와 해결
 
@@ -182,6 +185,20 @@ catalogguard_ready.csv + etl_summary.json
 -> INSERT 상품 삭제 / UPDATE 상품 이전 값 복원, rollback run·audit 저장
 ```
 
+ETL 프로필의 runtime activation은 위 실행 흐름과 분리된 별도 관리 흐름입니다. 프로필 정의를 바꾸는 것이 아니라, 이미 보존된 어떤 버전을 신규 실행에 쓸지만 정합니다.
+
+```text
+Streamlit ETL 프로필 운영 관리
+-> GET /api/v1/etl-profiles?include_inactive=true (비활성 포함 관리 목록)
+-> GET /api/v1/etl-profiles/{profile_id}/activation
+-> viewer: 상태·실제 적용 버전·배포 기본 버전·runtime override·보존 버전·마지막 변경자/시각 조회
+-> operator: PUT /api/v1/etl-profiles/{profile_id}/activation
+-> PostgreSQL etl_profile_activations (프로필당 current-state row 1건)
+-> 신규 ETL 실행이 effective activation을 따름
+```
+
+비활성화가 막는 것은 신규 ETL 실행뿐입니다. 과거 적재 이력, 품질 요약·추이·관찰, 동기화 차이, promotion·rollback 이력, 버전 archive는 그대로 남습니다.
+
 웹 ETL 실행 성공이 promotion을 자동으로 시작하지는 않습니다. 사용자가 ETL 적재 이력에서 새 batch를 직접 선택해야 이후 preview·승인 흐름이 시작됩니다.
 
 ## 6.5 기술 스택과 검증 버전
@@ -226,7 +243,12 @@ catalogguard_ready.csv + etl_summary.json
 | 관찰 가능 공급사 목록 검증 | 품질 metadata가 온전한 이력 기준 `DISTINCT profile_name` 오름차순, legacy-only 프로필 제외, Registry에 없는 과거 프로필 포함, 원본 값 보존, client의 공백·중복·정렬 계약 검증을 PostgreSQL 통합·API·client·UI 테스트로 확인 |
 | Observability supplier profile listing 기능 완료 commit 기준 전체 pytest | PostgreSQL 통합 환경에서 `2256 passed`, `2 skipped`, `6 deselected`, `0 failed`. `2 skipped`는 전용 image에서만 도는 격리 Airflow DAG 테스트이며 pass가 아닙니다. `TEST_DATABASE_URL`이 없으면 `2038 passed`, `220 skipped`, `6 deselected`로 PostgreSQL 통합 테스트가 함께 skip됩니다 |
 | Observability supplier profile listing 기능 완료 commit 기준 CI | commit `de3933b5dec622fd54d2d8cbfc08506da721f918`을 대상으로 한 GitHub Actions run `32450500140` success (`test`·`airflow-smoke`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate` 5개 job) |
-| 최신 Alembic head | `20260813_0013`(ETL initial source lineage, single head) |
+| ETL Profile Runtime Activation 검증 | 3-state 해석(row 없음 / 버전 / `NULL`), registry versions 밖 버전 `422`, viewer `GET`·operator `PUT` RBAC, 비활성 프로필도 activation `GET` 200, `include_inactive` 목록 분리, actor는 `current_user`에서만 기록, `ON CONFLICT DO UPDATE` 동시 변경, activation read 트랜잭션 정리와 보류 ORM 쓰기 검출을 service·API·client·Streamlit AppTest·PostgreSQL 통합 테스트로 확인 |
+| Activation 관련 파일별 수집 규모 | `tests/test_api_etl_profile_activation.py` 35 · `tests/test_catalogguard_api_client.py` 313 · `tests/test_etl_load_history_ui.py` 120. 운영 관리 화면 전용 Chromium E2E는 아직 없음 |
+| Airflow inactive profile 분류 검증 | `etl_profile_inactive` 전용 코드, `AirflowFailException`(non-retryable), `etl_profile_invalid`·`catalogguard_etl_unexpected`와의 구분, 메시지에 `profile_id`·feed 파일명 미노출을 `airflow-smoke` job의 격리 Airflow image에서 `python -m unittest discover`로 확인(`Ran 12 tests` / `OK`). 일반 pytest run에서는 Airflow 미설치로 module 단위 skip됩니다 |
+| ETL Profile Runtime Activation 기능 완료 commit 기준 전체 pytest | PostgreSQL 통합 환경에서 `2369 passed`, `2 skipped`, `6 deselected`, `0 failed`, 5 warnings. `2 skipped`는 전용 image에서만 도는 격리 Airflow DAG 테스트이며 pass가 아닙니다. `TEST_DATABASE_URL`이 없으면 `2090 passed`, `281 skipped`, `6 deselected`로 PostgreSQL 통합 테스트가 함께 skip됩니다 |
+| ETL Profile Runtime Activation 기능 완료 commit 기준 CI | commit `06215ec2b6104a5dedf85eb5d839bf654a5481dc`을 대상으로 한 GitHub Actions run `32571400595` success (`test`·`airflow-smoke`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate` 5개 job) |
+| 최신 Alembic head | `20260822_0014`(ETL profile runtime activations, single head) |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
 
 ## 6.6 핵심 구현 구조
@@ -407,6 +429,9 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 | `tests/test_api_inspections.py` | ETL 출력과 연동되는 FastAPI CSV 검수·중복 결과 재사용·응답 계약 |
 | `tests/test_api_inspection_jobs.py`, `tests/test_inspection_tasks.py` | 비동기 작업 API, Celery task 상태 전이와 임시 파일 정리 |
 | `tests/test_actor_audit.py` | Web ETL·Promotion·Rollback의 `actor_user_id`·`actor_username`이 JWT `current_user`에서만 기록되는지, viewer 403(세 endpoint)·Web ETL anonymous 401, request body 위조 무시, Promotion 실패 기록, legacy row 호환을 실제 PostgreSQL로 검증(10 scenarios) |
+| `tests/test_api_etl_profile_activation.py` | activation `GET`/`PUT` 계약, viewer/operator RBAC, 3-state(row 없음 / 버전 / `NULL`), 비활성 프로필의 activation `GET` 200, registry versions 밖 버전 `422`와 `available_versions`, 관리 목록을 통한 비활성 → 재활성 왕복(35개 수집) |
+| `tests/test_etl_profile_activation_service.py`, `tests/etl/test_profile_activation.py` | current-state upsert와 동시 변경(last-write-wins), effective activation 해석, activation read 트랜잭션 정리와 보류 ORM 쓰기 검출 |
+| `airflow/tests/test_catalogguard_http_feed_to_staging.py` | `etl_profile_inactive` 전용 코드와 non-retryable(`AirflowFailException`), `etl_profile_invalid`·`catalogguard_etl_unexpected`와의 구분, 실패 메시지에 `profile_id`·feed 파일명 미노출. 격리 Airflow image의 `airflow-smoke` job에서 실행되며, Airflow가 없는 일반 pytest run에서는 module 단위로 skip됩니다 |
 | `tests/test_metrics.py` | `CATALOGGUARD_METRICS_ENABLED` parsing, `/metrics` disabled=404·instrumentation no-op, HTTP request counter·duration histogram, 동적 ID route template 집계와 `unmatched`/`5xx` 고정 label, 민감정보 미노출, Web ETL created/duplicate/failed와 row 중복 집계 방지를 실제 PostgreSQL 포함해 검증(32 scenarios) |
 
 통계 집계 함수와 서버 응답 적용 helper에는 정렬, 빈 값 처리, 필수 컬럼 검증, 입력 불변성, TOP 5 적용 위치, malformed 응답 차단을 확인하는 테스트를 추가했습니다. Rollback Change Audit 기능 완료 commit 기준 CI 결과는 6.5절 표의 run `31487868946`이며, 아래는 ETL·promotion 기능을 처음 CI에서 연결해 확인하던 시점의 run 기록입니다.
@@ -822,6 +847,7 @@ ETL 적재가 끝나면 운영자가 실제로 묻는 질문은 "이번 배치�
 
 그래서 품질 metadata가 온전한 ETL 이력에서 `DISTINCT profile_name`을 뽑아 정렬까지 DB가 처리하는 조회 전용 API로 분리했습니다. 전체 행을 읽어 Python `set`으로 줄이지 않았고, 저장된 이름을 `strip`이나 `lower` 없이 그대로 반환해 정확 일치 비교에 다시 넣을 수 있게 했습니다. 후보 기준을 설정 Registry가 아니라 실제 적재 이력으로 둔 것도 의도적입니다. Registry에서 내려간 과거 공급사라도 품질 데이터가 남아 있으면 계속 비교할 수 있어야 하고, 반대로 Registry에 있어도 legacy 배치뿐이면 고를 이유가 없습니다. 화면 쪽에서는 선택한 공급사가 목록에서 사라졌을 때 첫 항목으로 자동 대체하지 않고 미선택으로 되돌리도록 했습니다. 자동으로 바꾸면 이전 공급사의 숫자가 다른 공급사 이름 아래 남을 수 있기 때문입니다.
 
+
 ## 6.14 면접 예상 질문과 답변
 
 ### Q1. 왜 Streamlit을 사용했나요?
@@ -896,6 +922,18 @@ Promotion A가 가격을 10,000원에서 12,000원으로 바꾼 뒤 다른 작�
 
 토큰에 있는 role만 믿으면 이미 발급된 토큰을 가진 사용자를 비활성화하거나 역할을 바꿔도 토큰이 만료될 때까지 예전 권한이 그대로 유지됩니다. 현재 프로젝트는 PostgreSQL이 이미 있고 사용자 수도 매우 적은 MVP이므로, `get_current_user()`가 매 요청마다 `users` 테이블에서 최신 role·is_active를 다시 확인하는 방식을 선택했습니다. 요청마다 조회가 한 번 더 늘어나지만 이 규모에서는 무시할 수 있고, 계정 비활성화를 즉시 반영할 수 있다는 이점이 더 크다고 판단했습니다.
 
+### Q19. 왜 activation을 메모리에 저장하지 않았나요?
+
+재시작하면 사라지기 때문입니다. 운영자가 문제 있는 공급사를 내려 뒀는데 배포나 재시작 한 번으로 조용히 다시 켜지면, 관리 기능이 있는 것이 오히려 더 위험합니다. Uvicorn worker를 여러 개 띄우면 worker마다 상태가 달라져 같은 프로필이 요청에 따라 활성으로도 비활성으로도 보입니다. 그래서 PostgreSQL에 공통 runtime 상태로 저장했고, 그 대신 옮긴 범위는 activation 상태 하나로 제한해 프로필 정의와 버전 archive는 계속 code/config에 뒀습니다.
+
+### Q20. row가 없는 것과 row가 있고 `active_version`이 `NULL`인 것은 왜 다릅니까?
+
+**row 없음**은 아무도 손대지 않아 배포 registry의 기본값을 그대로 쓰는 상태이고, **row 있음 + `NULL`**은 운영자가 명시적으로 내린 상태입니다. 둘을 하나로 합치면 배포 기본값이 바뀔 때 운영자의 결정이 조용히 뒤집힙니다. 예를 들어 운영자가 내려 둔 프로필을 "override 없음"과 같게 취급하면, 다음 배포에서 registry 기본값이 활성으로 바뀌는 순간 아무도 켜지 않았는데 다시 실행되기 시작합니다. 같은 이유로 `active_version: null`은 reset이 아니라 명시적 비활성이며, override row를 지워 배포 기본값으로 되돌리는 reset endpoint는 일부러 만들지 않았습니다.
+
+### Q21. Airflow에서 inactive profile은 왜 retry하지 않나요?
+
+일시적 장애가 아니라 운영 정책 상태이기 때문입니다. network timeout이나 HTTP 5xx, 일시적 DB 오류는 시간이 지나면 회복될 수 있지만, 운영자가 의도적으로 내린 프로필은 사람이 다시 켜기 전까지 재시도로 회복되지 않습니다. 재시도해 봐야 같은 결과를 반복하며 로그만 실패로 채웁니다. 그래서 `AirflowFailException`으로 non-retryable 전용 코드 `etl_profile_inactive`를 주고, 설정 오류를 뜻하는 `etl_profile_invalid`나 예기치 못한 장애를 뜻하는 `catalogguard_etl_unexpected`와 구분했습니다. 운영자가 할 일이 각각 다르기 때문입니다. 다만 현재 DAG는 feed를 먼저 읽은 뒤 판별하므로 외부 I/O 전 차단은 아니고, 그 개선은 failure precedence 정책과 함께 후속 과제로 남겨 뒀습니다.
+
 ## 6.15 포트폴리오 소개 문구
 
 ### 이력서용 짧은 설명
@@ -920,6 +958,9 @@ CatalogGuard Lite는 상품 운영자가 CSV 상품 데이터를 검수하고, E
 - Prometheus metric label에 동적 ID 대신 route template을 써서 high-cardinality 문제를 사전에 차단했고, 새 timing middleware를 추가하는 대신 기존 요청 로그가 이미 계산하던 duration을 재사용했습니다.
 - Actor Audit은 새 범용 Audit 테이블 대신 기존 실행 이력 테이블에 컬럼만 추가해 복잡도를 최소화했고, actor 값은 클라이언트 입력이 아니라 인증된 JWT `current_user`에서만 가져오도록 설계해 위조를 원천 차단했습니다.
 - Docker 이미지가 실행되는 것에서 끝내지 않고, GitHub Actions에 kind로 실제 Kubernetes cluster를 만들어 배포까지 검증했습니다. migration과 API 실행 책임을 Job/Deployment로 분리했고, kind·kubectl·node image 버전을 SHA-256 digest까지 고정해 같은 commit이 항상 같은 toolchain으로 재현되게 했습니다.
+- 프로필 activation을 재배포 없이 바꿀 수 있게 하면서도, 프로필 **정의**는 code/config에 남기고 runtime 상태 하나만 DB로 분리해 범위를 제한했습니다. "row 없음(배포 기본값)"과 "row + `NULL`(명시적 비활성)"을 다른 상태로 유지해 배포 기본값 변경이 운영자의 결정을 조용히 덮지 않게 했고, reset과 append-only history가 없다는 사실을 API·UI·문서에 함께 남겼습니다.
+- activation 조회 SELECT가 만든 autobegin 트랜잭션을 무조건 `rollback()`으로 지우지 않고, 보류 중인 ORM 쓰기가 있으면 먼저 실패시키도록 했습니다. 짧은 우회가 나중에 추가될 쓰기를 조용히 삼키는 것을 막기 위해 검사 비용을 감수한 선택입니다.
+- Airflow에서 운영자가 의도적으로 내린 프로필을 일시 장애와 같은 실패로 다루지 않고 non-retryable 전용 코드로 분리했습니다. 동시에 "Airflow는 아직 feed를 읽은 뒤에야 차단한다"는 남은 한계와, 그것을 고치면 failure precedence가 달라진다는 이유까지 문서에 남겼습니다.
 - 콘솔에서 수동 구성한 AWS staging을 Terraform으로 코드화할 때, 검증한 적 없는 새 인프라를 만드는 대신 이미 검증한 구성의 코드화로 범위를 제한했습니다. `terraform validate`로는 알 수 없는 "RDS가 인터넷에 열려 있는지" 같은 조건을 mock provider test의 assertion으로 고정해, 이후 `0.0.0.0/0` inbound가 추가되면 CI가 막도록 했습니다. 실제 `apply`를 하지 않은 것과 mock provider가 검증할 수 없는 항목도 문서에 그대로 남겼습니다.
 
 ## 6.16 PostgreSQL 쿼리·인덱스 성능 검증
@@ -1554,3 +1595,155 @@ Inspection dedup은 최초 실행자만 보존하므로 같은 결과를 나중�
 `TEST_DATABASE_URL` 등 DB 설정이 없는 상태에서 anonymous Sync Inspection 요청은 기대한 `401`보다 먼저 DB 의존성 초기화가 실패해 `500 DatabaseConfigurationError`가 됩니다. DB가 구성된 환경에서는 같은 요청이 `401`을 반환합니다. 이는 기존 의존성 평가 순서에서 발생하던 결함이며 Inspection Actor Audit의 저장·전파 계약을 막는 blocker는 아니어서 이번 문서 단계에서 수정하지 않았습니다.
 
 이번 단계에서는 AWS API를 호출하거나 SSM을 추가 조사하지 않았습니다. 따라서 별도로 기록된 SSM root cause는 계속 **K. INCONCLUSIVE**이며 해결되었다고 판단하지 않습니다.
+
+## 6.24 ETL Profile Runtime Activation과 운영 관리
+
+### 1. 문제
+
+Phase 5A까지 프로필 activation은 코드 상수였습니다. 공급사 하나의 신규 ETL 실행을 잠시 멈추거나 이전 버전으로 되돌리는 데도 코드 수정 → 테스트 → 배포가 필요했고, 그 사이 문제 있는 공급사 데이터는 계속 들어왔습니다. 운영자가 판단할 수 있는 상태 변경인데 개발·배포 사이클을 거쳐야 한다는 점이 실제 병목이었습니다.
+
+프로세스 메모리에 flag를 두는 방법은 쓰지 않았습니다. 재시작하면 사라지고 Uvicorn worker가 여러 개면 worker마다 상태가 갈라집니다. "관리 기능처럼 보이지만 관리되지 않는" 상태는 아무 상태도 없는 것보다 나쁩니다.
+
+### 2. PostgreSQL runtime activation 설계
+
+옮긴 것은 activation 상태 하나뿐입니다. 프로필 **정의**(`source_columns`·`required_source_columns`·`defaults`)와 버전 archive의 source of truth는 계속 `config/etl`의 버전별 JSON archive와 코드 registry이며, Policy A(Published Version Immutable)도 그대로입니다. 새 프로필을 등록하거나 삭제하지 않고 allowlist도 계속 코드 registry입니다.
+
+`etl_profile_activations`는 `profile_id`에 unique index를 걸어 **프로필당 정확히 한 행**만 허용합니다. `profile_id`에 FK는 걸지 않았습니다. 프로필이 아직 DB entity가 아니라 코드 registry의 key이므로 존재하지 않는 대상을 가리키는 FK를 만들 수 없고, 대신 쓰기 경로가 registry allowlist와 `versions`를 검증합니다.
+
+effective active version 계산은 `etl.profile_loader.resolve_etl_profile_activation()` **한 곳**에서만 합니다. Web·S3·HTTP feed·Airflow가 각자 DB를 읽어 각자 판단하면 같은 프로필이 경로마다 다르게 활성으로 보일 수 있기 때문입니다.
+
+### 3. 3-state model
+
+| runtime row | `active_version` | effective | 의미 |
+|---|---|---|---|
+| 없음 | — | 배포 registry의 `active_version` | runtime override 없음. 아무도 손대지 않은 상태 |
+| 있음 | `"2"` | `"2"` | runtime에서 v2를 명시적으로 사용 |
+| 있음 | `NULL` | `None` | 운영자의 명시적 비활성 |
+
+"row 없음"과 "row 있음 + `NULL`"을 합치지 않은 것이 이 설계의 핵심입니다. 전자는 배포 기본값을 따르는 상태이고 후자는 사람이 내린 결정입니다. 둘을 하나로 뭉개면 배포 기본값이 바뀔 때 운영자의 결정이 조용히 뒤집히거나 조용히 되살아납니다.
+
+비활성을 뜻하는 값은 JSON `null` 하나뿐입니다. `''`나 공백만 있는 값은 DB CHECK constraint가 막아 "비활성인가 잘못된 pointer인가"가 모호해지지 않게 했습니다. 값이 있을 때는 registry `versions`의 정확한 key여야 합니다. 임의 문자열(`"999"`)을 허용하면 존재하지 않는 버전이 활성으로 저장되고, 그 프로필의 다음 실행이 실행 시점에 가서야 실패합니다. 그 실패는 운영자가 방금 한 행동과 멀리 떨어져 있어 원인을 찾기 어렵습니다.
+
+### 4. transaction 문제 — autobegin과 `session.begin()` 충돌
+
+신규 ETL 실행 경로는 activation을 확인한 뒤 곧바로 쓰기 트랜잭션을 엽니다(`load_standard_csv()`의 `with session.begin()`). 그런데 확인용 SELECT가 SQLAlchemy 2.x의 autobegin으로 같은 Session에 암묵적 트랜잭션을 열어 두면, 그 `begin()`이 `A transaction is already begun on this Session.`으로 실패합니다. 6.13절의 sync inspection 충돌과 같은 계열의 문제입니다.
+
+가장 짧은 해결은 SELECT 뒤에 무조건 `session.rollback()`을 부르는 것입니다. 그렇게 하지 않았습니다. 나중에 누군가 이 앞에 쓰기를 추가하면 그 쓰기가 **조용히** 사라지기 때문입니다. 지금까지 같은 상황은 `load_standard_csv()`의 `begin()`이 `InvalidRequestError`로 시끄럽게 실패시켜 줬는데, 무조건 rollback이 바로 그 신호를 지웁니다.
+
+그래서 `end_activation_read_transaction()`은 rollback 전에 `session.new`·`session.dirty`·`session.deleted`를 먼저 봅니다. 보류 중인 ORM 쓰기가 있으면 조용히 버리지 않고 전용 예외로 실패시키고, 없을 때만 안전한 read 트랜잭션을 정리합니다. 한계도 그대로 적어 뒀습니다. 이 검사는 ORM 단위 작업만 보므로 `session.execute(insert(...))` 같은 Core 쓰기는 감지되지 않고 함께 rollback됩니다. 다만 그런 호출자는 이 함수 이전부터 계약상 허용되지 않았습니다.
+
+### 5. API
+
+| Endpoint | 권한 | 역할 |
+|---|---|---|
+| `GET /api/v1/etl-profiles/{profile_id}/activation` | viewer 이상 | 배포 기본값·runtime override·실제 적용 값을 함께 반환 |
+| `PUT /api/v1/etl-profiles/{profile_id}/activation` | operator | 보존 버전 활성화 또는 `null`로 비활성화 |
+
+`PUT`을 쓴 것은 이 요청이 새 자원을 만드는 것이 아니라 하나뿐인 상태를 통째로 바꾸기 때문입니다. 같은 body를 두 번 보내면 결과가 같습니다.
+
+body에는 `active_version` 하나만 둡니다. actor는 인증된 `current_user`에서만 가져오므로 사용자 이름을 **받을 자리 자체가 없습니다.** 받아 두고 무시하면 다음 사람이 "왜 반영되지 않지"를 디버깅하게 됩니다. `extra="forbid"`로 모르는 필드를 거부해, 이 endpoint를 Profile Update API로 오해하고 `source_columns`를 보내면 조용히 무시되지 않고 `422`로 실패합니다.
+
+응답이 세 값을 함께 돌려주는 이유는 "지금 왜 이 상태인가"에 답하기 위해서입니다. effective 하나만 주면 배포가 그렇게 정한 것인지 운영자가 내린 것인지 알 수 없고, 다음에 해야 할 일이 달라집니다. `actor_username`·`updated_at`은 runtime override가 있을 때만 채웁니다. override가 없는데 값이 있으면 아무도 바꾼 적 없는 상태를 누군가 바꾼 것처럼 보입니다.
+
+오류는 상태별로 나눴습니다. 없는 프로필은 `404`, 프로필은 있는데 그 버전이 보존 목록에 없으면 `422`(`unknown_profile_version`)에 `available_versions`를 함께 담습니다. 운영자가 해야 할 일이 "프로필을 고쳐야 하는가"와 "버전을 고쳐야 하는가"로 다르기 때문에, service 계층에서도 두 예외를 상속으로 묶지 않았습니다.
+
+동시에 두 operator가 같은 프로필을 바꾸면 INSERT가 unique index에서 충돌합니다. `ON CONFLICT DO UPDATE`로 한 문장에서 처리해 `IntegrityError`를 사용자에게 노출하지 않으며, 결과는 last-write-wins입니다.
+
+### 6. Streamlit 관리 UI
+
+`ETL 적재 이력` 탭 안에 divider로 구분된 `ETL 프로필 운영 관리` 영역을 뒀습니다. viewer는 현재 활성/비활성 상태, 실제 적용 버전, 배포 기본 버전, runtime override 여부, 선택 가능한 보존 버전, 마지막 변경 사용자와 시각을 봅니다. operator는 보존 버전 중 하나를 활성화하거나, 확인 checkbox를 거쳐 신규 ETL 실행을 비활성화합니다.
+
+**프로필 JSON 자체를 수정하는 UI가 아닙니다.** 화면 caption에도 "프로필 정의 자체는 여기서 바꾸지 않습니다"를 명시했습니다.
+
+실행 화면 state와 관리 화면 state는 session key로 분리했습니다(`etl_web_run_*` / `etl_profile_admin_*`). 관리 화면에서 프로필을 골랐다고 위쪽 Web ETL 실행 selector가 함께 바뀌면, 운영자가 관리 목적으로 선택한 프로필로 실수로 ETL을 실행할 수 있습니다. 반대로 activation을 **실제로 변경**했을 때는 실행 selector 목록과 프로필 상세 캐시를 명시적으로 무효화합니다. 방금 내린 프로필이 실행 목록에 남아 있으면 안 되고, 버전을 바꿨다면 상세가 옛 버전을 가리키기 때문입니다.
+
+상태 갱신은 **서버가 성공을 응답한 뒤에만** 합니다. 서버가 실패했는데 화면만 바뀌면 운영자가 내리지 않은 프로필을 내렸다고 믿게 됩니다.
+
+### 7. RBAC
+
+조회(`GET`)는 DB를 바꾸지 않으므로 viewer 이상, 신규 ETL 실행 대상을 바꾸는 변경(`PUT`)만 operator입니다. Promotion Preview / Promotion 실행을 나눈 것과 같은 기준입니다. Streamlit에서 viewer에게 변경 컨트롤을 감추는 것은 편의 기능이고, 실제 경계는 항상 `require_operator`입니다.
+
+actor는 요청 body가 아니라 인증된 `current_user`에서만 기록합니다. 요청 body의 사용자 이름을 그대로 저장하면 누구든 다른 사람 이름으로 기록을 남길 수 있습니다. 기존 Actor Audit(6.19·6.23절)과 같은 원칙입니다.
+
+### 8. `include_inactive`가 필요한 이유
+
+실행 화면과 관리 화면은 서로 다른 질문을 합니다.
+
+- 실행 selector: "지금 **실행할 수 있는** 프로필은 무엇인가" → 기본값 `include_inactive=false`. 비활성 프로필이 남아 있으면 사용자는 고를 수는 있는데 실행만 `409`로 막히는 화면을 보게 됩니다.
+- 관리 화면: "**관리할 수 있는** 프로필은 무엇인가" → `include_inactive=true`. 비활성 프로필을 목록에서 감추면 한 번 내린 프로필을 다시 고를 수 없어 영영 되살릴 방법이 없어집니다.
+
+기본값을 `false`로 둔 덕분에 이 parameter를 넘기지 않는 기존 호출자는 지금까지와 완전히 같은 응답을 받습니다. 응답 shape도 두 경우가 같고, 각 프로필의 실제 상태는 activation endpoint로 따로 조회합니다. `include_inactive`는 필터를 끄는 것이지 allowlist 밖의 후보를 넓히지 않습니다.
+
+같은 이유로 activation `GET`은 **비활성 프로필도 `200`으로 조회됩니다.** 이 endpoint의 목적이 바로 "지금 활성인가"를 묻는 것이므로, 비활성이라고 `409`를 내면 운영자가 상태를 확인할 방법이 없어집니다.
+
+### 9. Deactivate ≠ Delete
+
+비활성화가 막는 것은 **신규 ETL 실행**뿐입니다. 업로드·S3·HTTP feed·Airflow 네 경로 모두 해당됩니다.
+
+삭제되거나 막히지 않는 것: 과거 ETL 적재 이력, staging 상품 조회, ETL 품질 요약·추이·품질 관찰, 상품 동기화 차이(Catalog Reconciliation), promotion 이력, rollback 이력, `config/etl`의 버전별 프로필 archive. Policy G("Delete 대신 Deactivate")를 그대로 따른 것이며, DELETE API는 여전히 없습니다.
+
+### 10. reset / history 한계
+
+두 가지를 의도적으로 만들지 않았고, 그 사실을 API·UI·문서에 함께 남겼습니다.
+
+**reset이 없습니다.** `active_version: null`은 배포 기본값으로 되돌리는 reset이 아니라 명시적 비활성화입니다. 이 요청 뒤에도 `runtime_override_exists`는 `true`로 남습니다. runtime override row 자체를 삭제해 deployment default로 복귀하는 endpoint는 현재 없습니다.
+
+**append-only history가 아닙니다.** 이 표는 프로필당 current-state row 하나입니다. A가 deactivate하고 B가 v2를 activate하면 최종 row에는 B의 값만 남고 A의 이전 결정은 보존되지 않습니다. `actor_username`과 `updated_at`은 "현재 상태를 마지막으로 만든 것이 누구/언제인가"일 뿐이며, 그것으로 activation 변경 이력을 되짚을 수는 없습니다. 완전한 감사 이력이 필요하면 별도 표가 있어야 하고, 이 표를 그 용도로 읽으면 안 됩니다. Streamlit 화면에도 "변경 이력은 저장하지 않습니다"를 caption으로 남겼습니다.
+
+### 11. Airflow inactive 분류
+
+Airflow DAG는 비활성 프로필을 generic `catalogguard_etl_unexpected`로 실패시키고 있었습니다. 이를 전용 코드 `etl_profile_inactive`로 분리하고 **retry하지 않도록**(`AirflowFailException`) 했습니다.
+
+운영자가 의도적으로 내린 프로필은 network timeout, HTTP 5xx, 일시적 DB 오류 같은 장애와 의미가 다릅니다. 일시 장애는 재시도로 회복될 수 있지만 운영 정책 상태는 사람이 다시 켜기 전까지 회복되지 않습니다. 재시도해 봐야 같은 결과를 반복하며 로그만 실패로 채웁니다. 설정 오류를 뜻하는 `etl_profile_invalid`(없는 `profile_id`)와도 구분했습니다. 앞은 설정을 고쳐야 하고 뒤는 사람이 켤 때까지 그대로 두는 것이 맞아서, 운영자가 할 일이 다르기 때문입니다.
+
+Airflow와 로그에는 안전한 코드 하나만 노출합니다.
+
+```text
+CatalogGuard HTTP feed ingestion failed [etl_profile_inactive]
+```
+
+`profile_id`, 프로필 JSON 원문, feed URL과 query, token, DB URL, 원본 예외는 넣지 않고 `__cause__`도 남기지 않습니다. 다른 실패 분기와 같은 규칙입니다.
+
+### 12. Airflow pre-fetch 한계
+
+현재 DAG의 실제 순서는 `read_http_feed_csv()` → `run_web_etl()` → activation 판별입니다. 즉 **비활성 프로필이어도 HTTP feed를 한 번 읽은 뒤에 차단됩니다.** 분류는 정확하지만 그 읽기는 낭비입니다.
+
+반면 FastAPI의 S3·HTTP source route는 외부를 읽기 **전에** inactive guard를 수행합니다. 그 검사가 없으면 서버가 이미 비활성인 것을 알면서도 외부를 읽고, source가 먼저 실패할 경우 `409 inactive_profile` 대신 `404`/`502`/`503` 같은 source 오류를 돌려주게 되기 때문입니다. 따라서 "모든 ETL 경로가 inactive 프로필을 외부 I/O 전에 차단한다"는 설명은 **사실이 아닙니다.**
+
+Airflow에서도 검사를 fetch 앞으로 옮길 수는 있지만 이번에 하지 않았습니다. activation DB 조회와 HTTP feed가 **동시에** 실패하는 경우 어느 오류를 먼저 보고할지가 검사 위치에 따라 달라지기 때문입니다. 지금은 feed 오류가 먼저 보고됩니다. 어느 쪽이 옳은지는 운영자가 무엇을 먼저 보고 싶은가의 문제라 코드 정리만으로 결정할 수 없어, **Airflow inactive pre-fetch guard**와 **failure precedence 정책**을 함께 별도 후속 설계 과제로 남겼습니다.
+
+### 13. 검증
+
+Activation 검증 근거는 네 갈래이며, 하나는 아직 없습니다.
+
+- **API integration test** — `tests/test_api_etl_profile_activation.py`(35개 수집). `GET`/`PUT` 계약, viewer/operator RBAC, 3-state, 비활성 프로필의 activation `GET` 200, registry versions 밖 버전 `422`와 `available_versions`, 관리 목록을 통한 비활성 → 재활성 왕복
+- **API Client test** — `tests/test_catalogguard_api_client.py`(313개 수집). activation 응답 shape 검증과 `include_inactive` 파라미터 전달, `PUT` 오류 매핑
+- **Streamlit AppTest** — `tests/test_etl_load_history_ui.py`(120개 수집). 운영 관리 화면의 상태 표시, viewer/operator 컨트롤 분리, 실행/관리 state 분리, 성공 응답 뒤에만 캐시 무효화
+- **PostgreSQL 통합** — `tests/test_etl_profile_activation_service.py`, `tests/etl/test_profile_activation.py`. current-state upsert, 동시 변경, read 트랜잭션 정리와 보류 ORM 쓰기 검출
+- **전용 Chromium E2E는 아직 없습니다.** 이 구간을 "브라우저 E2E로 검증 완료"라고 쓰지 않습니다
+
+Airflow의 `etl_profile_inactive` 분류는 `airflow/tests/test_catalogguard_http_feed_to_staging.py`에 있고, 전용 `airflow-smoke` job의 격리 Airflow image가 `python -m unittest discover`로 실행합니다. 같은 run의 결과는 `Ran 12 tests` / `OK`이며, Airflow가 없는 일반 pytest run에서는 module 단위로 skip되어 위 `2 skipped`에 포함됩니다.
+
+기능 완료 commit `06215ec`를 대상으로 한 GitHub Actions run `32571400595`은 `test`·`airflow-smoke`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate` 5개 job이 모두 success였고, `Run tests` 단계는 다음과 같이 종료됐습니다.
+
+```text
+2369 passed
+2 skipped
+6 deselected
+5 warnings
+0 failed
+```
+
+`2 skipped`는 Airflow가 설치된 전용 image에서만 실행되는 격리 DAG 테스트 module 2개이며 **통과가 아닙니다.** 같은 commit을 `TEST_DATABASE_URL` 없이 실행하면 `2090 passed`, `281 skipped`, `6 deselected`가 됩니다. 모든 PostgreSQL 결과는 운영 DB가 아니라 일회성 테스트 환경의 결과입니다.
+
+### 14. 후속 개선
+
+1. runtime override를 제거해 배포 기본값으로 되돌리는 reset endpoint
+2. append-only activation history 전용 표
+3. 운영 관리 화면의 Chromium 브라우저 E2E
+4. Airflow DAG의 feed fetch 전 inactive guard
+5. activation 실패와 source 실패가 겹칠 때의 failure precedence 정책
+6. 사용자 정의 Profile CRUD
+7. DB-backed Profile / ProfileVersion 모델 도입 여부 검토
+
+1~5는 이번 범위에서 의도적으로 남긴 항목이고, 6~7은 프로필 정의를 code/config에 두는 현재 구조를 바꿀지에 대한 별도 판단입니다.
