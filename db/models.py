@@ -869,3 +869,118 @@ class ETLProfileActivation(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+
+class ETLProfileActivationEvent(Base):
+    """One successful operator activation command, kept forever.
+
+    위의 ETLProfileActivation과 **역할이 다릅니다.** 그 표는 프로필당 current-state row
+    하나이고, 이 표는 그 상태를 바꾼 명령의 append-only 기록입니다. 둘을 하나로 합치면
+    "지금 무엇이 적용되는가"와 "지금까지 무엇을 했는가" 중 하나를 잃습니다.
+
+    특히 reset(DELETE)은 current-state row 자체를 지우므로 actor_username과 updated_at도
+    함께 사라집니다. 그 순간의 운영 기록이 남는 곳은 이 표뿐입니다.
+
+    **기록 단위는 "상태가 실제로 달라진 순간"이 아니라 "서버가 성공으로 처리한 operator
+    명령"입니다.** 같은 버전을 다시 PUT하거나 override가 없는 프로필에 DELETE를 다시
+    보내도 상태는 그대로지만 운영자가 실제로 내린 명령이므로 event가 하나 생깁니다.
+    state idempotency와 audit event idempotency는 다른 개념입니다. 실패한 요청(없는
+    프로필/버전, 401/403)은 아무 event도 만들지 않습니다.
+
+    append-only는 **애플리케이션 계약**입니다. UPDATE/DELETE/purge API를 두지 않고,
+    쓰기 경로는 INSERT 하나뿐입니다. DB superuser가 직접 SQL을 실행하는 것까지 막는
+    WORM 저장소는 이 Phase의 범위가 아닙니다.
+
+    profile_id에 FK를 걸지 않는 이유는 ETLProfileActivation과 같습니다. 프로필은 아직
+    DB entity가 아니라 코드 registry의 key입니다.
+    """
+
+    __tablename__ = "etl_profile_activation_events"
+    __table_args__ = (
+        CheckConstraint(
+            "length(trim(profile_id)) > 0",
+            name="ck_etl_profile_activation_events_profile_id_not_blank",
+        ),
+        CheckConstraint(
+            "action IN ('activate', 'deactivate', 'reset')",
+            name="ck_etl_profile_activation_events_action",
+        ),
+        # 버전 문자열의 형식만 봅니다. registry의 어떤 key인지는 DB가 알 수 없고,
+        # ''나 '  '이 "비활성"으로 읽히지 않게 하는 것이 목적입니다.
+        CheckConstraint(
+            "deployment_active_version IS NULL"
+            " OR length(trim(deployment_active_version)) > 0",
+            name="ck_etl_profile_activation_events_deployment_version_not_blank",
+        ),
+        CheckConstraint(
+            "runtime_active_version IS NULL"
+            " OR length(trim(runtime_active_version)) > 0",
+            name="ck_etl_profile_activation_events_runtime_version_not_blank",
+        ),
+        CheckConstraint(
+            "effective_active_version IS NULL"
+            " OR length(trim(effective_active_version)) > 0",
+            name="ck_etl_profile_activation_events_effective_version_not_blank",
+        ),
+        # 명령과 그 직후 상태가 서로 모순되는 event를 남기지 않습니다. 모순된 기록은
+        # 없는 기록보다 나쁩니다 — 나중에 읽는 사람이 그것을 사실로 믿습니다.
+        #
+        # reset은 override를 지운 상태이므로 effective가 배포 기본값과 같아야 합니다.
+        # 둘 다 NULL일 수 있어 '='이 아니라 IS NOT DISTINCT FROM으로 비교합니다.
+        # PostgreSQL에서 NULL = NULL은 참이 아니라 NULL이고, CHECK는 NULL을 통과시켜
+        # 제약이 조용히 무력화되기 때문입니다.
+        CheckConstraint(
+            "("
+            "action = 'activate'"
+            " AND runtime_override_exists"
+            " AND runtime_active_version IS NOT NULL"
+            " AND effective_active_version = runtime_active_version"
+            ") OR ("
+            "action = 'deactivate'"
+            " AND runtime_override_exists"
+            " AND runtime_active_version IS NULL"
+            " AND effective_active_version IS NULL"
+            ") OR ("
+            "action = 'reset'"
+            " AND NOT runtime_override_exists"
+            " AND runtime_active_version IS NULL"
+            " AND effective_active_version IS NOT DISTINCT FROM deployment_active_version"
+            ")",
+            name="ck_etl_profile_activation_events_state_matches_action",
+        ),
+        # 주 조회는 "한 프로필의 최신 event부터"입니다. PostgreSQL은 B-tree를 역방향
+        # 으로도 훑을 수 있으므로 내림차순 전용 index를 따로 만들지 않습니다.
+        Index(
+            "ix_etl_profile_activation_events_profile_created_at_id",
+            "profile_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    profile_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    # 아래 네 값은 모두 "명령이 성공한 직후"의 snapshot입니다. 지금 registry를 다시
+    # 읽어 계산하면 배포 기본값이 바뀐 뒤에 과거 기록의 뜻이 조용히 달라집니다.
+    deployment_active_version: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )
+    runtime_override_exists: Mapped[bool] = mapped_column(nullable=False)
+    runtime_active_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    effective_active_version: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )
+    # Actor audit: 인증된 current_user에서만 채웁니다. 요청 body는 actor를 보낼 수
+    # 없습니다. 사용자가 삭제되면 FK만 NULL이 되고 actor_username snapshot은 남습니다.
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    actor_username: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )

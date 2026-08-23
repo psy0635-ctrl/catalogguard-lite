@@ -3983,3 +3983,278 @@ def test_reset_passes_the_server_request_id_through_like_the_other_calls():
         client.reset_etl_profile_activation("sample_fashion_vendor_v1")
 
     assert error.value.request_id == VALID_REQUEST_ID
+
+
+# ---- Phase 5B.4: activation 운영 이력 조회 ------------------------------------
+
+
+ETL_PROFILE_ACTIVATION_HISTORY_ITEM = {
+    "event_id": 3,
+    "profile_id": "sample_fashion_vendor_v1",
+    "action": "activate",
+    "deployment_active_version": "2",
+    "runtime_override_exists": True,
+    "runtime_active_version": "1",
+    "effective_active_version": "1",
+    "actor_username": "operator_user",
+    "created_at": "2026-08-23T09:00:00Z",
+}
+
+
+def _history_item(**overrides):
+    item = dict(ETL_PROFILE_ACTIVATION_HISTORY_ITEM)
+    item.update(overrides)
+    return item
+
+
+def _history_response(items=None, **overrides):
+    payload = {
+        "items": [ETL_PROFILE_ACTIVATION_HISTORY_ITEM] if items is None else items,
+        "total": 1,
+        "limit": 20,
+        "offset": 0,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_activation_history_uses_the_history_path_and_sends_pagination():
+    client, session = make_client(
+        response=FakeResponse(payload=_history_response()),
+        timeout_seconds=6.0,
+    )
+
+    data = client.list_etl_profile_activation_history(
+        " sample_fashion_vendor_v1 ", limit=10, offset=20
+    )
+
+    assert data == _history_response()
+    assert session.calls == [
+        {
+            "url": (
+                "https://api.example.com/api/v1/etl-profiles/"
+                "sample_fashion_vendor_v1/activation/history"
+            ),
+            "params": {"limit": 10, "offset": 20},
+            "timeout": 6.0,
+        }
+    ]
+
+
+def test_activation_history_defaults_to_the_first_page():
+    client, session = make_client(response=FakeResponse(payload=_history_response()))
+
+    client.list_etl_profile_activation_history("sample_fashion_vendor_v1")
+
+    assert session.calls[0]["params"] == {"limit": 20, "offset": 0}
+
+
+def test_activation_history_path_percent_encodes_path_separator():
+    client, session = make_client(response=FakeResponse(payload=_history_response()))
+
+    client.list_etl_profile_activation_history("../secret")
+
+    assert session.calls[0]["url"].endswith("/etl-profiles/..%2Fsecret/activation/history")
+
+
+def test_activation_history_rejects_a_blank_profile_id():
+    client, session = make_client(response=FakeResponse(payload=_history_response()))
+
+    with pytest.raises(ValueError):
+        client.list_etl_profile_activation_history("   ")
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    ("limit", "offset"),
+    [(0, 0), (101, 0), (-1, 0), (20, -1), ("10", 0), (20, "0"), (True, 0)],
+)
+def test_activation_history_rejects_invalid_pagination(limit, offset):
+    client, session = make_client(response=FakeResponse(payload=_history_response()))
+
+    with pytest.raises(ValueError):
+        client.list_etl_profile_activation_history(
+            "sample_fashion_vendor_v1", limit=limit, offset=offset
+        )
+
+    # 잘못된 값으로는 요청 자체를 보내지 않습니다.
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # 목록 metadata가 없거나 형태가 틀린 응답
+        {"items": [], "total": 0, "limit": 20},
+        _history_response(items="not-a-list"),
+        _history_response(total=-1),
+        _history_response(limit=0),
+        _history_response(offset=-1),
+        # item 자체가 깨진 경우
+        _history_response(items=[{"event_id": 1}]),
+        _history_response(items=[_history_item(event_id=0)]),
+        _history_response(items=[_history_item(event_id="3")]),
+        _history_response(items=[_history_item(profile_id="   ")]),
+        _history_response(items=[_history_item(created_at="")]),
+        _history_response(items=[_history_item(actor_username=7)]),
+        _history_response(items=[_history_item(runtime_override_exists="yes")]),
+        _history_response(items=[_history_item(runtime_active_version="  ")]),
+    ],
+)
+def test_activation_history_rejects_a_malformed_payload(payload):
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.list_etl_profile_activation_history("sample_fashion_vendor_v1")
+
+
+@pytest.mark.parametrize("action", ["bogus", "delete", "ACTIVATE", "", None, 1])
+def test_activation_history_rejects_an_unknown_action(action):
+    """모르는 action을 통과시키면 화면이 그것을 임의의 문구로 그립니다."""
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(payload=_history_response(items=[_history_item(action=action)]))
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.list_etl_profile_activation_history("sample_fashion_vendor_v1")
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        # activate인데 override가 없다
+        _history_item(
+            action="activate",
+            runtime_override_exists=False,
+            runtime_active_version=None,
+            effective_active_version=None,
+        ),
+        # deactivate인데 실제 적용 버전이 있다
+        _history_item(
+            action="deactivate",
+            runtime_active_version=None,
+            effective_active_version="2",
+        ),
+        # reset인데 override가 남아 있다
+        _history_item(
+            action="reset",
+            runtime_override_exists=True,
+            runtime_active_version=None,
+            effective_active_version="2",
+        ),
+        # reset인데 실제 적용 버전이 배포 기본값과 다르다
+        _history_item(
+            action="reset",
+            runtime_override_exists=False,
+            runtime_active_version=None,
+            deployment_active_version="2",
+            effective_active_version="1",
+        ),
+    ],
+)
+def test_activation_history_rejects_an_item_contradicting_its_own_action(item):
+    """action과 상태가 어긋나면 화면이 reset을 비활성화로 보여 주게 됩니다."""
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload=_history_response(items=[item])))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.list_etl_profile_activation_history("sample_fashion_vendor_v1")
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        _history_item(),
+        _history_item(
+            action="deactivate",
+            runtime_active_version=None,
+            effective_active_version=None,
+        ),
+        _history_item(
+            action="reset",
+            runtime_override_exists=False,
+            runtime_active_version=None,
+            deployment_active_version="2",
+            effective_active_version="2",
+        ),
+        # 배포 기본값 자체가 비활성이면 reset 뒤에도 비활성입니다.
+        _history_item(
+            action="reset",
+            runtime_override_exists=False,
+            runtime_active_version=None,
+            deployment_active_version=None,
+            effective_active_version=None,
+        ),
+        # 삭제된 사용자의 명령은 이름 없이 남을 수 있습니다.
+        _history_item(actor_username=None),
+    ],
+)
+def test_activation_history_accepts_every_contract_state(item):
+    client, _ = make_client(response=FakeResponse(payload=_history_response(items=[item])))
+
+    data = client.list_etl_profile_activation_history("sample_fashion_vendor_v1")
+
+    assert data["items"] == [item]
+
+
+def test_activation_history_accepts_an_empty_page():
+    """빈 이력은 오류가 아닙니다. 이 기능 이전의 조작은 남아 있지 않습니다."""
+    client, _ = make_client(
+        response=FakeResponse(payload=_history_response(items=[], total=0))
+    )
+
+    data = client.list_etl_profile_activation_history("sample_fashion_vendor_v1")
+
+    assert data["items"] == []
+    assert data["total"] == 0
+
+
+def test_activation_history_maps_404_to_the_profile_error():
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(status_code=404, text="not found"))
+
+    with pytest.raises(client_module.ETLProfileNotFoundError) as error:
+        client.list_etl_profile_activation_history("sample_fashion_vendor_v1")
+
+    assert "ETL 프로필을 찾을 수 없습니다." in str(error.value)
+    assert "not found" not in str(error.value)
+
+
+def test_activation_history_preserves_the_request_id_for_404():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=404,
+            text="not found",
+            headers={"X-Request-ID": VALID_REQUEST_ID},
+        )
+    )
+
+    with pytest.raises(client_module.ETLProfileNotFoundError) as error:
+        client.list_etl_profile_activation_history("sample_fashion_vendor_v1")
+
+    assert error.value.request_id == VALID_REQUEST_ID
+
+
+def test_activation_history_maps_connection_and_timeout_errors():
+    client_module = import_client_module()
+
+    client, _ = make_client(error=requests.ConnectionError("redis.internal:6379"))
+    with pytest.raises(client_module.CatalogGuardApiConnectionError) as connection_error:
+        client.list_etl_profile_activation_history("sample_fashion_vendor_v1")
+    assert "redis.internal" not in str(connection_error.value)
+
+    client, _ = make_client(error=requests.Timeout("too slow"))
+    with pytest.raises(client_module.CatalogGuardApiTimeoutError):
+        client.list_etl_profile_activation_history("sample_fashion_vendor_v1")
+
+
+def test_the_client_has_no_history_write_methods():
+    """append-only 기록에는 수정·삭제 경로를 두지 않습니다."""
+    client, _ = make_client(response=FakeResponse(payload=_history_response()))
+
+    for name in dir(client):
+        assert "activation_history" not in name or name.startswith("list_"), name

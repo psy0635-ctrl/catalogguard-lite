@@ -133,6 +133,33 @@ ETL_PROFILE_ADMIN_RESET_CONFIRM_LABEL = (
 )
 ETL_PROFILE_ADMIN_RESET_BUTTON_LABEL = "배포 기본값으로 되돌리기"
 
+ETL_PROFILE_ADMIN_HISTORY_LIMIT = 10
+ETL_PROFILE_ADMIN_HISTORY_CAPTION = (
+    "성공한 활성화·비활성화·초기화 명령을 최신순으로 보여 줍니다. "
+    "이 기능이 추가된 이후 성공한 운영 명령만 표시합니다."
+)
+ETL_PROFILE_ADMIN_HISTORY_EMPTY_MESSAGE = (
+    "아직 기록된 Activation 운영 이력이 없습니다. "
+    "이 기능이 추가된 이후의 성공한 운영 명령부터 표시됩니다."
+)
+ETL_PROFILE_ADMIN_HISTORY_ERROR_MESSAGE = "Activation 운영 이력을 불러오지 못했습니다."
+# reset을 "비활성화"로 적지 않습니다. override를 지운 것이지 내린 것이 아니고, 배포
+# 기본값이 활성이면 reset 직후 그 프로필은 오히려 실행 가능해집니다.
+ETL_PROFILE_ADMIN_HISTORY_ACTION_LABELS = {
+    "activate": "버전 활성화",
+    "deactivate": "비활성화",
+    "reset": "배포 기본값으로 되돌리기",
+}
+ETL_PROFILE_ADMIN_HISTORY_UNKNOWN_ACTION_LABEL = "알 수 없음"
+ETL_PROFILE_ADMIN_HISTORY_DISPLAY_COLUMNS = [
+    "시각",
+    "동작",
+    "런타임 결과",
+    "실제 적용 버전",
+    "배포 기본 버전",
+    "사용자",
+]
+
 CATALOG_RECONCILIATION_LIMIT = 50
 CATALOG_RECONCILIATION_FIELD_COLUMNS = ["변경 필드", "변경 건수"]
 CATALOG_RECONCILIATION_ITEM_COLUMNS = ["상품 ID", "상태", "변경 필드"]
@@ -320,6 +347,11 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_profile_admin_reset_confirmed": False,
     "etl_profile_admin_update_error": None,
     "etl_profile_admin_update_success": None,
+    # history는 관리 selector와 별개로 페이지를 들고 있어 prefix를 따로 씁니다.
+    "etl_profile_admin_history_profile_id": None,
+    "etl_profile_admin_history_response": None,
+    "etl_profile_admin_history_error": None,
+    "etl_profile_admin_history_offset": 0,
 }
 
 
@@ -3013,6 +3045,57 @@ def build_etl_profile_admin_update_error_message(error: Exception | None) -> str
     return "ETL 프로필 활성화 상태를 변경하지 못했습니다."
 
 
+def format_etl_profile_admin_history_action(action: object) -> str:
+    """Name one recorded command in the operator's words.
+
+    reset을 "비활성화"로 옮기지 않습니다. 셋은 서로 다른 명령이고, 특히 reset은
+    프로필을 **되살릴 수도** 있어 비활성화와 반대 방향의 결과를 낳을 수 있습니다.
+    """
+    if not isinstance(action, str):
+        return ETL_PROFILE_ADMIN_HISTORY_UNKNOWN_ACTION_LABEL
+    return ETL_PROFILE_ADMIN_HISTORY_ACTION_LABELS.get(
+        action, ETL_PROFILE_ADMIN_HISTORY_UNKNOWN_ACTION_LABEL
+    )
+
+
+def build_etl_profile_admin_history_dataframe(
+    items: list[dict[str, Any]],
+) -> pd.DataFrame:
+    """One row per recorded command, showing the state that command produced.
+
+    "런타임 결과"와 "실제 적용 버전"을 함께 보여 줍니다. reset event는 런타임 override가
+    없는 상태이지만 배포 기본값이 활성이면 실제 적용 버전이 있습니다. 한쪽만 보여 주면
+    "되돌리기 = 비활성"이라는 잘못된 읽기가 생깁니다.
+
+    런타임 결과 문구는 현재 상태 표시와 같은 helper를 씁니다. event가 그 시점의
+    runtime_override_exists/runtime_active_version을 그대로 담고 있어 계산이 같고,
+    두 곳의 문구가 갈라지면 같은 상태가 화면마다 다르게 보입니다.
+    """
+    rows = [
+        {
+            "시각": format_etl_datetime(item.get("created_at")),
+            "동작": format_etl_profile_admin_history_action(item.get("action")),
+            "런타임 결과": format_etl_profile_admin_runtime_state(item),
+            "실제 적용 버전": format_etl_profile_admin_version(
+                item.get("effective_active_version")
+            ),
+            "배포 기본 버전": format_etl_profile_admin_version(
+                item.get("deployment_active_version")
+            ),
+            "사용자": format_actor_username(item.get("actor_username")),
+        }
+        for item in items
+    ]
+    return pd.DataFrame(rows, columns=ETL_PROFILE_ADMIN_HISTORY_DISPLAY_COLUMNS)
+
+
+def _invalidate_etl_profile_admin_history(session_state) -> None:
+    """Drop the cached history page so the next run re-reads it."""
+    session_state["etl_profile_admin_history_profile_id"] = None
+    session_state["etl_profile_admin_history_response"] = None
+    session_state["etl_profile_admin_history_error"] = None
+
+
 def _invalidate_etl_profile_admin_activation(session_state) -> None:
     session_state["etl_profile_admin_activation_profile_id"] = None
     session_state["etl_profile_admin_activation_response"] = None
@@ -3021,6 +3104,10 @@ def _invalidate_etl_profile_admin_activation(session_state) -> None:
 
 def _on_etl_profile_admin_profile_change(session_state) -> None:
     _invalidate_etl_profile_admin_activation(session_state)
+    # 다른 프로필의 이력을 그 페이지 번호 그대로 이어 보면 첫 페이지가 아닌 곳에서
+    # 시작하거나 빈 페이지가 보입니다. 프로필이 바뀌면 항상 최신 페이지부터입니다.
+    _invalidate_etl_profile_admin_history(session_state)
+    session_state["etl_profile_admin_history_offset"] = 0
     session_state["etl_profile_admin_selected_version"] = None
     session_state["etl_profile_admin_deactivate_confirmed"] = False
     session_state["etl_profile_admin_reset_confirmed"] = False
@@ -3136,6 +3223,10 @@ def _commit_etl_profile_activation_change(session_state, send, build_success_mes
         session_state, "etl_profile_admin_reset_confirmed"
     )
     _invalidate_etl_profile_admin_activation(session_state)
+    # 방금 내린 명령도 이력의 일부입니다. 여기서 비우지 않으면 현재 상태만 갱신되고
+    # 이력만 옛 화면으로 남습니다. 새 event는 최신순 첫 페이지에 오므로 함께 되돌립니다.
+    _invalidate_etl_profile_admin_history(session_state)
+    session_state["etl_profile_admin_history_offset"] = 0
     # 관리 목록은 비활성 프로필도 포함하므로 구성이 바뀌지 않지만, 실행 selector는
     # 활성 목록만 쓰므로 반드시 다시 읽어야 방금 내린 프로필이 사라집니다.
     session_state["etl_profile_admin_profiles_response"] = None
@@ -3304,6 +3395,112 @@ def _render_etl_profile_reset_controls(api_client, activation) -> None:
         st.rerun()
 
 
+def _fetch_etl_profile_admin_history(api_client, session_state, profile_id):
+    """Read one page of this profile's activation history, or None on failure.
+
+    실패를 예외로 올려보내지 않습니다. 이력 조회가 실패했다고 해서 현재 상태 확인과
+    활성화·비활성화·초기화까지 함께 사라지면, 운영자가 정작 필요한 조작을 못 하게
+    됩니다. 오류는 이력 구획 안에서만 보여 줍니다.
+    """
+    if not profile_id:
+        return None
+    if session_state.get("etl_profile_admin_history_profile_id") == profile_id:
+        cached = session_state.get("etl_profile_admin_history_response")
+        if isinstance(cached, dict):
+            return cached
+        if session_state.get("etl_profile_admin_history_error") is not None:
+            return None
+
+    session_state["etl_profile_admin_history_profile_id"] = profile_id
+    session_state["etl_profile_admin_history_response"] = None
+    session_state["etl_profile_admin_history_error"] = None
+    try:
+        response = api_client.list_etl_profile_activation_history(
+            profile_id,
+            limit=ETL_PROFILE_ADMIN_HISTORY_LIMIT,
+            offset=session_state.get("etl_profile_admin_history_offset", 0),
+        )
+        session_state["etl_profile_admin_history_response"] = response
+        return response
+    except (
+        ETLProfileNotFoundError,
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        session_state["etl_profile_admin_history_error"] = error
+        return None
+
+
+def _render_etl_profile_activation_history(api_client, profile_id) -> None:
+    """Read-only record of the successful commands operators ran on this profile.
+
+    viewer도 봅니다. 상태를 바꿀 수 없는 사람도 "왜 지금 이렇게 되어 있는가"는 확인할
+    수 있어야 합니다.
+
+    수정·삭제 조작은 두지 않습니다. append-only 기록이고, 화면에서 지울 수 있으면
+    기록이 아닙니다.
+    """
+    st.markdown("##### Activation 운영 이력")
+    st.caption(ETL_PROFILE_ADMIN_HISTORY_CAPTION)
+
+    response = _fetch_etl_profile_admin_history(api_client, st.session_state, profile_id)
+    if response is None:
+        error = st.session_state.get("etl_profile_admin_history_error")
+        if error is not None:
+            st.error(
+                build_etl_api_error_display_message(
+                    ETL_PROFILE_ADMIN_HISTORY_ERROR_MESSAGE, error
+                )
+            )
+        return
+
+    items = response.get("items") or []
+    if not items:
+        # 기록이 없는 것은 오류가 아닙니다. 이 기능 이전의 조작은 애초에 남아 있지
+        # 않으므로, 실패처럼 보이게 하면 없는 문제를 찾게 만듭니다.
+        st.info(ETL_PROFILE_ADMIN_HISTORY_EMPTY_MESSAGE)
+    else:
+        st.dataframe(
+            build_etl_profile_admin_history_dataframe(items),
+            width="stretch",
+            hide_index=True,
+        )
+
+    total = max(0, int(response.get("total", 0)))
+    current_page, total_pages, has_previous, has_next = calculate_etl_pagination(
+        total=total,
+        limit=ETL_PROFILE_ADMIN_HISTORY_LIMIT,
+        offset=st.session_state.get("etl_profile_admin_history_offset", 0),
+    )
+    st.caption(f"이력 {current_page} / {total_pages} 페이지 · 전체 {total}건")
+    previous_col, next_col = st.columns(2)
+    with previous_col:
+        if st.button(
+            "이력 이전",
+            key="etl_profile_admin_history_previous",
+            disabled=not has_previous,
+        ):
+            st.session_state["etl_profile_admin_history_offset"] -= (
+                ETL_PROFILE_ADMIN_HISTORY_LIMIT
+            )
+            _invalidate_etl_profile_admin_history(st.session_state)
+            st.rerun()
+    with next_col:
+        if st.button(
+            "이력 다음",
+            key="etl_profile_admin_history_next",
+            disabled=not has_next,
+        ):
+            st.session_state["etl_profile_admin_history_offset"] += (
+                ETL_PROFILE_ADMIN_HISTORY_LIMIT
+            )
+            _invalidate_etl_profile_admin_history(st.session_state)
+            st.rerun()
+
+
 def _render_etl_profile_management(api_client) -> None:
     """Read and change which preserved version a supplier profile runs with."""
     st.divider()
@@ -3400,6 +3597,8 @@ def _render_etl_profile_management(api_client) -> None:
         st.caption(ETL_PROFILE_ADMIN_ACTOR_CAPTION)
 
     _render_etl_profile_activation_controls(api_client, activation)
+    # 쓰기 조작 뒤에 그립니다. viewer는 위 조작 구획이 비어 있고 이력만 보게 됩니다.
+    _render_etl_profile_activation_history(api_client, activation["profile_id"])
 
 
 def _render_unknown_size_token_report(api_client) -> None:

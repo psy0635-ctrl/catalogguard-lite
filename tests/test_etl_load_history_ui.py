@@ -575,6 +575,46 @@ def make_activation(
     }
 
 
+def make_activation_event(
+    event_id=1,
+    *,
+    profile_id="sample_fashion_vendor_v1",
+    action="activate",
+    deployment_active_version="2",
+    runtime_active_version="2",
+    actor_username="operator_user",
+    created_at="2026-08-23T09:00:00Z",
+):
+    """Build one history item the way the server records it.
+
+    action과 상태의 관계를 계약대로 파생시킵니다. 테스트가 어긋난 event를 만들면
+    화면이 실제로는 생기지 않는 기록을 그리게 됩니다.
+    """
+    if action == "reset":
+        override_exists = False
+        runtime_version = None
+        effective = deployment_active_version
+    elif action == "deactivate":
+        override_exists = True
+        runtime_version = None
+        effective = None
+    else:
+        override_exists = True
+        runtime_version = runtime_active_version
+        effective = runtime_active_version
+    return {
+        "event_id": event_id,
+        "profile_id": profile_id,
+        "action": action,
+        "deployment_active_version": deployment_active_version,
+        "runtime_override_exists": override_exists,
+        "runtime_active_version": runtime_version,
+        "effective_active_version": effective,
+        "actor_username": actor_username,
+        "created_at": created_at,
+    }
+
+
 DEFAULT_ACTIVATIONS = {
     "sample_fashion_vendor_v1": make_activation(),
     "sample_marketplace_vendor_v1": make_activation(
@@ -612,6 +652,8 @@ class FakeEtlApiClient:
         activation_update_error=None,
         activation_reset_error=None,
         activation_reset_responses=None,
+        activation_history=None,
+        activation_history_error=None,
         etl_profiles_error=None,
         etl_profile_details=None,
         etl_profile_detail_error=None,
@@ -671,6 +713,11 @@ class FakeEtlApiClient:
         self.activation_calls = []
         self.activation_update_calls = []
         self.activation_reset_calls = []
+        # profile_id -> 최신순 event 목록입니다. 서버처럼 offset/limit으로 잘라
+        # 돌려주므로 pagination도 실제와 같은 모양으로 검증할 수 있습니다.
+        self.activation_history = activation_history or {}
+        self.activation_history_error = activation_history_error
+        self.activation_history_calls = []
         self.etl_profile_details = etl_profile_details or {
             "sample_fashion_vendor_v1": {
                 "id": "sample_fashion_vendor_v1",
@@ -822,6 +869,20 @@ class FakeEtlApiClient:
             deployment_active_version=current["deployment_active_version"],
             available_versions=current["available_versions"],
         )
+
+    def list_etl_profile_activation_history(self, profile_id, *, limit=20, offset=0):
+        self.activation_history_calls.append(
+            {"profile_id": profile_id, "limit": limit, "offset": offset}
+        )
+        if self.activation_history_error is not None:
+            raise self.activation_history_error
+        items = self.activation_history.get(profile_id, [])
+        return {
+            "items": items[offset : offset + limit],
+            "total": len(items),
+            "limit": limit,
+            "offset": offset,
+        }
 
     def update_etl_profile_activation(self, profile_id, *, active_version):
         self.activation_update_calls.append(
@@ -3612,3 +3673,270 @@ def test_a_successful_reset_clears_the_confirmation_checkbox(monkeypatch):
 
     assert _reset_confirmation(app).value is False
     assert _admin_button(app, "etl_profile_admin_reset").disabled is True
+
+
+# --- Phase 5B.4: Activation 운영 이력 ------------------------------------------
+
+
+FASHION_HISTORY = [
+    make_activation_event(
+        3,
+        action="reset",
+        created_at="2026-08-23T12:00:00Z",
+        actor_username="reset_operator",
+    ),
+    make_activation_event(
+        2,
+        action="deactivate",
+        created_at="2026-08-23T11:00:00Z",
+        actor_username="deactivate_operator",
+    ),
+    make_activation_event(
+        1,
+        action="activate",
+        runtime_active_version="1",
+        created_at="2026-08-23T10:00:00Z",
+        actor_username="activate_operator",
+    ),
+]
+
+
+def _history_client(history=None, **overrides):
+    # 빈 목록도 뜻이 있는 값입니다(기록 없음). `or`로 기본값을 채우면 그 상태를
+    # 테스트할 수 없습니다.
+    return _admin_client(
+        activation_history={
+            "sample_fashion_vendor_v1": FASHION_HISTORY if history is None else history
+        },
+        **overrides,
+    )
+
+
+def _dataframe_text(app) -> str:
+    return " ".join(str(element.value) for element in app.dataframe)
+
+
+def test_history_section_is_shown_with_its_scope_explained(monkeypatch):
+    api_client = _history_client()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    body = _body_text(app)
+    assert "Activation 운영 이력" in body
+    # 과거 기록이 backfill된 것처럼 보이게 쓰지 않습니다.
+    assert etl_load_history.ETL_PROFILE_ADMIN_HISTORY_CAPTION in body
+    assert not app.exception
+
+
+def test_history_shows_every_recorded_command(monkeypatch):
+    api_client = _history_client()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    table = _dataframe_text(app)
+    for label in ("버전 활성화", "비활성화", "배포 기본값으로 되돌리기"):
+        assert label in table
+    assert api_client.activation_history_calls == [
+        {"profile_id": "sample_fashion_vendor_v1", "limit": 10, "offset": 0}
+    ]
+
+
+def test_history_does_not_describe_a_reset_as_a_deactivation():
+    """reset은 override 제거입니다. 배포 기본값이 활성이면 오히려 되살아납니다."""
+    frame = etl_load_history.build_etl_profile_admin_history_dataframe(FASHION_HISTORY)
+    rows = {row["동작"]: row for _, row in frame.iterrows()}
+
+    reset_row = rows["배포 기본값으로 되돌리기"]
+    assert reset_row["런타임 결과"] == (
+        etl_load_history.ETL_PROFILE_ADMIN_RUNTIME_NO_OVERRIDE
+    )
+    # 되돌린 뒤 실제로는 배포 기본값 v2가 적용됩니다.
+    assert reset_row["실제 적용 버전"] == "v2"
+    assert reset_row["배포 기본 버전"] == "v2"
+
+    deactivate_row = rows["비활성화"]
+    assert deactivate_row["런타임 결과"] == (
+        etl_load_history.ETL_PROFILE_ADMIN_RUNTIME_INACTIVE
+    )
+    assert deactivate_row["실제 적용 버전"] == "없음"
+
+
+def test_history_action_labels_cover_only_the_recorded_commands():
+    assert etl_load_history.format_etl_profile_admin_history_action("activate") == (
+        "버전 활성화"
+    )
+    assert etl_load_history.format_etl_profile_admin_history_action("deactivate") == (
+        "비활성화"
+    )
+    assert etl_load_history.format_etl_profile_admin_history_action("reset") == (
+        "배포 기본값으로 되돌리기"
+    )
+    # 계약에 없는 값은 그럴듯한 문구로 바꾸지 않습니다.
+    for unknown in ("promote", "", None, 3):
+        assert etl_load_history.format_etl_profile_admin_history_action(unknown) == (
+            etl_load_history.ETL_PROFILE_ADMIN_HISTORY_UNKNOWN_ACTION_LABEL
+        )
+
+
+def test_history_shows_the_actor_of_each_command(monkeypatch):
+    api_client = _history_client()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    table = _dataframe_text(app)
+    for actor in ("reset_operator", "deactivate_operator", "activate_operator"):
+        assert actor in table
+
+
+def test_history_handles_a_missing_actor(monkeypatch):
+    """사용자가 삭제되면 이름 없이 남을 수 있습니다. 화면이 깨지면 안 됩니다."""
+    api_client = _history_client(
+        [make_activation_event(1, actor_username=None, runtime_active_version="1")]
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert not app.exception
+    assert "버전 활성화" in _dataframe_text(app)
+
+
+def test_history_empty_state_is_information_not_an_error(monkeypatch):
+    api_client = _history_client([])
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert etl_load_history.ETL_PROFILE_ADMIN_HISTORY_EMPTY_MESSAGE in _body_text(app)
+    assert not app.error
+    assert not app.exception
+
+
+def test_history_paginates(monkeypatch):
+    events = [
+        make_activation_event(index, runtime_active_version="1")
+        for index in range(15, 0, -1)
+    ]
+    api_client = _history_client(events)
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    _admin_button(app, "etl_profile_admin_history_next").click().run(timeout=10)
+
+    assert app.session_state["etl_profile_admin_history_offset"] == 10
+    assert api_client.activation_history_calls[-1] == {
+        "profile_id": "sample_fashion_vendor_v1",
+        "limit": 10,
+        "offset": 10,
+    }
+    assert not app.exception
+
+
+def test_changing_the_profile_resets_the_history_page(monkeypatch):
+    """다른 프로필의 이력을 남의 페이지 번호로 이어 보면 빈 화면이 보입니다."""
+    events = [
+        make_activation_event(index, runtime_active_version="1")
+        for index in range(15, 0, -1)
+    ]
+    api_client = _history_client(events)
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    _admin_button(app, "etl_profile_admin_history_next").click().run(timeout=10)
+    assert app.session_state["etl_profile_admin_history_offset"] == 10
+
+    _admin_selectbox(app, "etl_profile_admin_selected_profile_id").select(
+        "마켓플레이스 공급사 샘플"
+    ).run(timeout=10)
+
+    assert app.session_state["etl_profile_admin_history_offset"] == 0
+    # 캐시는 새 프로필의 첫 페이지로 교체됩니다. 이전 프로필의 3페이지가 남아 있으면
+    # 화면이 남의 이력을 그대로 보여 줍니다.
+    assert app.session_state["etl_profile_admin_history_profile_id"] == (
+        "sample_marketplace_vendor_v1"
+    )
+    assert api_client.activation_history_calls[-1] == {
+        "profile_id": "sample_marketplace_vendor_v1",
+        "limit": 10,
+        "offset": 0,
+    }
+
+
+def test_viewer_can_read_the_history_without_write_controls(monkeypatch):
+    api_client = _history_client()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(role="viewer", timeout=10)
+
+    assert "Activation 운영 이력" in _body_text(app)
+    assert "버전 활성화" in _dataframe_text(app)
+    # 이력을 읽을 수 있다고 조작 권한이 생기지는 않습니다.
+    assert _admin_button(app, "etl_profile_admin_activate") is None
+    assert _admin_button(app, "etl_profile_admin_deactivate") is None
+    assert _admin_button(app, "etl_profile_admin_reset") is None
+    # 이력에도 수정·삭제 조작은 없습니다.
+    assert _admin_button(app, "etl_profile_admin_history_delete") is None
+
+
+def test_a_successful_mutation_refreshes_the_history(monkeypatch):
+    """이력만 옛 화면으로 남으면 방금 한 조작이 기록되지 않은 것처럼 보입니다."""
+    api_client = _history_client([])
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    assert etl_load_history.ETL_PROFILE_ADMIN_HISTORY_EMPTY_MESSAGE in _body_text(app)
+
+    # 서버가 event를 기록한 것과 같은 상태로 fake를 바꾸고 조작을 보냅니다.
+    api_client.activation_history["sample_fashion_vendor_v1"] = [
+        make_activation_event(1, action="deactivate")
+    ]
+    confirmation = next(
+        widget
+        for widget in app.checkbox
+        if widget.key == "etl_profile_admin_deactivate_confirmed"
+    )
+    confirmation.check().run(timeout=10)
+    _admin_button(app, "etl_profile_admin_deactivate").click().run(timeout=10)
+
+    assert not app.exception
+    assert "비활성화" in _dataframe_text(app)
+    assert app.session_state["etl_profile_admin_history_offset"] == 0
+
+
+def test_a_history_failure_does_not_break_the_management_screen(monkeypatch):
+    """이력 조회 실패가 상태 확인과 조작까지 함께 없애면 안 됩니다."""
+    api_client = _history_client(
+        activation_history_error=catalogguard_api.CatalogGuardApiResponseError(
+            "조회 실패", request_id=None
+        )
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert not app.exception
+    errors = " ".join(str(element.value) for element in app.error)
+    assert etl_load_history.ETL_PROFILE_ADMIN_HISTORY_ERROR_MESSAGE in errors
+    # 현재 상태와 조작 control은 그대로 남습니다.
+    body = _body_text(app)
+    assert "사용 가능한 버전" in body
+    assert _admin_button(app, "etl_profile_admin_activate") is not None
+    assert _admin_button(app, "etl_profile_admin_deactivate") is not None
+
+
+def test_a_history_failure_does_not_leak_the_server_message(monkeypatch):
+    api_client = _history_client(
+        activation_history_error=catalogguard_api.CatalogGuardApiResponseError(
+            "postgresql://admin:secret@db.internal/catalog", request_id=None
+        )
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    errors = " ".join(str(element.value) for element in app.error)
+    assert "secret" not in errors
+    assert "postgresql" not in errors

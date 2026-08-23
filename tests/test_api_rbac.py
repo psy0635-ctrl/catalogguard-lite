@@ -181,6 +181,22 @@ def test_no_token_returns_401_on_etl_profile_detail_before_database(
     assert reject_route_database_dependency() == 0
 
 
+def test_no_token_returns_401_on_etl_profile_activation_history_before_database(
+    reject_route_database_dependency,
+):
+    """Phase 5B.4. 운영 기록은 로그인한 사람만 읽습니다.
+
+    인증이 DB보다 먼저 걸려야 익명 요청이 조회 부하를 만들지 못합니다.
+    """
+    response = client.get(
+        "/api/v1/etl-profiles/sample_fashion_vendor_v1/activation/history"
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "authentication_required"
+    assert reject_route_database_dependency() == 0
+
+
 def test_no_token_returns_401_on_etl_detail_before_database(
     reject_route_database_dependency,
 ):
@@ -470,6 +486,26 @@ def test_viewer_token_can_read_etl_profile_detail(viewer_token):
 def test_operator_token_can_read_etl_profile_detail(operator_token):
     response = client.get(
         "/api/v1/etl-profiles/sample_fashion_vendor_v1",
+        headers=_auth_headers(operator_token),
+    )
+
+    assert response.status_code == 200
+
+
+def test_viewer_token_can_read_etl_profile_activation_history(viewer_token):
+    """상태를 바꿀 수 없는 사람도 왜 지금 이렇게 되어 있는지는 볼 수 있어야 합니다."""
+    response = client.get(
+        "/api/v1/etl-profiles/sample_fashion_vendor_v1/activation/history",
+        headers=_auth_headers(viewer_token),
+    )
+
+    assert response.status_code == 200
+
+
+def test_operator_token_can_read_etl_profile_activation_history(operator_token):
+    """operator는 viewer 권한을 포함합니다. 새 role을 만들지 않았습니다."""
+    response = client.get(
+        "/api/v1/etl-profiles/sample_fashion_vendor_v1/activation/history",
         headers=_auth_headers(operator_token),
     )
 

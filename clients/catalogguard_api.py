@@ -313,6 +313,21 @@ ETL_PROFILE_ACTIVATION_RESPONSE_KEYS = (
     "actor_username",
     "updated_at",
 )
+ETL_PROFILE_ACTIVATION_HISTORY_RESPONSE_KEYS = ("items", "total", "limit", "offset")
+ETL_PROFILE_ACTIVATION_HISTORY_ITEM_KEYS = (
+    "event_id",
+    "profile_id",
+    "action",
+    "deployment_active_version",
+    "runtime_override_exists",
+    "runtime_active_version",
+    "effective_active_version",
+    "actor_username",
+    "created_at",
+)
+# 서버가 기록하는 세 명령입니다. 모르는 action을 그대로 통과시키면 화면이 그것을
+# 임의의 문구로 그리거나 조용히 빈칸으로 남깁니다.
+ETL_PROFILE_ACTIVATION_ACTIONS = ("activate", "deactivate", "reset")
 ETL_PROFILE_DETAIL_RESPONSE_KEYS = (
     "id",
     "display_name",
@@ -760,6 +775,71 @@ def _is_valid_etl_profile_activation_response(data: dict[str, Any]) -> bool:
     if effective is not None and effective not in versions:
         return False
     return True
+
+
+def _is_valid_etl_profile_activation_history_item(item: object) -> bool:
+    """Reject one recorded command the history screen could misread.
+
+    activation 응답과 같은 이유로 계약의 불변식을 여기서 확인합니다. 특히 action과
+    상태의 관계가 어긋나면 화면이 reset을 비활성화로, 또는 그 반대로 보여 주게 됩니다.
+    그것은 "기록이 없다"보다 나쁜 **틀린 기록**입니다.
+    """
+    if not isinstance(item, dict) or any(
+        key not in item for key in ETL_PROFILE_ACTIVATION_HISTORY_ITEM_KEYS
+    ):
+        return False
+    if type(item["event_id"]) is not int or item["event_id"] < 1:
+        return False
+    if not isinstance(item["profile_id"], str) or not item["profile_id"].strip():
+        return False
+    if item["action"] not in ETL_PROFILE_ACTIVATION_ACTIONS:
+        return False
+    if not isinstance(item["runtime_override_exists"], bool):
+        return False
+    for key in (
+        "deployment_active_version",
+        "runtime_active_version",
+        "effective_active_version",
+    ):
+        value = item[key]
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            return False
+    actor_username = item["actor_username"]
+    if actor_username is not None and not isinstance(actor_username, str):
+        return False
+    if not isinstance(item["created_at"], str) or not item["created_at"].strip():
+        return False
+
+    override_exists = item["runtime_override_exists"]
+    runtime_version = item["runtime_active_version"]
+    effective = item["effective_active_version"]
+    if item["action"] == "activate":
+        return (
+            override_exists
+            and runtime_version is not None
+            and effective == runtime_version
+        )
+    if item["action"] == "deactivate":
+        return override_exists and runtime_version is None and effective is None
+    # reset은 override를 지운 상태이므로 실제 적용 버전이 배포 기본값과 같아야 합니다.
+    # 그 값이 None일 수도 있어(배포 기본값 자체가 비활성) 동등 비교로 확인합니다.
+    return (
+        not override_exists
+        and runtime_version is None
+        and effective == item["deployment_active_version"]
+    )
+
+
+def _validate_etl_profile_activation_history_response(data: dict[str, Any]) -> None:
+    items = data.get("items")
+    if (
+        not isinstance(items, list)
+        or not _validate_etl_list_metadata(data["total"], allow_limit_zero=True)
+        or not _validate_etl_list_metadata(data["limit"])
+        or not _validate_etl_list_metadata(data["offset"], allow_limit_zero=True)
+        or any(not _is_valid_etl_profile_activation_history_item(item) for item in items)
+    ):
+        raise _invalid_etl_response()
 
 
 def _is_valid_etl_profile_detail_response(data: dict[str, Any]) -> bool:
@@ -1775,6 +1855,35 @@ class CatalogGuardApiClient:
         self._validate_response_keys(data, ETL_PROFILE_ACTIVATION_RESPONSE_KEYS)
         if not _is_valid_etl_profile_activation_response(data):
             raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+        return data
+
+    def list_etl_profile_activation_history(
+        self,
+        profile_id: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """List one profile's recorded activation commands, newest first.
+
+        read-only입니다. 이 이력에는 수정·삭제 endpoint가 없으므로 대응하는 client
+        method도 두지 않습니다(append-only).
+
+        빈 목록은 오류가 아닙니다. 이 기능이 추가된 이후의 명령부터 기록되므로,
+        그 전에 있었던 조작은 어디에도 남아 있지 않습니다.
+        """
+        _validate_etl_pagination(limit, offset)
+        data = self._get_json(
+            f"{self._activation_path(profile_id)}/history",
+            params={"limit": limit, "offset": offset},
+            raise_not_found=True,
+            not_found_error=ETLProfileNotFoundError,
+            not_found_message=ETL_PROFILE_NOT_FOUND_MESSAGE,
+        )
+        self._validate_response_keys(
+            data, ETL_PROFILE_ACTIVATION_HISTORY_RESPONSE_KEYS
+        )
+        _validate_etl_profile_activation_history_response(data)
         return data
 
     @staticmethod

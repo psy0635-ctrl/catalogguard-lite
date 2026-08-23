@@ -51,6 +51,8 @@ from api.schemas import (
     ETLLoadQualitySummaryResponse,
     ETLLoadQualityTrendItemResponse,
     ETLLoadQualityTrendResponse,
+    ETLProfileActivationHistoryItemResponse,
+    ETLProfileActivationHistoryResponse,
     ETLProfileActivationResponse,
     ETLProfileActivationUpdateRequest,
     ETLProfileDetailResponse,
@@ -122,6 +124,7 @@ from db.etl_profile_activation_service import (
     ETLProfileVersionNotFoundError,
     end_activation_read_transaction,
     get_etl_profile_activation,
+    list_etl_profile_activation_history,
     reset_etl_profile_activation,
     set_etl_profile_activation,
 )
@@ -1044,7 +1047,7 @@ def set_etl_profile_activation_route(
 )
 def reset_etl_profile_activation_route(
     profile_id: str,
-    _current_user=Depends(require_operator),
+    current_user=Depends(require_operator),
     session: Session = Depends(get_session),
 ) -> ETLProfileActivationResponse:
     """Delete the runtime override so the deployment default applies again.
@@ -1063,19 +1066,90 @@ def reset_etl_profile_activation_route(
     다른 운영자의 변경이 끼면 화면이 방금 만든 상태를 잘못 설명하게 됩니다.
 
     body를 받지 않습니다. 지울 대상은 경로의 profile_id 하나로 정해지고, actor는
-    저장할 row 자체가 없어집니다.
+    인증된 current_user에서만 가져옵니다. 지우고 나면 저장할 current-state row가
+    없어지므로 이 응답의 actor_username/updated_at은 계속 null이지만, **이 명령을
+    누가 내렸는지는 Phase 5B.4의 history에 남습니다.**
 
     idempotent합니다. override가 이미 없어도 200입니다. 다만 없는 profile_id는 404로,
     "지울 것이 없다"와 "그런 프로필이 없다"를 구분합니다.
     """
     try:
-        view = reset_etl_profile_activation(session, profile_id=profile_id)
+        view = reset_etl_profile_activation(
+            session,
+            profile_id=profile_id,
+            actor_user_id=current_user.id,
+            actor_username=current_user.username,
+        )
     except ETLProfileNotFoundError as error:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ETL_PROFILE_NOT_FOUND_MESSAGE,
         ) from error
     return _build_profile_activation_response(view)
+
+
+@router.get(
+    "/api/v1/etl-profiles/{profile_id}/activation/history",
+    response_model=ETLProfileActivationHistoryResponse,
+)
+def list_etl_profile_activation_history_route(
+    profile_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> ETLProfileActivationHistoryResponse:
+    """List the successful activation commands recorded for one profile, newest first.
+
+    `.../activation`이 "지금 무엇이 적용되는가"라면 여기는 "지금까지 무엇을 했는가"입니다.
+    두 응답을 하나로 합치지 않습니다. current-state는 reset하면 사라지고, 이 기록은
+    남습니다.
+
+    **기록 단위는 성공한 운영 명령입니다.** 같은 버전을 다시 활성화하거나 override가
+    없는 프로필을 다시 reset해도 상태는 그대로지만 event는 하나 더 생깁니다. 실패한
+    요청(없는 프로필/버전, 401/403)은 아무것도 남기지 않습니다.
+
+    viewer 권한으로 읽습니다. 운영 기록을 읽는 것은 상태를 바꾸는 것이 아니고, 상태를
+    바꿀 수 없는 사람도 "왜 지금 이렇게 되어 있는가"는 확인할 수 있어야 합니다.
+
+    read-only입니다. 이 표에는 수정/삭제/purge endpoint가 없습니다(append-only).
+
+    이 기능이 추가된 migration(`20260823_0015`) 이후의 명령부터 기록됩니다. 그 이전
+    상태로 과거 이력을 만들어 내지 않았으므로, 빈 목록은 오류가 아닙니다.
+    """
+    try:
+        history = list_etl_profile_activation_history(
+            session,
+            profile_id=profile_id,
+            limit=limit,
+            offset=offset,
+        )
+    except ETLProfileNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ETL_PROFILE_NOT_FOUND_MESSAGE,
+        ) from error
+
+    return ETLProfileActivationHistoryResponse(
+        items=[
+            ETLProfileActivationHistoryItemResponse(
+                event_id=item.event_id,
+                profile_id=item.profile_id,
+                action=item.action,
+                deployment_active_version=item.deployment_active_version,
+                runtime_override_exists=item.runtime_override_exists,
+                runtime_active_version=item.runtime_active_version,
+                effective_active_version=item.effective_active_version,
+                # actor_user_id는 view에도 없고 여기서도 내보내지 않습니다.
+                actor_username=item.actor_username,
+                created_at=item.created_at,
+            )
+            for item in history.items
+        ],
+        total=history.total,
+        limit=history.limit,
+        offset=history.offset,
+    )
 
 
 @router.post("/api/v1/etl-loads", response_model=ETLWebRunResponse)
