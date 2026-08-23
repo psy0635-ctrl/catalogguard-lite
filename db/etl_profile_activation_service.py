@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.orm import Session
 
@@ -232,3 +232,49 @@ def set_etl_profile_activation(
 
     activation = resolve_etl_profile_activation(profile_id, session=session)
     return _to_view(activation, row=_activation_row(session, profile_id))
+
+
+def reset_etl_profile_activation(
+    session: Session,
+    *,
+    profile_id: str,
+) -> ETLProfileActivationView:
+    """Remove the runtime override so the deployment default applies again.
+
+    Phase 5B.3. set_etl_profile_activation(active_version=None)과 **다른 동작**입니다.
+    그쪽은 "운영자가 명시적으로 내렸다"는 상태를 만들고, 이쪽은 그 상태 자체를 지웁니다.
+
+    | 동작 | row | effective |
+    | --- | --- | --- |
+    | PUT active_version="2" | 있음 (active_version='2') | "2" |
+    | PUT active_version=null | 있음 (active_version=NULL) | None (명시적 비활성) |
+    | DELETE (여기) | 없음 | 배포 registry의 active_version |
+
+    **되살아날 수 있습니다.** 명시적 비활성 override를 지우면 배포 기본값이 다시
+    적용되므로, 배포 기본값이 활성이면 그 프로필은 reset과 동시에 활성이 됩니다.
+    호출자(API/UI)는 이것을 단순한 정리 동작으로 보여 주면 안 됩니다.
+
+    idempotent합니다. override가 이미 없어도 오류를 내지 않고 배포 기본값 상태를
+    그대로 돌려줍니다. DELETE를 두 번 보내는 것은 재시도이지 오류가 아니기 때문입니다.
+    다만 없는 profile_id는 계속 ETLProfileNotFoundError입니다 — "지울 것이 없다"와
+    "그런 프로필이 없다"는 운영자가 해야 할 일이 다릅니다.
+
+    이 표는 current-state row 하나뿐이라, 지우면 그 row의 actor_username/updated_at/
+    active_version도 함께 사라집니다. append-only activation history는 여전히 없으므로
+    (16.10) 이전 결정은 어디에도 남지 않습니다.
+    """
+    # 검증을 트랜잭션 밖에서 먼저 합니다. set_etl_profile_activation()과 같은 순서로,
+    # 없는 profile_id는 쓰기 트랜잭션을 열기 전에 여기서 끝납니다.
+    get_profile_display_name(profile_id)
+
+    with session.begin():
+        session.execute(
+            delete(ETLProfileActivation).where(
+                ETLProfileActivation.profile_id == profile_id
+            )
+        )
+
+    activation = resolve_etl_profile_activation(profile_id, session=session)
+    # row를 지웠으므로 actor/updated_at은 항상 None입니다. _to_view()가 row=None에서
+    # 그렇게 채우므로 여기서 따로 계산하지 않습니다.
+    return _to_view(activation, row=None)

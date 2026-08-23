@@ -610,6 +610,8 @@ class FakeEtlApiClient:
         activation_responses=None,
         activation_error=None,
         activation_update_error=None,
+        activation_reset_error=None,
+        activation_reset_responses=None,
         etl_profiles_error=None,
         etl_profile_details=None,
         etl_profile_detail_error=None,
@@ -662,8 +664,13 @@ class FakeEtlApiClient:
         )
         self.activation_error = activation_error
         self.activation_update_error = activation_update_error
+        self.activation_reset_error = activation_reset_error
+        # reset 응답은 override를 지운 뒤의 상태라 조회 응답과 다릅니다. 지정하지 않으면
+        # 서버가 하는 것과 같은 방식(배포 기본값 복귀)으로 계산합니다.
+        self.activation_reset_responses = activation_reset_responses
         self.activation_calls = []
         self.activation_update_calls = []
+        self.activation_reset_calls = []
         self.etl_profile_details = etl_profile_details or {
             "sample_fashion_vendor_v1": {
                 "id": "sample_fashion_vendor_v1",
@@ -801,6 +808,20 @@ class FakeEtlApiClient:
         if self.activation_error is not None:
             raise self.activation_error
         return self.activation_responses[profile_id]
+
+    def reset_etl_profile_activation(self, profile_id):
+        self.activation_reset_calls.append(profile_id)
+        if self.activation_reset_error is not None:
+            raise self.activation_reset_error
+        if self.activation_reset_responses is not None:
+            return self.activation_reset_responses[profile_id]
+        current = self.activation_responses[profile_id]
+        return make_activation(
+            profile_id,
+            display_name=current["display_name"],
+            deployment_active_version=current["deployment_active_version"],
+            available_versions=current["available_versions"],
+        )
 
     def update_etl_profile_activation(self, profile_id, *, active_version):
         self.activation_update_calls.append(
@@ -2888,14 +2909,16 @@ def test_management_shows_actor_only_when_a_runtime_override_exists(monkeypatch)
     assert etl_load_history.ETL_PROFILE_ADMIN_ACTOR_CAPTION in body
 
 
-def test_management_states_that_override_reset_is_unsupported(monkeypatch):
-    """없는 기능을 있는 것처럼 보이지 않습니다."""
+def test_management_says_there_is_nothing_to_reset_without_an_override(monkeypatch):
+    """지울 것이 없는데 버튼을 보여 주면 "무언가 남아 있다"고 잘못 말합니다."""
     api_client = _admin_client()
     _patch_etl_api_client(monkeypatch, api_client)
 
     app = run_authenticated_app_test(timeout=10)
 
-    assert etl_load_history.ETL_PROFILE_ADMIN_NO_RESET_CAPTION in _body_text(app)
+    assert (
+        etl_load_history.ETL_PROFILE_ADMIN_NO_OVERRIDE_RESET_CAPTION in _body_text(app)
+    )
     assert _admin_button(app, "etl_profile_admin_reset") is None
 
 
@@ -3224,3 +3247,368 @@ def test_activation_error_is_surfaced_without_write_controls(monkeypatch):
 
     assert any("활성화 상태를 불러오지 못했습니다" in str(e.value) for e in app.error)
     assert _admin_button(app, "etl_profile_admin_activate") is None
+
+
+# ---- Phase 5B.3: 런타임 설정 초기화 (배포 기본값으로 되돌리기) ----------------
+
+
+INACTIVE_DEPLOYMENT_ACTIVATION = make_activation(
+    "sample_fashion_vendor_v1",
+    deployment_active_version=None,
+    runtime_override_exists=True,
+    runtime_active_version="1",
+)
+
+
+def _reset_confirmation(app):
+    return next(
+        widget
+        for widget in app.checkbox
+        if widget.key == "etl_profile_admin_reset_confirmed"
+    )
+
+
+def _select_marketplace_profile(app):
+    app.session_state["etl_profile_admin_selected_profile_id"] = (
+        "sample_marketplace_vendor_v1"
+    )
+    app.run(timeout=10)
+    return app
+
+
+# --- 표시 조건 ---
+
+
+def test_reset_control_appears_only_when_a_runtime_override_exists(monkeypatch):
+    api_client = _admin_client(
+        activation_responses={"sample_fashion_vendor_v1": OVERRIDE_ACTIVATION}
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert _admin_button(app, "etl_profile_admin_reset") is not None
+    assert (
+        etl_load_history.ETL_PROFILE_ADMIN_NO_OVERRIDE_RESET_CAPTION
+        not in _body_text(app)
+    )
+
+
+def test_viewer_gets_no_reset_control(monkeypatch):
+    api_client = _admin_client(
+        activation_responses={"sample_fashion_vendor_v1": OVERRIDE_ACTIVATION}
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(role="viewer", timeout=10)
+
+    assert _admin_button(app, "etl_profile_admin_reset") is None
+
+
+# --- 결과 미리보기: reset은 되살릴 수 있다 ---
+
+
+def test_reset_preview_names_the_version_that_will_apply():
+    preview = etl_load_history.build_etl_profile_admin_reset_preview(
+        OVERRIDE_ACTIVATION
+    )
+
+    assert "v2" in preview
+
+
+def test_reset_preview_warns_that_an_inactive_profile_comes_back():
+    """이 경고가 없으면 운영자가 정리라고 생각하고 프로필을 되살립니다."""
+    preview = etl_load_history.build_etl_profile_admin_reset_preview(
+        INACTIVE_ACTIVATION
+    )
+
+    assert "v2" in preview
+    assert "다시 활성화" in preview
+
+
+def test_reset_preview_says_an_inactive_deployment_default_stays_inactive():
+    preview = etl_load_history.build_etl_profile_admin_reset_preview(
+        INACTIVE_DEPLOYMENT_ACTIVATION
+    )
+
+    assert "계속 비활성" in preview
+    assert "다시 활성화" not in preview
+
+
+def test_reset_preview_is_shown_before_the_button(monkeypatch):
+    api_client = _admin_client(
+        activation_responses={
+            "sample_fashion_vendor_v1": make_activation(),
+            "sample_marketplace_vendor_v1": INACTIVE_ACTIVATION,
+        }
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = _select_marketplace_profile(run_authenticated_app_test(timeout=10))
+
+    body = _body_text(app)
+    assert etl_load_history.ETL_PROFILE_ADMIN_RESET_CAPTION in body
+    assert "다시 활성화" in body
+
+
+# --- 확인 절차 ---
+
+
+def test_reset_needs_an_explicit_confirmation(monkeypatch):
+    api_client = _admin_client(
+        activation_responses={"sample_fashion_vendor_v1": OVERRIDE_ACTIVATION}
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    reset_button = _admin_button(app, "etl_profile_admin_reset")
+    assert reset_button.disabled is True
+
+    reset_button.click().run(timeout=10)
+    assert api_client.activation_reset_calls == []
+
+
+def test_reset_sends_the_delete_after_confirmation(monkeypatch):
+    api_client = _admin_client(
+        activation_responses={"sample_fashion_vendor_v1": OVERRIDE_ACTIVATION}
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    _reset_confirmation(app).check().run(timeout=10)
+    _admin_button(app, "etl_profile_admin_reset").click().run(timeout=10)
+
+    assert api_client.activation_reset_calls == ["sample_fashion_vendor_v1"]
+    # reset은 PUT이 아닙니다. 여기서 PUT이 나가면 override가 남습니다.
+    assert api_client.activation_update_calls == []
+
+
+def test_reset_of_an_explicit_inactive_override_is_possible(monkeypatch):
+    api_client = _admin_client(
+        activation_responses={
+            "sample_fashion_vendor_v1": make_activation(),
+            "sample_marketplace_vendor_v1": INACTIVE_ACTIVATION,
+        }
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = _select_marketplace_profile(run_authenticated_app_test(timeout=10))
+    _reset_confirmation(app).check().run(timeout=10)
+    _admin_button(app, "etl_profile_admin_reset").click().run(timeout=10)
+
+    assert api_client.activation_reset_calls == ["sample_marketplace_vendor_v1"]
+
+
+# --- 성공 후 상태 ---
+
+
+def test_reset_success_message_reports_the_state_the_server_returned():
+    message = etl_load_history.build_etl_profile_admin_reset_success_message(
+        "sample_fashion_vendor_v1",
+        make_activation(),
+    )
+
+    assert "v2" in message
+
+
+def test_reset_success_message_says_so_when_the_default_is_also_inactive():
+    message = etl_load_history.build_etl_profile_admin_reset_success_message(
+        "sample_fashion_vendor_v1",
+        make_activation(deployment_active_version=None),
+    )
+
+    assert "계속 비활성" in message
+
+
+def test_successful_reset_invalidates_the_same_caches_as_an_update():
+    """관리 화면에서 reset했는데 실행 selector가 옛 상태를 보여 주면 안 됩니다."""
+    api_client = _admin_client(
+        activation_responses={"sample_fashion_vendor_v1": OVERRIDE_ACTIVATION}
+    )
+    state = dict(etl_load_history.ETL_LOAD_STATE_DEFAULTS)
+    state["etl_web_run_profiles_response"] = {"items": [{"id": "x", "display_name": "x"}]}
+    state["etl_profile_admin_profiles_response"] = {"items": []}
+    state["etl_web_run_profile_detail_response"] = {"id": "x"}
+    state["etl_profile_admin_activation_response"] = OVERRIDE_ACTIVATION
+    state["etl_profile_admin_reset_confirmed"] = True
+
+    applied = etl_load_history._reset_etl_profile_activation(
+        api_client,
+        state,
+        "sample_fashion_vendor_v1",
+    )
+
+    assert applied is True
+    assert state["etl_web_run_profiles_response"] is None
+    assert state["etl_profile_admin_profiles_response"] is None
+    assert state["etl_web_run_profile_detail_response"] is None
+    assert state["etl_profile_admin_activation_response"] is None
+    # 성공한 조작의 확인 표시는 지웁니다(대입이 아니라 삭제여야 Streamlit이 허용합니다).
+    assert not state.get("etl_profile_admin_reset_confirmed")
+    assert state["etl_profile_admin_update_error"] is None
+    assert "v2" in state["etl_profile_admin_update_success"]
+
+
+def test_failed_reset_does_not_report_success():
+    api_client = _admin_client(
+        activation_responses={"sample_fashion_vendor_v1": OVERRIDE_ACTIVATION},
+        activation_reset_error=catalogguard_api.CatalogGuardApiResponseError("boom"),
+    )
+    state = dict(etl_load_history.ETL_LOAD_STATE_DEFAULTS)
+    state["etl_web_run_profiles_response"] = {"items": [{"id": "x", "display_name": "x"}]}
+
+    applied = etl_load_history._reset_etl_profile_activation(
+        api_client,
+        state,
+        "sample_fashion_vendor_v1",
+    )
+
+    assert applied is False
+    assert state["etl_profile_admin_update_success"] is None
+    assert state["etl_profile_admin_update_error"] is not None
+    # 실패했으므로 실행 목록 캐시는 그대로 둡니다.
+    assert state["etl_web_run_profiles_response"] is not None
+
+
+def test_reset_error_uses_the_existing_error_ui(monkeypatch):
+    api_client = _admin_client(
+        activation_responses={"sample_fashion_vendor_v1": OVERRIDE_ACTIVATION},
+        activation_reset_error=catalogguard_api.ETLProfileNotFoundError("gone"),
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    _reset_confirmation(app).check().run(timeout=10)
+    _admin_button(app, "etl_profile_admin_reset").click().run(timeout=10)
+
+    assert any(
+        "활성화 상태를 변경하지 못했습니다" in str(element.value) for element in app.error
+    )
+
+
+def test_reset_refreshes_the_management_state_to_the_deployment_default(monkeypatch):
+    """reset 뒤 화면이 계속 override를 말하면 사용자가 지워지지 않았다고 믿습니다."""
+    api_client = _admin_client(
+        activation_responses={"sample_fashion_vendor_v1": OVERRIDE_ACTIVATION}
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    _reset_confirmation(app).check().run(timeout=10)
+    _admin_button(app, "etl_profile_admin_reset").click().run(timeout=10)
+
+    # 캐시를 비웠으므로 상태를 다시 조회합니다.
+    assert api_client.activation_calls.count("sample_fashion_vendor_v1") == 2
+
+
+# --- 격리: reset이 다른 화면 상태를 건드리지 않는다 ---
+
+
+def test_reset_does_not_change_the_run_selector_choice(monkeypatch):
+    api_client = _admin_client(
+        activation_responses={
+            "sample_fashion_vendor_v1": make_activation(),
+            "sample_marketplace_vendor_v1": INACTIVE_ACTIVATION,
+        }
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = _select_marketplace_profile(run_authenticated_app_test(timeout=10))
+    _reset_confirmation(app).check().run(timeout=10)
+    _admin_button(app, "etl_profile_admin_reset").click().run(timeout=10)
+
+    # 관리 화면 조작이 "지금 실행할 프로필" 선택을 옮기면 안 됩니다.
+    assert app.session_state["etl_web_run_selected_profile_id"] == (
+        "sample_fashion_vendor_v1"
+    )
+    assert app.session_state["etl_profile_admin_selected_profile_id"] == (
+        "sample_marketplace_vendor_v1"
+    )
+
+
+def test_reset_does_not_clear_past_etl_history_state(monkeypatch):
+    """override를 지우는 것이지 조회 중인 이력을 지우는 것이 아닙니다."""
+    api_client = _admin_client(
+        activation_responses={"sample_fashion_vendor_v1": OVERRIDE_ACTIVATION}
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    app.session_state["etl_selected_run_id"] = 42
+    app.session_state["etl_page"] = 3
+    app.run(timeout=10)
+
+    _reset_confirmation(app).check().run(timeout=10)
+    _admin_button(app, "etl_profile_admin_reset").click().run(timeout=10)
+
+    assert app.session_state["etl_selected_run_id"] == 42
+    assert app.session_state["etl_page"] == 3
+
+
+def test_reset_section_renders_without_a_rerun_loop(monkeypatch):
+    api_client = _admin_client(
+        activation_responses={"sample_fashion_vendor_v1": OVERRIDE_ACTIVATION}
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert not app.exception
+    assert api_client.activation_calls == ["sample_fashion_vendor_v1"]
+    assert api_client.activation_reset_calls == []
+
+
+# --- 확인 checkbox 초기화는 대입이 아니라 삭제여야 한다 -----------------------
+
+
+def test_a_successful_deactivate_does_not_crash_the_page(monkeypatch):
+    """성공 처리에서 이미 그려진 checkbox key에 대입하면 화면이 예외로 끝납니다.
+
+    checkbox는 실행 버튼보다 먼저 그려지므로 성공 처리는 항상 그 뒤에 옵니다.
+    """
+    api_client = _admin_client()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    confirmation = next(
+        widget
+        for widget in app.checkbox
+        if widget.key == "etl_profile_admin_deactivate_confirmed"
+    )
+    confirmation.check().run(timeout=10)
+    _admin_button(app, "etl_profile_admin_deactivate").click().run(timeout=10)
+
+    assert not app.exception
+    assert api_client.activation_update_calls == [
+        {"profile_id": "sample_fashion_vendor_v1", "active_version": None}
+    ]
+
+
+def test_a_successful_reset_does_not_crash_the_page(monkeypatch):
+    api_client = _admin_client(
+        activation_responses={"sample_fashion_vendor_v1": OVERRIDE_ACTIVATION}
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    _reset_confirmation(app).check().run(timeout=10)
+    _admin_button(app, "etl_profile_admin_reset").click().run(timeout=10)
+
+    assert not app.exception
+    assert api_client.activation_reset_calls == ["sample_fashion_vendor_v1"]
+
+
+def test_a_successful_reset_clears_the_confirmation_checkbox(monkeypatch):
+    """확인 표시가 남으면 다음 reset이 확인 없이 버튼 한 번으로 나갑니다."""
+    api_client = _admin_client(
+        activation_responses={"sample_fashion_vendor_v1": OVERRIDE_ACTIVATION}
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    _reset_confirmation(app).check().run(timeout=10)
+    _admin_button(app, "etl_profile_admin_reset").click().run(timeout=10)
+
+    assert _reset_confirmation(app).value is False
+    assert _admin_button(app, "etl_profile_admin_reset").disabled is True

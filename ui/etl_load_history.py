@@ -119,10 +119,19 @@ ETL_PROFILE_ADMIN_ACTOR_CAPTION = (
 ETL_PROFILE_ADMIN_STALE_VERSION_MESSAGE = (
     "현재 배포에서 사용할 수 없는 버전입니다. 상태를 새로고침한 뒤 다시 선택하세요."
 )
-ETL_PROFILE_ADMIN_NO_RESET_CAPTION = (
-    "런타임 override를 제거해 배포 기본값으로 되돌리는 기능은 아직 없습니다. "
-    "비활성화는 override 제거가 아니라 '명시적 비활성' 상태입니다."
+# reset은 "정리"가 아니라 상태 전환입니다. 명시적 비활성 override를 지우면 배포
+# 기본값이 다시 적용되어 프로필이 되살아날 수 있으므로, 문구가 그 사실을 말해야 합니다.
+ETL_PROFILE_ADMIN_NO_OVERRIDE_RESET_CAPTION = (
+    "현재 런타임 override가 없습니다. 배포 기본값을 그대로 사용 중이라 되돌릴 설정이 없습니다."
 )
+ETL_PROFILE_ADMIN_RESET_CAPTION = (
+    "런타임 설정을 지우면 이 프로필은 다시 배포 기본값을 따라갑니다. "
+    "비활성화(명시적 비활성)와 달리 운영자가 내린 결정 자체가 사라집니다."
+)
+ETL_PROFILE_ADMIN_RESET_CONFIRM_LABEL = (
+    "런타임 설정을 제거하고 배포 기본값으로 되돌리는 것을 확인했습니다."
+)
+ETL_PROFILE_ADMIN_RESET_BUTTON_LABEL = "배포 기본값으로 되돌리기"
 
 CATALOG_RECONCILIATION_LIMIT = 50
 CATALOG_RECONCILIATION_FIELD_COLUMNS = ["변경 필드", "변경 건수"]
@@ -308,6 +317,7 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_profile_admin_activation_error": None,
     "etl_profile_admin_selected_version": None,
     "etl_profile_admin_deactivate_confirmed": False,
+    "etl_profile_admin_reset_confirmed": False,
     "etl_profile_admin_update_error": None,
     "etl_profile_admin_update_success": None,
 }
@@ -2949,6 +2959,49 @@ def build_etl_profile_admin_activate_state(
     return True, ""
 
 
+def build_etl_profile_admin_reset_preview(activation: dict[str, Any] | None) -> str:
+    """Say what will actually apply once the runtime override is removed.
+
+    reset은 "정리" 버튼이 아닙니다. 명시적 비활성 override를 지우면 배포 기본값이 다시
+    적용되므로, 배포 기본값이 활성이면 그 프로필은 그 자리에서 **다시 실행 가능**해집니다.
+    누르기 전에 결과를 보여 주지 않으면 운영자가 정리라고 생각하고 되살립니다.
+    """
+    if not isinstance(activation, dict):
+        return ""
+    deployment_version = activation.get("deployment_active_version")
+    if deployment_version is None:
+        return "되돌린 뒤에도 배포 기본값이 비활성이라 이 프로필은 계속 비활성입니다."
+    preview = f"되돌린 뒤 실제 적용 버전: v{deployment_version}"
+    if not activation.get("is_active"):
+        preview += " — 지금 비활성인 이 프로필이 다시 활성화됩니다."
+    return preview
+
+
+def build_etl_profile_admin_reset_success_message(
+    profile_id: str,
+    activation: dict[str, Any] | None,
+) -> str:
+    """Report the state the server actually returned, not the one we assumed.
+
+    DELETE 응답이 reset 직후의 effective 상태를 그대로 담고 있으므로 GET을 한 번 더
+    하지 않습니다. 그 사이에 다른 운영자의 변경이 끼면 방금 만든 상태를 잘못 설명합니다.
+    """
+    effective = (
+        activation.get("effective_active_version")
+        if isinstance(activation, dict)
+        else None
+    )
+    if effective is None:
+        return (
+            f"{profile_id} 프로필의 런타임 설정을 제거했습니다. "
+            "배포 기본값도 비활성이라 이 프로필은 계속 비활성입니다."
+        )
+    return (
+        f"{profile_id} 프로필의 런타임 설정을 제거했습니다. "
+        f"이제 배포 기본값 v{effective}을(를) 따릅니다."
+    )
+
+
 def build_etl_profile_admin_update_error_message(error: Exception | None) -> str:
     """Pick the headline that tells the operator what to do next.
 
@@ -2970,6 +3023,7 @@ def _on_etl_profile_admin_profile_change(session_state) -> None:
     _invalidate_etl_profile_admin_activation(session_state)
     session_state["etl_profile_admin_selected_version"] = None
     session_state["etl_profile_admin_deactivate_confirmed"] = False
+    session_state["etl_profile_admin_reset_confirmed"] = False
     session_state["etl_profile_admin_update_error"] = None
     session_state["etl_profile_admin_update_success"] = None
 
@@ -3029,39 +3083,58 @@ def _fetch_etl_profile_admin_activation(api_client, session_state, profile_id):
         return None
 
 
-def _apply_etl_profile_activation(api_client, session_state, profile_id, active_version):
-    """Send the change, and only touch local state after the server accepted it.
+# 활성화·비활성화·reset이 모두 같은 오류를 낼 수 있어 한 곳에서 관리합니다. 세 경로가
+# 각자 다른 목록을 들고 있으면 한쪽만 오류를 삼키는 차이가 조용히 생깁니다.
+ETL_PROFILE_ACTIVATION_WRITE_ERRORS = (
+    ETLProfileActivationVersionError,
+    ETLProfileNotFoundError,
+    CatalogGuardApiConfigurationError,
+    CatalogGuardApiConnectionError,
+    CatalogGuardApiTimeoutError,
+    CatalogGuardApiResponseError,
+    ValueError,
+)
+
+
+def _clear_etl_profile_admin_confirmation(session_state, key) -> None:
+    """Uncheck one confirmation box without assigning to an instantiated widget key.
+
+    Streamlit은 이번 run에서 이미 만들어진 widget의 key에 **대입**하면 예외를 냅니다.
+    확인 checkbox는 실행 버튼보다 먼저 그려지므로 성공 처리는 항상 그 뒤에 오고,
+    거기서 `session_state[key] = False`를 하면 화면이 예외로 끝납니다. 삭제는 허용되며
+    다음 run에서 checkbox가 기본값(False)으로 다시 만들어집니다.
+    """
+    session_state.pop(key, None)
+
+
+def _commit_etl_profile_activation_change(session_state, send, build_success_message):
+    """Send one activation write, and only touch local state after the server accepted it.
 
     서버가 실패했는데 화면만 바뀌면 운영자가 내리지 않은 프로필을 내렸다고 믿게 됩니다.
     그래서 성공 응답을 받은 뒤에만 캐시를 비웁니다.
+
+    활성화·비활성화·reset이 이 한 곳을 지납니다. 같은 무효화를 각자 복사하면 나중에
+    한쪽만 고쳐져 관리 화면과 실행 selector가 서로 다른 상태를 보여 주게 됩니다.
     """
     session_state["etl_profile_admin_update_error"] = None
     session_state["etl_profile_admin_update_success"] = None
     try:
-        api_client.update_etl_profile_activation(
-            profile_id,
-            active_version=active_version,
-        )
-    except (
-        ETLProfileActivationVersionError,
-        ETLProfileNotFoundError,
-        CatalogGuardApiConfigurationError,
-        CatalogGuardApiConnectionError,
-        CatalogGuardApiTimeoutError,
-        CatalogGuardApiResponseError,
-        ValueError,
-    ) as error:
+        response = send()
+    except ETL_PROFILE_ACTIVATION_WRITE_ERRORS as error:
         session_state["etl_profile_admin_update_error"] = error
         # 상태를 새로 읽어야 사용자가 최신 available_versions로 다시 고를 수 있습니다.
         _invalidate_etl_profile_admin_activation(session_state)
         return False
 
-    session_state["etl_profile_admin_update_success"] = (
-        f"{profile_id} 프로필을 비활성화했습니다."
-        if active_version is None
-        else f"{profile_id} 프로필을 v{active_version}(으)로 활성화했습니다."
+    session_state["etl_profile_admin_update_success"] = build_success_message(response)
+    # 성공한 조작의 확인 표시는 남기지 않습니다. 남겨 두면 다음 조작이 확인 없이
+    # 버튼 한 번으로 나갑니다.
+    _clear_etl_profile_admin_confirmation(
+        session_state, "etl_profile_admin_deactivate_confirmed"
     )
-    session_state["etl_profile_admin_deactivate_confirmed"] = False
+    _clear_etl_profile_admin_confirmation(
+        session_state, "etl_profile_admin_reset_confirmed"
+    )
     _invalidate_etl_profile_admin_activation(session_state)
     # 관리 목록은 비활성 프로필도 포함하므로 구성이 바뀌지 않지만, 실행 selector는
     # 활성 목록만 쓰므로 반드시 다시 읽어야 방금 내린 프로필이 사라집니다.
@@ -3074,6 +3147,38 @@ def _apply_etl_profile_activation(api_client, session_state, profile_id, active_
     session_state["etl_web_run_profile_detail_response"] = None
     session_state["etl_web_run_profile_detail_error"] = None
     return True
+
+
+def _apply_etl_profile_activation(api_client, session_state, profile_id, active_version):
+    """Set the runtime active version, or deactivate with None."""
+    return _commit_etl_profile_activation_change(
+        session_state,
+        lambda: api_client.update_etl_profile_activation(
+            profile_id,
+            active_version=active_version,
+        ),
+        lambda _response: (
+            f"{profile_id} 프로필을 비활성화했습니다."
+            if active_version is None
+            else f"{profile_id} 프로필을 v{active_version}(으)로 활성화했습니다."
+        ),
+    )
+
+
+def _reset_etl_profile_activation(api_client, session_state, profile_id):
+    """Remove the runtime override so the deployment default applies again.
+
+    비활성화와 다른 동작입니다. 비활성화는 "명시적 비활성" override를 만들고, reset은
+    override 자체를 지웁니다. 그래서 reset은 프로필을 **되살릴 수도** 있습니다.
+    """
+    return _commit_etl_profile_activation_change(
+        session_state,
+        lambda: api_client.reset_etl_profile_activation(profile_id),
+        lambda response: build_etl_profile_admin_reset_success_message(
+            profile_id,
+            response,
+        ),
+    )
 
 
 def _render_etl_profile_activation_controls(api_client, activation) -> None:
@@ -3123,6 +3228,12 @@ def _render_etl_profile_activation_controls(api_client, activation) -> None:
         )
         st.rerun()
 
+    _render_etl_profile_deactivate_controls(api_client, activation)
+    _render_etl_profile_reset_controls(api_client, activation)
+
+
+def _render_etl_profile_deactivate_controls(api_client, activation) -> None:
+    """Stop new ETL runs for this profile by writing an explicit inactive override."""
     st.markdown("##### 신규 ETL 실행 중단")
     if not activation.get("is_active"):
         st.caption("이미 비활성 상태입니다. 위에서 버전을 골라 다시 활성화할 수 있습니다.")
@@ -3149,8 +3260,46 @@ def _render_etl_profile_activation_controls(api_client, activation) -> None:
         _apply_etl_profile_activation(
             api_client,
             st.session_state,
-            profile_id,
+            activation["profile_id"],
             None,
+        )
+        st.rerun()
+
+
+def _render_etl_profile_reset_controls(api_client, activation) -> None:
+    """Drop the runtime override so this profile follows the deployment default again.
+
+    override가 없으면 되돌릴 설정 자체가 없으므로 버튼을 만들지 않습니다. 없는 대상을
+    지우는 버튼은 사용자에게 "무언가 남아 있다"고 잘못 말합니다.
+
+    override가 있을 때도 확인 없이 보내지 않습니다. 명시적 비활성 override를 지우면
+    배포 기본값이 다시 적용되어 프로필이 **되살아날 수** 있어, 비활성화와 같은 수준의
+    확인이 필요합니다.
+    """
+    st.markdown("##### 런타임 설정 초기화")
+    if not activation.get("runtime_override_exists"):
+        st.caption(ETL_PROFILE_ADMIN_NO_OVERRIDE_RESET_CAPTION)
+        return
+
+    st.caption(ETL_PROFILE_ADMIN_RESET_CAPTION)
+    # 누르기 전에 결과를 보여 줍니다. reset은 정리가 아니라 상태 전환입니다.
+    st.caption(build_etl_profile_admin_reset_preview(activation))
+    confirmed = st.checkbox(
+        ETL_PROFILE_ADMIN_RESET_CONFIRM_LABEL,
+        key="etl_profile_admin_reset_confirmed",
+    )
+    if (
+        st.button(
+            ETL_PROFILE_ADMIN_RESET_BUTTON_LABEL,
+            key="etl_profile_admin_reset",
+            disabled=not confirmed,
+        )
+        and confirmed
+    ):
+        _reset_etl_profile_activation(
+            api_client,
+            st.session_state,
+            activation["profile_id"],
         )
         st.rerun()
 
@@ -3161,7 +3310,8 @@ def _render_etl_profile_management(api_client) -> None:
     st.subheader("ETL 프로필 운영 관리")
     st.caption(
         "공급사 프로필의 현재 활성 상태를 확인하고, 보존된 버전 중 하나를 활성화하거나 "
-        "신규 ETL 실행을 중단합니다. 프로필 정의 자체는 여기서 바꾸지 않습니다."
+        "신규 ETL 실행을 중단하거나, 런타임 설정을 지워 배포 기본값으로 되돌립니다. "
+        "프로필 정의 자체는 여기서 바꾸지 않습니다."
     )
 
     profiles = _fetch_etl_profile_admin_profiles(api_client, st.session_state)
@@ -3248,7 +3398,6 @@ def _render_etl_profile_management(api_client) -> None:
         )
         st.write(f"마지막 변경 시각: {format_etl_datetime(activation.get('updated_at'))}")
         st.caption(ETL_PROFILE_ADMIN_ACTOR_CAPTION)
-    st.caption(ETL_PROFILE_ADMIN_NO_RESET_CAPTION)
 
     _render_etl_profile_activation_controls(api_client, activation)
 

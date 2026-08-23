@@ -17,6 +17,7 @@ from config.database import get_optional_database_url
 from db.etl_profile_activation_service import (
     ETLProfileVersionNotFoundError,
     get_etl_profile_activation,
+    reset_etl_profile_activation,
     set_etl_profile_activation,
 )
 from db.models import ETLProfileActivation
@@ -540,3 +541,211 @@ def test_a_pending_write_is_reported_instead_of_being_silently_discarded(
         assert any(
             obj.profile_id == orphan_profile_id for obj in session.new
         )
+
+
+# ---- Phase 5B.3: runtime override reset ---------------------------------------
+
+
+def _override_rows(session_factory, profile_id):
+    with session_factory() as session:
+        return session.scalars(
+            select(ETLProfileActivation).where(
+                ETLProfileActivation.profile_id == profile_id
+            )
+        ).all()
+
+
+def test_reset_removes_an_active_override_and_restores_the_deployment_default(
+    session_factory, clean_activations
+):
+    with session_factory() as session:
+        set_etl_profile_activation(
+            session,
+            profile_id=MARKETPLACE_PROFILE_ID,
+            active_version="1",
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
+
+    with session_factory() as session:
+        view = reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+
+    assert view.runtime_override_exists is False
+    assert view.runtime_active_version is None
+    # 배포 기본값이 다시 적용됩니다. reset은 override를 지우는 것이지 비활성이 아닙니다.
+    assert view.effective_active_version == "2"
+    assert view.deployment_active_version == "2"
+    assert view.is_active is True
+    # 지운 row의 actor/updated_at도 함께 사라집니다. 이 표는 현재 상태 한 줄뿐입니다.
+    assert view.actor_username is None
+    assert view.updated_at is None
+
+
+def test_reset_of_an_explicit_inactive_override_reactivates_the_profile(
+    session_factory, clean_activations
+):
+    """가장 중요한 케이스입니다. reset은 프로필을 되살릴 수 있습니다."""
+    with session_factory() as session:
+        set_etl_profile_activation(
+            session,
+            profile_id=MARKETPLACE_PROFILE_ID,
+            active_version=None,
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
+    with session_factory() as session:
+        assert get_etl_profile_activation(
+            session, profile_id=MARKETPLACE_PROFILE_ID
+        ).is_active is False
+
+    with session_factory() as session:
+        view = reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+
+    assert view.runtime_override_exists is False
+    assert view.effective_active_version == "2"
+    assert view.is_active is True
+
+    # 신규 실행도 다시 가능해져야 합니다.
+    with session_factory() as session:
+        assert load_profile(
+            get_profile_path(MARKETPLACE_PROFILE_ID, session=session)
+        ).version == "2"
+
+
+def test_reset_is_idempotent_for_a_profile_without_an_override(
+    session_factory, clean_activations
+):
+    """DELETE를 두 번 보내는 것은 재시도이지 오류가 아닙니다."""
+    with session_factory() as session:
+        first = reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+    with session_factory() as session:
+        second = reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+
+    assert first == second
+    assert first.runtime_override_exists is False
+    assert first.effective_active_version == "2"
+    assert _override_rows(session_factory, MARKETPLACE_PROFILE_ID) == []
+
+
+@pytest.mark.parametrize("unknown_profile_id", ["nope", "sample_fashion_vendor", ""])
+def test_reset_of_an_unknown_profile_is_rejected(
+    session_factory, clean_activations, unknown_profile_id
+):
+    """"지울 것이 없다"와 "그런 프로필이 없다"는 운영자가 해야 할 일이 다릅니다."""
+    with session_factory() as session:
+        with pytest.raises(ETLProfileNotFoundError):
+            reset_etl_profile_activation(session, profile_id=unknown_profile_id)
+
+
+def test_reset_actually_deletes_the_row(session_factory, clean_activations):
+    with session_factory() as session:
+        set_etl_profile_activation(
+            session,
+            profile_id=MARKETPLACE_PROFILE_ID,
+            active_version="1",
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
+    assert len(_override_rows(session_factory, MARKETPLACE_PROFILE_ID)) == 1
+
+    with session_factory() as session:
+        reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+
+    # view만 배포 기본값으로 보이고 row가 남아 있으면, 다음 조회가 다시 override를
+    # 발견해 화면과 실제 상태가 갈라집니다.
+    assert _override_rows(session_factory, MARKETPLACE_PROFILE_ID) == []
+
+
+def test_reset_survives_a_brand_new_session(clean_activations, session_factory):
+    """지운 상태도 저장된 상태입니다. 다음 프로세스가 옛 override를 보면 안 됩니다."""
+    with session_factory() as session:
+        set_etl_profile_activation(
+            session,
+            profile_id=MARKETPLACE_PROFILE_ID,
+            active_version=None,
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
+    with session_factory() as session:
+        reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+
+    engine = create_database_engine(get_optional_database_url())
+    try:
+        with create_session_factory(engine)() as session:
+            activation = resolve_etl_profile_activation(
+                MARKETPLACE_PROFILE_ID, session=session
+            )
+    finally:
+        engine.dispose()
+
+    assert activation.runtime_override_exists is False
+    assert activation.effective_active_version == "2"
+
+
+def test_reset_only_touches_the_requested_profile(session_factory, clean_activations):
+    for profile_id in (MARKETPLACE_PROFILE_ID, FASHION_PROFILE_ID):
+        with session_factory() as session:
+            set_etl_profile_activation(
+                session,
+                profile_id=profile_id,
+                active_version="1",
+                actor_user_id=None,
+                actor_username="operator_user",
+            )
+
+    with session_factory() as session:
+        reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+
+    with session_factory() as session:
+        other = get_etl_profile_activation(session, profile_id=FASHION_PROFILE_ID)
+
+    assert other.runtime_override_exists is True
+    assert other.effective_active_version == "1"
+
+
+def test_reset_is_not_the_same_as_writing_a_null_version(
+    session_factory, clean_activations
+):
+    """PUT null != reset. 이 계약이 깨지면 운영자의 결정이 조용히 뒤집힙니다."""
+    with session_factory() as session:
+        deactivated = set_etl_profile_activation(
+            session,
+            profile_id=MARKETPLACE_PROFILE_ID,
+            active_version=None,
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
+    with session_factory() as session:
+        reset = reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+
+    # 둘 다 runtime_active_version은 None이지만 뜻이 정반대입니다.
+    assert deactivated.runtime_active_version is None
+    assert reset.runtime_active_version is None
+    assert deactivated.runtime_override_exists is True
+    assert reset.runtime_override_exists is False
+    assert deactivated.effective_active_version is None
+    assert reset.effective_active_version == "2"
+
+
+def test_reset_does_not_change_the_deployment_registry(
+    session_factory, clean_activations
+):
+    with session_factory() as session:
+        set_etl_profile_activation(
+            session,
+            profile_id=MARKETPLACE_PROFILE_ID,
+            active_version="1",
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
+    with session_factory() as session:
+        reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+
+    assert profile_loader._ETL_PROFILE_REGISTRY[MARKETPLACE_PROFILE_ID][
+        "active_version"
+    ] == "2"
+    # archive도 그대로입니다. reset은 Delete가 아닙니다(Policy G).
+    for version in ("1", "2"):
+        assert load_profile(
+            get_profile_version_path(MARKETPLACE_PROFILE_ID, version)
+        ).version == version

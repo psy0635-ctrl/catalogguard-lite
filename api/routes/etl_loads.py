@@ -122,6 +122,7 @@ from db.etl_profile_activation_service import (
     ETLProfileVersionNotFoundError,
     end_activation_read_transaction,
     get_etl_profile_activation,
+    reset_etl_profile_activation,
     set_etl_profile_activation,
 )
 from etl.web_service import ETLWebRunOutcome, run_web_etl
@@ -1033,6 +1034,46 @@ def set_etl_profile_activation_route(
                 "message": "요청한 ETL 프로필 버전이 없습니다.",
                 "available_versions": registered_profile_versions(profile_id),
             },
+        ) from error
+    return _build_profile_activation_response(view)
+
+
+@router.delete(
+    "/api/v1/etl-profiles/{profile_id}/activation",
+    response_model=ETLProfileActivationResponse,
+)
+def reset_etl_profile_activation_route(
+    profile_id: str,
+    _current_user=Depends(require_operator),
+    session: Session = Depends(get_session),
+) -> ETLProfileActivationResponse:
+    """Delete the runtime override so the deployment default applies again.
+
+    `PUT {"active_version": null}`과 **다른 동작**입니다. PUT null은 지금까지와 똑같이
+    "운영자가 명시적으로 내렸다"는 override를 남기고, 이 DELETE만 그 override 자체를
+    지웁니다. 두 개념을 하나로 합치면 배포 기본값이 바뀔 때 운영자의 결정이 조용히
+    뒤집힙니다.
+
+    **reset이 프로필을 다시 활성화할 수 있습니다.** 명시적 비활성 override를 지우면
+    배포 기본값이 다시 적용되므로, 배포 기본값이 활성이면 그 프로필은 즉시 실행
+    가능해집니다. 화면은 이 결과를 미리 알려 줘야 합니다.
+
+    204가 아니라 200 + activation 응답입니다. 호출자가 reset 직후의 effective 상태를
+    알아야 하는데, 204를 주면 그 상태를 알기 위해 GET을 한 번 더 해야 하고 그 사이에
+    다른 운영자의 변경이 끼면 화면이 방금 만든 상태를 잘못 설명하게 됩니다.
+
+    body를 받지 않습니다. 지울 대상은 경로의 profile_id 하나로 정해지고, actor는
+    저장할 row 자체가 없어집니다.
+
+    idempotent합니다. override가 이미 없어도 200입니다. 다만 없는 profile_id는 404로,
+    "지울 것이 없다"와 "그런 프로필이 없다"를 구분합니다.
+    """
+    try:
+        view = reset_etl_profile_activation(session, profile_id=profile_id)
+    except ETLProfileNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ETL_PROFILE_NOT_FOUND_MESSAGE,
         ) from error
     return _build_profile_activation_response(view)
 
