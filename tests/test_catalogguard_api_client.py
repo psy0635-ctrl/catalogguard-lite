@@ -159,6 +159,12 @@ class FakeSession:
             raise self.error
         return self.response
 
+    def delete(self, url, *, timeout=None):
+        self.calls.append({"url": url, "timeout": timeout})
+        if self.error is not None:
+            raise self.error
+        return self.response
+
     def post(self, url, *, files=None, data=None, json=None, timeout=None):
         call = {
             "url": url,
@@ -3829,3 +3835,151 @@ def test_activation_update_maps_connection_and_timeout_errors():
     client, _ = make_client(error=requests.Timeout("slow"))
     with pytest.raises(client_module.CatalogGuardApiTimeoutError):
         client.update_etl_profile_activation("sample_fashion_vendor_v1", active_version="1")
+
+
+# ---- Phase 5B.3: runtime override reset (DELETE) ------------------------------
+
+
+def test_reset_etl_profile_activation_deletes_the_activation_path():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_PROFILE_ACTIVATION_RESPONSE),
+        timeout_seconds=6.0,
+    )
+
+    data = client.reset_etl_profile_activation(" sample_fashion_vendor_v1 ")
+
+    assert data == ETL_PROFILE_ACTIVATION_RESPONSE
+    # body를 보내지 않습니다. 지울 대상은 경로가 정합니다.
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/etl-profiles/sample_fashion_vendor_v1/activation",
+            "timeout": 6.0,
+        }
+    ]
+
+
+def test_reset_reuses_the_shared_profile_id_validation():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_PROFILE_ACTIVATION_RESPONSE)
+    )
+
+    with pytest.raises(ValueError):
+        client.reset_etl_profile_activation("   ")
+
+    assert session.calls == []
+
+
+def test_reset_percent_encodes_the_path_separator():
+    client, session = make_client(
+        response=FakeResponse(payload=ETL_PROFILE_ACTIVATION_RESPONSE)
+    )
+
+    client.reset_etl_profile_activation("../secret")
+
+    assert session.calls[0]["url"].endswith("/etl-profiles/..%2Fsecret/activation")
+
+
+def test_reset_reuses_the_activation_response_validation():
+    """새 validator를 만들지 않았습니다. 어긋난 응답은 여기서도 거부돼야 합니다."""
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            # override가 없는데 runtime 값이 붙어 있는, 있을 수 없는 상태입니다.
+            payload=_activation(runtime_active_version="2")
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.reset_etl_profile_activation("sample_fashion_vendor_v1")
+
+
+def test_reset_accepts_the_state_the_server_returns_after_deleting_the_row():
+    """reset 직후 응답은 항상 "override 없음"입니다."""
+    payload = _activation(
+        runtime_override_exists=False,
+        runtime_active_version=None,
+        effective_active_version="2",
+        actor_username=None,
+        updated_at=None,
+    )
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    assert client.reset_etl_profile_activation("sample_fashion_vendor_v1") == payload
+
+
+def test_reset_rejects_a_response_missing_contract_keys():
+    client_module = import_client_module()
+    payload = dict(ETL_PROFILE_ACTIVATION_RESPONSE)
+    payload.pop("available_versions")
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.reset_etl_profile_activation("sample_fashion_vendor_v1")
+
+
+def test_reset_rejects_a_malformed_body():
+    client_module = import_client_module()
+
+    client, _ = make_client(response=FakeResponse(json_error=ValueError("not json")))
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.reset_etl_profile_activation("sample_fashion_vendor_v1")
+
+    client, _ = make_client(response=FakeResponse(payload=["not", "a", "dict"]))
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.reset_etl_profile_activation("sample_fashion_vendor_v1")
+
+
+def test_reset_maps_missing_profile_to_not_found():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(status_code=404, payload={"detail": "nope"})
+    )
+
+    with pytest.raises(client_module.ETLProfileNotFoundError):
+        client.reset_etl_profile_activation("gone")
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_attribute"),
+    [
+        (401, "CatalogGuardApiAuthenticationError"),
+        (403, "CatalogGuardApiAuthorizationError"),
+    ],
+)
+def test_reset_reuses_the_existing_auth_errors(status_code, expected_attribute):
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(status_code=status_code, payload={"detail": {"code": "x"}})
+    )
+
+    with pytest.raises(getattr(client_module, expected_attribute)):
+        client.reset_etl_profile_activation("sample_fashion_vendor_v1")
+
+
+def test_reset_maps_connection_and_timeout_errors():
+    client_module = import_client_module()
+
+    client, _ = make_client(error=requests.ConnectionError("boom"))
+    with pytest.raises(client_module.CatalogGuardApiConnectionError):
+        client.reset_etl_profile_activation("sample_fashion_vendor_v1")
+
+    client, _ = make_client(error=requests.Timeout("slow"))
+    with pytest.raises(client_module.CatalogGuardApiTimeoutError):
+        client.reset_etl_profile_activation("sample_fashion_vendor_v1")
+
+
+def test_reset_passes_the_server_request_id_through_like_the_other_calls():
+    """오류 화면이 request ID를 보여 줄 수 있어야 기존 client와 같은 진단이 됩니다."""
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=500,
+            payload={"detail": "boom"},
+            headers={"X-Request-ID": VALID_REQUEST_ID},
+        )
+    )
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as error:
+        client.reset_etl_profile_activation("sample_fashion_vendor_v1")
+
+    assert error.value.request_id == VALID_REQUEST_ID

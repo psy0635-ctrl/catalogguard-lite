@@ -580,3 +580,238 @@ def test_deactivate_then_reactivate_round_trip_through_the_management_list(api):
         for item in client.get(ETL_PROFILES_ENDPOINT, headers=_headers(token)).json()["items"]
     ]
     assert PROFILE_ID in run_ids
+
+
+# ---- Phase 5B.3: DELETE로 runtime override를 지운다 ---------------------------
+
+
+def test_anonymous_reset_is_401(api):
+    response = client.delete(ACTIVATION_ENDPOINT)
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "authentication_required"
+
+
+def test_viewer_reset_is_403_and_changes_nothing(api, session_factory):
+    """조회는 되지만 override 제거는 운영 기능입니다."""
+    operator = api("operator")
+    client.put(
+        ACTIVATION_ENDPOINT, json={"active_version": "1"}, headers=_headers(operator)
+    )
+
+    response = client.delete(ACTIVATION_ENDPOINT, headers=_headers(api("viewer")))
+
+    assert response.status_code == 403
+    with session_factory() as session:
+        [row] = session.scalars(select(ETLProfileActivation)).all()
+    assert row.active_version == "1"
+
+
+def test_operator_reset_removes_an_active_override(api, session_factory):
+    token = api("operator")
+    client.put(ACTIVATION_ENDPOINT, json={"active_version": "1"}, headers=_headers(token))
+
+    response = client.delete(ACTIVATION_ENDPOINT, headers=_headers(token))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["runtime_override_exists"] is False
+    assert body["runtime_active_version"] is None
+    assert body["effective_active_version"] == "2"
+    assert body["deployment_active_version"] == "2"
+    assert body["is_active"] is True
+    # row가 사라졌으므로 actor/updated_at도 없습니다.
+    assert body["actor_username"] is None
+    assert body["updated_at"] is None
+    with session_factory() as session:
+        assert session.scalars(select(ETLProfileActivation)).all() == []
+
+
+def test_reset_of_an_explicit_inactive_override_reactivates_the_profile(api):
+    """reset은 정리가 아니라 상태 전환입니다. 비활성 프로필이 되살아납니다."""
+    token = api("operator")
+    client.put(ACTIVATION_ENDPOINT, json={"active_version": None}, headers=_headers(token))
+    assert (
+        client.get(ACTIVATION_ENDPOINT, headers=_headers(token)).json()["is_active"]
+        is False
+    )
+
+    body = client.delete(ACTIVATION_ENDPOINT, headers=_headers(token)).json()
+
+    assert body["runtime_override_exists"] is False
+    assert body["effective_active_version"] == "2"
+    assert body["is_active"] is True
+
+
+def test_reset_is_idempotent_without_an_override(api):
+    """두 번째 DELETE는 재시도이지 오류가 아닙니다."""
+    token = api("operator")
+
+    first = client.delete(ACTIVATION_ENDPOINT, headers=_headers(token))
+    second = client.delete(ACTIVATION_ENDPOINT, headers=_headers(token))
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json() == second.json()
+    assert first.json()["runtime_override_exists"] is False
+    assert first.json()["effective_active_version"] == "2"
+
+
+def test_reset_of_an_unknown_profile_is_404(api):
+    """override가 없는 정상 프로필(200)과 없는 프로필(404)을 구분합니다."""
+    response = client.delete(
+        "/api/v1/etl-profiles/not_a_profile/activation",
+        headers=_headers(api("operator")),
+    )
+
+    assert response.status_code == 404
+
+
+def test_reset_response_matches_the_activation_response_shape(api):
+    """새 schema를 만들지 않았습니다. GET/PUT과 같은 응답이어야 합니다."""
+    token = api("operator")
+    client.put(ACTIVATION_ENDPOINT, json={"active_version": "1"}, headers=_headers(token))
+
+    reset_body = client.delete(ACTIVATION_ENDPOINT, headers=_headers(token)).json()
+    read_body = client.get(ACTIVATION_ENDPOINT, headers=_headers(token)).json()
+
+    assert sorted(reset_body) == sorted(read_body)
+    # reset 직후 GET을 한 번 더 해도 같은 상태여야 합니다. 다르면 DELETE 응답이
+    # 서버의 실제 상태를 말하지 않는다는 뜻입니다.
+    assert reset_body == read_body
+    assert read_body["runtime_override_exists"] is False
+
+
+def test_reset_does_not_accept_a_request_body(api):
+    """DELETE에는 고를 것이 없습니다. body를 받으면 계약이 모호해집니다."""
+    token = api("operator")
+    client.put(ACTIVATION_ENDPOINT, json={"active_version": "1"}, headers=_headers(token))
+
+    response = client.request(
+        "DELETE",
+        ACTIVATION_ENDPOINT,
+        json={"active_version": "1"},
+        headers=_headers(token),
+    )
+
+    # body는 route가 읽지 않으므로 무시되고, 결과는 body 없는 DELETE와 같습니다.
+    assert response.status_code == 200, response.text
+    assert response.json()["runtime_override_exists"] is False
+
+
+def test_reset_puts_a_deactivated_profile_back_in_the_run_list(api):
+    """관리 화면에서 reset했는데 실행 목록이 옛 상태면 안 됩니다."""
+    token = api("operator")
+    client.put(ACTIVATION_ENDPOINT, json={"active_version": None}, headers=_headers(token))
+    hidden = [
+        item["id"]
+        for item in client.get(ETL_PROFILES_ENDPOINT, headers=_headers(token)).json()["items"]
+    ]
+    assert PROFILE_ID not in hidden
+
+    client.delete(ACTIVATION_ENDPOINT, headers=_headers(token))
+
+    ids = [
+        item["id"]
+        for item in client.get(ETL_PROFILES_ENDPOINT, headers=_headers(token)).json()["items"]
+    ]
+    assert PROFILE_ID in ids
+    assert OTHER_PROFILE_ID in ids
+
+
+def test_reset_restores_the_deployment_default_version_for_a_new_run(
+    api, session_factory
+):
+    """override로 v1을 쓰던 프로필이 reset 뒤에는 배포 기본값 v2로 실행돼야 합니다."""
+    token = api("operator")
+    client.put(ACTIVATION_ENDPOINT, json={"active_version": "1"}, headers=_headers(token))
+    client.delete(ACTIVATION_ENDPOINT, headers=_headers(token))
+
+    response = _post_web_etl(token, uuid4().hex[:10])
+
+    assert response.status_code == 200, response.text
+    run_id = response.json()["etl_load_run_id"]
+    try:
+        with session_factory() as session:
+            assert session.get(ETLLoadRun, run_id).profile_version == "2"
+    finally:
+        with session_factory() as session:
+            session.execute(delete(ETLLoadRun).where(ETLLoadRun.id == run_id))
+            session.commit()
+
+
+def test_reset_only_touches_the_requested_profile(api, session_factory):
+    token = api("operator")
+    for profile_id in (PROFILE_ID, OTHER_PROFILE_ID):
+        client.put(
+            f"/api/v1/etl-profiles/{profile_id}/activation",
+            json={"active_version": "1"},
+            headers=_headers(token),
+        )
+
+    client.delete(ACTIVATION_ENDPOINT, headers=_headers(token))
+
+    other = client.get(
+        f"/api/v1/etl-profiles/{OTHER_PROFILE_ID}/activation", headers=_headers(token)
+    ).json()
+    assert other["runtime_override_exists"] is True
+    assert other["effective_active_version"] == "1"
+    with session_factory() as session:
+        rows = session.scalars(select(ETLProfileActivation)).all()
+    assert [row.profile_id for row in rows] == [OTHER_PROFILE_ID]
+
+
+def test_put_null_still_means_explicit_inactive_after_reset_exists(api, session_factory):
+    """이번 Phase가 기존 계약을 바꾸지 않았다는 회귀입니다.
+
+    PUT null이 reset처럼 동작하기 시작하면 운영자가 내린 결정이 배포 기본값으로
+    조용히 되살아납니다.
+    """
+    token = api("operator")
+
+    body = client.put(
+        ACTIVATION_ENDPOINT, json={"active_version": None}, headers=_headers(token)
+    ).json()
+
+    assert body["runtime_override_exists"] is True
+    assert body["effective_active_version"] is None
+    assert body["is_active"] is False
+    with session_factory() as session:
+        [row] = session.scalars(select(ETLProfileActivation)).all()
+    assert row.active_version is None
+
+
+def test_reset_does_not_delete_past_etl_history(api, session_factory):
+    """override를 지우는 것이지 배치를 지우는 것이 아닙니다."""
+    token = api("operator")
+    response = _post_web_etl(token, uuid4().hex[:10])
+    assert response.status_code == 200, response.text
+    run_id = response.json()["etl_load_run_id"]
+    client.put(ACTIVATION_ENDPOINT, json={"active_version": None}, headers=_headers(token))
+
+    client.delete(ACTIVATION_ENDPOINT, headers=_headers(token))
+
+    try:
+        detail = client.get(f"{WEB_ETL_ENDPOINT}/{run_id}", headers=_headers(token))
+        assert detail.status_code == 200, detail.text
+        with session_factory() as session:
+            assert session.get(ETLLoadRun, run_id) is not None
+    finally:
+        with session_factory() as session:
+            session.execute(delete(ETLLoadRun).where(ETLLoadRun.id == run_id))
+            session.commit()
+
+
+def test_reset_does_not_change_the_profile_definition(api):
+    """Policy A. reset은 어떤 버전을 쓸지만 되돌립니다."""
+    token = api("operator")
+    client.put(ACTIVATION_ENDPOINT, json={"active_version": "1"}, headers=_headers(token))
+
+    client.delete(ACTIVATION_ENDPOINT, headers=_headers(token))
+
+    detail = client.get(
+        f"{ETL_PROFILES_ENDPOINT}/{PROFILE_ID}", headers=_headers(token)
+    ).json()
+    assert detail["profile_version"] == "2"
+    assert detail["profile_name"] == "sample_marketplace_vendor"
+    assert detail["source_columns"]["style_id"] == ["product_group_id"]

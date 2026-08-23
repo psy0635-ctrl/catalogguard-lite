@@ -1739,8 +1739,8 @@ class CatalogGuardApiClient:
         """Set the runtime active version, or deactivate new runs with None.
 
         active_version=None은 **명시적 비활성화**이지 "runtime override 제거"가
-        아닙니다. 서버에는 override를 지우고 배포 기본값으로 돌아가는 API가 없습니다.
-        호출자가 두 개념을 섞지 않도록 여기에 적어 둡니다.
+        아닙니다. override를 지우고 배포 기본값으로 돌아가는 것은 아래
+        reset_etl_profile_activation()이며, 두 개념을 섞으면 안 됩니다.
 
         actor는 body에 넣지 않습니다. 서버가 인증된 사용자에서만 가져옵니다.
         """
@@ -1754,6 +1754,24 @@ class CatalogGuardApiClient:
             self._activation_path(profile_id),
             json_body={"active_version": normalized_version},
         )
+        self._validate_response_keys(data, ETL_PROFILE_ACTIVATION_RESPONSE_KEYS)
+        if not _is_valid_etl_profile_activation_response(data):
+            raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+        return data
+
+    def reset_etl_profile_activation(self, profile_id: str) -> dict[str, Any]:
+        """Delete the runtime override so the deployment default applies again.
+
+        `update_etl_profile_activation(active_version=None)`과 **다른 동작**입니다.
+        그쪽은 명시적 비활성 override를 만들고, 이쪽은 override 자체를 지웁니다.
+
+        지운 결과 배포 기본값이 활성이면 그 프로필은 **다시 활성화됩니다.** 호출자는
+        이것을 단순한 정리 동작으로 보여 주면 안 됩니다.
+
+        서버가 204가 아니라 reset 직후의 activation 상태를 돌려주므로, 같은 응답
+        검증을 그대로 씁니다. 별도 schema를 만들지 않습니다.
+        """
+        data = self._delete_json(self._activation_path(profile_id))
         self._validate_response_keys(data, ETL_PROFILE_ACTIVATION_RESPONSE_KEYS)
         if not _is_valid_etl_profile_activation_response(data):
             raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
@@ -2350,6 +2368,67 @@ class CatalogGuardApiClient:
                 request_id=_get_response_request_id(response),
             )
         return data
+
+    def _delete_json(self, path: str) -> dict[str, Any]:
+        response = self._delete_response(path)
+
+        try:
+            data = response.json()
+        except ValueError as error:
+            raise CatalogGuardApiResponseError(
+                INVALID_RESPONSE_MESSAGE,
+                request_id=_get_response_request_id(response),
+            ) from error
+
+        if not isinstance(data, dict):
+            raise CatalogGuardApiResponseError(
+                INVALID_RESPONSE_MESSAGE,
+                request_id=_get_response_request_id(response),
+            )
+        return data
+
+    def _delete_response(self, path: str):
+        """DELETE one runtime override, mapping the errors the caller must distinguish.
+
+        지금 DELETE를 쓰는 곳은 activation reset 하나뿐이라 오류 매핑도 그 계약에
+        맞춥니다. 404는 없는 프로필입니다. PUT과 달리 422 버전 오류는 없습니다 —
+        요청에 버전이 들어가지 않기 때문입니다.
+
+        body를 보내지 않습니다. 지울 대상은 경로가 정합니다.
+        """
+        url = f"{self._base_url}{path}"
+
+        try:
+            response = self._session.delete(url, timeout=self._timeout_seconds)
+            response.raise_for_status()
+        except requests.Timeout as error:
+            raise CatalogGuardApiTimeoutError(TIMEOUT_ERROR_MESSAGE) from error
+        except requests.ConnectionError as error:
+            raise CatalogGuardApiConnectionError(CONNECTION_ERROR_MESSAGE) from error
+        except requests.HTTPError as error:
+            error_response = getattr(error, "response", None)
+            request_id = _get_response_request_id(error_response)
+            status_code = getattr(error_response, "status_code", None)
+            if status_code == 404:
+                raise ETLProfileNotFoundError(
+                    ETL_PROFILE_NOT_FOUND_MESSAGE,
+                    request_id=request_id,
+                ) from error
+            auth_error = self._build_auth_error(
+                status_code,
+                error_response,
+                request_id=request_id,
+            )
+            if auth_error is not None:
+                raise auth_error from error
+            raise CatalogGuardApiResponseError(
+                SERVER_ERROR_MESSAGE,
+                request_id=request_id,
+            ) from error
+        except requests.RequestException as error:
+            raise CatalogGuardApiResponseError(SERVER_ERROR_MESSAGE) from error
+
+        return response
 
     def _put_response(self, path: str, *, json_body: dict[str, Any]):
         """PUT one idempotent state, mapping the errors the caller must distinguish.

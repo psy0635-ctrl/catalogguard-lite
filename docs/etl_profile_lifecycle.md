@@ -10,7 +10,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 - `[정책 결정]` — 지켜야 할 규칙. 그 자체로는 코드를 규정하지 않고, 강제 장치는 별도 Phase에서 만든다
 - `[향후 구현]` — 아직 없고, 나중에 만들 때 따를 방향
 
-**시점 표기 규칙**: 각 Phase 절은 그 Phase 시점의 사실을 기록한다. 뒤 Phase가 그것을 바꿨으면 해당 절에 갱신 표시를 남기고, 지금 무엇이 사실인지는 가장 나중 Phase 절이 말한다. 현재 최신은 **Phase 5B.2(17장)** 이다.
+**시점 표기 규칙**: 각 Phase 절은 그 Phase 시점의 사실을 기록한다. 뒤 Phase가 그것을 바꿨으면 해당 절에 갱신 표시를 남기고, 지금 무엇이 사실인지는 가장 나중 Phase 절이 말한다. 현재 최신은 **Phase 5B.3(18장)** 이다.
 
 | Phase | 무엇이 바뀌었나 | 절 |
 | --- | --- | --- |
@@ -21,6 +21,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 | Phase 5A.1 | 클라이언트/UI의 inactive 처리 | 15장 |
 | Phase 5B.1 | Persistent Runtime Activation API | 16장 |
 | Phase 5B.2 | Streamlit 운영 관리 화면 | 17장 |
+| Phase 5B.3 | Runtime Override Reset | 18장 |
 
 ---
 
@@ -256,6 +257,8 @@ sample_fashion_vendor
 > **갱신(Phase 5A)**: 비활성 상태 자체는 이제 코드에 있다. `active_version = None`이 Deactivate이며, `versions`의 archive는 그대로 남는다(14장).
 >
 > **갱신(Phase 5B.1)**: 이 값을 바꾸는 API가 생겼다. `PUT /api/v1/etl-profiles/{profile_id}/activation`에 `active_version: null`을 보내면 배포 없이 비활성화된다(16장). DELETE API는 여전히 없다 — Policy G대로 삭제가 아니라 비활성이 기본 동작이기 때문이다.
+>
+> **갱신(Phase 5B.3)**: 같은 경로에 `DELETE`가 생겼다. 다만 이것은 **프로필 삭제가 아니라 runtime override row 삭제**이며, 지운 결과는 "없어짐"이 아니라 "배포 기본값 복귀"다. 프로필도 archive도 과거 배치도 그대로 남으므로 Policy G는 그대로다(18장).
 
 ### Policy H — Active Version (채택, `[향후 구현]`, 단 자동 추론 금지)
 
@@ -399,6 +402,7 @@ registry: sample_fashion_vendor_v1 -> active_version "3"
 | Phase 5A.1 | 클라이언트/UI의 inactive 처리 — Python client가 `inactive_profile`을 전용 예외로 매핑하고 Streamlit이 원인을 안내한다 | **완료** (15장) |
 | Phase 5B.1 | Persistent Runtime Activation API — activation을 바꾸는 API·권한·DB 지속 상태 (16장) | **완료** |
 | Phase 5B.2 | Streamlit Admin UI — 활성 버전 선택·활성화·비활성화 화면 (17장) | **완료** |
+| Phase 5B.3 | Runtime Override Reset — runtime override를 지워 배포 기본값으로 되돌린다 (18장) | **완료** |
 | Phase 6 | 필요할 때만 DB-backed Profile / ProfileVersion (Option C) | 조건부 |
 
 Phase 4가 끝나기 전에는 새 프로필 **등록** 기능을 만들지 않는다. 등록을 먼저 만들면 보존 구조 없이 프로필 수만 늘어 3.2의 위험이 프로필 수만큼 곱해진다.
@@ -927,12 +931,14 @@ activation API 계약, DB 스키마, Alembic head(`20260822_0014`), 동시성 �
 
 ### 17.10 아직 없는 것
 
-- **runtime override 제거(배포 기본값 복귀) 기능이 없다.** 아래 17.11에서 따로 다룬다
+- ~~**runtime override 제거(배포 기본값 복귀) 기능이 없다.**~~ → Phase 5B.3에서 추가됐다(18장). 아래 17.11은 Phase 5B.2 시점의 한계 기록이다
 - activation 변경 이력(append-only audit)이 없다(16.10)
 - Profile CRUD가 없다
 - 이 화면의 Chromium E2E가 없다. AppTest로만 검증한다
 
 ### 17.11 `[한계]` runtime override는 되돌릴 수 없다
+
+> **갱신(Phase 5B.3)**: 이 한계는 해소됐다. 아래는 Phase 5B.2 시점의 기록이며, 지금 무엇이 사실인지는 18장이 말한다.
 
 현재 API로 만들 수 있는 상태 전환은 셋뿐이다.
 
@@ -947,6 +953,112 @@ activation API 계약, DB 스키마, Alembic head(`20260822_0014`), 동시성 �
 `PUT {"active_version": null}`은 **override 제거가 아니라 명시적 비활성**이다. 두 개념을 섞으면 안 된다. 그래서 화면에 "배포 기본값으로 되돌리기" 버튼을 만들지 않았다. 있지도 않은 동작을 버튼으로 보여 주는 것이 기능이 없는 것보다 나쁘다.
 
 한 번 override를 만들면 그 프로필은 계속 명시적으로 관리된다. Phase 5B.2의 목표(상태 확인·활성화·비활성화)에는 이 전환이 필요 없어서 blocker는 아니지만, 실제 운영에서 필요해지면 별도 endpoint를 설계해야 한다.
+
+---
+
+## 18. `[현재 구현]` Phase 5B.3 — Runtime Override Reset
+
+Phase 5B.2가 남긴 한계 하나(17.11)를 없앤다. **없던 상태 전환 하나**를 더하는 것이 전부이고, 기존 계약은 한 줄도 바꾸지 않았다. DB 스키마와 Alembic head(`20260822_0014`)도 그대로다.
+
+### 18.1 왜 필요했나: `PUT null`은 reset이 아니다
+
+`PUT {"active_version": null}`은 **명시적 비활성**이다. row가 남고, "운영자가 이 프로필을 내렸다"는 사실이 저장된다. 그래서 이 요청으로는 "아무도 손대지 않은 상태"로 돌아갈 수 없다.
+
+한 번 override를 만들면 그 프로필은 영영 명시적으로 관리됐다. 배포 기본값이 바뀌어도 그 프로필만 따라가지 않고, 되돌릴 방법이 없었다.
+
+두 개념을 하나로 합치는 것(= `PUT null`을 reset으로 바꾸는 것)은 **선택지가 아니다.** 합치는 순간 운영자가 내린 결정이 배포 기본값이 바뀔 때 조용히 뒤집힌다. 그래서 `PUT null`의 뜻은 그대로 두고 **DELETE를 따로 만들었다.**
+
+### 18.2 상태 전환
+
+| 동작 | `etl_profile_activations` row | effective |
+| --- | --- | --- |
+| `PUT {"active_version": "2"}` | 있음 (`active_version = '2'`) | `"2"` |
+| `PUT {"active_version": null}` | 있음 (`active_version = NULL`) | `None` — 명시적 비활성 |
+| `DELETE` (이번 Phase) | **없음** | 배포 registry의 `active_version` |
+
+`DELETE` 뒤에는 `runtime_override_exists = false`, `runtime_active_version = null`이고 `effective_active_version = deployment_active_version`이다. `is_active`도 배포 기본값이 다시 정한다.
+
+이제 없던 전환이 생겼다.
+
+```text
+명시적 활성 override  --DELETE-->  배포 기본값 사용
+명시적 비활성 override --DELETE-->  배포 기본값 사용
+```
+
+### 18.3 `[안전]` reset은 프로필을 되살릴 수 있다
+
+이번 Phase에서 가장 중요한 사실이다.
+
+배포 기본값이 활성(`v2`)인 프로필에 명시적 비활성 override가 걸려 있을 때 reset을 누르면, override가 사라지면서 **배포 기본값 `v2`가 다시 적용되어 그 프로필이 즉시 실행 가능해진다.**
+
+그래서 화면에서 reset을 단순한 "정리" 버튼처럼 보여 주지 않는다.
+
+- 누르기 전에 **되돌린 뒤 실제 적용 버전**을 보여 준다
+- 지금 비활성인 프로필이면 "다시 활성화됩니다"를 명시한다
+- 배포 기본값 자체가 비활성이면 "reset 뒤에도 계속 비활성"임을 정확히 말한다
+- 비활성화와 같은 수준의 확인 checkbox를 거친다
+
+### 18.4 Idempotency와 404의 구분
+
+`DELETE`는 idempotent하다. override가 이미 없어도 200이고, 배포 기본값 상태를 그대로 돌려준다. 두 번째 DELETE는 재시도이지 오류가 아니다.
+
+다만 **없는 프로필은 계속 404**다. "지울 것이 없다"와 "그런 프로필이 없다"는 운영자가 해야 할 일이 다르고, 하나로 뭉개면 오타로 친 profile_id가 성공으로 보인다.
+
+| 요청 | 응답 |
+| --- | --- |
+| allowlist 프로필 + override 있음 | 200 (지우고 배포 기본값 상태 반환) |
+| allowlist 프로필 + override 없음 | 200 (그대로 배포 기본값 상태 반환) |
+| allowlist 밖 profile_id | 404 |
+| viewer | 403 |
+| 미인증 | 401 |
+
+### 18.5 왜 204가 아니라 200 + activation 응답인가
+
+`204 No Content`면 화면이 reset 직후의 effective 상태를 알기 위해 `GET`을 한 번 더 해야 한다. 그 사이에 다른 운영자의 변경이 끼면 화면이 **방금 자기가 만든 상태를 잘못 설명한다.**
+
+그래서 기존 `ETLProfileActivationResponse`를 그대로 돌려준다. 새 schema를 만들지 않았고, 클라이언트도 기존 응답 검증을 그대로 재사용한다. `actor_username`과 `updated_at`은 항상 `null`이다 — 그 값을 들고 있던 row 자체가 없어졌기 때문이다.
+
+`DELETE`는 body를 받지 않는다. 지울 대상은 경로의 `profile_id` 하나로 정해지고, actor는 저장할 row가 없어진다.
+
+### 18.6 권한
+
+기존 RBAC dependency를 그대로 쓴다. 새 role도 새 검사도 없다.
+
+| 메서드 | 권한 |
+| --- | --- |
+| `GET .../activation` | viewer 이상 |
+| `PUT .../activation` | operator |
+| `DELETE .../activation` | operator |
+
+### 18.7 `[한계]` reset은 정보를 지운다
+
+이 표는 프로필당 **current-state row 하나**다(16.8). DELETE하면 그 row의 `active_version`뿐 아니라 `actor_username`과 `updated_at`도 함께 사라진다.
+
+즉 "누가 언제 이 override를 만들었는가"는 reset과 동시에 어디에도 남지 않는다. activation append-only history/audit 표는 **이번 Phase에서도 만들지 않았다**(16.10). 필요해지면 별도 Phase에서 별도 표로 설계해야 하며, 이 표를 그 용도로 읽으면 안 된다.
+
+### 18.8 이번에 바뀌지 않은 것
+
+- `PUT {"active_version": null}`의 뜻. 여전히 **명시적 비활성**이고 override를 남긴다
+- `GET`/`PUT`의 응답 계약, `ETLProfileActivationResponse` schema, `available_versions` 규칙
+- DB 스키마, Alembic head `20260822_0014`, migration
+- effective 계산 위치. 계속 `resolve_etl_profile_activation()` 한 곳뿐이다
+- Profile CRUD 없음, ProfileVersion DB 표 없음, activation history 없음
+- Airflow DAG, S3/HTTP의 fetch 전 사전 검사, 실패 코드 우선순위
+- `INSPECTION_VERSION`, `PREVIEW_SCHEMA_VERSION`, profile semantic version, dedup identity, 프로필 JSON
+- 의존성
+
+### 18.9 부수적으로 고친 것
+
+Streamlit 관리 화면의 확인 checkbox 초기화가 성공 처리에서 `session_state[key] = False`로 되어 있었다. Streamlit은 이번 run에서 이미 만들어진 widget의 key에 대입하면 예외를 내므로, 비활성화 성공 뒤 화면이 예외로 끝나고 있었다. 기존 AppTest가 `app.exception`을 보지 않아 드러나지 않던 문제다.
+
+대입 대신 삭제(`pop`)로 바꿨다. 삭제는 허용되고 다음 run에서 checkbox가 기본값으로 다시 만들어진다. reset과 비활성화가 같은 경로를 쓰므로 한 곳만 고치면 둘 다 낫는다.
+
+### 18.10 아직 없는 것
+
+- activation 변경 이력(append-only audit)이 없다 — 18.7
+- Profile CRUD(등록·수정·삭제)가 없다
+- 이 화면의 Chromium E2E가 없다. AppTest로만 검증한다
+- 과거 배치의 런타임 재현은 여전히 없다(16.4)
 
 ---
 
