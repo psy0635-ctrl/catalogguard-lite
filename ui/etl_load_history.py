@@ -111,9 +111,14 @@ ETL_PROFILE_ADMIN_NO_VERSION = "없음"
 ETL_PROFILE_ADMIN_DEACTIVATE_CONFIRM_LABEL = (
     "이 프로필의 신규 ETL 실행을 중단하는 것을 확인했습니다."
 )
-# 이 표는 현재 상태 한 줄만 저장합니다. 변경 이력이 아니라는 점을 화면에서도 밝힙니다.
+# 위쪽 actor/updated_at은 현재 runtime override 하나에 대한 current-state 정보이고,
+# 성공한 운영 명령의 과거 기록은 아래 Activation 운영 이력이 따로 보여 줍니다. 이 caption은
+# override가 있을 때만 그려지므로, "지금 보이는 이 값이 무엇인가"와 "되돌리면 어떻게 되는가"를
+# 말합니다. reset하면 이 값은 사라지지만 그 명령 자체는 이력에 남는다는 것이 핵심입니다.
 ETL_PROFILE_ADMIN_ACTOR_CAPTION = (
-    "마지막으로 이 상태를 만든 사용자와 시각입니다. 변경 이력은 저장하지 않습니다."
+    "현재 런타임 override를 마지막으로 만든 사용자와 시각입니다. "
+    "배포 기본값으로 되돌리면 이 값은 사라지지만, 성공한 활성화·비활성화·"
+    "배포 기본값으로 되돌리기 명령은 아래 Activation 운영 이력에 남습니다."
 )
 # 서버 message 원문 대신 화면 문구를 씁니다. 사용자가 바로 할 수 있는 행동을 적습니다.
 ETL_PROFILE_ADMIN_STALE_VERSION_MESSAGE = (
