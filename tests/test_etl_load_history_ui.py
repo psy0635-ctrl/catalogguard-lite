@@ -3940,3 +3940,42 @@ def test_a_history_failure_does_not_leak_the_server_message(monkeypatch):
     errors = " ".join(str(element.value) for element in app.error)
     assert "secret" not in errors
     assert "postgresql" not in errors
+
+
+# 이 문구는 Phase 5B.4 이전 caption의 일부였습니다. 지금은 같은 화면 바로 아래에
+# Activation 운영 이력이 그려지므로, 남아 있으면 화면이 스스로와 모순됩니다.
+STALE_NO_HISTORY_CAPTION = "변경 이력은 저장하지 않습니다"
+
+
+def test_the_actor_caption_does_not_contradict_the_history_section(monkeypatch):
+    """한 화면이 "이력을 저장하지 않는다"와 운영 이력 표를 동시에 보여 주면 안 됩니다.
+
+    current-state의 actor는 "지금 이 override를 만든 사람"이라 reset하면 사라지지만,
+    그 명령 자체는 이력에 남습니다. caption이 그 관계를 말해야 합니다.
+
+    문구 전체를 고정하지는 않습니다. 사소한 표현 수정마다 테스트가 깨지면 정작
+    지켜야 할 의미가 묻히기 때문에, 핵심 의미 조각만 확인합니다.
+    """
+    api_client = _history_client(
+        activation_responses={"sample_fashion_vendor_v1": OVERRIDE_ACTIVATION}
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    body = _body_text(app)
+    assert STALE_NO_HISTORY_CAPTION not in body
+    # caption과 이력 표가 같은 화면에 함께 있습니다.
+    assert etl_load_history.ETL_PROFILE_ADMIN_ACTOR_CAPTION in body
+    assert "현재 런타임 override" in body
+    assert "Activation 운영 이력" in body
+    assert not app.exception
+
+
+def test_the_actor_caption_constant_points_at_the_history_section():
+    """상수 자체도 고정합니다. 렌더링 조건이 바뀌어도 문구는 남기 때문입니다."""
+    caption = etl_load_history.ETL_PROFILE_ADMIN_ACTOR_CAPTION
+
+    assert STALE_NO_HISTORY_CAPTION not in caption
+    assert "현재 런타임 override" in caption
+    assert "Activation 운영 이력" in caption
