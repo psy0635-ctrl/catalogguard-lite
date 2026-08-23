@@ -16,7 +16,12 @@ from api.main import app
 from config.database import get_optional_database_url
 from core.security import create_access_token
 from db.auth_service import create_user
-from db.models import ETLLoadRun, ETLProfileActivation, User
+from db.models import (
+    ETLLoadRun,
+    ETLProfileActivation,
+    ETLProfileActivationEvent,
+    User,
+)
 from db.session import create_database_engine, create_session_factory, get_session
 
 
@@ -25,6 +30,10 @@ client = TestClient(app, raise_server_exceptions=False)
 PROFILE_ID = "sample_marketplace_vendor_v1"
 OTHER_PROFILE_ID = "sample_fashion_vendor_v1"
 ACTIVATION_ENDPOINT = f"/api/v1/etl-profiles/{PROFILE_ID}/activation"
+ACTIVATION_HISTORY_ENDPOINT = f"{ACTIVATION_ENDPOINT}/history"
+OTHER_ACTIVATION_ENDPOINT = (
+    f"/api/v1/etl-profiles/{OTHER_PROFILE_ID}/activation"
+)
 ETL_PROFILES_ENDPOINT = "/api/v1/etl-profiles"
 WEB_ETL_ENDPOINT = "/api/v1/etl-loads"
 
@@ -80,7 +89,10 @@ def fixture_api(session_factory):
         return token
 
     def clear_activations() -> None:
+        # history도 함께 비웁니다. 남겨 두면 다음 테스트가 이전 테스트의 운영 명령을
+        # 자기 이력으로 보게 됩니다.
         with session_factory() as session:
+            session.execute(delete(ETLProfileActivationEvent))
             session.execute(delete(ETLProfileActivation))
             session.commit()
 
@@ -815,3 +827,276 @@ def test_reset_does_not_change_the_profile_definition(api):
     assert detail["profile_version"] == "2"
     assert detail["profile_name"] == "sample_marketplace_vendor"
     assert detail["source_columns"]["style_id"] == ["product_group_id"]
+
+
+# ---- Phase 5B.4: 성공한 운영 명령의 append-only 이력 --------------------------
+
+
+HISTORY_ITEM_KEYS = {
+    "event_id",
+    "profile_id",
+    "action",
+    "deployment_active_version",
+    "runtime_override_exists",
+    "runtime_active_version",
+    "effective_active_version",
+    "actor_username",
+    "created_at",
+}
+
+
+def _history(token: str, **params):
+    return client.get(
+        ACTIVATION_HISTORY_ENDPOINT, headers=_headers(token), params=params or None
+    )
+
+
+def test_anonymous_history_read_is_401(api):
+    response = client.get(ACTIVATION_HISTORY_ENDPOINT)
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "authentication_required"
+
+
+def test_viewer_can_read_the_history(api):
+    """운영 기록을 읽는 것은 상태를 바꾸는 것이 아닙니다.
+
+    상태를 바꿀 수 없는 사람도 "왜 지금 이렇게 되어 있는가"는 확인할 수 있어야 합니다.
+    """
+    response = _history(api("viewer"))
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["items"] == []
+    assert payload["total"] == 0
+    assert payload["limit"] == 20
+    assert payload["offset"] == 0
+
+
+def test_operator_can_read_the_history(api):
+    response = _history(api("operator"))
+
+    assert response.status_code == 200, response.text
+
+
+def test_history_of_an_unknown_profile_is_404(api):
+    response = client.get(
+        "/api/v1/etl-profiles/nope/activation/history",
+        headers=_headers(api("viewer")),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "ETL profile not found."
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"limit": 0},
+        {"limit": 101},
+        {"limit": -1},
+        {"offset": -1},
+        {"limit": "many"},
+        {"offset": "start"},
+    ],
+)
+def test_invalid_pagination_is_422(api, params):
+    response = _history(api("viewer"), **params)
+
+    assert response.status_code == 422
+
+
+def test_history_records_every_successful_mutation(api):
+    """PUT version / PUT null / DELETE가 각각 event 하나를 남깁니다."""
+    token = api("operator")
+    assert (
+        client.put(
+            ACTIVATION_ENDPOINT, headers=_headers(token), json={"active_version": "1"}
+        ).status_code
+        == 200
+    )
+    assert (
+        client.put(
+            ACTIVATION_ENDPOINT, headers=_headers(token), json={"active_version": None}
+        ).status_code
+        == 200
+    )
+    assert client.delete(ACTIVATION_ENDPOINT, headers=_headers(token)).status_code == 200
+
+    payload = _history(token).json()
+    assert payload["total"] == 3
+    # 최신순입니다.
+    assert [item["action"] for item in payload["items"]] == [
+        "reset",
+        "deactivate",
+        "activate",
+    ]
+
+
+def test_a_failed_mutation_records_nothing(api):
+    """없는 버전으로 실패한 요청은 이력에 흔적을 남기지 않습니다."""
+    token = api("operator")
+    response = client.put(
+        ACTIVATION_ENDPOINT, headers=_headers(token), json={"active_version": "999"}
+    )
+
+    assert response.status_code == 422
+    assert _history(token).json()["total"] == 0
+
+
+def test_a_forbidden_mutation_records_nothing(api):
+    """403은 service까지 도달하지 않으므로 event가 생길 자리가 없습니다."""
+    viewer_token = api("viewer")
+    response = client.put(
+        ACTIVATION_ENDPOINT,
+        headers=_headers(viewer_token),
+        json={"active_version": "1"},
+    )
+
+    assert response.status_code == 403
+    assert _history(viewer_token).json()["total"] == 0
+
+
+def test_history_item_shape_and_actor(api):
+    token = api("operator")
+    client.put(
+        ACTIVATION_ENDPOINT, headers=_headers(token), json={"active_version": "1"}
+    )
+
+    [item] = _history(token).json()["items"]
+    assert set(item) == HISTORY_ITEM_KEYS
+    # DB 관계용 ID는 응답에 없습니다. 화면에 필요한 것은 username snapshot입니다.
+    assert "actor_user_id" not in item
+    assert item["profile_id"] == PROFILE_ID
+    assert item["action"] == "activate"
+    assert item["deployment_active_version"] == "2"
+    assert item["runtime_override_exists"] is True
+    assert item["runtime_active_version"] == "1"
+    assert item["effective_active_version"] == "1"
+    assert item["actor_username"].startswith("activation_operator_")
+    assert item["created_at"]
+
+
+def test_reset_keeps_the_actor_in_history_while_current_state_has_none(api):
+    """모순이 아니라 서로 다른 질문에 대한 답입니다.
+
+    current-state row는 지워졌으므로 "지금 이 override를 만든 사람"은 없습니다.
+    "그 override를 지운 명령을 내린 사람"은 이력에 남습니다.
+    """
+    token = api("operator")
+    client.put(
+        ACTIVATION_ENDPOINT, headers=_headers(token), json={"active_version": "1"}
+    )
+    reset_response = client.delete(ACTIVATION_ENDPOINT, headers=_headers(token))
+
+    assert reset_response.status_code == 200
+    assert reset_response.json()["actor_username"] is None
+    assert reset_response.json()["updated_at"] is None
+
+    reset_event = _history(token).json()["items"][0]
+    assert reset_event["action"] == "reset"
+    assert reset_event["actor_username"].startswith("activation_operator_")
+    # override는 사라졌지만 배포 기본값이 활성이라 실제 적용 버전은 있습니다.
+    assert reset_event["runtime_override_exists"] is False
+    assert reset_event["effective_active_version"] == "2"
+
+
+def test_repeated_identical_commands_still_add_events(api):
+    """상태 idempotency와 audit event idempotency는 다른 개념입니다."""
+    token = api("operator")
+    for _ in range(2):
+        client.put(
+            ACTIVATION_ENDPOINT, headers=_headers(token), json={"active_version": "1"}
+        )
+    for _ in range(2):
+        client.delete(ACTIVATION_ENDPOINT, headers=_headers(token))
+
+    payload = _history(token).json()
+    assert payload["total"] == 4
+    assert [item["action"] for item in payload["items"]] == [
+        "reset",
+        "reset",
+        "activate",
+        "activate",
+    ]
+
+
+def test_history_paginates(api):
+    token = api("operator")
+    for _ in range(3):
+        client.put(
+            ACTIVATION_ENDPOINT, headers=_headers(token), json={"active_version": "1"}
+        )
+
+    first = _history(token, limit=2, offset=0).json()
+    second = _history(token, limit=2, offset=2).json()
+
+    assert first["total"] == 3
+    assert first["limit"] == 2
+    assert len(first["items"]) == 2
+    assert second["offset"] == 2
+    assert len(second["items"]) == 1
+    assert not {item["event_id"] for item in first["items"]} & {
+        item["event_id"] for item in second["items"]
+    }
+
+
+def test_history_is_scoped_to_one_profile(api):
+    token = api("operator")
+    client.put(
+        ACTIVATION_ENDPOINT, headers=_headers(token), json={"active_version": "1"}
+    )
+    client.put(
+        OTHER_ACTIVATION_ENDPOINT, headers=_headers(token), json={"active_version": "1"}
+    )
+
+    payload = _history(token).json()
+    assert payload["total"] == 1
+    assert [item["profile_id"] for item in payload["items"]] == [PROFILE_ID]
+
+
+def test_mutation_responses_did_not_gain_a_history_field(api):
+    """기존 PUT/DELETE 응답 계약은 그대로입니다. 이력은 별도 endpoint로만 읽습니다."""
+    token = api("operator")
+    put_response = client.put(
+        ACTIVATION_ENDPOINT, headers=_headers(token), json={"active_version": "1"}
+    )
+    delete_response = client.delete(ACTIVATION_ENDPOINT, headers=_headers(token))
+
+    expected_keys = {
+        "profile_id",
+        "display_name",
+        "deployment_active_version",
+        "runtime_override_exists",
+        "runtime_active_version",
+        "effective_active_version",
+        "is_active",
+        "available_versions",
+        "actor_username",
+        "updated_at",
+    }
+    assert set(put_response.json()) == expected_keys
+    assert set(delete_response.json()) == expected_keys
+
+
+def test_history_has_no_write_endpoints(api):
+    """append-only는 애플리케이션 계약입니다. 수정/삭제 경로를 두지 않습니다."""
+    token = api("operator")
+    client.put(
+        ACTIVATION_ENDPOINT, headers=_headers(token), json={"active_version": "1"}
+    )
+    event_id = _history(token).json()["items"][0]["event_id"]
+
+    for send in (
+        lambda: client.put(
+            ACTIVATION_HISTORY_ENDPOINT, headers=_headers(token), json={"action": "x"}
+        ),
+        lambda: client.delete(ACTIVATION_HISTORY_ENDPOINT, headers=_headers(token)),
+        lambda: client.post(ACTIVATION_HISTORY_ENDPOINT, headers=_headers(token)),
+        lambda: client.delete(
+            f"{ACTIVATION_HISTORY_ENDPOINT}/{event_id}", headers=_headers(token)
+        ),
+    ):
+        assert send().status_code in (404, 405)
+
+    assert _history(token).json()["total"] == 1

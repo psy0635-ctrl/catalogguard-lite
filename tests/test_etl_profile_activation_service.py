@@ -568,7 +568,12 @@ def test_reset_removes_an_active_override_and_restores_the_deployment_default(
         )
 
     with session_factory() as session:
-        view = reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+        view = reset_etl_profile_activation(
+            session,
+            profile_id=MARKETPLACE_PROFILE_ID,
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
 
     assert view.runtime_override_exists is False
     assert view.runtime_active_version is None
@@ -599,7 +604,12 @@ def test_reset_of_an_explicit_inactive_override_reactivates_the_profile(
         ).is_active is False
 
     with session_factory() as session:
-        view = reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+        view = reset_etl_profile_activation(
+            session,
+            profile_id=MARKETPLACE_PROFILE_ID,
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
 
     assert view.runtime_override_exists is False
     assert view.effective_active_version == "2"
@@ -617,9 +627,19 @@ def test_reset_is_idempotent_for_a_profile_without_an_override(
 ):
     """DELETE를 두 번 보내는 것은 재시도이지 오류가 아닙니다."""
     with session_factory() as session:
-        first = reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+        first = reset_etl_profile_activation(
+            session,
+            profile_id=MARKETPLACE_PROFILE_ID,
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
     with session_factory() as session:
-        second = reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+        second = reset_etl_profile_activation(
+            session,
+            profile_id=MARKETPLACE_PROFILE_ID,
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
 
     assert first == second
     assert first.runtime_override_exists is False
@@ -634,7 +654,12 @@ def test_reset_of_an_unknown_profile_is_rejected(
     """"지울 것이 없다"와 "그런 프로필이 없다"는 운영자가 해야 할 일이 다릅니다."""
     with session_factory() as session:
         with pytest.raises(ETLProfileNotFoundError):
-            reset_etl_profile_activation(session, profile_id=unknown_profile_id)
+            reset_etl_profile_activation(
+            session,
+            profile_id=unknown_profile_id,
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
 
 
 def test_reset_actually_deletes_the_row(session_factory, clean_activations):
@@ -649,7 +674,12 @@ def test_reset_actually_deletes_the_row(session_factory, clean_activations):
     assert len(_override_rows(session_factory, MARKETPLACE_PROFILE_ID)) == 1
 
     with session_factory() as session:
-        reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+        reset_etl_profile_activation(
+            session,
+            profile_id=MARKETPLACE_PROFILE_ID,
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
 
     # view만 배포 기본값으로 보이고 row가 남아 있으면, 다음 조회가 다시 override를
     # 발견해 화면과 실제 상태가 갈라집니다.
@@ -667,7 +697,12 @@ def test_reset_survives_a_brand_new_session(clean_activations, session_factory):
             actor_username="operator_user",
         )
     with session_factory() as session:
-        reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+        reset_etl_profile_activation(
+            session,
+            profile_id=MARKETPLACE_PROFILE_ID,
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
 
     engine = create_database_engine(get_optional_database_url())
     try:
@@ -694,7 +729,12 @@ def test_reset_only_touches_the_requested_profile(session_factory, clean_activat
             )
 
     with session_factory() as session:
-        reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+        reset_etl_profile_activation(
+            session,
+            profile_id=MARKETPLACE_PROFILE_ID,
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
 
     with session_factory() as session:
         other = get_etl_profile_activation(session, profile_id=FASHION_PROFILE_ID)
@@ -716,7 +756,12 @@ def test_reset_is_not_the_same_as_writing_a_null_version(
             actor_username="operator_user",
         )
     with session_factory() as session:
-        reset = reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+        reset = reset_etl_profile_activation(
+            session,
+            profile_id=MARKETPLACE_PROFILE_ID,
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
 
     # 둘 다 runtime_active_version은 None이지만 뜻이 정반대입니다.
     assert deactivated.runtime_active_version is None
@@ -739,7 +784,12 @@ def test_reset_does_not_change_the_deployment_registry(
             actor_username="operator_user",
         )
     with session_factory() as session:
-        reset_etl_profile_activation(session, profile_id=MARKETPLACE_PROFILE_ID)
+        reset_etl_profile_activation(
+            session,
+            profile_id=MARKETPLACE_PROFILE_ID,
+            actor_user_id=None,
+            actor_username="operator_user",
+        )
 
     assert profile_loader._ETL_PROFILE_REGISTRY[MARKETPLACE_PROFILE_ID][
         "active_version"

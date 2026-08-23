@@ -301,6 +301,41 @@ class ETLProfileActivationUpdateRequest(BaseModel):
     active_version: str | None = None
 
 
+# 서버가 기록하는 세 명령입니다. 자유 문자열로 두면 화면이 모르는 값을 받고도
+# 그럴듯하게 그리게 되므로, 계약을 여기서 좁힙니다.
+ETLProfileActivationAction = Literal["activate", "deactivate", "reset"]
+
+
+class ETLProfileActivationHistoryItemResponse(BaseModel):
+    """One successful operator activation command, as it was recorded.
+
+    네 상태 값은 **그 명령이 성공한 직후의 snapshot**이지 지금 상태가 아닙니다.
+    지금 상태는 `.../activation`이 답합니다.
+
+    actor_user_id는 노출하지 않습니다. DB 관계용 ID이고, 운영자에게 필요한 것은
+    사용자가 삭제된 뒤에도 남는 actor_username snapshot입니다.
+    """
+
+    event_id: int
+    profile_id: str
+    action: ETLProfileActivationAction
+    deployment_active_version: str | None
+    runtime_override_exists: bool
+    runtime_active_version: str | None
+    effective_active_version: str | None
+    actor_username: str | None
+    created_at: datetime
+
+
+class ETLProfileActivationHistoryResponse(BaseModel):
+    """Read-only. 이 표에는 수정·삭제 endpoint가 없습니다(append-only)."""
+
+    items: list[ETLProfileActivationHistoryItemResponse]
+    total: int
+    limit: int
+    offset: int
+
+
 CatalogPromotionValue = str | int | None
 
 

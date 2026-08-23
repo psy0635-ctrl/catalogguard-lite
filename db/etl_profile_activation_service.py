@@ -15,6 +15,11 @@ Phase 5B.1 of docs/etl_profile_lifecycle.md. Phase 5A까지 activation은 코드
 
 effective activation 계산은 여기서 다시 구현하지 않고
 etl.profile_loader.resolve_etl_profile_activation() 하나만 씁니다.
+
+Phase 5B.4에서 여기에 append-only history가 더해졌습니다. current-state 표
+(etl_profile_activations)는 그대로 두고, **성공한 operator 명령**을 별도 표
+(etl_profile_activation_events)에 하나씩 남깁니다. 두 쓰기는 반드시 같은 트랜잭션
+안에서 일어납니다.
 """
 from __future__ import annotations
 
@@ -25,7 +30,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.orm import Session
 
-from db.models import ETLProfileActivation
+from db.models import ETLProfileActivation, ETLProfileActivationEvent
 from etl.profile_loader import (
     ETLProfileActivationState,
     get_profile_display_name,
@@ -166,6 +171,40 @@ def _normalized_version(profile_id: str, active_version: str | None) -> str | No
     return stripped
 
 
+# 세 명령이 남기는 event의 모양을 한 곳에서 정합니다. 각 함수가 따로 만들면 한쪽만
+# 필드가 빠지거나 다른 값을 넣는 차이가 조용히 생깁니다. 허용되는 action 값
+# (activate/deactivate/reset)은 DB CHECK 제약이 최종적으로 강제합니다.
+def _record_activation_event(
+    session: Session,
+    *,
+    action: str,
+    activation: ETLProfileActivationState,
+    actor_user_id: int | None,
+    actor_username: str | None,
+) -> None:
+    """Append one event for a command the server just accepted.
+
+    **커밋하지 않습니다.** 트랜잭션 경계는 호출자(set_/reset_)가 가집니다. 여기서
+    commit하면 상태 변경과 기록이 서로 다른 트랜잭션으로 갈라져, 뒤이어 실패했을 때
+    기록만 남거나 상태만 바뀝니다.
+
+    activation은 **명령 직후의 상태**여야 합니다. 호출자가 같은 트랜잭션 안에서
+    resolve한 값을 넘기므로, 여기서 registry를 다시 읽지 않습니다.
+    """
+    session.add(
+        ETLProfileActivationEvent(
+            profile_id=activation.profile_id,
+            action=action,
+            deployment_active_version=activation.deployment_active_version,
+            runtime_override_exists=activation.runtime_override_exists,
+            runtime_active_version=activation.runtime_active_version,
+            effective_active_version=activation.effective_active_version,
+            actor_user_id=actor_user_id,
+            actor_username=actor_username,
+        )
+    )
+
+
 def set_etl_profile_activation(
     session: Session,
     *,
@@ -200,11 +239,14 @@ def set_etl_profile_activation(
     actor_username과 updated_at은 "현재 상태를 마지막으로 만든 것이 누구/언제인가"일
     뿐이고, 그것으로 activation 변경 이력을 되짚을 수는 없습니다.
 
-    append-only activation audit/history는 Phase 5B.1 범위 밖입니다. 필요해지면 별도
-    표가 있어야 하며, 이 표를 그 용도로 읽으면 안 됩니다.
+    이 표 자체는 여전히 이력이 아닙니다. 성공한 명령의 append-only 기록은 Phase 5B.4가
+    추가한 **별도 표**(etl_profile_activation_events)에 남고, 아래에서 이 upsert와
+    **같은 트랜잭션 안에서** 함께 기록합니다. 두 쓰기를 다른 트랜잭션으로 나누면 상태만
+    바뀌고 기록이 없거나, 기록만 있고 상태가 안 바뀐 순간이 생깁니다.
     """
     # 검증을 트랜잭션 밖에서 먼저 합니다. 잘못된 입력이 쓰기 트랜잭션을 열지 않게 하고,
-    # 없는 profile_id는 여기서 ETLProfileNotFoundError로 끝납니다.
+    # 없는 profile_id는 여기서 ETLProfileNotFoundError로 끝납니다. 실패한 요청은 상태도
+    # history event도 만들지 않아야 하므로, 이 순서가 audit 정확성의 일부입니다.
     get_profile_display_name(profile_id)
     normalized_version = _normalized_version(profile_id, active_version)
 
@@ -229,7 +271,19 @@ def set_etl_profile_activation(
                 },
             )
         )
+        # event가 담는 것은 "이 명령이 성공한 직후의 상태"입니다. 그래서 같은 트랜잭션
+        # 안에서 resolve합니다. 여기서 effective를 다시 계산하지 않는 이유는 계속
+        # 같습니다 — 계산하는 곳은 resolve_etl_profile_activation() 한 곳뿐입니다.
+        _record_activation_event(
+            session,
+            action="activate" if normalized_version is not None else "deactivate",
+            activation=resolve_etl_profile_activation(profile_id, session=session),
+            actor_user_id=actor_user_id,
+            actor_username=actor_username,
+        )
 
+    # 응답은 지금까지와 같이 커밋 뒤에 다시 읽습니다. row의 updated_at처럼 DB가 채우는
+    # 값을 그대로 보여 주기 위해서이고, 이 endpoint의 기존 응답 계약을 바꾸지 않습니다.
     activation = resolve_etl_profile_activation(profile_id, session=session)
     return _to_view(activation, row=_activation_row(session, profile_id))
 
@@ -238,6 +292,8 @@ def reset_etl_profile_activation(
     session: Session,
     *,
     profile_id: str,
+    actor_user_id: int | None,
+    actor_username: str | None,
 ) -> ETLProfileActivationView:
     """Remove the runtime override so the deployment default applies again.
 
@@ -260,11 +316,22 @@ def reset_etl_profile_activation(
     "그런 프로필이 없다"는 운영자가 해야 할 일이 다릅니다.
 
     이 표는 current-state row 하나뿐이라, 지우면 그 row의 actor_username/updated_at/
-    active_version도 함께 사라집니다. append-only activation history는 여전히 없으므로
-    (16.10) 이전 결정은 어디에도 남지 않습니다.
+    active_version도 함께 사라집니다. **그래서 이 명령을 누가 언제 내렸는지가 남는 곳은
+    Phase 5B.4의 history 표뿐입니다.** 이 함수가 actor를 받는 이유가 그것입니다 — 저장할
+    current-state row는 없어지지만, 명령 자체는 기록되어야 합니다.
+
+    그 결과 reset 직후에는 current-state 응답의 actor_username/updated_at이 None이고
+    history에는 actor가 남습니다. 모순이 아니라 서로 다른 질문에 대한 답입니다. 전자는
+    "지금 이 override를 만든 사람"이고(override 자체가 없으므로 없음), 후자는 "그 override를
+    지운 명령을 내린 사람"입니다.
+
+    override가 원래 없어 지운 row가 0건이어도 event는 남깁니다. API는 idempotent 200이지만
+    이것은 **성공한 운영 명령**이고, 이 표가 기록하는 단위가 상태 변화가 아니라 명령이기
+    때문입니다.
     """
     # 검증을 트랜잭션 밖에서 먼저 합니다. set_etl_profile_activation()과 같은 순서로,
-    # 없는 profile_id는 쓰기 트랜잭션을 열기 전에 여기서 끝납니다.
+    # 없는 profile_id는 쓰기 트랜잭션을 열기 전에 여기서 끝납니다. 실패한 요청은 history
+    # event도 남기지 않습니다.
     get_profile_display_name(profile_id)
 
     with session.begin():
@@ -273,8 +340,116 @@ def reset_etl_profile_activation(
                 ETLProfileActivation.profile_id == profile_id
             )
         )
+        # DELETE와 event INSERT가 같은 트랜잭션입니다. event 기록이 실패하면 override
+        # 삭제도 함께 rollback되어, "지워졌는데 기록이 없는" 상태가 생기지 않습니다.
+        _record_activation_event(
+            session,
+            action="reset",
+            activation=resolve_etl_profile_activation(profile_id, session=session),
+            actor_user_id=actor_user_id,
+            actor_username=actor_username,
+        )
 
     activation = resolve_etl_profile_activation(profile_id, session=session)
     # row를 지웠으므로 actor/updated_at은 항상 None입니다. _to_view()가 row=None에서
     # 그렇게 채우므로 여기서 따로 계산하지 않습니다.
     return _to_view(activation, row=None)
+
+
+@dataclass(frozen=True)
+class ETLProfileActivationEventView:
+    """One recorded activation command as an API caller needs to read it.
+
+    actor_user_id는 일부러 없습니다. DB 관계용 ID이고, 화면이 필요로 하는 것은 삭제된
+    사용자에게도 남는 actor_username snapshot입니다. view에 두지 않으면 응답에 실수로
+    새어 나갈 자리 자체가 없습니다.
+    """
+
+    event_id: int
+    profile_id: str
+    action: str
+    deployment_active_version: str | None
+    runtime_override_exists: bool
+    runtime_active_version: str | None
+    effective_active_version: str | None
+    actor_username: str | None
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class ETLProfileActivationHistory:
+    items: list[ETLProfileActivationEventView]
+    total: int
+    limit: int
+    offset: int
+
+
+def _to_event_view(
+    event: ETLProfileActivationEvent,
+) -> ETLProfileActivationEventView:
+    return ETLProfileActivationEventView(
+        event_id=event.id,
+        profile_id=event.profile_id,
+        action=event.action,
+        deployment_active_version=event.deployment_active_version,
+        runtime_override_exists=event.runtime_override_exists,
+        runtime_active_version=event.runtime_active_version,
+        effective_active_version=event.effective_active_version,
+        actor_username=event.actor_username,
+        created_at=event.created_at,
+    )
+
+
+def list_etl_profile_activation_history(
+    session: Session,
+    *,
+    profile_id: str,
+    limit: int,
+    offset: int,
+) -> ETLProfileActivationHistory:
+    """List one profile's recorded activation commands, newest first.
+
+    읽기 전용입니다. 이 표에 대한 UPDATE/DELETE/purge 경로는 만들지 않습니다 —
+    append-only는 애플리케이션 계약이고, 그 계약은 "쓰기 함수가 INSERT 하나뿐"이라는
+    사실로 지켜집니다.
+
+    한 번에 한 프로필만 조회합니다. 전체 프로필을 섞어 보여 주는 화면이 아직 없고,
+    profile_id index가 그대로 쓰이는 질의 형태이기도 합니다.
+
+    정렬은 created_at DESC, id DESC입니다. created_at은 트랜잭션 시각이라 같은 값이
+    나올 수 있어 id로 tie를 끊습니다. 다만 이 순서를 분산 환경의 절대적 인과 순서로
+    읽으면 안 됩니다 — 동시에 성공한 두 명령의 상대 순서는 이 표가 답할 수 있는 질문이
+    아닙니다(activation의 동시성 정책은 지금도 last-write-wins입니다).
+
+    없는 profile_id는 ETLProfileNotFoundError입니다. registry가 allowlist이므로,
+    registry에서 사라진 과거 프로필의 event는 이 API로 조회할 수 없습니다. 그 상황이
+    실제로 생기면 별도 조회 경로를 설계해야 합니다.
+    """
+    get_profile_display_name(profile_id)
+
+    events = list(
+        session.scalars(
+            select(ETLProfileActivationEvent)
+            .where(ETLProfileActivationEvent.profile_id == profile_id)
+            .order_by(
+                ETLProfileActivationEvent.created_at.desc(),
+                ETLProfileActivationEvent.id.desc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        ).all()
+    )
+    total = int(
+        session.scalar(
+            select(func.count())
+            .select_from(ETLProfileActivationEvent)
+            .where(ETLProfileActivationEvent.profile_id == profile_id)
+        )
+        or 0
+    )
+    return ETLProfileActivationHistory(
+        items=[_to_event_view(event) for event in events],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
