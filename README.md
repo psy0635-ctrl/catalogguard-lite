@@ -4,7 +4,7 @@
 
 상품 카탈로그 CSV를 업로드해 누락, 형식 오류, 중복, 가격 이상치, 카테고리 불일치, 금지어와 개인정보 의심 정보를 검사하고, 검수 결과를 저장·검색·조회·다운로드하는 Python·FastAPI + PostgreSQL 기반 MVP입니다. Streamlit은 CSV 업로드 검증·검수 결과 화면, 공급사 CSV와 허용된 ETL 프로필을 선택해 웹에서 바로 ETL을 실행하는 화면, ETL 적재 이력과 선택한 batch의 운영 상품 반영 흐름을 담당합니다. JSON 프로필 기반 공급사 CSV ETL과 PostgreSQL staging 적재는 기존 CLI로도 계속 실행할 수 있으며, Streamlit에서 시작한 웹 ETL도 FastAPI를 거쳐 같은 ETL Pipeline과 staging 적재 함수를 재사용합니다. FastAPI는 웹 ETL 실행·ETL 조회·promotion preview·승인된 promotion API를 제공합니다. promotion은 미리보기, 변경 전후 확인, 사용자 승인, preview hash 재검증을 거쳐 운영 상품을 insert/update하고 run과 append-only audit을 저장합니다.
 
-ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl`의 버전별 JSON archive와 코드 registry가 source of truth입니다. 그 위에 신규 ETL 실행에 실제로 적용할 **runtime activation 상태만** PostgreSQL `etl_profile_activations`에 따로 두어, 재배포 없이 보존된 버전 중 하나를 활성화하거나 신규 실행을 비활성화할 수 있습니다. viewer는 상태를 조회하고, operator는 `PUT /api/v1/etl-profiles/{profile_id}/activation`과 Streamlit `ETL 프로필 운영 관리` 화면에서 변경하거나 `DELETE`로 runtime override를 지워 배포 기본값으로 되돌립니다. 프로필 JSON 자체를 편집하거나 새 프로필을 등록하는 기능은 아닙니다.
+ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl`의 버전별 JSON archive와 코드 registry가 source of truth입니다. PostgreSQL에 두는 것은 두 가지뿐입니다. 신규 ETL 실행에 실제로 적용할 **runtime current-state**(`etl_profile_activations`, 프로필당 row 0 또는 1)와, **성공한 운영 명령의 append-only 이력**(`etl_profile_activation_events`)입니다. 덕분에 재배포 없이 보존된 버전 중 하나를 활성화하거나 신규 실행을 비활성화할 수 있고, 그 뒤에 "누가 어떤 명령을 실행했는가"도 따로 남습니다. viewer는 상태와 이력을 조회하고, operator는 `PUT /api/v1/etl-profiles/{profile_id}/activation`과 Streamlit `ETL 프로필 운영 관리` 화면에서 변경하거나 `DELETE`로 runtime override를 지워 배포 기본값으로 되돌립니다. 프로필 JSON 자체를 편집하거나 새 프로필을 등록하는 기능은 아닙니다.
 
 공개 Streamlit 앱은 아래 주소에서 확인할 수 있습니다.
 
@@ -96,6 +96,8 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - PostgreSQL `etl_profile_activations`에 저장하는 persistent runtime profile activation. 서버를 재시작하거나 worker가 여러 개여도 같은 상태를 사용하며, row 없음(배포 기본값 사용)·`active_version` 값(그 버전 활성)·`active_version = NULL`(명시적 비활성) 세 상태를 구분합니다
 - Streamlit `ETL 프로필 운영 관리` 화면에서 현재 상태·실제 적용 버전·배포 기본 버전·runtime override 여부·선택 가능한 보존 버전·마지막 변경 사용자·마지막 변경 시각 확인. 프로필 JSON을 편집하는 화면이 아닙니다
 - `GET`/`PUT`/`DELETE /api/v1/etl-profiles/{profile_id}/activation`의 viewer(조회)·operator(변경·초기화) RBAC 분리와 인증된 `current_user` 기준 actor 기록(요청 body에 actor 필드 없음)
+- PostgreSQL `etl_profile_activation_events`에 저장하는 activation 운영 이력. 서버가 성공으로 처리한 activate·deactivate·reset 명령마다 event 한 건을 append-only로 남기며, 그 명령 직후의 실제 적용 상태와 `actor_username` snapshot을 함께 보존합니다. 실패한 요청은 기록하지 않습니다
+- `GET /api/v1/etl-profiles/{profile_id}/activation/history`(viewer 이상)와 Streamlit `Activation 운영 이력` 표로 선택한 프로필의 운영 명령을 최신순으로 확인. reset 직후 current-state의 actor가 사라져도 "누가 reset했는가"는 이 이력에 남습니다
 - `DELETE .../activation`으로 runtime override row를 제거해 배포 기본값으로 복귀. **Deactivate와 다릅니다** — `active_version: null`은 "운영자가 명시적으로 내렸다"는 상태를 남기고, `DELETE`는 그 상태 자체를 지웁니다. 배포 기본값이 활성이면 reset이 프로필을 **다시 활성화**하므로 Streamlit이 적용될 버전을 미리 보여 주고 확인을 받습니다
 - `GET /api/v1/etl-profiles?include_inactive=true` 관리 목록. 실행 selector용 기본 목록은 지금 실행 가능한 프로필만 반환하고, 관리 화면은 비활성 프로필까지 포함해 다시 활성화할 수 있게 합니다
 - Deactivate ≠ Delete: 비활성화는 신규 ETL 실행(업로드·S3·HTTP feed·Airflow)만 막고 과거 적재 이력·staging 조회·품질 요약/추이/관찰·동기화 차이·promotion/rollback 이력·버전 archive는 그대로 유지합니다
@@ -234,13 +236,16 @@ Streamlit ETL 프로필 운영 관리
 -> GET /api/v1/etl-profiles?include_inactive=true로 비활성 포함 관리 목록 조회
 -> 관리할 프로필 선택 (실행 selector는 바뀌지 않음)
 -> GET /api/v1/etl-profiles/{profile_id}/activation
--> viewer: 상태·실제 적용 버전·배포 기본 버전·runtime override·보존 버전·마지막 변경 사용자/시각 확인
+-> GET /api/v1/etl-profiles/{profile_id}/activation/history  (성공한 운영 명령, 최신순)
+-> viewer: 상태·실제 적용 버전·배포 기본 버전·runtime override·보존 버전·마지막 변경 사용자/시각
+           + 성공한 activate/deactivate/reset 명령 이력 확인
 -> operator: 보존 버전 활성화 / 확인 checkbox 후 신규 실행 비활성화
               / 확인 checkbox 후 런타임 설정 초기화(배포 기본값으로 복귀)
 -> PUT /api/v1/etl-profiles/{profile_id}/activation      (활성화·비활성화)
 -> DELETE /api/v1/etl-profiles/{profile_id}/activation   (runtime override 제거)
 -> PostgreSQL etl_profile_activations의 current-state row 갱신 또는 삭제(actor는 current_user)
--> 실행 selector·프로필 상세 캐시 무효화
+   + 같은 transaction에서 etl_profile_activation_events에 성공한 명령 1건 INSERT
+-> 실행 selector·프로필 상세·운영 이력 캐시 무효화
 -> 이후 신규 ETL 실행이 effective activation을 따름
 ```
 
@@ -630,6 +635,7 @@ catalogguard-lite/
       20260810_0012_add_inspection_actor_audit.py
       20260813_0013_add_etl_initial_source_lineage.py
       20260822_0014_create_etl_profile_activations.py
+      20260823_0015_create_etl_profile_activation_events.py
   data/
     dev/
       category_mismatch_test.csv
@@ -704,11 +710,11 @@ catalogguard-lite/
 | 파일 | 역할 |
 |---|---|
 | `app.py` | Streamlit 화면, CSV 검수·이력 탭, 공통 통계 UI, 검수 저장, 목록·상세·CSV 다운로드, API 오류 안내와 요청 ID 표시 |
-| `clients/catalogguard_api.py` | FastAPI 검수·ETL·promotion API 호출, 응답 schema·SHA-256 검증, HTTP·404·JSON 오류 mapping |
+| `clients/catalogguard_api.py` | FastAPI 검수·ETL·promotion API 호출, 응답 schema·SHA-256 검증, HTTP·404·JSON 오류 mapping. activation 운영 이력은 조회 method 하나만 두고(`list_etl_profile_activation_history()`) 수정·삭제 method는 두지 않으며, `action`과 결과 상태가 어긋난 항목을 거부합니다 |
 | `api/main.py` | FastAPI 앱 생성, 라우터 등록, `/health`와 `/ready`, 요청 ID 및 요청 단위 로그 처리 |
-| `api/routes/etl_loads.py` | 웹 ETL 실행(`POST /api/v1/etl-loads`)과 ETL 프로필 목록 조회(`include_inactive` 포함)·상세, activation 조회/변경/초기화(`GET`·`PUT`·`DELETE /api/v1/etl-profiles/{profile_id}/activation`), S3·HTTP feed source의 외부 읽기 전 inactive 차단, ETL 조회와 promotion preview·실행 endpoint, Query·Path 검증, 오류 응답과 응답 변환 |
+| `api/routes/etl_loads.py` | 웹 ETL 실행(`POST /api/v1/etl-loads`)과 ETL 프로필 목록 조회(`include_inactive` 포함)·상세, activation 조회/변경/초기화(`GET`·`PUT`·`DELETE /api/v1/etl-profiles/{profile_id}/activation`)와 운영 이력 조회(`GET .../activation/history`, viewer 이상), S3·HTTP feed source의 외부 읽기 전 inactive 차단, ETL 조회와 promotion preview·실행 endpoint, Query·Path 검증, 오류 응답과 응답 변환 |
 | `api/routes/inspections.py` | 검수 생성, JWT `current_user` actor 전달, 서버 SHA-256 계산, 중복 이력 응답, actor를 포함한 검수 이력 목록·상세 조회 API |
-| `api/schemas.py` | `actor_username`을 포함한 검수·ETL 조회·promotion API 응답 Pydantic 모델과 `LoginRequest`/`LoginResponse`/`CurrentUserResponse` |
+| `api/schemas.py` | `actor_username`을 포함한 검수·ETL 조회·promotion API 응답 Pydantic 모델과 `LoginRequest`/`LoginResponse`/`CurrentUserResponse`. activation 운영 이력 응답은 `action`을 `activate`/`deactivate`/`reset` `Literal`로 좁히고 `actor_user_id`는 내보내지 않습니다 |
 | `api/dependencies.py` | `get_current_user()`(JWT 검증 + PostgreSQL 재조회), `require_viewer`/`require_operator` RBAC dependency |
 | `api/routes/auth.py` | `POST /api/v1/auth/login`(Access Token 발급), `GET /api/v1/auth/me` |
 | `config/logging.py` | 중복 handler 없이 한 줄 JSON 운영 로그를 기록하는 표준 라이브러리 유틸리티 |
@@ -727,15 +733,15 @@ catalogguard-lite/
 | `core/product_template.py` | CSV 입력 템플릿 생성 |
 | `core/privacy.py` | 개인정보 정규식과 마스킹 처리 |
 | `core/security.py` | bcrypt 비밀번호 hash·검증, JWT Access Token 발급·검증 |
-| `db/models.py` | actor FK·snapshot을 포함한 `inspection_runs`, `inspection_results`, ETL staging 배치·상품, `users` SQLAlchemy 모델 |
+| `db/models.py` | actor FK·snapshot을 포함한 `inspection_runs`, `inspection_results`, ETL staging 배치·상품, `users` SQLAlchemy 모델. ETL 프로필 activation은 current-state(`etl_profile_activations`)와 append-only 운영 이력(`etl_profile_activation_events`) 두 모델로 나뉘며, 후자는 명령과 결과 상태가 모순되는 행을 CHECK constraint로 막습니다 |
 | `db/auth_service.py` | `users` 조회, 로그인 인증(`authenticate_user`), 계정 생성(`create_user`, bootstrap CLI 전용) |
 | `db/etl_query_service.py` | 필터·정렬·count·SQL 페이지네이션을 적용하는 읽기 전용 ETL 배치·상품 조회 Service |
-| `db/etl_profile_activation_service.py` | 한 프로필의 runtime activation 상태 조회·변경 Service. 배포 기본값·runtime override·실제 적용 버전을 함께 돌려주고, 쓰기는 registry versions에 있는 값만 허용하며 `ON CONFLICT DO UPDATE`로 프로필당 current-state row 하나를 유지합니다(append-only history 아님). reset은 그 row를 삭제해 배포 기본값으로 되돌리며 override가 없어도 오류를 내지 않습니다. activation 조회 SELECT가 연 read 트랜잭션을 정리하는 `end_activation_read_transaction()`도 여기 있습니다 |
+| `db/etl_profile_activation_service.py` | 한 프로필의 runtime activation 상태 조회·변경과 운영 이력 조회 Service. 배포 기본값·runtime override·실제 적용 버전을 함께 돌려주고, 쓰기는 registry versions에 있는 값만 허용하며 `ON CONFLICT DO UPDATE`로 프로필당 current-state row 하나를 유지합니다(이 표 자체는 append-only history 아님). reset은 그 row를 삭제해 배포 기본값으로 되돌리며 override가 없어도 오류를 내지 않습니다. 성공한 activate·deactivate·reset 명령은 `_record_activation_event()`가 **같은 트랜잭션 안에서** `etl_profile_activation_events`에 INSERT하므로, 이력 기록이 실패하면 상태 변경도 함께 rollback됩니다. `list_etl_profile_activation_history()`가 그 이력을 최신순으로 조회합니다. activation 조회 SELECT가 연 read 트랜잭션을 정리하는 `end_activation_read_transaction()`도 여기 있습니다 |
 | `db/repositories.py` | actor를 포함한 검수 실행과 상세 결과 저장·조회, 파일 identity 조회 Repository |
 | `db/persistence_service.py` | 검수 결과와 최초 actor 저장 트랜잭션, 중복 조회·최초 actor 보존, 경쟁 상태 처리, 목록·상세 조회 Service |
 | `db/session.py` | SQLAlchemy 엔진, 세션 팩토리, DB 연결 확인, FastAPI 세션 의존성 |
 | `ui/auth.py` | Streamlit 로그인·로그아웃 UI, `session_state` 기반 Access Token 저장, 인증된 API Client 생성 |
-| `ui/etl_load_history.py` | ETL 실행·목록·검색·페이지네이션·상세·promotion 승인 UI와 `ETL 프로필 운영 관리` 화면. 관리 화면은 `etl_profile_admin_*` 상태를 써서 실행 selector(`etl_web_run_*`)와 분리되며, viewer는 실행·변경 버튼이 비활성화되지만 실제 차단은 FastAPI가 수행 |
+| `ui/etl_load_history.py` | ETL 실행·목록·검색·페이지네이션·상세·promotion 승인 UI와 `ETL 프로필 운영 관리` 화면. 관리 화면은 `etl_profile_admin_*` 상태를 써서 실행 selector(`etl_web_run_*`)와 분리되며, viewer는 실행·변경 버튼이 비활성화되지만 실제 차단은 FastAPI가 수행. 하단 `Activation 운영 이력`은 viewer도 읽는 read-only 표이고, 조회가 실패해도 그 구획에만 오류를 표시해 상태 확인·조작은 계속 쓸 수 있습니다 |
 | `services/redis_job_store.py` | Redis에 비동기 검수 작업 상태, optional actor scalar와 TTL 저장. actor 필드가 없는 legacy payload도 `None`으로 복원 |
 | `services/inspection_job_service.py`, `services/job_files.py` | actor scalar를 포함한 작업 제출, 서버 생성 job 파일 저장·검증·정리 |
 | `workers/celery_app.py`, `workers/inspection_tasks.py` | Celery Worker 실행과 Redis actor scalar를 사용한 비동기 CSV 검수·결과 저장 |
@@ -759,7 +765,8 @@ catalogguard-lite/
 | `alembic/versions/20260808_0011_add_promotion_audit_order_index.py` | promotion audit 페이지네이션을 위한 `(promotion_run_id, created_at DESC, id DESC)` 정렬 index 추가 마이그레이션 |
 | `alembic/versions/20260810_0012_add_inspection_actor_audit.py` | `inspection_runs`에 `actor_user_id`(FK `ON DELETE SET NULL`)·`actor_username` nullable 컬럼을 추가하는 Inspection Actor Audit 마이그레이션 |
 | `alembic/versions/20260813_0013_add_etl_initial_source_lineage.py` | `etl_load_runs`에 최초 입력 경로를 기록하는 `initial_source_type`·`initial_source_ref`를 추가하는 ETL lineage 마이그레이션 |
-| `alembic/versions/20260822_0014_create_etl_profile_activations.py` | 프로필당 runtime activation 상태 한 행을 저장하는 `etl_profile_activations` 테이블 생성 마이그레이션(현재 head). 빈 표로 시작하므로 적용해도 기존 동작이 바뀌지 않습니다 |
+| `alembic/versions/20260822_0014_create_etl_profile_activations.py` | 프로필당 runtime activation 상태 한 행을 저장하는 `etl_profile_activations` 테이블 생성 마이그레이션. 빈 표로 시작하므로 적용해도 기존 동작이 바뀌지 않습니다 |
+| `alembic/versions/20260823_0015_create_etl_profile_activation_events.py` | 성공한 activation 운영 명령을 쌓는 append-only `etl_profile_activation_events` 테이블과 조회 index 생성 마이그레이션(현재 head). **빈 표로 시작하며 기존 current-state row로 과거 이력을 backfill하지 않습니다** |
 | `.github/workflows/test.yml` | 일반 테스트와 분리된 `browser-e2e`·`kubernetes-smoke` job을 포함해 PostgreSQL·Chromium 실제 브라우저 흐름과 kind 실제 Kubernetes 배포까지 실행하는 GitHub Actions workflow |
 | `k8s/dev-postgres.yaml`, `k8s/migration-job.yaml`, `k8s/catalogguard-api.yaml` | kind CI 전용 PostgreSQL, Alembic Migration Job, FastAPI Deployment/Service manifest |
 | `.env.example` | 로컬 PostgreSQL 연결 환경변수 예시 |
@@ -1178,7 +1185,7 @@ python -m alembic upgrade head
 python -m alembic history
 ```
 
-현재 Alembic head는 `20260822_0014`입니다.
+현재 Alembic head는 `20260823_0015`입니다.
 
 `20260703_0001_create_inspection_tables.py`는 다음 테이블을 만듭니다.
 
@@ -1252,7 +1259,7 @@ upgrade 동작은 다음 순서입니다.
 
 중요한 점은 기존 이력의 `file_sha256`을 NULL로 유지한다는 것입니다. DB에는 과거 원본 CSV bytes가 저장되어 있지 않으므로 과거 파일 해시를 추측해서 채우지 않습니다. 또한 `inspection_version`에는 DB `server_default`를 두지 않고, 애플리케이션이 현재 검수 규칙 버전을 명시적으로 저장합니다.
 
-`20260822_0014_create_etl_profile_activations.py`(`down_revision=20260813_0013`)는 ETL 프로필의 **runtime activation 상태**를 저장하는 `etl_profile_activations` 테이블을 추가합니다. 현재 단일 head입니다.
+`20260822_0014_create_etl_profile_activations.py`(`down_revision=20260813_0013`)는 ETL 프로필의 **runtime activation 상태**를 저장하는 `etl_profile_activations` 테이블을 추가합니다.
 
 - `profile_id`(`VARCHAR(100)`, `NOT NULL`): `ux_etl_profile_activations_profile_id` **unique index**로 프로필당 정확히 한 행만 허용합니다. 프로필은 아직 DB entity가 아니라 코드 registry의 key이므로 FK는 걸지 않고, allowlist와 버전 검증은 애플리케이션 쓰기 경로가 합니다
 - `active_version`(`VARCHAR(20)`, nullable): `NULL`이 비활성입니다. 값이 있으면 registry `versions`의 정확한 key여야 하며 그 검증은 애플리케이션이 합니다. `''`나 공백만 있는 값은 CHECK constraint가 막아 "비활성인가 잘못된 pointer인가"가 모호해지지 않습니다
@@ -1263,9 +1270,22 @@ upgrade 동작은 다음 순서입니다.
 
 세 상태를 구분합니다. **row 없음**은 runtime override가 없어 배포 registry의 `active_version`을 그대로 쓰는 상태이고, **row 있음 + `active_version = '2'`**는 runtime에서 v2를 명시적으로 사용하는 상태이며, **row 있음 + `active_version = NULL`**은 운영자가 명시적으로 비활성화한 상태입니다. 앞의 두 상태와 마지막 상태를 하나로 합치면 배포 기본값이 바뀔 때 운영자의 결정이 조용히 덮이거나 되살아납니다.
 
-이 표는 **append-only activation history가 아니라 프로필당 current-state row 하나**입니다. `actor_username`과 `updated_at`은 "현재 상태를 마지막으로 만든 사용자와 시각"을 뜻하며, 이 표로 activation 변경 이력을 되짚을 수는 없습니다. 같은 이유로 `DELETE .../activation`으로 override를 지우면 그 row의 `active_version`·`actor_username`·`updated_at`도 함께 사라집니다.
+이 표는 **append-only activation history가 아니라 프로필당 current-state row 하나**입니다. `actor_username`과 `updated_at`은 "현재 상태를 마지막으로 만든 사용자와 시각"을 뜻하며, 이 표로 activation 변경 이력을 되짚을 수는 없습니다. 같은 이유로 `DELETE .../activation`으로 override를 지우면 그 row의 `active_version`·`actor_username`·`updated_at`도 함께 사라집니다. 운영 명령 이력은 아래 `20260823_0015`가 추가한 **별도 표**(`etl_profile_activation_events`)가 담당합니다.
 
 upgrade는 빈 표를 만들 뿐이므로 적용해도 기존 동작이 바뀌지 않습니다. downgrade는 unique index와 테이블을 제거해 runtime override를 모두 버리고 배포 registry 기본값으로 돌아가며, 프로필 archive와 과거 `etl_load_runs`는 이 표와 무관하므로 그대로 남습니다.
+
+`20260823_0015_create_etl_profile_activation_events.py`(`down_revision=20260822_0014`)는 **성공한 activation 운영 명령**을 쌓는 `etl_profile_activation_events` 테이블을 추가합니다. 현재 단일 head입니다.
+
+- `profile_id`(`VARCHAR(100)`, `NOT NULL`): 위 표와 같은 이유로 **FK를 걸지 않고** allowlist 검증은 애플리케이션이 합니다
+- `action`(`VARCHAR(20)`, `NOT NULL`): CHECK constraint가 `activate`·`deactivate`·`reset` 세 값만 허용합니다
+- `deployment_active_version`·`runtime_active_version`·`effective_active_version`(`VARCHAR(20)`, nullable)과 `runtime_override_exists`(`BOOLEAN`, `NOT NULL`): **그 명령이 성공한 직후 상태의 snapshot**입니다. 나중에 registry를 다시 읽어 계산하면 배포 기본값이 바뀔 때 과거 기록의 뜻이 조용히 달라집니다
+- `actor_user_id`(`BigInteger`, `users.id` FK, `ON DELETE SET NULL`)·`actor_username`(`VARCHAR(50)`, nullable): 사용자를 지워도 FK만 `NULL`이 되고 이름 snapshot은 남습니다
+- `created_at`(`TIMESTAMPTZ`, `NOT NULL`, `server_default now()`)
+- `ix_etl_profile_activation_events_profile_created_at_id`(`profile_id`, `created_at`, `id`): 주 조회가 "한 프로필의 최신 event부터"입니다. PostgreSQL은 B-tree를 역방향으로도 훑으므로 내림차순 전용 index를 따로 만들지 않았습니다
+
+CHECK constraint 하나가 **명령과 그 직후 상태가 모순되는 행**을 막습니다. `activate`는 override가 있고 `effective = runtime`, `deactivate`는 override가 있고 둘 다 `NULL`, `reset`은 override가 없고 `effective IS NOT DISTINCT FROM deployment`입니다. reset 비교에 일반 `=`를 쓰지 않은 이유는, 배포 기본값 자체가 비활성이면 양쪽이 `NULL`인데 PostgreSQL에서 `NULL = NULL`은 참이 아니라 `NULL`이고 CHECK는 `NULL`을 통과시켜 제약이 **조용히 무력화**되기 때문입니다.
+
+**upgrade는 빈 표를 만들고, 기존 `etl_profile_activations` row로 과거 이력을 만들어 내지 않습니다.** current-state row 하나만으로는 누가 처음 활성화했는지, 몇 번 바꿨는지, 언제 내렸다 올렸는지 알 수 없습니다. 모르는 것을 추측해 채우면 없는 기록보다 나쁜 **틀린 기록**이 남으므로, 이 이력은 `0015` 적용 이후의 명령부터 시작합니다. downgrade는 이 표와 index만 제거하고 `etl_profile_activations`는 건드리지 않습니다.
 
 테이블이 만들어졌는지 확인하려면 아래 명령을 실행합니다.
 
@@ -1282,13 +1302,14 @@ psql "$env:DATABASE_URL" -c "\d catalog_promotion_rollbacks"
 psql "$env:DATABASE_URL" -c "\d catalog_promotion_rollback_changes"
 psql "$env:DATABASE_URL" -c "\d users"
 psql "$env:DATABASE_URL" -c "\d etl_profile_activations"
+psql "$env:DATABASE_URL" -c "\d etl_profile_activation_events"
 ```
 
 테스트용 PostgreSQL 18 임시 클러스터에서 빈 DB의 `upgrade head`, `downgrade 20260728_0005`, 재-upgrade와 단일 head를 확인했다. `0006` downgrade는 새 운영 상품 persistence 테이블만 제거하며 기존 inspection·ETL staging 테이블은 유지한다.
 
 같은 방식으로 로컬 disposable PostgreSQL 18에서 빈 DB의 `upgrade head`, `downgrade 20260803_0007`, `downgrade 20260728_0006`, 재-upgrade와 단일 head도 확인했다. `20260805_0009`도 같은 방식으로 `downgrade 20260803_0008` 뒤 재-upgrade와 단일 head(`20260805_0009`)를 disposable PostgreSQL 18에서 확인했다.
 
-`tests/test_inspection_actor_migration.py`와 `tests/test_catalog_promotion_migration.py`는 `alembic.script.ScriptDirectory`로 현재 단일 head가 `20260822_0014`인지 확인합니다. CI의 `Apply database migrations` step은 고정 revision이 아니라 `upgrade head`를 실행하므로 현재 migration chain 전체를 적용합니다.
+`tests/test_inspection_actor_migration.py`·`tests/test_catalog_promotion_migration.py`·`tests/test_etl_profile_activation_history_migration.py`는 `alembic.script.ScriptDirectory`로 현재 단일 head가 `20260823_0015`인지 확인합니다. 마지막 파일은 실제 PostgreSQL에서 `0014 → 0015` upgrade, downgrade 뒤 재-upgrade, 그리고 **기존 current-state row가 있어도 이력이 backfill되지 않는다는 것**까지 확인합니다. CI의 `Apply database migrations` step은 고정 revision이 아니라 `upgrade head`를 실행하므로 현재 migration chain 전체를 적용합니다.
 
 ## 16. FastAPI 실행 방법
 
@@ -1657,7 +1678,9 @@ python -m streamlit run app.py
 
 `ETL 적재 이력` 탭의 `ETL 프로필 운영 관리` 영역은 공급사 프로필의 runtime activation 상태를 다룹니다. viewer는 현재 활성/비활성 상태, 실제 적용 버전, 배포 기본 버전, runtime override 여부, 선택 가능한 보존 버전, 마지막 변경 사용자와 시각을 확인할 수 있습니다. operator는 보존된 버전 중 하나를 활성화하거나, 확인 checkbox를 거쳐 신규 ETL 실행을 비활성화할 수 있습니다. **프로필 JSON 자체를 수정하는 화면이 아닙니다.**
 
-이 화면의 목록은 `include_inactive=true`로 조회하므로 비활성 프로필도 계속 보이며, 그래서 한 번 내린 프로필을 다시 고를 수 있습니다. 관리 화면 상태(`etl_profile_admin_*`)는 실행 화면 상태(`etl_web_run_*`)와 session key를 분리했으므로, 관리 화면에서 프로필을 골라도 위쪽 `ETL 실행` selector가 함께 바뀌지 않습니다. 반대로 activation을 실제로 변경하면 실행 selector와 프로필 상세 캐시는 다시 읽어, 방금 내린 프로필이 실행 목록에서 사라지도록 합니다.
+그 아래 `Activation 운영 이력`은 선택한 프로필에 대해 성공한 운영 명령을 최신순으로 보여 주는 **read-only** 표입니다. 시각·동작·런타임 결과·실제 적용 버전·배포 기본 버전·사용자를 함께 표시하며, 동작은 `버전 활성화`·`비활성화`·`배포 기본값으로 되돌리기`로 구분합니다. **reset을 비활성화로 표시하지 않습니다** — override가 사라졌을 뿐이고 배포 기본값이 활성이면 실제 적용 버전이 있기 때문에, 두 값을 같은 행에서 함께 보여 줍니다. viewer도 읽을 수 있고, 이력에는 수정·삭제 조작이 없습니다. 기록이 없으면 오류가 아니라 "이 기능이 추가된 이후의 성공한 운영 명령부터 표시됩니다"라고 안내합니다.
+
+이 화면의 목록은 `include_inactive=true`로 조회하므로 비활성 프로필도 계속 보이며, 그래서 한 번 내린 프로필을 다시 고를 수 있습니다. 관리 화면 상태(`etl_profile_admin_*`)는 실행 화면 상태(`etl_web_run_*`)와 session key를 분리했으므로, 관리 화면에서 프로필을 골라도 위쪽 `ETL 실행` selector가 함께 바뀌지 않습니다. 반대로 activation을 실제로 변경하면 실행 selector·프로필 상세·운영 이력 캐시를 한 곳에서 함께 비워, 방금 내린 프로필이 실행 목록에서 사라지고 방금 실행한 명령이 이력 첫 페이지에 보이도록 합니다.
 
 ## 18. API 목록
 
@@ -1726,6 +1749,7 @@ FastAPI 프로세스와 PostgreSQL 연결 상태를 함께 확인합니다. 기�
 | `GET /api/v1/etl-profiles/{id}/activation` | 필요 | viewer 이상 |
 | `PUT /api/v1/etl-profiles/{id}/activation` | 필요 | operator |
 | `DELETE /api/v1/etl-profiles/{id}/activation` | 필요 | operator |
+| `GET /api/v1/etl-profiles/{id}/activation/history` | 필요 | viewer 이상 |
 | `POST /api/v1/etl-loads`, `POST /api/v1/etl-loads/s3` | 필요 | operator |
 | `POST /api/v1/etl-loads/{id}/promotion-preview` | 필요 | viewer 이상 |
 | `POST /api/v1/etl-loads/{id}/promotions` | 필요 | operator |
@@ -2038,7 +2062,7 @@ CSV 파일을 업로드해 검수하고, 검수 실행과 상세 결과를 Postg
 
 ### `DELETE /api/v1/etl-profiles/{profile_id}/activation`
 
-runtime override row를 삭제해 그 프로필이 다시 배포 기본값을 따르게 합니다. operator 권한이 필요하고, 성공하면 `PUT`과 같은 `ETLProfileActivationResponse`를 `200`으로 돌려줍니다. **request body를 받지 않습니다** — 지울 대상은 경로의 `profile_id` 하나로 정해지고, actor는 저장할 row 자체가 없어집니다.
+runtime override row를 삭제해 그 프로필이 다시 배포 기본값을 따르게 합니다. operator 권한이 필요하고, 성공하면 `PUT`과 같은 `ETLProfileActivationResponse`를 `200`으로 돌려줍니다. **request body를 받지 않습니다** — 지울 대상은 경로의 `profile_id` 하나로 정해지고, actor는 인증된 `current_user`에서만 가져옵니다.
 
 | 요청 | 응답 |
 |---|---|
@@ -2053,6 +2077,51 @@ reset 뒤 응답은 `runtime_override_exists: false`, `runtime_active_version: n
 **Reset ≠ Deactivate이고, reset은 프로필을 다시 활성화할 수 있습니다.** 배포 기본값이 `v2` 활성인 프로필에 명시적 비활성 override가 걸려 있을 때 `DELETE`를 보내면 override가 사라지면서 `v2`가 다시 적용되어 신규 실행이 즉시 가능해집니다. 그래서 Streamlit은 이 조작을 단순한 정리 버튼으로 보여 주지 않고, 되돌린 뒤 실제 적용될 버전을 미리 표시한 다음 확인 checkbox를 거칩니다.
 
 지우는 것은 `etl_profile_activations`의 current-state row **하나뿐**입니다. 과거 ETL 적재 이력·staging·품질·동기화 차이·promotion·rollback 이력과 `config/etl`의 버전별 archive, 프로필 정의는 그대로 남습니다.
+
+**응답의 `actor_username`이 `null`인 것과 이력에 actor가 남는 것은 모순이 아닙니다.** 이 응답의 actor는 "지금 이 override를 만든 사람"이라 override가 사라지면 없는 것이 맞고, "그 override를 지운 명령을 내린 사람"은 아래 history의 `reset` event에 남습니다. 서로 다른 질문에 대한 답입니다.
+
+### `GET /api/v1/etl-profiles/{profile_id}/activation/history`
+
+한 프로필에 대해 **서버가 성공으로 처리한 activation 명령**을 최신순으로 반환합니다. viewer 이상이면 조회할 수 있습니다. `limit`(기본 `20`, `1`~`100`)과 `offset`(기본 `0`)으로 페이지를 나눕니다.
+
+```json
+{
+  "items": [
+    {
+      "event_id": 3,
+      "profile_id": "sample_marketplace_vendor_v1",
+      "action": "reset",
+      "deployment_active_version": "2",
+      "runtime_override_exists": false,
+      "runtime_active_version": null,
+      "effective_active_version": "2",
+      "actor_username": "ops_user",
+      "created_at": "2026-08-23T12:00:00Z"
+    }
+  ],
+  "total": 3,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+`action`은 `activate`·`deactivate`·`reset` 세 값뿐입니다. 네 상태 값은 **그 명령이 성공한 직후의 snapshot**이지 지금 상태가 아닙니다(지금 상태는 위 `GET .../activation`이 답합니다). **`actor_user_id`는 노출하지 않습니다** — DB 관계용 ID이고, 화면에 필요한 것은 사용자가 삭제된 뒤에도 남는 `actor_username` snapshot입니다.
+
+**기록 단위는 "상태가 달라진 순간"이 아니라 "성공한 운영 명령"입니다.**
+
+| 요청 | 상태 변화 | event |
+|---|---|---|
+| `PUT {"active_version": "2"}` | 있음 | `activate` 1건 |
+| 같은 `PUT`을 한 번 더 | **없음** | `activate` 1건 더 |
+| `PUT {"active_version": null}` | 있음 | `deactivate` 1건 |
+| 이미 비활성인데 같은 `PUT` | **없음** | `deactivate` 1건 더 |
+| `DELETE` | 있음 | `reset` 1건 |
+| override 없는데 `DELETE`(idempotent `200`) | **없음** | `reset` 1건 더 |
+| 없는 프로필 / 없는 버전 / `401` / `403` | 없음 | **없음** |
+
+즉 state idempotency와 audit event idempotency는 다른 개념입니다. API가 idempotent한 것은 결과 상태에 대한 성질이고, 이 이력이 답하는 질문은 "누가 무엇을 시도해 서버가 받아들였는가"입니다.
+
+없는 `profile_id`는 `404`이고, 기록이 없으면 오류가 아니라 `200` + 빈 `items`입니다. 이 표는 마이그레이션 `20260823_0015` **적용 이후의 명령부터** 기록합니다(과거 이력을 추측해 채우지 않았습니다).
 
 ### `POST /api/v1/etl-loads`
 
@@ -2563,11 +2632,11 @@ Activation 관련 파일별 수집 규모는 다음과 같습니다.
 
 | 검증 범위 | 파일 | 테스트 수 |
 |---|---|---:|
-| Activation API 계약(`GET`/`PUT`, RBAC, 3-state, 알 수 없는 버전 `422`) | `tests/test_api_etl_profile_activation.py` | 35 |
-| CatalogGuard API Client 전체(activation client와 `include_inactive` 포함) | `tests/test_catalogguard_api_client.py` | 313 |
-| Streamlit ETL 화면 helper와 AppTest(운영 관리 화면 포함) | `tests/test_etl_load_history_ui.py` | 120 |
+| Activation API 계약(`GET`/`PUT`/`DELETE`·이력 조회, RBAC, 3-state, 알 수 없는 버전 `422`) | `tests/test_api_etl_profile_activation.py` | 69 |
+| CatalogGuard API Client 전체(activation·이력 client와 `include_inactive` 포함) | `tests/test_catalogguard_api_client.py` | 369 |
+| Streamlit ETL 화면 helper와 AppTest(운영 관리 화면·운영 이력 포함) | `tests/test_etl_load_history_ui.py` | 154 |
 
-Activation service 자체는 `tests/test_etl_profile_activation_service.py`, effective activation 해석은 `tests/etl/test_profile_activation.py`가 각각 담당합니다.
+Activation service 자체는 `tests/test_etl_profile_activation_service.py`, 운영 이력의 audit 의미·atomicity·DB 제약은 `tests/test_etl_profile_activation_history_service.py`, 이력 테이블 migration은 `tests/test_etl_profile_activation_history_migration.py`, effective activation 해석은 `tests/etl/test_profile_activation.py`가 각각 담당합니다.
 
 Airflow의 `etl_profile_inactive` 분류는 `airflow/tests/test_catalogguard_http_feed_to_staging.py`에 있습니다. 이 파일은 Airflow가 설치되지 않은 환경에서 module 단위로 skip되므로 위 `2 skipped`에 해당하며, 실제 assertion은 전용 `airflow-smoke` job이 격리 Airflow image에서 `python -m unittest discover`로 실행합니다. 같은 run의 결과는 `Ran 12 tests` / `OK`입니다.
 
@@ -2792,11 +2861,14 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 프로필 **정의**는 여전히 code/config입니다. runtime activation만 PostgreSQL로 옮겼고, `source_columns`·`required_source_columns`·`defaults`와 버전 archive의 source of truth는 계속 `config/etl` JSON archive와 코드 registry입니다. DB-backed Profile / ProfileVersion 모델은 없습니다.
 - 사용자 Profile CRUD는 없습니다. 새 프로필 등록·삭제와 프로필 JSON을 수정하는 UI/API 모두 없으며, allowlist는 계속 코드 registry입니다.
 - **`active_version: null`은 reset이 아니라 명시적 비활성화입니다.** 이 요청 뒤에도 `runtime_override_exists`는 `true`로 남습니다. 배포 기본값으로 되돌리는 것은 별도 `DELETE .../activation`이며, 두 동작은 저장되는 상태가 다릅니다. reset은 배포 기본값이 활성인 프로필을 **다시 활성화할 수 있으므로** 화면에서 결과를 미리 보여 주고 확인을 받습니다.
-- `etl_profile_activations`는 **프로필당 current-state row 하나**이며 append-only activation history가 아닙니다. `actor_username`·`updated_at`은 현재 상태를 마지막으로 만든 사용자·시각일 뿐이고, 이전 변경 결정은 보존되지 않습니다. 변경 이력이 필요하면 별도 표가 있어야 합니다.
-- Streamlit `ETL 프로필 운영 관리` 화면 전용 Chromium 브라우저 E2E는 아직 없습니다. Activation은 API integration test, API client test, Streamlit AppTest, PostgreSQL 통합 테스트로 검증했습니다.
+- `etl_profile_activations`는 **프로필당 current-state row 하나**이며 그 표 자체는 append-only history가 아닙니다. `actor_username`·`updated_at`은 현재 상태를 마지막으로 만든 사용자·시각일 뿐이고, reset하면 함께 사라집니다. 운영 명령 이력은 별도 표 `etl_profile_activation_events`가 담당합니다.
+- **운영 이력은 `20260823_0015` 적용 이후의 명령부터입니다.** 기존 current-state row로 과거 이력을 backfill하지 않았습니다. current-state row 하나로는 누가 처음 활성화했는지, 몇 번 바꿨는지 알 수 없어 추측해 채우면 틀린 기록이 남기 때문입니다.
+- 이력 조회도 **현재 registry allowlist**를 기준으로 검증하므로, registry에서 완전히 제거된 과거 프로필의 event는 표에 남아 있어도 프로필별 endpoint로는 읽을 수 없습니다(`404`). 여러 프로필을 한 번에 보는 조회도 없습니다.
+- 운영 이력의 append-only는 **애플리케이션 계약**입니다. 수정·삭제·purge API를 두지 않고 쓰기 경로가 INSERT 하나뿐이라는 뜻이며, DB superuser의 직접 `UPDATE`/`DELETE`까지 막는 WORM 저장소를 구현한 것은 아닙니다. retention/purge 정책도 없어 event는 계속 누적됩니다.
+- Streamlit `ETL 프로필 운영 관리` 화면(운영 이력 포함) 전용 Chromium 브라우저 E2E는 아직 없습니다. Activation은 API integration test, API client test, Streamlit AppTest, PostgreSQL 통합 테스트로 검증했습니다.
 - **Airflow에는 feed fetch 전 inactive guard가 없습니다.** DAG는 `read_http_feed_csv()` → `run_web_etl()` → activation 판별 순서이므로 비활성 프로필도 HTTP feed를 한 번 읽은 뒤 `etl_profile_inactive`(non-retryable)로 차단됩니다. FastAPI의 S3·HTTP route만 외부 읽기 전에 막습니다.
 - activation DB 조회와 외부 source가 동시에 실패할 때 어느 오류를 먼저 보고할지에 대한 **failure precedence 정책이 정해져 있지 않습니다.** Airflow의 inactive pre-fetch guard와 함께 별도 후속 설계 과제입니다.
-- Activation 변경 범위는 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)의 Phase 5A·5A.1·5B.1·5B.2·5B.3을 참고하세요.
+- Activation 변경 범위는 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)의 Phase 5A·5A.1·5B.1·5B.2·5B.3·5B.4를 참고하세요.
 - `etl_load_runs`는 `profile_name`·`profile_version`만 기록하고 프로필 JSON snapshot이나 매핑 hash는 저장하지 않으므로, 어떤 버전을 썼는지는 알 수 있지만 그 버전의 당시 내용이 보존된다고 DB가 보장하지는 않습니다. 버전 증가 기준과 향후 방향은 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)에 정리했습니다.
 - S3 ingestion은 호출자가 `object_key` 하나를 지정하는 pull 방식입니다. S3 event 알림·Lambda·SQS 기반 자동 수집과 prefix 일괄 처리는 지원하지 않습니다.
 - S3 source를 실제로 호출하는 Streamlit 화면은 없습니다. 현재는 API 직접 호출로만 사용합니다.
@@ -2850,7 +2922,6 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - `gender` 선택 컬럼과 표준화
 - 웹 ETL 처리 시간이 길어질 경우의 비동기(Celery) 실행
 - 웹 ETL 다중 파일 업로드와 XLSX 등 추가 입력 형식 지원
-- activation 변경 이력(append-only activation history) 전용 표
 - Streamlit `ETL 프로필 운영 관리` 화면의 Chromium 브라우저 E2E
 - Airflow DAG의 feed fetch 전 inactive profile guard
 - activation 조회 실패와 외부 source 실패가 겹칠 때의 failure precedence 정책

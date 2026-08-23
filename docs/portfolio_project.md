@@ -59,6 +59,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, 
 28. 위 activation을 운영자가 실제로 다룰 수 있도록 `GET`/`PUT /api/v1/etl-profiles/{profile_id}/activation`과 Streamlit `ETL 프로필 운영 관리` 화면을 연결했습니다. 조회는 viewer, 변경은 operator로 나누고 actor는 요청 body가 아니라 인증된 `current_user`에서만 기록했습니다. 관리 목록은 `include_inactive=true`로 조회해 비활성 프로필을 계속 노출했는데, 감추면 한 번 내린 프로필을 다시 고를 수 없어 되살릴 방법이 사라지기 때문입니다. 실행 selector 상태(`etl_web_run_*`)와 관리 화면 상태(`etl_profile_admin_*`)의 session key를 분리해 관리 화면에서 프로필을 골라도 실행 selector가 함께 바뀌지 않게 했고, `active_version: null`이 배포 기본값 reset이 아니라 명시적 비활성임을 API·화면 문구 양쪽에 남겼습니다.
 29. Airflow HTTP feed DAG가 비활성 프로필을 generic `catalogguard_etl_unexpected`로 실패시키던 것을 전용 코드 `etl_profile_inactive`(non-retryable)로 분리했습니다. 운영자가 의도적으로 내린 프로필은 network timeout·HTTP 5xx·일시적 DB 오류와 달리 재시도로 회복되지 않기 때문입니다. Airflow와 로그에는 `CatalogGuard HTTP feed ingestion failed [etl_profile_inactive]`처럼 안전한 코드 하나만 남기고 `profile_id`·feed URL·raw 예외는 노출하지 않았습니다. 다만 현재 DAG는 feed를 먼저 읽고 나서 activation을 판별하므로 FastAPI의 S3·HTTP route와 달리 외부 I/O 전 차단은 아니며, 검사를 앞으로 옮기면 activation 실패와 feed 실패가 겹칠 때 failure precedence가 달라지므로 두 항목을 함께 후속 설계 과제로 남겼습니다.
 30. runtime override를 한 번 만들면 배포 기본값으로 돌아갈 방법이 없다는 한계를, `PUT`에 `null`을 재사용하지 않고 `DELETE /api/v1/etl-profiles/{profile_id}/activation`을 별도 endpoint로 분리해 해결했습니다. `null`은 "운영자가 명시적으로 내렸다"는 상태를 저장하는 것이고 reset은 그 상태 자체를 지우는 것이라, 둘을 합치면 배포 기본값이 바뀔 때 운영자의 결정이 조용히 뒤집히기 때문입니다. reset은 명시적 비활성 override를 지우면서 프로필을 **다시 활성화할 수 있으므로** 단순한 정리 조작으로 보이지 않도록 Streamlit에서 되돌린 뒤 적용될 버전을 미리 표시하고 확인 checkbox를 거치게 했고, override가 이미 없어도 `200`을 주는 idempotent 계약으로 두되 없는 `profile_id`는 `404`로 구분했습니다. `204` 대신 기존 activation 응답을 그대로 돌려줘 호출자가 reset 직후 상태를 다시 조회하지 않게 했습니다.
+31. reset이 current-state row를 지우면서 actor와 시각까지 함께 지운다는 한계를, current-state 표는 그대로 두고 성공한 activate·deactivate·reset 명령을 별도 append-only 표(`etl_profile_activation_events`)에 기록해 해결했습니다. 기록 단위를 "상태가 달라진 순간"이 아니라 "서버가 성공으로 처리한 운영 명령"으로 정해 같은 버전을 다시 활성화하거나 override 없는 프로필을 다시 reset해도 event를 남기고, 실패한 요청은 남기지 않았습니다. 상태 변경과 이력 INSERT를 같은 transaction으로 묶어 이력 기록이 실패하면 상태 변경도 rollback되게 했고, current-state row 하나로는 알 수 없는 과거 이력을 추측해 backfill하지 않아 이 기록은 마이그레이션 `20260823_0015` 적용 이후의 명령부터 시작합니다.
 
 ### Airflow ETL orchestration: 문제와 해결
 
@@ -195,6 +196,8 @@ Streamlit ETL 프로필 운영 관리
 -> viewer: 상태·실제 적용 버전·배포 기본 버전·runtime override·보존 버전·마지막 변경자/시각 조회
 -> operator: PUT /api/v1/etl-profiles/{profile_id}/activation
 -> PostgreSQL etl_profile_activations (프로필당 current-state row 1건)
+   + 같은 transaction에서 etl_profile_activation_events에 성공한 명령 1건 INSERT
+-> GET /api/v1/etl-profiles/{profile_id}/activation/history (성공한 운영 명령, 최신순)
 -> 신규 ETL 실행이 effective activation을 따름
 ```
 
@@ -245,13 +248,15 @@ Streamlit ETL 프로필 운영 관리
 | Observability supplier profile listing 기능 완료 commit 기준 전체 pytest | PostgreSQL 통합 환경에서 `2256 passed`, `2 skipped`, `6 deselected`, `0 failed`. `2 skipped`는 전용 image에서만 도는 격리 Airflow DAG 테스트이며 pass가 아닙니다. `TEST_DATABASE_URL`이 없으면 `2038 passed`, `220 skipped`, `6 deselected`로 PostgreSQL 통합 테스트가 함께 skip됩니다 |
 | Observability supplier profile listing 기능 완료 commit 기준 CI | commit `de3933b5dec622fd54d2d8cbfc08506da721f918`을 대상으로 한 GitHub Actions run `32450500140` success (`test`·`airflow-smoke`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate` 5개 job) |
 | ETL Profile Runtime Activation 검증 | 3-state 해석(row 없음 / 버전 / `NULL`), registry versions 밖 버전 `422`, viewer `GET`·operator `PUT` RBAC, 비활성 프로필도 activation `GET` 200, `include_inactive` 목록 분리, actor는 `current_user`에서만 기록, `ON CONFLICT DO UPDATE` 동시 변경, activation read 트랜잭션 정리와 보류 ORM 쓰기 검출을 service·API·client·Streamlit AppTest·PostgreSQL 통합 테스트로 확인 |
-| Activation 관련 파일별 수집 규모 | `tests/test_api_etl_profile_activation.py` 35 · `tests/test_catalogguard_api_client.py` 313 · `tests/test_etl_load_history_ui.py` 120. 운영 관리 화면 전용 Chromium E2E는 아직 없음 |
+| Activation 관련 파일별 수집 규모 | 최신 기준 `tests/test_api_etl_profile_activation.py` 69 · `tests/test_catalogguard_api_client.py` 369 · `tests/test_etl_load_history_ui.py` 154 · `tests/test_etl_profile_activation_history_service.py` 35 · `tests/test_etl_profile_activation_history_migration.py` 5. 운영 관리 화면(운영 이력 포함) 전용 Chromium E2E는 아직 없음 |
 | Airflow inactive profile 분류 검증 | `etl_profile_inactive` 전용 코드, `AirflowFailException`(non-retryable), `etl_profile_invalid`·`catalogguard_etl_unexpected`와의 구분, 메시지에 `profile_id`·feed 파일명 미노출을 `airflow-smoke` job의 격리 Airflow image에서 `python -m unittest discover`로 확인(`Ran 12 tests` / `OK`). 일반 pytest run에서는 Airflow 미설치로 module 단위 skip됩니다 |
 | ETL Profile Runtime Activation 기능 완료 commit 기준 전체 pytest | PostgreSQL 통합 환경에서 `2369 passed`, `2 skipped`, `6 deselected`, `0 failed`, 5 warnings. `2 skipped`는 전용 image에서만 도는 격리 Airflow DAG 테스트이며 pass가 아닙니다. `TEST_DATABASE_URL`이 없으면 `2090 passed`, `281 skipped`, `6 deselected`로 PostgreSQL 통합 테스트가 함께 skip됩니다 |
 | ETL Profile Runtime Activation 기능 완료 commit 기준 CI | commit `06215ec2b6104a5dedf85eb5d839bf654a5481dc`을 대상으로 한 GitHub Actions run `32571400595` success (`test`·`airflow-smoke`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate` 5개 job) |
 | ETL Profile Runtime Override Reset 검증 | `DELETE .../activation`의 row 삭제와 배포 기본값 복귀, 명시적 비활성 override reset이 프로필을 재활성화하는 동작, override가 없을 때의 idempotent `200`과 없는 프로필 `404`, operator `403`/viewer 구분, `PUT` `null`이 여전히 명시적 비활성이라는 회귀, reset이 과거 ETL 이력·프로필 정의를 건드리지 않는다는 확인, reset 성공 뒤 화면 예외 없음을 service·API·client·Streamlit AppTest·PostgreSQL 통합 테스트로 확인 |
 | Reset 기능 commit `0a2a80f` 기준 로컬 테스트 | 로컬 PostgreSQL 통합 환경에서 `python -m pytest tests/` 결과 `2427 passed`, `6 deselected`, `0 failed`, 5 warnings. 관련 5개 파일 묶음은 `603 passed`(service 37 · API 49 · client 325 · Streamlit AppTest 141 · RBAC 51). `6 deselected`는 `pytest.ini`의 기본 `-m "not e2e and not performance"`입니다. **이 commit에 대한 CI run은 아직 없습니다.** CI는 `python -m pytest -q`로 저장소 전체를 수집해 `airflow/tests/`까지 포함하므로 이 로컬 수치와 직접 비교할 수 없습니다 |
-| 최신 Alembic head | `20260822_0014`(ETL profile runtime activations, single head) |
+| ETL Profile Activation History 검증 | 성공한 activate·deactivate·reset 명령마다 event 1건, 같은 `PUT`·no-op reset도 기록, 실패 요청은 기록 없음, 상태 변경과 event INSERT의 same-transaction rollback, reset event의 실제 적용 버전이 배포 기본값, 사용자 삭제 후 `actor_user_id` `NULL`·이름 snapshot 유지, 응답에 `actor_user_id` 미노출, `0015` upgrade의 backfill 없음, 화면이 reset을 비활성화로 표시하지 않음, 이력 조회 실패의 화면 격리를 migration·service·API·client·Streamlit AppTest·PostgreSQL 통합 테스트로 확인 |
+| History 기능 commit `b14e16f` 기준 로컬 테스트 | 로컬 PostgreSQL 16 통합 환경에서 `python -m pytest tests/`(e2e·performance 제외) 결과 `2543 passed`, `0 failed`. 핵심 7개 파일 묶음은 `723 passed`(history migration 5 · history service 35 · activation service 37 · API 69 · client 369 · Streamlit AppTest 154 · RBAC 54). **이 commit에 대한 CI run은 아직 없습니다.** CI는 저장소 전체를 수집해 `airflow/tests/`까지 포함하므로 이 로컬 수치와 직접 비교할 수 없습니다 |
+| 최신 Alembic head | `20260823_0015`(ETL profile activation events, single head) |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
 
 ## 6.6 핵심 구현 구조
@@ -945,6 +950,16 @@ Promotion A가 가격을 10,000원에서 12,000원으로 바꾼 뒤 다른 작�
 
 `DELETE`는 idempotent하게 두되(override가 없어도 `200`) 없는 `profile_id`는 `404`로 남겼습니다. "지울 것이 없다"와 "그런 프로필이 없다"는 운영자가 해야 할 일이 다르고, 합치면 오타로 친 `profile_id`가 성공으로 보입니다. 응답은 `204`가 아니라 기존 activation 응답인데, `204`면 화면이 reset 직후 상태를 알기 위해 `GET`을 한 번 더 해야 하고 그 사이 다른 operator의 변경이 끼면 방금 만든 상태를 잘못 설명하게 되기 때문입니다.
 
+### Q23. 왜 현재 상태 테이블에 이력을 계속 쌓지 않고 별도 event table을 만들었나요?
+
+**두 표가 답하는 질문이 다르기 때문입니다.** "지금 무엇이 적용되는가"와 "지금까지 무엇을 했는가"는 조회 패턴도, 쓰기 패턴도, row 수도 다릅니다.
+
+current-state를 event log에서 매번 재구성하면 activation을 확인할 때마다 이력 전체에서 최신 행을 골라야 하고, 그 계산이 `resolve_etl_profile_activation()` 밖으로 새어 나갑니다. 지금은 effective active version을 계산하는 곳이 한 곳뿐이고 신규 ETL 실행 경로가 그것 하나만 보는데, 그 구조가 무너집니다. 그래서 `etl_profile_activations`는 프로필당 row 하나인 현재 상태로 두고, `etl_profile_activation_events`를 성공한 명령의 append-only 이력으로 따로 뒀습니다.
+
+대신 두 표가 어긋나면 이력을 믿을 수 없게 되므로, 상태 변경과 event INSERT를 **같은 transaction**으로 묶었습니다. 이력 기록이 실패하면 상태 변경도 rollback됩니다. 나누면 "상태만 바뀌고 기록이 없는" 순간이 생기고, 그러면 "기록에 없으니 아무도 안 했다"가 거짓이 되어 감사 기록 전체의 값이 사라집니다.
+
+기록 단위를 "상태 변화"가 아니라 "성공한 운영 명령"으로 정한 것도 같은 이유입니다. 같은 버전을 다시 활성화해 상태가 그대로여도 운영자는 실제로 명령을 내렸고, 그 사실이 남아야 "이 시각에 누가 무엇을 확인했는가"에 답할 수 있습니다.
+
 ## 6.15 포트폴리오 소개 문구
 
 ### 이력서용 짧은 설명
@@ -969,7 +984,7 @@ CatalogGuard Lite는 상품 운영자가 CSV 상품 데이터를 검수하고, E
 - Prometheus metric label에 동적 ID 대신 route template을 써서 high-cardinality 문제를 사전에 차단했고, 새 timing middleware를 추가하는 대신 기존 요청 로그가 이미 계산하던 duration을 재사용했습니다.
 - Actor Audit은 새 범용 Audit 테이블 대신 기존 실행 이력 테이블에 컬럼만 추가해 복잡도를 최소화했고, actor 값은 클라이언트 입력이 아니라 인증된 JWT `current_user`에서만 가져오도록 설계해 위조를 원천 차단했습니다.
 - Docker 이미지가 실행되는 것에서 끝내지 않고, GitHub Actions에 kind로 실제 Kubernetes cluster를 만들어 배포까지 검증했습니다. migration과 API 실행 책임을 Job/Deployment로 분리했고, kind·kubectl·node image 버전을 SHA-256 digest까지 고정해 같은 commit이 항상 같은 toolchain으로 재현되게 했습니다.
-- 프로필 activation을 재배포 없이 바꿀 수 있게 하면서도, 프로필 **정의**는 code/config에 남기고 runtime 상태 하나만 DB로 분리해 범위를 제한했습니다. "row 없음(배포 기본값)"과 "row + `NULL`(명시적 비활성)"을 다른 상태로 유지해 배포 기본값 변경이 운영자의 결정을 조용히 덮지 않게 했고, 나중에 배포 기본값으로 되돌리는 기능이 필요해졌을 때도 `PUT` `null`을 재해석하는 대신 `DELETE`를 따로 만들어 그 구분을 지켰습니다. append-only history가 없다는 사실은 API·UI·문서에 함께 남겼습니다.
+- 프로필 activation을 재배포 없이 바꿀 수 있게 하면서도, 프로필 **정의**는 code/config에 남기고 runtime 상태 하나만 DB로 분리해 범위를 제한했습니다. "row 없음(배포 기본값)"과 "row + `NULL`(명시적 비활성)"을 다른 상태로 유지해 배포 기본값 변경이 운영자의 결정을 조용히 덮지 않게 했고, 나중에 배포 기본값으로 되돌리는 기능이 필요해졌을 때도 `PUT` `null`을 재해석하는 대신 `DELETE`를 따로 만들어 그 구분을 지켰습니다. append-only history가 없다는 사실은 당시 API·UI·문서에 함께 남겼고, 그 한계는 이후 6.26에서 별도 표로 해소했습니다.
 - activation 조회 SELECT가 만든 autobegin 트랜잭션을 무조건 `rollback()`으로 지우지 않고, 보류 중인 ORM 쓰기가 있으면 먼저 실패시키도록 했습니다. 짧은 우회가 나중에 추가될 쓰기를 조용히 삼키는 것을 막기 위해 검사 비용을 감수한 선택입니다.
 - Airflow에서 운영자가 의도적으로 내린 프로필을 일시 장애와 같은 실패로 다루지 않고 non-retryable 전용 코드로 분리했습니다. 동시에 "Airflow는 아직 feed를 읽은 뒤에야 차단한다"는 남은 한계와, 그것을 고치면 failure precedence가 달라진다는 이유까지 문서에 남겼습니다.
 - 콘솔에서 수동 구성한 AWS staging을 Terraform으로 코드화할 때, 검증한 적 없는 새 인프라를 만드는 대신 이미 검증한 구성의 코드화로 범위를 제한했습니다. `terraform validate`로는 알 수 없는 "RDS가 인터넷에 열려 있는지" 같은 조건을 mock provider test의 assertion으로 고정해, 이후 `0.0.0.0/0` inbound가 추가되면 CI가 막도록 했습니다. 실제 `apply`를 하지 않은 것과 mock provider가 검증할 수 없는 항목도 문서에 그대로 남겼습니다.
@@ -1701,6 +1716,8 @@ actor는 요청 body가 아니라 인증된 `current_user`에서만 기록합니
 
 **append-only history가 아닙니다.** 이 표는 프로필당 current-state row 하나입니다. A가 deactivate하고 B가 v2를 activate하면 최종 row에는 B의 값만 남고 A의 이전 결정은 보존되지 않습니다. `actor_username`과 `updated_at`은 "현재 상태를 마지막으로 만든 것이 누구/언제인가"일 뿐이며, 그것으로 activation 변경 이력을 되짚을 수는 없습니다. 완전한 감사 이력이 필요하면 별도 표가 있어야 하고, 이 표를 그 용도로 읽으면 안 됩니다. Streamlit 화면에도 "변경 이력은 저장하지 않습니다"를 caption으로 남겼습니다.
 
+> **갱신(6.26)**: current-state 표에 대한 위 설명은 지금도 그대로 맞습니다. 다만 성공한 운영 명령의 append-only 이력은 6.26에서 별도 표 `etl_profile_activation_events`로 추가됐습니다.
+
 ### 11. Airflow inactive 분류
 
 Airflow DAG는 비활성 프로필을 generic `catalogguard_etl_unexpected`로 실패시키고 있었습니다. 이를 전용 코드 `etl_profile_inactive`로 분리하고 **retry하지 않도록**(`AirflowFailException`) 했습니다.
@@ -1750,7 +1767,7 @@ Airflow의 `etl_profile_inactive` 분류는 `airflow/tests/test_catalogguard_htt
 ### 14. 후속 개선
 
 1. ~~runtime override를 제거해 배포 기본값으로 되돌리는 reset endpoint~~ → 6.25에서 구현했습니다
-2. append-only activation history 전용 표
+2. ~~append-only activation history 전용 표~~ → 6.26에서 구현했습니다
 3. 운영 관리 화면의 Chromium 브라우저 E2E
 4. Airflow DAG의 feed fetch 전 inactive guard
 5. activation 실패와 source 실패가 겹칠 때의 failure precedence 정책
@@ -1853,7 +1870,126 @@ reset의 AppTest를 쓰다가 **기존 비활성화 경로의 버그**가 드러
 
 ### 9. 한계
 
-- **activation history는 여전히 없습니다.** 이 표는 current-state row 하나이므로 reset하면 그 row의 `active_version`·`actor_username`·`updated_at`도 함께 사라집니다. "누가 언제 이 override를 만들었는가"는 reset과 동시에 어디에도 남지 않습니다. append-only audit이 필요하면 별도 표가 있어야 하고, 이 표를 그 용도로 읽으면 안 됩니다
+- **activation history는 (이 단계 시점에는) 여전히 없었습니다.** 이 표는 current-state row 하나이므로 reset하면 그 row의 `active_version`·`actor_username`·`updated_at`도 함께 사라집니다. "누가 언제 이 override를 만들었는가"는 reset과 동시에 어디에도 남지 않았습니다. → **6.26에서 별도 append-only 표로 해소했습니다.** current-state 응답의 actor가 reset 후 `null`인 것은 지금도 그대로이고, 그 명령을 누가 내렸는지는 이력 쪽에 남습니다
 - **Profile CRUD는 없습니다.** 프로필 정의와 버전 archive의 source of truth는 계속 `config/etl` JSON archive와 코드 registry입니다
 - 운영 관리 화면의 Chromium 브라우저 E2E는 아직 없습니다. 이 구간은 service·API·client·AppTest·PostgreSQL 통합 테스트로만 검증했습니다
+- Airflow의 feed fetch 전 inactive guard와 failure precedence 정책은 6.24 시점 그대로 남아 있습니다
+
+## 6.26 ETL Profile Activation Append-only History
+
+6.25가 남긴 한계 1번을 구현한 단계입니다. **current-state 구조는 한 줄도 바꾸지 않았습니다.** `PUT` `null`은 여전히 명시적 비활성이고 `DELETE`는 여전히 reset이며, 더한 것은 표 하나와 읽기 endpoint 하나입니다. Alembic head는 `20260823_0015`입니다.
+
+### 1. 문제
+
+`etl_profile_activations`는 프로필당 current-state row 하나입니다. A가 v2를 활성화하고 B가 비활성화하고 C가 reset하면, 표에 남는 것은 마지막 상태뿐입니다. 특히 reset은 row 자체를 지우므로 `actor_username`과 `updated_at`까지 함께 사라져 **누가 무엇을 했는지 아무것도 남지 않았습니다.**
+
+### 2. current-state와 history를 왜 나눴나
+
+이 표를 history 표로 바꾸는 것은 선택지가 아니었습니다. 바꾸면 "지금 무엇이 적용되는가"를 물을 때마다 이력 전체에서 최신 행을 골라야 하고, 그 계산이 `resolve_etl_profile_activation()` 밖으로 새어 나갑니다. 두 표는 답하는 질문이 다릅니다.
+
+| 표 | 답하는 질문 | 쓰기 | row 수 |
+| --- | --- | --- | --- |
+| `etl_profile_activations` | 지금 무엇이 적용되는가 | upsert / delete | 프로필당 0 또는 1 |
+| `etl_profile_activation_events` | 지금까지 무엇을 했는가 | **INSERT만** | 명령마다 1, 누적 |
+
+### 3. event의 기록 단위
+
+**"상태가 실제로 달라진 순간"이 아니라 "서버가 성공으로 처리한 operator 명령"입니다.**
+
+| 요청 | 상태 변화 | event |
+| --- | --- | --- |
+| `PUT {"active_version": "2"}` | 있음 | `activate` 1건 |
+| 같은 `PUT`을 한 번 더 | **없음** | `activate` 1건 더 |
+| `PUT {"active_version": null}` | 있음 | `deactivate` 1건 |
+| 이미 비활성인데 같은 `PUT` | **없음** | `deactivate` 1건 더 |
+| `DELETE` | 있음 | `reset` 1건 |
+| override 없는데 `DELETE`(idempotent `200`) | **없음** | `reset` 1건 더 |
+| 없는 프로필 / 없는 버전 / `401` / `403` | 없음 | **없음** |
+
+즉 state idempotency와 audit event idempotency는 다른 개념입니다. API가 idempotent한 것은 결과 상태에 대한 성질이고, 이 표가 답하는 질문은 "누가 무엇을 시도해 서버가 받아들였는가"입니다. 같은 명령을 두 번 내린 것은 실제로 두 번 일어난 일입니다.
+
+실패한 요청이 흔적을 남기지 않는 것은 검증 순서 덕분입니다. allowlist와 보존 버전 검증은 지금도 쓰기 transaction을 열기 **전에** 끝나므로, 없는 프로필이나 버전은 이 표에 도달하지 못합니다. `401`/`403`은 애초에 service까지 오지 않습니다.
+
+### 4. DB와 migration
+
+`etl_profile_activation_events`에는 `profile_id`, `action`, 명령 직후 상태 snapshot 네 개(`deployment_active_version`·`runtime_override_exists`·`runtime_active_version`·`effective_active_version`), actor 두 개, `created_at`을 둡니다. 상태 값을 snapshot으로 저장한 이유는, 나중에 registry를 다시 읽어 계산하면 배포 기본값이 바뀔 때 과거 기록의 뜻이 조용히 달라지기 때문입니다. `profile_id`에 FK를 걸지 않은 이유는 current-state 표와 같습니다.
+
+CHECK constraint 하나가 **명령과 결과 상태가 모순되는 행**을 막습니다.
+
+```text
+activate   : override 있음 AND runtime IS NOT NULL AND effective = runtime
+deactivate : override 있음 AND runtime IS NULL     AND effective IS NULL
+reset      : override 없음 AND runtime IS NULL     AND effective IS NOT DISTINCT FROM deployment
+```
+
+reset 비교에 일반 `=`를 쓰지 않았습니다. 배포 기본값 자체가 비활성이면 양쪽이 `NULL`인데, PostgreSQL에서 `NULL = NULL`은 참이 아니라 `NULL`이고 CHECK는 `NULL`을 통과시켜 제약이 **조용히 무력화**됩니다. `IS NOT DISTINCT FROM`이 그 경우까지 정확히 봅니다.
+
+### 5. Atomicity
+
+이 단계에서 가장 중요한 설계 판단입니다. 단순히 로그 테이블을 추가한 것이 아닙니다.
+
+```python
+with session.begin():
+    <current-state upsert 또는 delete>
+    <같은 transaction에서 resolve>
+    <event INSERT>
+```
+
+두 쓰기를 다른 transaction으로 나누면 둘 중 하나가 반드시 생깁니다. **상태만 바뀌고 기록이 없으면** "기록에 없으니 아무도 안 했다"가 거짓이 되어 이력 전체를 믿을 수 없게 되고, **기록만 있고 상태가 안 바뀌면** 일어나지 않은 일이 기록에 남습니다. 그래서 event helper는 `session.add()`만 하고 commit하지 않으며, transaction 경계는 호출자가 소유합니다. 이력 INSERT가 실패하면 상태 변경도 함께 rollback됩니다.
+
+event에 담는 상태는 같은 transaction 안에서 `resolve_etl_profile_activation()`으로 얻습니다. effective 계산을 다시 구현하지 않는다는 6.24의 규칙은 그대로입니다.
+
+### 6. API와 RBAC
+
+`GET /api/v1/etl-profiles/{profile_id}/activation/history`(viewer 이상)로 조회합니다. `limit`(기본 `20`, `1`~`100`)·`offset`(기본 `0`) pagination과 `created_at DESC, id DESC` 정렬을 쓰고, 없는 프로필은 `404`, 기록이 없으면 `200` + 빈 목록입니다. 운영 기록을 읽는 것은 상태를 바꾸는 것이 아니므로 새 role을 만들지 않았고, 상태를 바꿀 수 없는 사람도 "왜 지금 이렇게 되어 있는가"는 확인할 수 있어야 합니다.
+
+**`actor_user_id`는 응답에 노출하지 않습니다.** DB 관계용 ID이고, 화면에 필요한 것은 사용자가 삭제된 뒤에도 남는 `actor_username` snapshot입니다. service view dataclass에도 그 필드를 두지 않아 실수로 새어 나갈 자리 자체를 없앴습니다. 기존 `PUT`/`DELETE` 응답에는 이력을 끼워 넣지 않아 `ETLProfileActivationResponse` 계약이 그대로입니다.
+
+이력에는 수정·삭제·purge API가 없고 client에도 조회 method 하나만 뒀습니다. 다만 append-only는 **애플리케이션 계약**이지, DB superuser의 직접 `UPDATE`/`DELETE`까지 막는 WORM 저장소를 구현한 것은 아닙니다.
+
+### 7. Streamlit
+
+`ETL 프로필 운영 관리` 아래에 read-only `Activation 운영 이력` 표를 더했습니다. 시각·동작·런타임 결과·실제 적용 버전·배포 기본 버전·사용자를 함께 보여 주고, 동작은 `버전 활성화`·`비활성화`·`배포 기본값으로 되돌리기`로 구분합니다. **reset을 비활성화로 표시하지 않습니다** — override가 사라졌을 뿐이고 배포 기본값이 활성이면 실제 적용 버전이 있으므로 두 값을 한 행에서 함께 보여 줍니다.
+
+activate/deactivate/reset 성공 뒤에는 기존 공통 경로(`_commit_etl_profile_activation_change()`) **한 곳**에서 이력 캐시까지 함께 비웁니다. 같은 무효화를 세 군데 복사하면 나중에 한쪽만 고쳐져 이력만 옛 화면으로 남습니다. 이력 조회가 실패해도 관리 화면 전체가 사라지지 않고 그 구획에만 오류를 표시해, 상태 확인과 조작은 계속 쓸 수 있습니다.
+
+### 8. reset actor: 모순이 아니다
+
+reset 직후 current-state 응답의 `actor_username`과 `updated_at`은 여전히 `null`입니다. 그 값을 들고 있던 row가 없어졌기 때문이고, 이 계약은 6.25 그대로입니다. 동시에 이력의 `reset` event에는 actor가 남습니다.
+
+두 값은 서로 다른 질문에 답합니다. 앞은 "지금 이 override를 만든 사람"이라 override가 없으면 없는 것이 맞고, 뒤는 "그 override를 지운 명령을 내린 사람"입니다. 그래서 `DELETE` route가 이번에 인증된 `current_user`에서 actor를 받도록 확장됐고, request body에는 여전히 actor를 넣을 자리가 없습니다.
+
+### 9. 과거 이력을 만들어 내지 않았다
+
+migration은 **빈 표를 만듭니다.** 기존 current-state row를 보고 과거 event를 채우지 않았습니다. row 하나로는 누가 처음 활성화했는지, 몇 번 바꿨는지, 언제 내렸다 올렸는지 알 수 없기 때문입니다. 모르는 것을 추측해 채우면 없는 기록보다 나쁜 **틀린 기록**이 남고, 나중에 읽는 사람이 그것을 사실로 믿습니다.
+
+그래서 이력은 `0015` 적용 **이후의 명령부터** 시작하며, 화면·API 문서도 그렇게 말합니다. 실제 PostgreSQL migration 테스트에서 `0014` 상태에 override row를 넣고 `0015`로 올린 뒤 event 0건과 current-state row 보존을 함께 확인했습니다.
+
+### 10. 검증
+
+로컬 PostgreSQL 16 통합 환경에서 실행한 결과입니다. **이 commit에 대한 CI run은 아직 없으므로 "CI 통과"라고 쓰지 않습니다.**
+
+`python -m pytest tests/` 전체(e2e·performance 제외)는 `2543 passed`, `0 failed`였고, 핵심 묶음은 다음과 같습니다.
+
+| 대상 | 결과 |
+| --- | --- |
+| `tests/test_etl_profile_activation_history_migration.py` | 5 passed |
+| `tests/test_etl_profile_activation_history_service.py` | 35 passed |
+| `tests/test_etl_profile_activation_service.py` | 37 passed |
+| `tests/test_api_etl_profile_activation.py` | 69 passed |
+| `tests/test_catalogguard_api_client.py` | 369 passed |
+| `tests/test_etl_load_history_ui.py` | 154 passed |
+| `tests/test_api_rbac.py` | 54 passed |
+| 위 7개 묶음 | **723 passed, 0 failed, 0 skipped** |
+
+고정한 것: 세 명령이 각각 event 하나를 남기는지, 같은 `PUT`·no-op reset도 event를 추가하는지, 실패한 요청이 아무것도 남기지 않는지, 이력 INSERT가 실패할 때 상태 변경까지 rollback되는지, reset event의 실제 적용 버전이 배포 기본값인지, 사용자를 지워도 이름 snapshot이 남는지, 응답에 `actor_user_id`가 없는지, `0015` upgrade가 기존 row로 이력을 만들지 않는지, 화면이 reset을 비활성화로 표시하지 않는지, 이력 조회 실패가 관리 화면을 깨지 않는지.
+
+### 11. 한계
+
+- **`0015` 이전의 운영 명령은 이력에 없습니다.** backfill하지 않았습니다
+- 이력 조회도 현재 registry allowlist를 기준으로 검증하므로, registry에서 완전히 제거된 과거 프로필의 event는 표에 남아 있어도 프로필별 endpoint로는 읽을 수 없습니다(`404`). 여러 프로필을 한 번에 보는 조회도 없습니다
+- append-only는 애플리케이션 계약이며 WORM 저장소가 아닙니다. retention/purge 정책도 없어 event는 계속 누적됩니다
+- 동시성 정책은 6.24 그대로 last-write-wins입니다. 정렬은 결정적이지만 분산 환경의 절대적 인과 순서는 아닙니다
+- **Profile CRUD는 없습니다.** 프로필 정의와 버전 archive의 source of truth는 계속 `config/etl` JSON archive와 코드 registry입니다
+- 운영 관리 화면(운영 이력 포함)의 Chromium 브라우저 E2E는 아직 없습니다
 - Airflow의 feed fetch 전 inactive guard와 failure precedence 정책은 6.24 시점 그대로 남아 있습니다
