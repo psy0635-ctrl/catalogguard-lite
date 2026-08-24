@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import os
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -151,6 +153,70 @@ class CatalogGuardHTTPFeedDagTest(unittest.TestCase):
         )
         self.assertNotIn("sample_fashion_vendor_v1", message)
         self.assertNotIn("supplier_feed.csv", message)
+
+    def test_inactive_profile_blocks_before_reading_the_feed(self) -> None:
+        """The pre-fetch guard must prevent any external HTTP request."""
+        from airflow.exceptions import AirflowFailException
+
+        module = _load_dag_module()
+        with patch(
+            "etl.profile_loader.is_etl_profile_inactive",
+            return_value=True,
+        ), patch("etl.http_source.read_http_feed_csv") as read_http_feed_csv:
+            with self.assertRaises(AirflowFailException) as error:
+                module.run_configured_http_feed_to_staging("sample_fashion_vendor_v1")
+
+        self.assertEqual(
+            str(error.exception),
+            "CatalogGuard HTTP feed ingestion failed [etl_profile_inactive]",
+        )
+        read_http_feed_csv.assert_not_called()
+
+    def test_active_profile_checks_before_fetch_and_keeps_the_web_etl_flow(self) -> None:
+        """An active profile still reaches the configured feed and existing service."""
+        from etl.http_source import HTTPFeedSourceObject
+
+        module = _load_dag_module()
+        session = object()
+        outcome = SimpleNamespace(etl_load_run_id=17, created=True)
+        call_order: list[str] = []
+
+        def check_activation(profile_id: str, *, session: object) -> bool:
+            self.assertEqual(profile_id, "sample_fashion_vendor_v1")
+            call_order.append("activation")
+            return False
+
+        def finish_activation_read(checked_session: object) -> None:
+            self.assertIs(checked_session, session)
+            call_order.append("end_read")
+
+        def read_feed() -> HTTPFeedSourceObject:
+            call_order.append("fetch")
+            return HTTPFeedSourceObject("supplier_feed.csv", b"supplier,csv\n")
+
+        def run_service(checked_session: object, **kwargs):
+            self.assertIs(checked_session, session)
+            self.assertEqual(kwargs["profile_id"], "sample_fashion_vendor_v1")
+            call_order.append("run_web_etl")
+            return outcome
+
+        with patch(
+            "db.session.get_session_factory",
+            return_value=lambda: nullcontext(session),
+        ), patch(
+            "etl.profile_loader.is_etl_profile_inactive",
+            side_effect=check_activation,
+        ), patch(
+            "db.etl_profile_activation_service.end_activation_read_transaction",
+            side_effect=finish_activation_read,
+        ), patch("etl.http_source.read_http_feed_csv", side_effect=read_feed), patch(
+            "etl.web_service.run_web_etl",
+            side_effect=run_service,
+        ):
+            result = module.run_configured_http_feed_to_staging("sample_fashion_vendor_v1")
+
+        self.assertEqual(result, {"etl_load_run_id": 17, "created": True})
+        self.assertEqual(call_order, ["activation", "end_read", "fetch", "run_web_etl"])
 
     def test_inactive_and_invalid_profiles_get_different_failure_codes(self) -> None:
         """Fixing a misconfigured profile and re-enabling a disabled one are different jobs."""
@@ -312,21 +378,19 @@ class CatalogGuardHTTPFeedDagTest(unittest.TestCase):
                 self.assertTrue(view.runtime_override_exists)
                 self.assertFalse(view.is_active)
 
-            with patch(
-                "etl.http_source.read_http_feed_csv",
-                return_value=HTTPFeedSourceObject(
-                    "supplier_feed.csv", b"supplier,csv\n"
-                ),
-            ):
+            with patch("etl.http_source.read_http_feed_csv") as read_http_feed_csv:
                 with self.assertRaises(AirflowFailException) as error:
                     module.run_configured_http_feed_to_staging(profile_id)
 
             message = str(error.exception)
-            self.assertIn("etl_profile_inactive", message)
-            self.assertNotIn("catalogguard_etl_unexpected", message)
+            self.assertEqual(
+                message,
+                "CatalogGuard HTTP feed ingestion failed [etl_profile_inactive]",
+            )
+            read_http_feed_csv.assert_not_called()
         finally:
-            # reset API가 없으므로 테스트가 만든 row는 직접 지운다. 남겨 두면 이후
-            # 테스트와 로컬 환경에서 이 프로필이 계속 비활성으로 보인다.
+            # reset API는 있지만, 이 fixture의 cleanup은 만든 row만 직접 지우는 편이
+            # 간단하다. 남겨 두면 이후 테스트와 로컬 환경에서 계속 비활성으로 보인다.
             with session_factory() as cleanup:
                 cleanup.execute(
                     delete(ETLProfileActivation).where(

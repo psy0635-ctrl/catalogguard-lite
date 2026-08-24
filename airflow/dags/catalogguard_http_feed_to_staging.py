@@ -34,6 +34,7 @@ def run_configured_http_feed_to_staging(profile_id: str) -> dict[str, int | bool
 
     from config.settings import ETL_HTTP_FEED_SOURCE_REF
     from core.upload_validator import CsvUploadValidationError
+    from db.etl_profile_activation_service import end_activation_read_transaction
     from db.session import get_session_factory
     from etl.db_loader import ETLLoadError
     from etl.http_source import (
@@ -43,25 +44,34 @@ def run_configured_http_feed_to_staging(profile_id: str) -> dict[str, int | bool
         read_http_feed_csv,
     )
     from etl.pipeline import ETLPipelineError
-    from etl.profile_loader import ETLProfileInactiveError, ETLProfileNotFoundError
+    from etl.profile_loader import (
+        ETLProfileInactiveError,
+        ETLProfileNotFoundError,
+        is_etl_profile_inactive,
+    )
     from etl.web_service import run_web_etl
 
+    inactive = False
     try:
-        # API의 S3/HTTP route와 달리 여기에는 fetch 전 활성 여부 사전 검사가 없다.
-        # 비활성 프로필은 아래 run_web_etl()의 get_profile_path()에서 걸리므로,
-        # 피드를 한 번 읽은 뒤에야 판별된다. 분류는 정확하지만 읽기는 낭비다.
-        source = read_http_feed_csv()
         with get_session_factory()() as session:
-            outcome = run_web_etl(
-                session,
-                profile_id=profile_id,
-                source_filename=source.source_filename,
-                input_bytes=source.content,
-                actor_user_id=None,
-                actor_username=None,
-                initial_source_type="http_feed",
-                initial_source_ref=ETL_HTTP_FEED_SOURCE_REF,
-            )
+            # Runtime override까지 반영한 기존 activation resolver를 재사용합니다.
+            # unknown profile은 False로 통과시켜 기존 오류 우선순위를 보존합니다.
+            inactive = is_etl_profile_inactive(profile_id, session=session)
+            if not inactive:
+                # activation SELECT가 시작한 transaction을 source I/O 전에 끝냅니다.
+                # run_web_etl()의 최종 activation 검사는 pre-check 뒤 상태 변경의 방어선입니다.
+                end_activation_read_transaction(session)
+                source = read_http_feed_csv()
+                outcome = run_web_etl(
+                    session,
+                    profile_id=profile_id,
+                    source_filename=source.source_filename,
+                    input_bytes=source.content,
+                    actor_user_id=None,
+                    actor_username=None,
+                    initial_source_type="http_feed",
+                    initial_source_ref=ETL_HTTP_FEED_SOURCE_REF,
+                )
     except HTTPFeedTransientError as error:
         _safe_airflow_failure(error.error_code, retryable=True)
     except HTTPFeedPermanentError as error:
@@ -97,6 +107,9 @@ def run_configured_http_feed_to_staging(profile_id: str) -> dict[str, int | bool
         _safe_airflow_failure("catalogguard_db_non_retryable", retryable=False)
     except Exception:
         _safe_airflow_failure("catalogguard_etl_unexpected", retryable=False)
+
+    if inactive:
+        _safe_airflow_failure("etl_profile_inactive", retryable=False)
 
     return {
         "etl_load_run_id": outcome.etl_load_run_id,
