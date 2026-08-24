@@ -101,7 +101,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - `DELETE .../activation`으로 runtime override row를 제거해 배포 기본값으로 복귀. **Deactivate와 다릅니다** — `active_version: null`은 "운영자가 명시적으로 내렸다"는 상태를 남기고, `DELETE`는 그 상태 자체를 지웁니다. 배포 기본값이 활성이면 reset이 프로필을 **다시 활성화**하므로 Streamlit이 적용될 버전을 미리 보여 주고 확인을 받습니다
 - `GET /api/v1/etl-profiles?include_inactive=true` 관리 목록. 실행 selector용 기본 목록은 지금 실행 가능한 프로필만 반환하고, 관리 화면은 비활성 프로필까지 포함해 다시 활성화할 수 있게 합니다
 - Deactivate ≠ Delete: 비활성화는 신규 ETL 실행(업로드·S3·HTTP feed·Airflow)만 막고 과거 적재 이력·staging 조회·품질 요약/추이/관찰·동기화 차이·promotion/rollback 이력·버전 archive는 그대로 유지합니다
-- Airflow HTTP feed DAG의 비활성 프로필 전용 실패 분류(`etl_profile_inactive`, non-retryable). 일시 장애가 아니라 운영자가 의도한 상태이므로 재시도하지 않습니다
+- Airflow HTTP feed DAG는 effective activation을 feed fetch 전에 확인하며, inactive profile은 `read_http_feed_csv()`를 호출하지 않고 전용 non-retryable 실패 `etl_profile_inactive`로 끝납니다
 - `POST /api/v1/etl-loads`로 업로드 CSV와 profile_id를 받아 기존 `run_pipeline()`·`load_standard_csv()`를 그대로 실행하고 PostgreSQL staging까지 적재
 - 동일한 원본 파일 해시·프로필 이름·버전의 웹 ETL 요청은 새 배치를 만들지 않고 기존 배치를 `created=false`로 재사용
 - 웹 ETL 성공 후 ETL 적재 이력 캐시만 자동 무효화하고, 운영 상품 반영은 사용자가 이력에서 batch를 선택해 별도로 진행
@@ -2162,7 +2162,7 @@ bucket과 허용 prefix는 요청이 아니라 서버 환경변수 `CATALOGGUARD
 
 비활성 프로필 검사는 **S3를 읽기 전에** 수행하므로, 비활성 프로필 요청은 위 S3 source 오류보다 먼저 `409`로 끊기고 외부 요청 자체를 만들지 않습니다. HTTP feed(`POST /api/v1/etl-loads/http`)도 같습니다. 판단 기준은 배포 기본값이 아니라 runtime override까지 반영한 effective 상태이므로, runtime에서 내린 프로필도 외부를 읽기 전에 막힙니다. 없는 `profile_id`는 사전 검사하지 않으므로 기존처럼 source 오류가 먼저 반환됩니다.
 
-이 사전 검사는 **FastAPI의 S3·HTTP feed route에만** 있습니다. Airflow DAG에는 없으므로 "모든 ETL 경로가 외부 I/O 전에 비활성 프로필을 차단한다"고 말할 수 없습니다. 자세한 내용은 아래 "Airflow Foundation과 configured HTTP feed staging"을 참고하세요.
+이 사전 검사는 FastAPI의 S3·HTTP feed route와 Airflow HTTP feed DAG에 있습니다. active pre-check 뒤 deactivate되는 race에서는 `run_web_etl()`의 기존 activation 검사가 최종 방어선이며, 이 경우 HTTP fetch 0회까지 보장하지는 않습니다. 자세한 내용은 아래 "Airflow Foundation과 configured HTTP feed staging"을 참고하세요.
 
 AWS 자격증명은 요청이나 환경변수로 받지 않고 boto3 기본 credential chain을 사용하므로, EC2에서는 Instance Role이 그대로 적용됩니다.
 
@@ -2866,8 +2866,8 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 이력 조회도 **현재 registry allowlist**를 기준으로 검증하므로, registry에서 완전히 제거된 과거 프로필의 event는 표에 남아 있어도 프로필별 endpoint로는 읽을 수 없습니다(`404`). 여러 프로필을 한 번에 보는 조회도 없습니다.
 - 운영 이력의 append-only는 **애플리케이션 계약**입니다. 수정·삭제·purge API를 두지 않고 쓰기 경로가 INSERT 하나뿐이라는 뜻이며, DB superuser의 직접 `UPDATE`/`DELETE`까지 막는 WORM 저장소를 구현한 것은 아닙니다. retention/purge 정책도 없어 event는 계속 누적됩니다.
 - Streamlit `ETL 프로필 운영 관리` 화면(운영 이력 포함) 전용 Chromium 브라우저 E2E는 아직 없습니다. Activation은 API integration test, API client test, Streamlit AppTest, PostgreSQL 통합 테스트로 검증했습니다.
-- **Airflow에는 feed fetch 전 inactive guard가 없습니다.** DAG는 `read_http_feed_csv()` → `run_web_etl()` → activation 판별 순서이므로 비활성 프로필도 HTTP feed를 한 번 읽은 뒤 `etl_profile_inactive`(non-retryable)로 차단됩니다. FastAPI의 S3·HTTP route만 외부 읽기 전에 막습니다.
-- activation DB 조회와 외부 source가 동시에 실패할 때 어느 오류를 먼저 보고할지에 대한 **failure precedence 정책이 정해져 있지 않습니다.** Airflow의 inactive pre-fetch guard와 함께 별도 후속 설계 과제입니다.
+- Airflow는 effective activation을 HTTP feed fetch 전에 확인합니다. 이미 inactive면 `read_http_feed_csv()`를 호출하지 않고 `etl_profile_inactive`(non-retryable)로 차단됩니다. pre-check 뒤 deactivate되는 race는 `run_web_etl()`의 최종 guard가 처리하지만 HTTP fetch 0회까지 보장하지는 않습니다.
+- activation DB 조회와 외부 source가 동시에 실패할 때의 failure precedence는 사전 검사 순서에 따릅니다. 모든 activation/source failure 우선순위의 재설계는 별도 범위입니다.
 - Activation 변경 범위는 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)의 Phase 5A·5A.1·5B.1·5B.2·5B.3·5B.4를 참고하세요.
 - `etl_load_runs`는 `profile_name`·`profile_version`만 기록하고 프로필 JSON snapshot이나 매핑 hash는 저장하지 않으므로, 어떤 버전을 썼는지는 알 수 있지만 그 버전의 당시 내용이 보존된다고 DB가 보장하지는 않습니다. 버전 증가 기준과 향후 방향은 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)에 정리했습니다.
 - S3 ingestion은 호출자가 `object_key` 하나를 지정하는 pull 방식입니다. S3 event 알림·Lambda·SQS 기반 자동 수집과 prefix 일괄 처리는 지원하지 않습니다.
@@ -2923,7 +2923,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 웹 ETL 처리 시간이 길어질 경우의 비동기(Celery) 실행
 - 웹 ETL 다중 파일 업로드와 XLSX 등 추가 입력 형식 지원
 - Streamlit `ETL 프로필 운영 관리` 화면의 Chromium 브라우저 E2E
-- Airflow DAG의 feed fetch 전 inactive profile guard
+- Airflow pre-check 뒤 deactivate되는 race에서 HTTP fetch 0회까지 보장하는 lock 구조
 - activation 조회 실패와 외부 source 실패가 겹칠 때의 failure precedence 정책
 - 사용자 정의 ETL 프로필 등록·관리(Profile CRUD)
 - DB-backed Profile / ProfileVersion 모델 도입 여부 검토(현재 정의는 code/config)
@@ -2976,6 +2976,7 @@ Airflow는 ETL 변환 로직을 새로 구현하지 않는다. 운영자가 manu
 -> Airflow manual trigger
 -> catalogguard_http_feed_to_staging
 -> ingest_configured_http_feed_to_staging
+-> effective profile activation pre-check
 -> read_http_feed_csv()
 -> run_web_etl()
 -> run_pipeline()
@@ -3039,16 +3040,11 @@ CatalogGuard HTTP feed ingestion failed [etl_profile_inactive]
 `profile_id`, 프로필 JSON 원문, feed URL과 query, token, DB URL, 원본 예외는 이 메시지에
 넣지 않으며 `__cause__`도 남기지 않는다.
 
-**현재 한계 — Airflow에는 fetch 전 사전 검사가 없다.** DAG의 실제 순서는
-`read_http_feed_csv()` → `run_web_etl()` → activation 판별이므로, 비활성 프로필이어도 HTTP
-feed를 **한 번 읽은 뒤에** 차단된다. 분류는 정확하지만 그 읽기는 낭비다. 반면 FastAPI의
-S3·HTTP source route는 외부를 읽기 전에 inactive guard를 수행한다. 따라서 "모든 ETL 경로가
-inactive 프로필을 외부 I/O 전에 차단한다"는 설명은 사실이 아니다.
-
-이 검사를 feed fetch 앞으로 옮기지 않은 이유는 실패 우선순위(failure precedence)가 달라지기
-때문이다. activation DB 조회와 HTTP feed가 **동시에** 실패하는 경우, 어느 쪽을 먼저 보고할지가
-검사 위치에 따라 바뀐다. 지금은 feed 오류가 먼저 보고된다. Airflow의 inactive pre-fetch guard와
-failure precedence 정책은 별도 후속 설계 과제로 남겨 두었다.
+Airflow는 effective activation을 feed fetch 전에 확인한다. 이미 inactive인 profile은
+`read_http_feed_csv()`를 호출하지 않고 `etl_profile_inactive`로 non-retryable failure가 된다.
+active pre-check가 시작한 read transaction은 fetch 전에 정리하고, `run_web_etl()`의 기존
+activation 검사는 pre-check 뒤 deactivate되는 race의 최종 방어선으로 남는다. 따라서 이 race에서는
+HTTP fetch 0회까지 보장하지 않는다.
 
 Idempotency(같은 작업을 다시 실행해도 중복 결과를 만들지 않는 성질)의 identity는
 `(input_file_sha256, profile_name, profile_version)`이다. 같은 bytes를 다시 처리하면

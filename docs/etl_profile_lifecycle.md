@@ -786,9 +786,9 @@ Phase 5A의 `409 inactive_profile` 계약은 **그대로다.** runtime에서 내
 | Web CSV Upload | `run_web_etl()` → `get_profile_path(session=...)` |
 | S3 source | source를 읽기 전 `is_etl_profile_inactive(session=...)`, 그 뒤 `run_web_etl()` |
 | HTTP feed | 위와 같다 |
-| Airflow DAG | `run_web_etl()`에 자기 session을 넘긴다 |
+| Airflow DAG | source를 읽기 전 `is_etl_profile_inactive(session=...)`, 그 뒤 `run_web_etl()` |
 
-S3/HTTP는 외부를 읽기 전에 막는다는 14.3의 순서도 그대로다. 이 사전 검사가 이제 session을 받는 이유는, 배포 기본값만 보면 runtime에서 내린 프로필이 외부를 먼저 읽고 나서야 막히기 때문이다.
+S3/HTTP와 Airflow는 외부를 읽기 전에 막는다. 이 사전 검사가 session을 받는 이유는, 배포 기본값만 보면 runtime에서 내린 프로필이 외부를 먼저 읽고 나서야 막히기 때문이다. Airflow도 active pre-check 뒤에는 `end_activation_read_transaction()`으로 read transaction을 끝낸 뒤 fetch하며, `run_web_etl()`의 기존 검사는 그 사이 deactivate되는 race의 최종 방어선으로 남는다.
 
 `etl.cli`는 `profile_id`가 아니라 파일 경로를 직접 받으므로 이 resolver를 지나지 않는다. 의도적이다. CLI의 `--profile`은 "이 파일로 실행하라"는 명시적 지시이지 "활성 버전으로 실행하라"가 아니다.
 
@@ -806,7 +806,7 @@ activation 조회는 SELECT라 session을 autobegin시킨다. 그 상태로 두�
 
 한계도 적어 둔다. 이 검사는 ORM 단위 작업(`new`/`dirty`/`deleted`)만 본다. `session.execute(insert(...))` 같은 Core 쓰기는 감지되지 않고 함께 rollback된다. 다만 그런 호출자는 원래도 허용되지 않았다 — `load_standard_csv()`가 자기 트랜잭션을 여는 구조라, `run_web_etl()`에 넘기는 session은 트랜잭션이 열려 있지 않아야 한다는 것이 이 함수 이전부터의 계약이다.
 
-현재 네 경로 모두 이 시점에 쓰기를 들고 있지 않다. Web upload는 `await file.read()`만, S3/HTTP는 비활성 사전 검사(읽기)와 source fetch만, Airflow는 session을 만든 직후 호출한다.
+현재 네 경로 모두 이 시점에 쓰기를 들고 있지 않다. Web upload는 `await file.read()`만, S3/HTTP와 Airflow는 비활성 사전 검사(읽기)와 source fetch만 수행한다.
 
 ### 16.8 동시성
 
@@ -832,7 +832,7 @@ activation 조회는 SELECT라 session을 autobegin시킨다. 그 상태로 두�
 - Profile CRUD(등록·수정·삭제)가 없다
 - ~~activation 변경 **이력**이 없다. 표는 현재 상태 한 줄만 들고 있어 "언제 누가 내렸다가 언제 올렸는가"는 남지 않는다. append-only audit이 필요해지면 별도 표가 필요하다~~ → Phase 5B.4에서 별도 표로 추가됐다(19장). 다만 그 기록은 `20260823_0015` 적용 **이후**의 명령부터다
 - 과거 배치의 **런타임 재현**은 여전히 없다. 버전 전환이 쉬워졌을 뿐, 실행되는 코드는 언제나 현재 코드다(16.4)
-- ~~Airflow DAG는 비활성 프로필을 `catalogguard_etl_unexpected`로 실패시킨다~~ → 전용 코드 `etl_profile_inactive`(non-retryable)로 구분한다. 다만 DAG에는 API의 S3/HTTP route와 달리 fetch 전 사전 검사가 없어, 비활성 프로필도 HTTP 피드를 한 번 읽은 뒤 `run_web_etl()`에서 판별된다. 분류는 정확하지만 그 읽기는 낭비이며, 피드 자체가 실패하면 여전히 피드 오류 코드가 먼저 보고된다
+- ~~Airflow DAG는 비활성 프로필을 `catalogguard_etl_unexpected`로 실패시킨다~~ → 전용 코드 `etl_profile_inactive`(non-retryable)로 구분하고, effective activation을 HTTP fetch 전에 확인한다. 이미 inactive면 feed를 요청하지 않는다. pre-check 뒤 deactivate되는 race에서는 `run_web_etl()`의 최종 검사가 차단하지만 HTTP fetch 0회까지 보장하지는 않는다
 
 ---
 

@@ -247,6 +247,7 @@ Airflow는 공급사 ETL 실행 흐름을 관리한다. Celery는 API가 요청�
 -> Airflow manual trigger(profile_id)
 -> catalogguard_http_feed_to_staging
 -> ingest_configured_http_feed_to_staging
+-> effective profile activation pre-check
 -> read_http_feed_csv()
 -> run_web_etl()
 -> run_pipeline()
@@ -262,6 +263,12 @@ Airflow는 새 ETL pipeline이 아니다. `read_http_feed_csv()`가 configured f
 복제하지 않는다. 단일 task를 택한 이유도 temporary artifact를 task 간 shared filesystem이나 XCom으로
 넘기지 않기 위해서다. XCom은 Airflow task 사이에 작은 값을 전달하는 기능이며, 이 DAG의 반환값/XCom은
 `etl_load_run_id`, `created`만 포함한다.
+
+Airflow task는 configured HTTP feed를 읽기 전에 기존 effective activation helper로 profile 상태를
+확인한다. 이미 inactive면 `read_http_feed_csv()`를 호출하지 않고 `etl_profile_inactive`의
+non-retryable failure로 끝난다. active pre-check가 시작한 read transaction은 source I/O 전에
+정리하며, `run_web_etl()`의 activation 검사는 pre-check 뒤 deactivate되는 race의 최종 방어선으로
+남는다. 따라서 그 race에서는 HTTP fetch 0회를 보장하지 않는다.
 
 ### runtime과 DB 분리
 
