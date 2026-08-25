@@ -10,7 +10,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 - `[정책 결정]` — 지켜야 할 규칙. 그 자체로는 코드를 규정하지 않고, 강제 장치는 별도 Phase에서 만든다
 - `[향후 구현]` — 아직 없고, 나중에 만들 때 따를 방향
 
-**시점 표기 규칙**: 각 Phase 절은 그 Phase 시점의 사실을 기록한다. 뒤 Phase가 그것을 바꿨으면 해당 절에 갱신 표시를 남기고, 지금 무엇이 사실인지는 가장 나중 Phase 절이 말한다. 현재 최신은 **Phase 5B.6(20장)** 이다.
+**시점 표기 규칙**: 각 Phase 절은 그 Phase 시점의 사실을 기록한다. 뒤 Phase가 그것을 바꿨으면 해당 절에 갱신 표시를 남기고, 지금 무엇이 사실인지는 가장 나중 Phase 절이 말한다. 현재 최신은 **Phase 5C.1(21장)** 이다.
 
 | Phase | 무엇이 바뀌었나 | 절 |
 | --- | --- | --- |
@@ -25,6 +25,9 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 | Phase 5B.4 | Activation append-only history | 19장 |
 | Phase 5B.5 | Airflow HTTP Feed Inactive Pre-fetch Guard | 16.5·16.10, [ETL MVP](etl_mvp.md) |
 | Phase 5B.6 | ETL Profile Operations Chromium E2E | 20장 |
+| Phase 5B.7 | ETL Quality Observability Chromium E2E | 20장 이후 Chromium 회귀 범위 |
+| Phase 5B.8 | Catalog Reconciliation Chromium E2E | 20장 이후 Chromium 회귀 범위 |
+| Phase 5C.1 | ETL Profile Definition Fingerprint Lineage | 21장 |
 
 ---
 
@@ -76,7 +79,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 
 `db/models.py`의 `ETLLoadRun` 컬럼 전체:
 
-`source_filename`, `profile_name`, `profile_version`, `input_file_sha256`, `output_file_sha256`, `loaded_rows`, `total_rows`, `rejected_rows`, `error_counts`, `reject_details_stored`, `rejects_file_sha256`, `initial_source_type`, `initial_source_ref`, `actor_user_id`, `actor_username`, `created_at`
+`source_filename`, `profile_name`, `profile_version`, `input_file_sha256`, `output_file_sha256`, `profile_definition_sha256`, `loaded_rows`, `total_rows`, `rejected_rows`, `error_counts`, `reject_details_stored`, `rejects_file_sha256`, `initial_source_type`, `initial_source_ref`, `actor_user_id`, `actor_username`, `created_at`
 
 - `profile_name`: `String(100)`, NOT NULL
 - `profile_version`: `String(20)`, NOT NULL
@@ -94,11 +97,13 @@ ux_etl_load_runs_input_profile_version
 
 `etl/web_service.py`의 `run_web_etl()`은 변환을 먼저 다 수행한 뒤 `load_standard_csv()`를 호출하므로, dedup에 걸리면 **이번에 계산한 새 결과를 버리고** 기존 배치를 돌려준다. 즉 버전을 올리지 않으면 이미 적재한 CSV에는 새 매핑이 반영되지 않는다.
 
-### 2.5 프로필 스냅샷 / mapping hash 저장 여부
+### 2.5 프로필 스냅샷 / definition fingerprint 저장 여부
 
-**없음.**
+**전체 snapshot은 없지만, Phase 5C.1부터 semantic definition fingerprint는 있다.**
 
-`ETLLoadRun`에는 프로필 JSON 전체 snapshot도, mapping config의 hash도 저장하지 않는다. `input_file_sha256`·`output_file_sha256`·`rejects_file_sha256`은 모두 **파일 bytes**의 해시이지 프로필 내용의 해시가 아니다. `etl/pipeline.py`가 만드는 summary JSON에도 `profile_name`/`profile_version` 문자열만 들어가고 매핑 내용은 들어가지 않는다.
+`ETLLoadRun.profile_definition_sha256`은 `source_columns`·`required_source_columns`·`defaults`만을 key 정렬·공백 없는 canonical JSON으로 만든 SHA-256이다. `profile_name`, `profile_version`, registry ID, display name, 파일 경로·형식, 애플리케이션 코드/런타임은 의도적으로 포함하지 않는다. 따라서 이는 **프로필 정의 지문**이지 전체 ETL runtime 또는 application commit hash가 아니다. migration 이전 legacy row는 `NULL`이며 backfill하지 않는다.
+
+프로필 JSON 전체 snapshot은 여전히 저장하지 않는다. `input_file_sha256`·`output_file_sha256`·`rejects_file_sha256`은 모두 **파일 bytes**의 해시다. 새 pipeline summary에는 definition fingerprint가 포함되고 loader는 lower-case 64자리 hex만 받아 저장한다.
 
 ### 2.6 과거 버전 archive / registry 존재 여부
 
@@ -578,7 +583,7 @@ Phase 3 guardrail이 이제 **archive 전체**를 검사한다. 등록된 모든
 
 **가능해진 것** — 과거 profile JSON 정의를 애플리케이션이 archive 파일에서 읽을 수 있다. "그때 v1이 어떤 매핑이었나"에 저장소가 답한다.
 
-**아직 보장하지 않는 것** — 현재 코드로 v1.json을 실행해도 **과거 v1 배치의 결과를 그대로 재현한다고 말할 수 없다.** v1 → v2 전환에는 JSON 밖의 코드 변경(카테고리별 필수 속성 정책)이 포함됐고, 지금 실행되는 것은 언제나 현재 코드다. `ETLLoadRun`에는 여전히 profile snapshot도, application commit SHA도, transformer 코드 버전도 저장하지 않는다(2.3, 2.5). git 이력을 함께 보면 개발자가 당시 코드를 찾을 수는 있지만, 런타임이 자동으로 재현해 주는 기능은 아니다.
+**아직 보장하지 않는 것** — 현재 코드로 v1.json을 실행해도 **과거 v1 배치의 결과를 그대로 재현한다고 말할 수 없다.** v1 → v2 전환에는 JSON 밖의 코드 변경(카테고리별 필수 속성 정책)이 포함됐고, 지금 실행되는 것은 언제나 현재 코드다. `ETLLoadRun`의 definition fingerprint는 semantic JSON 정의만 식별하며, 전체 snapshot·application commit SHA·transformer 코드 버전은 저장하지 않는다(2.3, 2.5). git 이력을 함께 보면 개발자가 당시 코드를 찾을 수는 있지만, 런타임이 자동으로 재현해 주는 기능은 아니다.
 
 ### 13.9 `[Phase 4 시점]` 아직 없던 것
 
@@ -776,7 +781,7 @@ Phase 5A까지 activation은 코드 상수였다. 바꾸려면 코드 수정 →
 
 이 차이가 실제로 문제가 되는 선례가 이미 있다. v1 → v2 전환에서 실제로 바뀐 것은 JSON이 아니라 **카테고리별 필수 속성 정책 코드**였다(`80e8ea4`, 5장). 그 코드는 지금도 v2 시점의 것이므로, v1.json을 활성화해도 그 정책은 v1 시절로 돌아가지 않는다.
 
-`ETLLoadRun`에는 여전히 profile snapshot도, application commit SHA도, transformer 코드 버전도 저장하지 않는다(2.3, 2.5). 따라서 activation API는 **"어떤 매핑 정의로 실행할지"를 고르는 기능**이지 "과거 배치를 재현하는 기능"이 아니다. 재현이 목적이라면 코드 버전까지 함께 고정해야 하고, 그것은 이 문서의 어떤 Phase도 아직 제공하지 않는다.
+`ETLLoadRun`의 definition fingerprint는 semantic JSON 정의만 식별한다. 전체 snapshot·application commit SHA·transformer 코드 버전은 여전히 저장하지 않는다(2.3, 2.5). 따라서 activation API는 **"어떤 매핑 정의로 실행할지"를 고르는 기능**이지 "과거 배치를 재현하는 기능"이 아니다. 재현이 목적이라면 코드 버전까지 함께 고정해야 하고, 그것은 이 문서의 어떤 Phase도 아직 제공하지 않는다.
 
 ### 16.5 신규 실행 차단
 
@@ -1278,6 +1283,30 @@ activation current-state는 profile당 persistent row이므로, 테스트는 시
 ### 20.2 이번에 바뀌지 않은 것
 
 production API·UI·DB schema·migration·activation semantics·append-only production contract·dependency는 바꾸지 않았다. Profile CRUD, 동시 운영자 경쟁, production DB와 Chromium 외 브라우저 검증은 이 E2E 범위가 아니다.
+
+---
+
+## 21. `[현재 구현]` Phase 5C.1 — ETL Profile Definition Fingerprint Lineage
+
+새 ETL pipeline은 선택된 `ETLProfile`에서 다음 semantic payload만 만들고 canonical JSON SHA-256을 summary에 넣는다.
+
+```text
+source_columns
+required_source_columns
+defaults
+```
+
+key는 정렬하고 JSON 공백은 제거한다. `profile_name`, `profile_version`, profile ID, display name, registry/파일 경로, 포맷 표기와 애플리케이션 코드·runtime은 payload에 포함하지 않는다. 따라서 값은 **프로필 정의 지문**이며 runtime 또는 전체 코드의 재현 해시라고 주장하지 않는다. 기존 Phase 3 baseline fixture는 바꾸지 않고, test-only 알고리즘도 production helper 하나를 공유한다.
+
+Alembic `20260825_0016`은 `etl_load_runs.profile_definition_sha256 VARCHAR(64) NULL`을 추가한다. legacy row는 `NULL`로 남고 backfill하지 않는다. 새 summary에 field가 없을 때도 loader는 legacy 입력으로 받아들인다. field가 있으면 lower-case 64자리 hex만 허용한다.
+
+dedup identity는 계속 `(input_file_sha256, profile_name, profile_version)`이다. 기존 row와 새 요청의 지문이 모두 있고 서로 다르면 pre-check와 `IntegrityError` 경쟁 fallback 모두 안전하게 실패한다. 어느 한쪽이 legacy `NULL`이면 기존 row를 update하거나 backfill하지 않고 그대로 반환한다. Web/S3/HTTP 결과는 생성 여부와 관계없이 실제 DB row에 저장된 값을 반환한다.
+
+`GET /api/v1/etl-loads/{id}`와 Web ETL 결과는 `profile_definition_sha256: string | null`을 반환한다. Python client는 상세와 Web ETL 양쪽에서 non-null 값을 lower-case SHA-256으로 검증한다. Streamlit 상세의 SHA-256 구역은 legacy `NULL`을 `알 수 없음 (legacy batch)`로 보이고, 지문의 semantic 범위와 runtime hash가 아니라는 점을 함께 표시한다. Web upload Chromium E2E는 DB·API·UI가 모두 shared helper의 예상 지문을 보이는지 확인한다.
+
+### 21.1 한계
+
+이 Phase는 profile JSON 전체 snapshot, transformer/application code hash, dependency lock 또는 과거 runtime의 완전 재현을 제공하지 않는다. 같은 definition fingerprint라도 코드가 달라지면 결과가 달라질 수 있으므로, 의미 있는 코드 변경에는 기존 lifecycle policy대로 `profile_version`을 올려야 한다.
 
 ---
 

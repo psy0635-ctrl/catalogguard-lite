@@ -111,6 +111,26 @@ def test_normalize_summary_returns_a_new_trimmed_error_counts_dict_without_mutat
     assert summary["error_counts"] == {" INVALID_PRICE ": 1, "NEGATIVE_STOCK": 1}
 
 
+@pytest.mark.parametrize(
+    "value",
+    [" " + "a" * 64, "A" * 64, "a" * 63, None, 123],
+)
+def test_normalize_summary_rejects_noncanonical_profile_definition_hash(value):
+    summary = json.loads(make_summary(b"output"))
+    summary["profile_definition_sha256"] = value
+
+    with pytest.raises(ETLLoadError, match="profile_definition_sha256"):
+        _normalize_summary(summary)
+
+
+def test_normalize_summary_allows_legacy_summary_without_profile_definition_hash():
+    summary = json.loads(make_summary(b"output"))
+
+    normalized = _normalize_summary(summary)
+
+    assert "profile_definition_sha256" not in normalized
+
+
 ROWS = [
     {
         "product_group_id": "G001",
@@ -370,6 +390,42 @@ def test_repeated_identity_returns_existing_batch_without_duplicate_products(pos
             CatalogProductStaging.etl_load_run_id == first.etl_load_run_id
         )
     ) == 2
+
+
+def test_duplicate_with_different_known_profile_definition_is_rejected(postgres_session):
+    session, profile_name = postgres_session
+    csv_bytes = make_standard_csv(ROWS)
+    first_summary = json.loads(make_summary(csv_bytes))
+    first_summary.update(
+        profile_name=profile_name,
+        profile_definition_sha256="a" * 64,
+    )
+    second_summary = {**first_summary, "profile_definition_sha256": "b" * 64}
+
+    first = load_standard_csv(session, csv_bytes, json.dumps(first_summary).encode())
+
+    with pytest.raises(ETLLoadError, match="프로필 정의"):
+        load_standard_csv(session, csv_bytes, json.dumps(second_summary).encode())
+
+    persisted = session.get(ETLLoadRun, first.etl_load_run_id)
+    assert persisted is not None
+    assert persisted.profile_definition_sha256 == "a" * 64
+
+
+def test_duplicate_legacy_null_profile_definition_remains_unchanged(postgres_session):
+    session, profile_name = postgres_session
+    csv_bytes = make_standard_csv(ROWS)
+    legacy_summary = json.loads(make_summary(csv_bytes))
+    legacy_summary["profile_name"] = profile_name
+    known_summary = {**legacy_summary, "profile_definition_sha256": "a" * 64}
+
+    first = load_standard_csv(session, csv_bytes, json.dumps(legacy_summary).encode())
+    second = load_standard_csv(session, csv_bytes, json.dumps(known_summary).encode())
+
+    assert second.created is False
+    assert second.etl_load_run_id == first.etl_load_run_id
+    assert second.profile_definition_sha256 is None
+    assert session.get(ETLLoadRun, first.etl_load_run_id).profile_definition_sha256 is None
 
 
 def test_profile_version_change_creates_new_batch(postgres_session):

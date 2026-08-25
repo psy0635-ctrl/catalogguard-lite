@@ -23,7 +23,7 @@ def test_inspection_run_actor_columns_are_nullable_and_user_fk_sets_null() -> No
 def test_inspection_actor_migration_is_the_single_alembic_head() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert list(script.get_heads()) == ["20260823_0015"]
+    assert list(script.get_heads()) == ["20260825_0016"]
     revision = script.get_revision("20260810_0012")
     assert revision is not None
     assert revision.down_revision == "20260808_0011"

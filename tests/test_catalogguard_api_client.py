@@ -1126,6 +1126,7 @@ ETL_LOAD_DETAIL_RESPONSE = {
     "profile_version": "1",
     "input_file_sha256": "a" * 64,
     "output_file_sha256": "b" * 64,
+    "profile_definition_sha256": "c" * 64,
     "loaded_rows": 25,
     "total_rows": 30,
     "rejected_rows": 5,
@@ -1718,6 +1719,31 @@ def test_get_etl_load_detail_rejects_invalid_hash_and_product_shape():
 
     with pytest.raises(import_client_module().CatalogGuardApiResponseError):
         client.get_etl_load_detail(12)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["not-a-sha", "A" * 64, "a" * 63, 123],
+)
+def test_get_etl_load_detail_rejects_invalid_profile_definition_hash(value):
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={**ETL_LOAD_DETAIL_RESPONSE, "profile_definition_sha256": value}
+        )
+    )
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_load_detail(12)
+
+
+def test_get_etl_load_detail_accepts_null_profile_definition_hash_for_legacy_batch():
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={**ETL_LOAD_DETAIL_RESPONSE, "profile_definition_sha256": None}
+        )
+    )
+
+    assert client.get_etl_load_detail(12)["profile_definition_sha256"] is None
 
 
 @pytest.mark.parametrize(
@@ -2450,6 +2476,7 @@ ETL_WEB_RUN_RESPONSE = {
     "created": True,
     "profile_name": "sample_fashion_vendor",
     "profile_version": "1",
+    "profile_definition_sha256": "c" * 64,
     "source_filename": "vendor.csv",
     "total_rows": 2,
     "loaded_rows": 2,
@@ -2551,6 +2578,42 @@ def test_run_etl_load_rejects_missing_required_response_keys():
             source_filename="vendor.csv",
             file_content=b"a,b\n1,2\n",
         )
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["not-a-sha", "A" * 64, "a" * 63, 123],
+)
+def test_run_etl_load_rejects_invalid_profile_definition_hash(value):
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={**ETL_WEB_RUN_RESPONSE, "profile_definition_sha256": value}
+        )
+    )
+
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.run_etl_load(
+            profile_id="sample_fashion_vendor_v1",
+            source_filename="vendor.csv",
+            file_content=b"a,b\n1,2\n",
+        )
+
+
+def test_run_etl_load_accepts_null_profile_definition_hash_for_legacy_batch():
+    client, _ = make_client(
+        response=FakeResponse(
+            payload={**ETL_WEB_RUN_RESPONSE, "profile_definition_sha256": None}
+        )
+    )
+
+    assert (
+        client.run_etl_load(
+            profile_id="sample_fashion_vendor_v1",
+            source_filename="vendor.csv",
+            file_content=b"a,b\n1,2\n",
+        )["profile_definition_sha256"]
+        is None
+    )
 
 
 def test_run_etl_load_maps_unsupported_profile_error_without_leaking_body():

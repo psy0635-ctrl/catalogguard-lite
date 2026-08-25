@@ -39,6 +39,7 @@ class ETLLoadOutcome:
     # 이미 저장돼 있는 최초 source를 그대로 돌려줍니다.
     initial_source_type: str = ETL_INITIAL_SOURCE_TYPE_UNKNOWN
     initial_source_ref: str | None = None
+    profile_definition_sha256: str | None = None
 
 
 ETLLoadResult = ETLLoadOutcome
@@ -72,6 +73,18 @@ def _normalize_hash(value: str, field_name: str) -> str:
     if not _SHA256_PATTERN.fullmatch(normalized):
         raise ETLLoadError(f"요약 JSON의 {field_name} 값이 올바르지 않습니다")
     return normalized
+
+
+def _validate_profile_definition_sha256(value: object) -> str:
+    """Validate the profile definition hash without normalizing its spelling.
+
+    This is lineage metadata rather than an input/output file hash.  Accepting
+    whitespace or upper-case variants would make an invalid producer summary
+    look canonical, so the on-the-wire value must already be lower-case hex.
+    """
+    if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
+        raise ETLLoadError("요약 JSON의 profile_definition_sha256 값이 올바르지 않습니다")
+    return value
 
 
 def _normalize_source_filename(value: str) -> str:
@@ -159,7 +172,23 @@ def _normalize_summary(summary: dict[str, object]) -> dict[str, object]:
             _required_text(summary, "rejects_file_sha256"),
             "rejects_file_sha256",
         )
+    if "profile_definition_sha256" in summary:
+        normalized_summary["profile_definition_sha256"] = _validate_profile_definition_sha256(
+            summary["profile_definition_sha256"],
+        )
     return normalized_summary
+
+
+def _validate_existing_profile_definition(existing: ETLLoadRun, incoming: str | None) -> None:
+    """Reject only the provable known-known semantic definition mismatch."""
+    if (
+        existing.profile_definition_sha256 is not None
+        and incoming is not None
+        and existing.profile_definition_sha256 != incoming
+    ):
+        raise ETLLoadError(
+            "동일한 profile_name/profile_version의 프로필 정의가 기존 ETL 배치와 일치하지 않습니다"
+        )
 
 
 def _validated_source_type(value: str) -> str:
@@ -344,6 +373,9 @@ def load_standard_csv(
                 )
             )
             if existing is not None:
+                _validate_existing_profile_definition(
+                    existing, summary.get("profile_definition_sha256")
+                )
                 # duplicate입니다. 이번 요청의 source로 기존 배치를 덮어쓰지 않고,
                 # 저장돼 있는 최초 source를 그대로 돌려줍니다.
                 return ETLLoadOutcome(
@@ -357,6 +389,7 @@ def load_standard_csv(
                     existing.rejects_file_sha256,
                     initial_source_type=existing.initial_source_type,
                     initial_source_ref=existing.initial_source_ref,
+                    profile_definition_sha256=existing.profile_definition_sha256,
                 )
 
             load_run = ETLLoadRun(
@@ -365,6 +398,7 @@ def load_standard_csv(
                 profile_version=summary["profile_version"],
                 input_file_sha256=summary["input_file_sha256"],
                 output_file_sha256=summary["output_file_sha256"],
+                profile_definition_sha256=summary.get("profile_definition_sha256"),
                 loaded_rows=summary["loaded_rows"],
                 total_rows=summary["total_rows"],
                 rejected_rows=summary["rejected_rows"],
@@ -399,6 +433,7 @@ def load_standard_csv(
                 load_run.rejects_file_sha256,
                 initial_source_type=load_run.initial_source_type,
                 initial_source_ref=load_run.initial_source_ref,
+                profile_definition_sha256=load_run.profile_definition_sha256,
             )
     except IntegrityError:
         # A concurrent caller may have won the unique identity race.
@@ -411,6 +446,9 @@ def load_standard_csv(
             )
         )
         if existing is not None:
+            _validate_existing_profile_definition(
+                existing, summary.get("profile_definition_sha256")
+            )
             # unique identity 경쟁에서 진 요청입니다. 여기서도 기존 row를 update하지 않습니다.
             return ETLLoadOutcome(
                 existing.id,
@@ -423,6 +461,7 @@ def load_standard_csv(
                 existing.rejects_file_sha256,
                 initial_source_type=existing.initial_source_type,
                 initial_source_ref=existing.initial_source_ref,
+                profile_definition_sha256=existing.profile_definition_sha256,
             )
         raise
 

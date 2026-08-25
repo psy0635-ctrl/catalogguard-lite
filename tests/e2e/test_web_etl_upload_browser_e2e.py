@@ -16,6 +16,11 @@ STREAMLIT_URL = os.environ.get("E2E_STREAMLIT_URL", "http://127.0.0.1:8501")
 SOURCE_FILENAME = os.environ.get("E2E_WEB_UPLOAD_SOURCE_FILENAME", FIXTURE_PATH.name)
 E2E_OPERATOR_USERNAME = os.environ.get("E2E_OPERATOR_USERNAME", "")
 E2E_OPERATOR_PASSWORD = os.environ.get("E2E_OPERATOR_PASSWORD", "")
+API_URL = os.environ.get(
+    "E2E_API_URL",
+    os.environ.get("CATALOGGUARD_API_BASE_URL", "http://127.0.0.1:8000"),
+)
+PROFILE_ID = "sample_marketplace_vendor_v1"
 PRODUCT_IDS = (
     "CG-E2E-WEB-UPLOAD-BLK-M",
     "CG-E2E-WEB-UPLOAD-WHT-L",
@@ -50,7 +55,14 @@ def _preserve_browser_failure_artifacts(page) -> None:
         pass
 
 
-def _assert_web_upload_persisted(etl_load_run_id: int) -> None:
+def _expected_profile_definition_sha256() -> str:
+    from etl.profile_fingerprint import compute_profile_definition_sha256
+    from etl.profile_loader import get_profile_path, load_profile
+
+    return compute_profile_definition_sha256(load_profile(get_profile_path(PROFILE_ID)))
+
+
+def _assert_web_upload_persisted(etl_load_run_id: int) -> str:
     from sqlalchemy import func, select
 
     from db.models import CatalogProductStaging, ETLLoadRun
@@ -63,6 +75,8 @@ def _assert_web_upload_persisted(etl_load_run_id: int) -> None:
         assert load_run.source_filename == SOURCE_FILENAME
         assert load_run.profile_name == "sample_marketplace_vendor"
         assert load_run.profile_version == "2"
+        expected_fingerprint = _expected_profile_definition_sha256()
+        assert load_run.profile_definition_sha256 == expected_fingerprint
         assert load_run.initial_source_type == "upload"
         assert load_run.initial_source_ref == SOURCE_FILENAME
 
@@ -80,6 +94,16 @@ def _assert_web_upload_persisted(etl_load_run_id: int) -> None:
             )
         )
         assert staging_product_ids == set(PRODUCT_IDS)
+    return expected_fingerprint
+
+
+def _api_headers(page) -> dict[str, str]:
+    response = page.request.post(
+        f"{API_URL}/api/v1/auth/login",
+        data={"username": E2E_OPERATOR_USERNAME, "password": E2E_OPERATOR_PASSWORD},
+    )
+    assert response.ok, response.text()
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
 
 def _run_web_etl_upload_scenario(page) -> None:
@@ -130,7 +154,12 @@ def _run_web_etl_upload_scenario(page) -> None:
     match = success_pattern.search(body_text)
     assert match is not None
     etl_load_run_id = int(match.group(1))
-    _assert_web_upload_persisted(etl_load_run_id)
+    expected_fingerprint = _assert_web_upload_persisted(etl_load_run_id)
+    detail_response = page.request.get(
+        f"{API_URL}/api/v1/etl-loads/{etl_load_run_id}", headers=_api_headers(page)
+    )
+    assert detail_response.ok, detail_response.text()
+    assert detail_response.json()["profile_definition_sha256"] == expected_fingerprint
 
     expect(page.locator("body")).to_contain_text("ETL 적재 이력")
     page.get_by_label("원본 파일명").fill(SOURCE_FILENAME)
@@ -152,6 +181,8 @@ def _run_web_etl_upload_scenario(page) -> None:
         "공급사 프로필: sample_marketplace_vendor"
     )
     expect(page.locator("body")).to_contain_text("프로필 버전: 2")
+    expect(page.locator("body")).to_contain_text("프로필 정의 SHA-256")
+    expect(page.locator("body")).to_contain_text(expected_fingerprint)
     expect(page.locator("body")).to_contain_text("정상 적재")
     expect(page.locator("body")).to_contain_text("전체 입력")
     expect(page.locator("body")).to_contain_text(PRODUCT_IDS[0])

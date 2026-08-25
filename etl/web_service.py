@@ -29,6 +29,7 @@ class ETLWebRunOutcome:
     # duplicate(created=False)면 다른 경로로 처음 만들어졌을 수 있습니다.
     initial_source_type: str = ETL_INITIAL_SOURCE_TYPE_UNKNOWN
     initial_source_ref: str | None = None
+    profile_definition_sha256: str | None = None
 
 
 def _leaf_filename(filename: str) -> str:
@@ -94,6 +95,7 @@ def run_web_etl(
         created=outcome.created,
         profile_name=load_run.profile_name,
         profile_version=load_run.profile_version,
+        profile_definition_sha256=load_run.profile_definition_sha256,
         source_filename=load_run.source_filename,
         total_rows=load_run.total_rows,
         loaded_rows=load_run.loaded_rows,
