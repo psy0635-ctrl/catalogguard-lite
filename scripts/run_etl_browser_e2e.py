@@ -385,6 +385,9 @@ class ETLBrowserE2ERunner:
                     # Profile Ops mutates persistent activation state, so run it
                     # after the existing ETL and upload flows as an extra guard.
                     "tests/e2e/test_etl_profile_ops_browser_e2e.py",
+                    # Quality observability creates and removes only its own
+                    # synthetic history rows, independent of earlier scenarios.
+                    "tests/e2e/test_etl_quality_observability_browser_e2e.py",
                     "--browser",
                     "chromium",
                     "--tracing",
