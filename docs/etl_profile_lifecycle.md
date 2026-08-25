@@ -10,7 +10,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 - `[정책 결정]` — 지켜야 할 규칙. 그 자체로는 코드를 규정하지 않고, 강제 장치는 별도 Phase에서 만든다
 - `[향후 구현]` — 아직 없고, 나중에 만들 때 따를 방향
 
-**시점 표기 규칙**: 각 Phase 절은 그 Phase 시점의 사실을 기록한다. 뒤 Phase가 그것을 바꿨으면 해당 절에 갱신 표시를 남기고, 지금 무엇이 사실인지는 가장 나중 Phase 절이 말한다. 현재 최신은 **Phase 5B.3(18장)** 이다.
+**시점 표기 규칙**: 각 Phase 절은 그 Phase 시점의 사실을 기록한다. 뒤 Phase가 그것을 바꿨으면 해당 절에 갱신 표시를 남기고, 지금 무엇이 사실인지는 가장 나중 Phase 절이 말한다. 현재 최신은 **Phase 5B.6(20장)** 이다.
 
 | Phase | 무엇이 바뀌었나 | 절 |
 | --- | --- | --- |
@@ -22,6 +22,8 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 | Phase 5B.1 | Persistent Runtime Activation API | 16장 |
 | Phase 5B.2 | Streamlit 운영 관리 화면 | 17장 |
 | Phase 5B.3 | Runtime Override Reset | 18장 |
+| Phase 5B.4 | Activation append-only history | 19장 |
+| Phase 5B.6 | ETL Profile Operations Chromium E2E | 20장 |
 
 ---
 
@@ -934,7 +936,7 @@ activation API 계약, DB 스키마, Alembic head(`20260822_0014`), 동시성 �
 - ~~**runtime override 제거(배포 기본값 복귀) 기능이 없다.**~~ → Phase 5B.3에서 추가됐다(18장). 아래 17.11은 Phase 5B.2 시점의 한계 기록이다
 - ~~activation 변경 이력(append-only audit)이 없다(16.10)~~ → Phase 5B.4에서 추가됐다(19장)
 - Profile CRUD가 없다
-- 이 화면의 Chromium E2E가 없다. AppTest로만 검증한다
+- ~~이 화면의 Chromium E2E가 없다. AppTest로만 검증한다~~ → Phase 5B.6에서 운영 관리·운영 이력까지 전용 Chromium E2E를 추가했다(20장)
 
 ### 17.11 `[한계]` runtime override는 되돌릴 수 없다
 
@@ -1059,7 +1061,7 @@ Streamlit 관리 화면의 확인 checkbox 초기화가 성공 처리에서 `ses
 
 - ~~activation 변경 이력(append-only audit)이 없다 — 18.7~~ → Phase 5B.4에서 추가됐다(19장)
 - Profile CRUD(등록·수정·삭제)가 없다
-- 이 화면의 Chromium E2E가 없다. AppTest로만 검증한다
+- ~~이 화면의 Chromium E2E가 없다. AppTest로만 검증한다~~ → Phase 5B.6에서 reset까지 포함한 전용 Chromium E2E를 추가했다(20장)
 - 과거 배치의 런타임 재현은 여전히 없다(16.4)
 
 ---
@@ -1248,8 +1250,33 @@ registry가 allowlist이고 그 밖의 값을 DB row 하나로 되살리면 allo
 - 범용 Audit/Event framework를 만들지 않았다. 이 표는 activation 명령 전용이다
 - history retention/purge 정책이 없다 — 19.8
 - 여러 프로필의 이력을 한 번에 보는 조회가 없다
-- 이 화면의 Chromium E2E가 없다. AppTest로만 검증한다
+- ~~이 화면의 Chromium E2E가 없다. AppTest로만 검증한다~~ → Phase 5B.6에서 운영 이력 표시와 PostgreSQL event까지 전용 Chromium E2E로 확인한다(20장)
 - 과거 배치의 런타임 재현은 여전히 없다(16.4)
+
+---
+
+## 20. `[현재 구현]` Phase 5B.6 — ETL Profile Operations Chromium E2E
+
+`tests/e2e/test_etl_profile_ops_browser_e2e.py`는 실제 Chromium에서 operator 로그인 뒤 `ETL 적재 이력`의 `ETL 프로필 운영 관리`를 연다. 기존 ETL·웹 업로드 E2E가 사용하는 마켓플레이스 프로필과 간섭하지 않도록 `sample_fashion_vendor_v1`을 선택하고, 배포 기본값 v2 상태에서 다음 흐름을 검증한다.
+
+```text
+배포 기본값 v2
+→ 확인 후 deactivate (명시적 비활성)
+→ archived v1 activate (명시적 runtime override)
+→ 확인 후 reset (runtime override 제거, 배포 기본값 v2 복귀)
+```
+
+각 전환은 Streamlit의 실제 accessible control과 상태 문구, 확인 checkbox의 disabled/enabled 경계를 확인한다. 마지막에는 `Activation 운영 이력`의 최신순 표시와 PostgreSQL의 `ETLProfileActivation` current-state 및 세 `ETLProfileActivationEvent` snapshot을 함께 확인한다. console error와 page error도 0건이어야 한다.
+
+### 20.1 격리
+
+activation current-state는 profile당 persistent row이므로, 테스트는 시작 전에 대상 row(`active_version`, actor, `updated_at`)와 대상 profile의 최대 event id를 snapshot한다. disposable local E2E DB에서만 대상 current-state row를 직접 제거해 deployment-default 상태로 시작하며, reset API를 setup에 쓰지 않아 예상 밖 audit event를 만들지 않는다.
+
+`finally`에서는 이전 current-state row를 정확히 복원하거나 테스트가 만든 row를 제거한다. history는 대상 profile + E2E operator + baseline 이후 event만 삭제한다. 이는 production append-only 계약이나 다른 profile·기존 이력을 바꾸지 않는 test-only cleanup이다. runner는 이 stateful scenario를 기존 ETL/promotion/rollback 및 web upload Chromium 흐름 뒤에 마지막으로 실행한다.
+
+### 20.2 이번에 바뀌지 않은 것
+
+production API·UI·DB schema·migration·activation semantics·append-only production contract·dependency는 바꾸지 않았다. Profile CRUD, 동시 운영자 경쟁, production DB와 Chromium 외 브라우저 검증은 이 E2E 범위가 아니다.
 
 ---
 

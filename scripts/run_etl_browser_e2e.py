@@ -382,6 +382,9 @@ class ETLBrowserE2ERunner:
                     "pytest",
                     "tests/e2e/test_etl_browser_e2e.py",
                     "tests/e2e/test_web_etl_upload_browser_e2e.py",
+                    # Profile Ops mutates persistent activation state, so run it
+                    # after the existing ETL and upload flows as an extra guard.
+                    "tests/e2e/test_etl_profile_ops_browser_e2e.py",
                     "--browser",
                     "chromium",
                     "--tracing",
