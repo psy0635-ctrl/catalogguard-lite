@@ -260,7 +260,7 @@ viewer 계정으로 로그인해 같은 화면을 열면 상태와 운영 이력
 | “`0015`를 적용하면 과거 activation 명령까지 복원됩니다.” | backfill하지 않는다. 이력은 `20260823_0015` 적용 이후의 성공한 명령부터 기록한다. current-state row 하나로는 과거에 무슨 일이 있었는지 알 수 없어 추측해 채우지 않았다. |
 | “append-only라 DB에서 누구도 절대 수정·삭제할 수 없습니다.” | 애플리케이션에 이력 수정·삭제·purge API가 없다는 MVP 계약이다. DB superuser의 직접 `UPDATE`/`DELETE`까지 막는 WORM 저장소를 구현한 것은 아니다. |
 | “같은 상태로 다시 저장하면 이력에는 아무것도 남지 않습니다.” | 기록 단위가 성공한 운영 명령이라 event가 추가된다. 상태 idempotency와 이력 idempotency는 다른 개념이다. |
-| “Airflow도 HTTP feed를 읽기 전에 inactive를 차단합니다.” | 외부 읽기 전 차단은 FastAPI의 S3·HTTP route만이다. Airflow는 feed를 한 번 읽은 뒤 판별한다. |
+| “Airflow는 어떤 경우에도 HTTP feed를 읽지 않습니다.” | pre-check 시점에 이미 inactive인 프로필은 `read_http_feed_csv()`를 호출하지 않는다. 다만 pre-check 뒤 deactivate되는 race에서는 fetch가 시작될 수 있고, `run_web_etl()`의 최종 activation 검사가 ETL load를 막는다. |
 
 ## D. Optional Airflow: manual trigger only
 
@@ -300,7 +300,7 @@ CatalogGuard HTTP feed ingestion failed [etl_profile_inactive]
 
 대사 예시: “운영자가 일부러 내린 프로필은 network timeout이나 HTTP 5xx 같은 일시 장애와 다릅니다. 사람이 다시 켜기 전까지 재시도로 회복되지 않으므로 재시도하지 않습니다.”
 
-**현재 한계를 함께 말한다.** 이 DAG는 `read_http_feed_csv()`로 feed를 먼저 읽고 그다음 `run_web_etl()`에서 activation을 판별한다. 즉 비활성이어도 feed를 한 번 읽은 뒤 차단된다. 따라서 "Airflow도 외부 fetch 전에 inactive를 차단한다"고 말하지 않는다. 외부 읽기 전 차단은 FastAPI의 S3·HTTP source route만 해당한다. 검사를 앞으로 옮기면 activation 실패와 feed 실패가 겹칠 때 failure precedence가 달라지므로, 두 항목을 함께 후속 설계 과제로 남겨 두었다.
+Airflow HTTP feed 경로는 실행 전에 effective activation을 확인한다. 이미 inactive인 프로필이면 `read_http_feed_csv()`를 호출하지 않고 `etl_profile_inactive`로 끝난다. 다만 pre-check 뒤 운영자가 deactivate하면 HTTP fetch가 이미 시작될 수 있다. 이 race에서는 `run_web_etl()`의 최종 activation 재검사가 ETL load를 차단하며, 외부 HTTP 요청 동안 DB transaction이나 lock을 유지하지 않는 MVP 정책은 그대로다.
 
 ## 3. 검증 근거와 최소 troubleshooting
 
@@ -350,7 +350,7 @@ docker compose --env-file .env -f airflow/compose.yaml down
 6. 품질 관찰과 동기화 차이는 조회 전용으로 두어, 판단은 사람이 하고 시스템은 근거만 남긴다.
 7. 프로필의 신규 실행 여부는 운영자가 재배포 없이 바꿀 수 있게 하되, 프로필 정의는 계속 code/config에 두고 비활성화는 삭제가 아니라 신규 실행 차단으로만 다룬다.
 
-이 프로젝트는 검증된 MVP다. 대용량 운영 데이터·실제 외부 공급사·운영 catalog 반영을 검증했다고 주장하지 않는다. 규칙 기반 검수는 AI 자동 수정이나 최종 업무 판단을 대체하지 않으며, 의심 패턴 탐지는 오탐·미탐 가능성이 있다. 품질 관찰과 동기화 차이는 변화를 보여 줄 뿐 위험 임계값을 정하지 않고, 자동 차단·자동 rollback·자동 알림도 하지 않는다. Runtime activation은 신규 실행 상태만 다룬다. 성공한 activate·deactivate·reset 명령은 append-only 이력으로 남지만, 그 기록은 마이그레이션 `20260823_0015` 적용 이후의 명령부터이며 과거 이력을 backfill하지 않았다. 운영 관리·운영 이력의 Chromium E2E는 local disposable PostgreSQL과 Chromium 한 경로만 검증한다. Airflow는 비활성 프로필을 정확히 분류하지만 feed를 읽은 뒤에 차단하므로, 외부 fetch 전 차단이라고 말하지 않는다.
+이 프로젝트는 검증된 MVP다. 대용량 운영 데이터·실제 외부 공급사·운영 catalog 반영을 검증했다고 주장하지 않는다. 규칙 기반 검수는 AI 자동 수정이나 최종 업무 판단을 대체하지 않으며, 의심 패턴 탐지는 오탐·미탐 가능성이 있다. 품질 관찰과 동기화 차이는 변화를 보여 줄 뿐 위험 임계값을 정하지 않고, 자동 차단·자동 rollback·자동 알림도 하지 않는다. Runtime activation은 신규 실행 상태만 다룬다. 성공한 activate·deactivate·reset 명령은 append-only 이력으로 남지만, 그 기록은 마이그레이션 `20260823_0015` 적용 이후의 명령부터이며 과거 이력을 backfill하지 않았다. 운영 관리·운영 이력의 Chromium E2E는 local disposable PostgreSQL과 Chromium 한 경로만 검증한다. Airflow는 pre-check 시점에 이미 inactive인 프로필의 외부 fetch를 시작하지 않지만, 직후 상태 변경 race에서 fetch 0회를 보장하지는 않으며 최종 guard가 ETL load를 차단한다.
 
 최신 main에서는 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 CI job의 success를 확인한다. 세부 설계와 최신 실행 결과는 아래 문서를 기준으로 한다.
 

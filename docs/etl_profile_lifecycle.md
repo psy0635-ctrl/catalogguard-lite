@@ -23,6 +23,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 | Phase 5B.2 | Streamlit 운영 관리 화면 | 17장 |
 | Phase 5B.3 | Runtime Override Reset | 18장 |
 | Phase 5B.4 | Activation append-only history | 19장 |
+| Phase 5B.5 | Airflow HTTP Feed Inactive Pre-fetch Guard | 16.5·16.10, [ETL MVP](etl_mvp.md) |
 | Phase 5B.6 | ETL Profile Operations Chromium E2E | 20장 |
 
 ---
