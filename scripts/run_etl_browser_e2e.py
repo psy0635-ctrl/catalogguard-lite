@@ -388,6 +388,9 @@ class ETLBrowserE2ERunner:
                     # Quality observability creates and removes only its own
                     # synthetic history rows, independent of earlier scenarios.
                     "tests/e2e/test_etl_quality_observability_browser_e2e.py",
+                    # Reconciliation owns its synthetic staging/catalog rows and
+                    # removes them by exact primary key after the read-only flow.
+                    "tests/e2e/test_catalog_reconciliation_browser_e2e.py",
                     "--browser",
                     "chromium",
                     "--tracing",

@@ -230,6 +230,11 @@ def _dataframe_grid_cell(grid, value: str):
     )
 
 
+def _metric_text(page, value: str):
+    """Scope values to metric paragraphs, excluding dataframe grid cells."""
+    return page.locator("p").filter(has_text=re.compile(rf"^{re.escape(value)}$"))
+
+
 def _assert_api_observability(page, fixture: _QualityFixture) -> None:
     headers = _api_headers(page)
     profiles_response = page.request.get(
@@ -309,10 +314,9 @@ def _run_quality_observability_scenario(page, fixture: _QualityFixture) -> None:
     expect(page.get_by_text("직전 Reject 비율", exact=True)).to_be_visible()
     expect(page.get_by_text("변화량", exact=True)).to_be_visible()
     expect(page.get_by_text("방향", exact=True)).to_be_visible()
-    expect(page.get_by_text("10.00%", exact=True)).to_be_visible()
-    expect(page.get_by_text("20.00%", exact=True)).to_be_visible()
-    expect(page.get_by_text("-10.00%p", exact=True)).to_be_visible()
-    expect(page.get_by_text("개선", exact=True)).to_be_visible()
+    for value in ("10.00%", "20.00%", "-10.00%p", "개선"):
+        expect(_metric_text(page, value)).to_have_count(1)
+        expect(_metric_text(page, value)).to_be_visible()
     expect(
         page.get_by_text("Reject 비율이 직전 배치보다 낮아졌습니다.", exact=True)
     ).to_be_visible()
