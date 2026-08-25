@@ -2640,7 +2640,7 @@ Activation service 자체는 `tests/test_etl_profile_activation_service.py`, 운
 
 Airflow의 `etl_profile_inactive` 분류는 `airflow/tests/test_catalogguard_http_feed_to_staging.py`에 있습니다. 이 파일은 Airflow가 설치되지 않은 환경에서 module 단위로 skip되므로 위 `2 skipped`에 해당하며, 실제 assertion은 전용 `airflow-smoke` job이 격리 Airflow image에서 `python -m unittest discover`로 실행합니다. 같은 run의 결과는 `Ran 12 tests` / `OK`입니다.
 
-Streamlit `ETL 프로필 운영 관리` 화면 전용 Chromium 브라우저 E2E는 아직 없습니다. 이 구간을 "브라우저 E2E로 검증 완료"라고 기록하지 않습니다.
+Streamlit `ETL 프로필 운영 관리`와 운영 이력은 전용 Chromium E2E(`tests/e2e/test_etl_profile_ops_browser_e2e.py`)로 검증합니다. operator가 `sample_fashion_vendor_v1`을 deployment default v2에서 deactivate하고 archived v1을 activate한 뒤 reset하며, 각 current-state와 `deactivate`·`activate`·`reset` event를 PostgreSQL에서도 확인합니다. 범위는 disposable local PostgreSQL과 Chromium 한 경로다.
 
 promotion preview의 응답 schema와 hash 형식, blocked reason, insert/update/unchanged 계산, confirmation 요구, stale preview, 안전한 오류 mapping, Streamlit 상태 초기화와 중복 제출 방지를 테스트했습니다. promotion E2E는 브라우저 성공 메시지에 의존하지 않고 `catalog_products`, `catalog_promotion_runs`, `catalog_product_changes`의 PostgreSQL 최종 상태와 `applying` 잔존 여부까지 확인합니다. rollback은 서비스·API 계층의 PostgreSQL 통합 테스트에 더해, 조회 계층(query service·API·client)과 Streamlit History/Detail/Change Audit AppTest, 실제 Chromium Browser E2E까지 검증합니다.
 
@@ -2865,10 +2865,10 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - **운영 이력은 `20260823_0015` 적용 이후의 명령부터입니다.** 기존 current-state row로 과거 이력을 backfill하지 않았습니다. current-state row 하나로는 누가 처음 활성화했는지, 몇 번 바꿨는지 알 수 없어 추측해 채우면 틀린 기록이 남기 때문입니다.
 - 이력 조회도 **현재 registry allowlist**를 기준으로 검증하므로, registry에서 완전히 제거된 과거 프로필의 event는 표에 남아 있어도 프로필별 endpoint로는 읽을 수 없습니다(`404`). 여러 프로필을 한 번에 보는 조회도 없습니다.
 - 운영 이력의 append-only는 **애플리케이션 계약**입니다. 수정·삭제·purge API를 두지 않고 쓰기 경로가 INSERT 하나뿐이라는 뜻이며, DB superuser의 직접 `UPDATE`/`DELETE`까지 막는 WORM 저장소를 구현한 것은 아닙니다. retention/purge 정책도 없어 event는 계속 누적됩니다.
-- Streamlit `ETL 프로필 운영 관리` 화면(운영 이력 포함) 전용 Chromium 브라우저 E2E는 아직 없습니다. Activation은 API integration test, API client test, Streamlit AppTest, PostgreSQL 통합 테스트로 검증했습니다.
+- Streamlit `ETL 프로필 운영 관리` 화면(운영 이력 포함)은 API integration·API client·Streamlit AppTest·PostgreSQL 통합 테스트에 더해 전용 Chromium E2E로 검증합니다. 이 E2E는 local disposable PostgreSQL과 Chromium 한 경로만 다루며 Profile CRUD·동시 update 경쟁은 범위 밖입니다.
 - Airflow는 effective activation을 HTTP feed fetch 전에 확인합니다. 이미 inactive면 `read_http_feed_csv()`를 호출하지 않고 `etl_profile_inactive`(non-retryable)로 차단됩니다. pre-check 뒤 deactivate되는 race는 `run_web_etl()`의 최종 guard가 처리하지만 HTTP fetch 0회까지 보장하지는 않습니다.
 - activation DB 조회와 외부 source가 동시에 실패할 때의 failure precedence는 사전 검사 순서에 따릅니다. 모든 activation/source failure 우선순위의 재설계는 별도 범위입니다.
-- Activation 변경 범위는 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)의 Phase 5A·5A.1·5B.1·5B.2·5B.3·5B.4를 참고하세요.
+- Activation 변경 범위는 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)의 Phase 5A·5A.1·5B.1·5B.2·5B.3·5B.4·5B.5·5B.6을 참고하세요.
 - `etl_load_runs`는 `profile_name`·`profile_version`만 기록하고 프로필 JSON snapshot이나 매핑 hash는 저장하지 않으므로, 어떤 버전을 썼는지는 알 수 있지만 그 버전의 당시 내용이 보존된다고 DB가 보장하지는 않습니다. 버전 증가 기준과 향후 방향은 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)에 정리했습니다.
 - S3 ingestion은 호출자가 `object_key` 하나를 지정하는 pull 방식입니다. S3 event 알림·Lambda·SQS 기반 자동 수집과 prefix 일괄 처리는 지원하지 않습니다.
 - S3 source를 실제로 호출하는 Streamlit 화면은 없습니다. 현재는 API 직접 호출로만 사용합니다.
