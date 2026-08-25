@@ -6,13 +6,16 @@ Policy B(Semantic Change = Version Bump)를 CI에서 강제하기 위한 test-on
 runtime 동작은 바꾸지 않습니다. fingerprint 계산은 이 파일 안에만 있고
 etl.profile_loader에는 새 API를 추가하지 않습니다.
 """
-import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
 from etl.models import ETLProfile
+from etl.profile_fingerprint import (
+    build_profile_semantic_payload as semantic_payload,
+    compute_profile_definition_sha256 as fingerprint,
+)
 from etl.profile_loader import (
     _ETL_PROFILE_REGISTRY,
     get_profile_path,
@@ -33,48 +36,6 @@ _IMMUTABILITY_HINT = (
     "Restore the published definition, or bump profile_version and ADD a new "
     "fingerprint record without changing or deleting the existing one."
 )
-
-
-def _target_columns(targets: object) -> list[str]:
-    # load_profile()은 항상 tuple을 주지만, ETLProfile 타입은 단일 문자열도 허용하므로
-    # transformer와 같은 방식으로 두 형태를 모두 받아들입니다.
-    if isinstance(targets, str):
-        return [targets]
-    return list(targets)
-
-
-def semantic_payload(profile: ETLProfile) -> dict[str, object]:
-    """Return only the profile fields that change ETL transform behavior.
-
-    profile_id, display_name, 파일명, 경로는 변환 결과를 바꾸지 않으므로 넣지 않습니다.
-    profile_name/profile_version은 payload가 아니라 fingerprint를 찾는 key로 씁니다.
-    """
-    return {
-        "source_columns": {
-            source: _target_columns(targets)
-            for source, targets in profile.source_columns.items()
-        },
-        # 순서를 유지합니다. transform_rows()가 이 순서대로 MISSING_SOURCE_VALUE 오류를
-        # 만들고, 그 배열이 reject CSV와 etl_rejected_rows.errors에 그대로 저장되므로
-        # 순서가 실제 출력에 드러납니다.
-        "required_source_columns": list(profile.required_source_columns),
-        "defaults": dict(profile.defaults),
-    }
-
-
-def fingerprint(profile: ETLProfile) -> str:
-    """SHA-256 of the canonical semantic payload (64 lowercase hex characters).
-
-    dict key 순서는 의미가 없으므로 sort_keys로 정규화하고, list 순서는 의미가 있을 수
-    있으므로 그대로 둡니다. 들여쓰기·공백 차이는 separators로 제거합니다.
-    """
-    canonical_json = json.dumps(
-        semantic_payload(profile),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
 
 def load_baseline() -> dict[str, dict[str, str]]:

@@ -19,6 +19,7 @@ from core.upload_validator import (
     validate_csv_text_not_empty,
     validate_no_nul_bytes,
 )
+from etl.profile_fingerprint import compute_profile_definition_sha256
 from etl.profile_loader import ETLProfileValidationError, load_profile
 from etl.transformer import transform_rows
 
@@ -247,6 +248,7 @@ def run_pipeline(
             {
                 "profile_name": profile.name,
                 "profile_version": profile.version,
+                "profile_definition_sha256": compute_profile_definition_sha256(profile),
                 "input_filename": input_path.name,
                 "output_filename": output_path.name,
                 "input_file_sha256": _sha256_bytes(input_bytes),

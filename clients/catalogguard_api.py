@@ -93,6 +93,7 @@ ETL_LOAD_DETAIL_RESPONSE_KEYS = (
     "profile_version",
     "input_file_sha256",
     "output_file_sha256",
+    "profile_definition_sha256",
     "total_rows",
     "loaded_rows",
     "rejected_rows",
@@ -127,6 +128,7 @@ ETL_REJECTION_ITEM_KEYS = (
 )
 ETL_REJECTION_ERROR_KEYS = ("code", "field", "message")
 ETL_SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+ETL_PROFILE_DEFINITION_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 CATALOG_PROMOTION_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 CATALOG_RECONCILIATION_RESPONSE_KEYS = (
     "etl_load_run_id",
@@ -288,6 +290,7 @@ ETL_WEB_RUN_RESPONSE_KEYS = (
     "created",
     "profile_name",
     "profile_version",
+    "profile_definition_sha256",
     "source_filename",
     "total_rows",
     "loaded_rows",
@@ -972,6 +975,14 @@ def _validate_etl_load_detail_response(data: dict[str, Any]) -> None:
         or ETL_SHA256_PATTERN.fullmatch(data["input_file_sha256"]) is None
         or not isinstance(data["output_file_sha256"], str)
         or ETL_SHA256_PATTERN.fullmatch(data["output_file_sha256"]) is None
+        or (
+            data["profile_definition_sha256"] is not None
+            and (
+                not isinstance(data["profile_definition_sha256"], str)
+                or ETL_PROFILE_DEFINITION_SHA256_PATTERN.fullmatch(data["profile_definition_sha256"])
+                is None
+            )
+        )
         or type(data["loaded_rows"]) is not int
         or data["loaded_rows"] < 0
         or not isinstance(data["created_at"], str)
@@ -983,6 +994,21 @@ def _validate_etl_load_detail_response(data: dict[str, Any]) -> None:
             require_error_counts=True,
         )
         or not _validate_etl_product_list(data["products"])
+    ):
+        raise _invalid_etl_response()
+
+
+def _validate_etl_web_run_response(data: dict[str, Any]) -> None:
+    if (
+        any(key not in data for key in ETL_WEB_RUN_RESPONSE_KEYS)
+        or (
+            data["profile_definition_sha256"] is not None
+            and (
+                not isinstance(data["profile_definition_sha256"], str)
+                or ETL_PROFILE_DEFINITION_SHA256_PATTERN.fullmatch(data["profile_definition_sha256"])
+                is None
+            )
+        )
     ):
         raise _invalid_etl_response()
 
@@ -1775,6 +1801,7 @@ class CatalogGuardApiClient:
             map_etl_run_errors=True,
         )
         self._validate_response_keys(data, ETL_WEB_RUN_RESPONSE_KEYS)
+        _validate_etl_web_run_response(data)
         return data
 
     def list_etl_profiles(self, *, include_inactive: bool = False) -> dict[str, Any]:

@@ -261,6 +261,9 @@ class ETLLoadRun(Base):
     profile_version: Mapped[str] = mapped_column(String(20), nullable=False)
     input_file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     output_file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    profile_definition_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     loaded_rows: Mapped[int] = mapped_column(Integer, nullable=False)
     total_rows: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rejected_rows: Mapped[int | None] = mapped_column(Integer, nullable=True)

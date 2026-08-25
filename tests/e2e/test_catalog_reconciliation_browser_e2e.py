@@ -36,6 +36,7 @@ class _LoadRunSnapshot:
     profile_version: str
     input_file_sha256: str
     output_file_sha256: str
+    profile_definition_sha256: str | None
     total_rows: int | None
     loaded_rows: int
     rejected_rows: int | None
@@ -153,6 +154,7 @@ def _snapshot_load_run(load_run) -> _LoadRunSnapshot:
         profile_version=load_run.profile_version,
         input_file_sha256=load_run.input_file_sha256,
         output_file_sha256=load_run.output_file_sha256,
+        profile_definition_sha256=load_run.profile_definition_sha256,
         total_rows=load_run.total_rows,
         loaded_rows=load_run.loaded_rows,
         rejected_rows=load_run.rejected_rows,

@@ -31,7 +31,7 @@ MIGRATION_REVISION = "20260813_0013"
 PREVIOUS_REVISION = "20260810_0012"
 # 새 migration이 올라올 때마다 함께 갱신합니다. 이 파일이 확인하려는 것은 "lineage
 # migration이 하나뿐인 head 사슬 안에 그대로 있는가"이지 "그것이 head인가"가 아닙니다.
-CURRENT_HEAD_REVISION = "20260823_0015"
+CURRENT_HEAD_REVISION = "20260825_0016"
 
 CSV_COLUMNS = [
     "product_group_id",

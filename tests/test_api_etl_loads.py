@@ -91,6 +91,7 @@ def fake_etl_query_service(monkeypatch):
         profile_version="1",
         input_file_sha256="a" * 64,
         output_file_sha256="b" * 64,
+        profile_definition_sha256="c" * 64,
         loaded_rows=25,
         total_rows=30,
         rejected_rows=5,
@@ -837,6 +838,7 @@ def test_detail_returns_nullable_fields_and_hashes(fake_etl_query_service):
     data = response.json()
     assert data["input_file_sha256"] == "a" * 64
     assert data["output_file_sha256"] == "b" * 64
+    assert data["profile_definition_sha256"] == "c" * 64
     assert data["total_rows"] == 30
     assert data["rejected_rows"] == 5
     assert data["error_counts"] == {"INVALID_PRICE": 5}

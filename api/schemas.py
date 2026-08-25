@@ -183,6 +183,7 @@ class ETLLoadDetailResponse(BaseModel):
     profile_version: str
     input_file_sha256: str
     output_file_sha256: str
+    profile_definition_sha256: str | None
     total_rows: int | None
     loaded_rows: int
     rejected_rows: int | None
@@ -222,6 +223,7 @@ class ETLWebRunResponse(BaseModel):
     created: bool
     profile_name: str
     profile_version: str
+    profile_definition_sha256: str | None
     source_filename: str
     total_rows: int | None
     loaded_rows: int

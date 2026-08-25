@@ -1972,6 +1972,9 @@ def _render_etl_load_detail(api_client) -> None:
     with st.expander("파일 SHA-256"):
         st.code(f"원본 파일 SHA-256: {detail_response.get('input_file_sha256', '')}")
         st.code(f"적재 파일 SHA-256: {detail_response.get('output_file_sha256', '')}")
+        fingerprint = detail_response.get("profile_definition_sha256")
+        st.code(f"프로필 정의 SHA-256: {fingerprint or '알 수 없음 (legacy batch)'}")
+        st.caption("매핑·필수 원본 컬럼·기본값 정의의 지문이며 전체 애플리케이션 코드 hash는 아닙니다.")
 
     products = detail_response.get("products") or {}
     product_items = products.get("items") or []
