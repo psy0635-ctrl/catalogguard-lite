@@ -2,7 +2,7 @@
 
 ## 이 문서의 목적
 
-ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**, 프로필 버전을 어떻게 다룰지 먼저 고정하기 위해 시작한 문서다. 처음에는 정책만 정하는 설계 gate였고(Phase 2), 그 뒤 Phase 3·4·5A·5A.1·5B.1이 실제로 구현되면서 **그 정책과 구현 결과를 함께 기록하는 문서**로 자랐다.
+ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**, 프로필 버전을 어떻게 다룰지 먼저 고정하기 위해 시작한 문서다. 처음에는 정책만 정하는 설계 gate였고(Phase 2), 그 뒤 Phase 3 이후 실제 구현이 이어지면서 **그 정책과 구현 결과를 함께 기록하는 문서**로 자랐다.
 
 이 문서는 다음 세 가지를 **명확히 구분해서** 쓴다. 아직 없는 기능을 이미 있는 것처럼 쓰지 않는다.
 
@@ -10,7 +10,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 - `[정책 결정]` — 지켜야 할 규칙. 그 자체로는 코드를 규정하지 않고, 강제 장치는 별도 Phase에서 만든다
 - `[향후 구현]` — 아직 없고, 나중에 만들 때 따를 방향
 
-**시점 표기 규칙**: 각 Phase 절은 그 Phase 시점의 사실을 기록한다. 뒤 Phase가 그것을 바꿨으면 해당 절에 갱신 표시를 남기고, 지금 무엇이 사실인지는 가장 나중 Phase 절이 말한다. 현재 최신은 **Phase 5C.1(21장)** 이다.
+**시점 표기 규칙**: 각 Phase 절은 그 Phase 시점의 사실을 기록한다. 뒤 Phase가 그것을 바꿨으면 해당 절에 갱신 표시를 남기고, 지금 무엇이 사실인지는 가장 나중 Phase 절이 말한다. 현재 최신은 **Phase 5C.2(22장)** 이다.
 
 | Phase | 무엇이 바뀌었나 | 절 |
 | --- | --- | --- |
@@ -28,6 +28,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 | Phase 5B.7 | ETL Quality Observability Chromium E2E | 20장 이후 Chromium 회귀 범위 |
 | Phase 5B.8 | Catalog Reconciliation Chromium E2E | 20장 이후 Chromium 회귀 범위 |
 | Phase 5C.1 | ETL Profile Definition Fingerprint Lineage | 21장 |
+| Phase 5C.2 | ETL Application Commit SHA Lineage | 22장 |
 
 ---
 
@@ -79,7 +80,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 
 `db/models.py`의 `ETLLoadRun` 컬럼 전체:
 
-`source_filename`, `profile_name`, `profile_version`, `input_file_sha256`, `output_file_sha256`, `profile_definition_sha256`, `loaded_rows`, `total_rows`, `rejected_rows`, `error_counts`, `reject_details_stored`, `rejects_file_sha256`, `initial_source_type`, `initial_source_ref`, `actor_user_id`, `actor_username`, `created_at`
+`source_filename`, `profile_name`, `profile_version`, `input_file_sha256`, `output_file_sha256`, `profile_definition_sha256`, `application_commit_sha`, `loaded_rows`, `total_rows`, `rejected_rows`, `error_counts`, `reject_details_stored`, `rejects_file_sha256`, `initial_source_type`, `initial_source_ref`, `actor_user_id`, `actor_username`, `created_at`
 
 - `profile_name`: `String(100)`, NOT NULL
 - `profile_version`: `String(20)`, NOT NULL
@@ -103,9 +104,7 @@ ux_etl_load_runs_input_profile_version
 
 `ETLLoadRun.profile_definition_sha256`은 `source_columns`·`required_source_columns`·`defaults`만을 key 정렬·공백 없는 canonical JSON으로 만든 SHA-256이다. `profile_name`, `profile_version`, registry ID, display name, 파일 경로·형식, 애플리케이션 코드/런타임은 의도적으로 포함하지 않는다. 따라서 이는 **프로필 정의 지문**이지 전체 ETL runtime 또는 application commit hash가 아니다. migration 이전 legacy row는 `NULL`이며 backfill하지 않는다.
 
-### Phase 5C.2 — application commit lineage
-
-`application_commit_sha`는 ETL batch를 만든 application Git commit(소문자 40자리 SHA) lineage이다. `profile_definition_sha256`이 JSON semantic definition fingerprint인 것과 달리 application code의 commit을 식별한다. 새 batch는 `CATALOGGUARD_APPLICATION_COMMIT_SHA`, `RAILWAY_GIT_COMMIT_SHA`, local `git rev-parse HEAD` 순으로 결정하고, 확인하지 못하면 `NULL`을 저장한다. 과거 row와 legacy summary의 `NULL`은 추측 backfill하지 않으며 duplicate 요청도 기존 값을 변경하지 않는다. 두 값을 함께 기록해도 Docker image digest, 전체 dependency, OS, DB 상태, 외부 응답, local uncommitted code를 포함한 historical runtime reproduction은 제공하지 않는다.
+`ETLLoadRun.application_commit_sha`는 Phase 5C.2부터 새 ETL batch가 만든 application Git commit lineage(소문자 40자리 SHA)다. profile definition fingerprint와의 역할 차이, 결정 순서, legacy·dedup 정책 및 재현성 한계는 22장에서 정리한다.
 
 프로필 JSON 전체 snapshot은 여전히 저장하지 않는다. `input_file_sha256`·`output_file_sha256`·`rejects_file_sha256`은 모두 **파일 bytes**의 해시다. 새 pipeline summary에는 definition fingerprint가 포함되고 loader는 lower-case 64자리 hex만 받아 저장한다.
 
@@ -1306,11 +1305,64 @@ Alembic `20260825_0016`은 `etl_load_runs.profile_definition_sha256 VARCHAR(64) 
 
 dedup identity는 계속 `(input_file_sha256, profile_name, profile_version)`이다. 기존 row와 새 요청의 지문이 모두 있고 서로 다르면 pre-check와 `IntegrityError` 경쟁 fallback 모두 안전하게 실패한다. 어느 한쪽이 legacy `NULL`이면 기존 row를 update하거나 backfill하지 않고 그대로 반환한다. Web/S3/HTTP 결과는 생성 여부와 관계없이 실제 DB row에 저장된 값을 반환한다.
 
-`GET /api/v1/etl-loads/{id}`와 Web ETL 결과는 `profile_definition_sha256: string | null`과 `application_commit_sha: string | null`을 반환한다. Python client는 상세와 Web ETL 양쪽에서 non-null 값을 각각 lower-case SHA-256과 lower-case 40자리 Git SHA로 검증한다. Streamlit 상세은 legacy `NULL`을 알 수 없음으로 보이고, definition fingerprint와 commit lineage 어느 것도 runtime hash나 완전한 재현성이 아니라는 점을 함께 표시한다. Web upload Chromium E2E는 DB·API·UI가 모두 shared helper의 예상 지문과 application commit SHA를 보이는지 확인한다.
+`GET /api/v1/etl-loads/{id}`와 Web ETL 결과는 `profile_definition_sha256: string | null`을 반환한다. Python client는 상세와 Web ETL 양쪽에서 non-null 값을 lower-case SHA-256으로 검증한다. Streamlit 상세은 legacy `NULL`을 알 수 없음으로 보이고, definition fingerprint가 runtime hash나 완전한 재현성이 아니라는 점을 함께 표시한다. application commit lineage의 API·client·UI 전달과 Chromium E2E 범위는 22장에서 다룬다.
 
 ### 21.1 한계
 
 이 Phase는 profile JSON 전체 snapshot, transformer/application code hash, dependency lock 또는 과거 runtime의 완전 재현을 제공하지 않는다. 같은 definition fingerprint라도 코드가 달라지면 결과가 달라질 수 있으므로, 의미 있는 코드 변경에는 기존 lifecycle policy대로 `profile_version`을 올려야 한다.
+
+---
+
+## 22. `[현재 구현]` Phase 5C.2 — ETL Application Commit SHA Lineage
+
+### 22.1 구현 목적
+
+Phase 5C.1의 `profile_definition_sha256`은 ETL profile JSON의 semantic definition을 식별한다. 그러나 해당 ETL batch를 만든 application code의 Git commit은 알 수 없었다. Phase 5C.2는 새 batch에 `application_commit_sha`를 추가해 **application Git commit lineage**를 남긴다.
+
+### 22.2 SHA 결정과 저장·전달 경로
+
+새 batch의 SHA는 다음 순서로 결정한다.
+
+1. `CATALOGGUARD_APPLICATION_COMMIT_SHA`
+2. `RAILWAY_GIT_COMMIT_SHA`
+3. local `git rev-parse HEAD`
+4. 확인 불가능하면 `NULL`
+
+명시 환경변수가 있으면 lower-case hexadecimal 40자리여야 한다. malformed 값은 조용히 `NULL`로 바꾸지 않고 안전하게 오류 처리한다. Git 실행 파일·Git metadata가 없거나 `rev-parse`가 실패하는 경우는 unknown으로 처리한다.
+
+값은 다음 경로로 전달된다.
+
+```text
+pipeline summary
+→ ETL loader
+→ ETLLoadRun.application_commit_sha
+→ FastAPI
+→ Python client
+→ Streamlit ETL detail
+```
+
+FastAPI 상세 및 Web ETL 결과는 `application_commit_sha: string | null`을 반환한다. Python client는 non-null 값을 lower-case 40자리 Git SHA로 검증하고, Streamlit 상세은 legacy 또는 미확인 `NULL`을 구분해 표시한다. Web upload Chromium E2E는 summary·DB·API·UI의 값을 함께 확인한다.
+
+### 22.3 Legacy와 dedup 정책
+
+- migration 이전 row와 field가 없는 legacy summary는 `NULL`이다.
+- historical backfill은 하지 않는다. 알 수 없는 과거 값을 추측해 기록하지 않는다.
+- duplicate batch는 기존 row를 반환하며 incoming SHA로 기존 `application_commit_sha`를 갱신하지 않는다. 기존 값이 `NULL`이면 그대로 `NULL`이다.
+
+`application_commit_sha`는 dedup identity가 아니다. 기준은 계속 `(input_file_sha256, profile_name, profile_version)`이고 unique index `ux_etl_load_runs_input_profile_version`도 바꾸지 않았다. **코드 commit이 달라졌다는 이유만으로 동일 input/profile batch를 새 batch로 생성하지 않는다.**
+
+### 22.4 Profile definition과의 관계
+
+| 값 | 의미 |
+| --- | --- |
+| `profile_definition_sha256` | profile JSON semantic definition fingerprint |
+| `application_commit_sha` | application Git commit lineage |
+
+둘은 서로 다른 질문에 답한다. 함께 기록해도 full runtime fingerprint가 되지는 않는다.
+
+### 22.5 재현성 한계
+
+`application_commit_sha`는 Docker image digest, dependency snapshot, OS·환경·DB snapshot, 외부 HTTP 응답 또는 local uncommitted changes snapshot이 아니다. Phase 5C.2는 추적 가능성을 높였지만, 과거 실행 환경 전체를 자동으로 복원하거나 완전한 historical runtime reproduction을 제공하는 기능은 아니다.
 
 ---
 
