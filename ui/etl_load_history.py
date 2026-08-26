@@ -1986,6 +1986,27 @@ def _render_etl_load_detail(api_client) -> None:
             "로컬 미커밋 변경을 의미하지 않으므로 완전한 재현성을 보장하지 않습니다."
         )
 
+    snapshot = detail_response.get("profile_definition_snapshot")
+    st.subheader("실행 당시 저장된 Profile 정의")
+    if not isinstance(snapshot, dict):
+        st.info("알 수 없음 (legacy batch)")
+    else:
+        st.caption("이 batch가 실행될 당시 저장된 정의이며, 지금 실행할 Profile 정의와 다를 수 있습니다.")
+        st.markdown("#### 필수 원본 컬럼")
+        st.markdown("\n".join(f"- {column}" for column in snapshot["required_source_columns"]))
+        st.markdown("#### 컬럼 매핑")
+        st.dataframe(
+            build_etl_profile_mapping_dataframe(snapshot["source_columns"]),
+            width="stretch",
+            hide_index=True,
+        )
+        st.markdown("#### 기본값")
+        st.dataframe(
+            build_etl_profile_defaults_dataframe(snapshot["defaults"]),
+            width="stretch",
+            hide_index=True,
+        )
+
     products = detail_response.get("products") or {}
     product_items = products.get("items") or []
     product_dataframe = build_etl_product_dataframe(product_items)

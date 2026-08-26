@@ -19,7 +19,10 @@ from core.upload_validator import (
     validate_csv_text_not_empty,
     validate_no_nul_bytes,
 )
-from etl.profile_fingerprint import compute_profile_definition_sha256
+from etl.profile_fingerprint import (
+    build_profile_semantic_payload,
+    compute_profile_definition_sha256_from_payload,
+)
 from etl.application_lineage import (
     ApplicationCommitLineageError,
     resolve_application_commit_sha,
@@ -218,6 +221,10 @@ def run_pipeline(
         profile = load_profile(profile_path)
     except ETLProfileValidationError as error:
         raise ETLPipelineError(str(error)) from error
+    profile_definition_snapshot = build_profile_semantic_payload(profile)
+    profile_definition_sha256 = compute_profile_definition_sha256_from_payload(
+        profile_definition_snapshot
+    )
     source_columns, source_rows, source_row_numbers, input_bytes = _read_supplier_csv(
         input_path,
         profile.required_source_columns,
@@ -256,7 +263,8 @@ def run_pipeline(
             {
                 "profile_name": profile.name,
                 "profile_version": profile.version,
-                "profile_definition_sha256": compute_profile_definition_sha256(profile),
+                "profile_definition_sha256": profile_definition_sha256,
+                "profile_definition_snapshot": profile_definition_snapshot,
                 "application_commit_sha": application_commit_sha,
                 "input_filename": input_path.name,
                 "output_filename": output_path.name,

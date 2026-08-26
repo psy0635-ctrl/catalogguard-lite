@@ -1,4 +1,4 @@
-"""Phase 5C.1 migration and ORM contract for ETL profile definition lineage."""
+"""Phase 5C.3 migration and ORM contract for profile semantic snapshots."""
 
 from __future__ import annotations
 
@@ -8,33 +8,30 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import String, text
+from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import JSONB
 
 from config.database import get_optional_database_url
 from db.models import ETLLoadRun
 from db.session import create_database_engine
 
 
-REVISION = "20260825_0016"
-HEAD_REVISION = "20260826_0018"
-PREVIOUS_REVISION = "20260823_0015"
-COLUMN = "profile_definition_sha256"
+REVISION = "20260826_0018"
+PREVIOUS_REVISION = "20260826_0017"
+COLUMN = "profile_definition_snapshot"
 
 
-def test_profile_definition_fingerprint_migration_is_the_single_alembic_head() -> None:
+def test_profile_definition_snapshot_migration_is_the_single_alembic_head() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-
-    assert list(script.get_heads()) == [HEAD_REVISION]
+    assert list(script.get_heads()) == [REVISION]
     revision = script.get_revision(REVISION)
     assert revision is not None
     assert revision.down_revision == PREVIOUS_REVISION
 
 
-def test_profile_definition_fingerprint_model_column_is_nullable_sha256_text() -> None:
+def test_profile_definition_snapshot_model_column_is_nullable_jsonb() -> None:
     column = ETLLoadRun.__table__.columns[COLUMN]
-
-    assert isinstance(column.type, String)
-    assert column.type.length == 64
+    assert isinstance(column.type, JSONB)
     assert column.nullable is True
     assert column.server_default is None
 
@@ -60,16 +57,8 @@ def fixture_engine():
         engine.dispose()
 
 
-@pytest.fixture(name="head_restored")
-def fixture_head_restored(alembic_config):
-    yield
-    command.upgrade(alembic_config, "head")
-
-
-def test_upgrade_adds_nullable_column_without_backfilling_legacy_rows(
-    alembic_config, engine, head_restored
-) -> None:
-    marker = hashlib.sha256(b"profile-definition-migration-test").hexdigest()
+def test_upgrade_adds_nullable_jsonb_without_backfilling_legacy_rows(alembic_config, engine) -> None:
+    marker = hashlib.sha256(b"profile-definition-snapshot-migration-test").hexdigest()
     command.downgrade(alembic_config, PREVIOUS_REVISION)
     try:
         with engine.begin() as connection:
@@ -79,25 +68,23 @@ def test_upgrade_adds_nullable_column_without_backfilling_legacy_rows(
                     "source_filename, profile_name, profile_version, "
                     "input_file_sha256, output_file_sha256, loaded_rows, "
                     "initial_source_type) VALUES ("
-                    "'legacy.csv', 'migration_legacy_profile', '1', "
+                    "'legacy.csv', 'migration_snapshot_profile', '1', "
                     ":input_hash, :output_hash, 0, 'unknown')"
                 ),
                 {"input_hash": marker, "output_hash": marker},
             )
-
         command.upgrade(alembic_config, REVISION)
         with engine.connect() as connection:
-            column = connection.execute(
+            assert connection.execute(
                 text(
                     "SELECT data_type, is_nullable FROM information_schema.columns "
                     "WHERE table_name = 'etl_load_runs' AND column_name = :column"
                 ),
                 {"column": COLUMN},
-            ).one()
-            assert column == ("character varying", "YES")
+            ).one() == ("jsonb", "YES")
             assert connection.execute(
                 text(
-                    "SELECT profile_definition_sha256 FROM etl_load_runs "
+                    "SELECT profile_definition_snapshot FROM etl_load_runs "
                     "WHERE input_file_sha256 = :input_hash"
                 ),
                 {"input_hash": marker},

@@ -23,6 +23,11 @@ from etl.db_loader import (
     _normalize_summary,
     load_standard_csv,
 )
+from etl.profile_fingerprint import (
+    build_profile_semantic_payload,
+    compute_profile_definition_sha256_from_payload,
+)
+from etl.profile_loader import get_profile_path, load_profile
 
 
 CSV_COLUMNS = [
@@ -97,6 +102,12 @@ def make_rejects_csv(
     return output.getvalue().encode("utf-8")
 
 
+def make_profile_snapshot() -> dict[str, object]:
+    return build_profile_semantic_payload(
+        load_profile(get_profile_path("sample_fashion_vendor_v1"))
+    )
+
+
 def test_normalize_summary_returns_a_new_trimmed_error_counts_dict_without_mutating_input():
     summary = json.loads(make_summary(b"output"))
     summary["output_file_sha256"] = hashlib.sha256(b"output").hexdigest()
@@ -113,7 +124,7 @@ def test_normalize_summary_returns_a_new_trimmed_error_counts_dict_without_mutat
 
 @pytest.mark.parametrize(
     "value",
-    [" " + "a" * 64, "A" * 64, "a" * 63, None, 123],
+    [" " + "a" * 64, "A" * 64, "a" * 63, 123],
 )
 def test_normalize_summary_rejects_noncanonical_profile_definition_hash(value):
     summary = json.loads(make_summary(b"output"))
@@ -129,6 +140,49 @@ def test_normalize_summary_allows_legacy_summary_without_profile_definition_hash
     normalized = _normalize_summary(summary)
 
     assert "profile_definition_sha256" not in normalized
+
+
+def test_normalize_summary_allows_explicit_null_profile_definition_hash_without_snapshot():
+    summary = json.loads(make_summary(b"output"))
+    summary["profile_definition_sha256"] = None
+
+    assert _normalize_summary(summary)["profile_definition_sha256"] is None
+
+
+def test_normalize_summary_accepts_matching_profile_snapshot_and_canonicalizes_it():
+    summary = json.loads(make_summary(b"output"))
+    snapshot = make_profile_snapshot()
+    summary["profile_definition_snapshot"] = snapshot
+    summary["profile_definition_sha256"] = compute_profile_definition_sha256_from_payload(snapshot)
+
+    normalized = _normalize_summary(summary)
+
+    assert normalized["profile_definition_snapshot"] == snapshot
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [[], {"source_columns": {}, "required_source_columns": [], "defaults": {}, "api_key": "x"}],
+)
+def test_normalize_summary_rejects_invalid_profile_snapshot_shape(snapshot):
+    summary = json.loads(make_summary(b"output"))
+    summary["profile_definition_snapshot"] = snapshot
+
+    with pytest.raises(ETLLoadError, match="profile_definition_snapshot"):
+        _normalize_summary(summary)
+
+
+def test_normalize_summary_rejects_snapshot_without_fingerprint_or_with_mismatching_hash():
+    summary = json.loads(make_summary(b"output"))
+    snapshot = make_profile_snapshot()
+    summary["profile_definition_snapshot"] = snapshot
+
+    with pytest.raises(ETLLoadError, match="profile_definition_sha256"):
+        _normalize_summary(summary)
+
+    summary["profile_definition_sha256"] = "a" * 64
+    with pytest.raises(ETLLoadError, match="일치하지 않습니다"):
+        _normalize_summary(summary)
 
 
 @pytest.mark.parametrize("value", ["", "A" * 40, "a" * 39, "a" * 41, "g" * 40, 123, []])
@@ -443,6 +497,29 @@ def test_duplicate_legacy_null_profile_definition_remains_unchanged(postgres_ses
     assert second.etl_load_run_id == first.etl_load_run_id
     assert second.profile_definition_sha256 is None
     assert session.get(ETLLoadRun, first.etl_load_run_id).profile_definition_sha256 is None
+
+
+def test_profile_definition_snapshot_is_persisted_and_duplicate_returns_stored_value(postgres_session):
+    session, profile_name = postgres_session
+    csv_bytes = make_standard_csv(ROWS)
+    snapshot = make_profile_snapshot()
+    summary = json.loads(make_summary(csv_bytes, profile_name=profile_name))
+    summary["profile_definition_snapshot"] = snapshot
+    summary["profile_definition_sha256"] = compute_profile_definition_sha256_from_payload(
+        snapshot
+    )
+
+    first = load_standard_csv(session, csv_bytes, json.dumps(summary).encode())
+    duplicate_summary = {**summary}
+    duplicate_summary.pop("profile_definition_snapshot")
+    duplicate = load_standard_csv(
+        session, csv_bytes, json.dumps(duplicate_summary).encode()
+    )
+
+    assert first.profile_definition_snapshot == snapshot
+    assert duplicate.created is False
+    assert duplicate.profile_definition_snapshot == snapshot
+    assert session.get(ETLLoadRun, first.etl_load_run_id).profile_definition_snapshot == snapshot
 
 
 def test_application_commit_sha_is_saved_and_duplicate_does_not_backfill_legacy_null(postgres_session):

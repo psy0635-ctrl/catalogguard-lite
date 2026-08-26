@@ -10,7 +10,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 - `[정책 결정]` — 지켜야 할 규칙. 그 자체로는 코드를 규정하지 않고, 강제 장치는 별도 Phase에서 만든다
 - `[향후 구현]` — 아직 없고, 나중에 만들 때 따를 방향
 
-**시점 표기 규칙**: 각 Phase 절은 그 Phase 시점의 사실을 기록한다. 뒤 Phase가 그것을 바꿨으면 해당 절에 갱신 표시를 남기고, 지금 무엇이 사실인지는 가장 나중 Phase 절이 말한다. 현재 최신은 **Phase 5C.2(22장)** 이다.
+**시점 표기 규칙**: 각 Phase 절은 그 Phase 시점의 사실을 기록한다. 뒤 Phase가 그것을 바꿨으면 해당 절에 갱신 표시를 남기고, 지금 무엇이 사실인지는 가장 나중 Phase 절이 말한다. 현재 최신은 **Phase 5C.3(23장)** 이다.
 
 | Phase | 무엇이 바뀌었나 | 절 |
 | --- | --- | --- |
@@ -29,6 +29,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 | Phase 5B.8 | Catalog Reconciliation Chromium E2E | 20장 이후 Chromium 회귀 범위 |
 | Phase 5C.1 | ETL Profile Definition Fingerprint Lineage | 21장 |
 | Phase 5C.2 | ETL Application Commit SHA Lineage | 22장 |
+| Phase 5C.3 | ETL Profile Definition Snapshot Lineage | 23장 |
 
 ---
 
@@ -80,7 +81,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 
 `db/models.py`의 `ETLLoadRun` 컬럼 전체:
 
-`source_filename`, `profile_name`, `profile_version`, `input_file_sha256`, `output_file_sha256`, `profile_definition_sha256`, `application_commit_sha`, `loaded_rows`, `total_rows`, `rejected_rows`, `error_counts`, `reject_details_stored`, `rejects_file_sha256`, `initial_source_type`, `initial_source_ref`, `actor_user_id`, `actor_username`, `created_at`
+`source_filename`, `profile_name`, `profile_version`, `input_file_sha256`, `output_file_sha256`, `profile_definition_sha256`, `profile_definition_snapshot`, `application_commit_sha`, `loaded_rows`, `total_rows`, `rejected_rows`, `error_counts`, `reject_details_stored`, `rejects_file_sha256`, `initial_source_type`, `initial_source_ref`, `actor_user_id`, `actor_username`, `created_at`
 
 - `profile_name`: `String(100)`, NOT NULL
 - `profile_version`: `String(20)`, NOT NULL
@@ -100,13 +101,13 @@ ux_etl_load_runs_input_profile_version
 
 ### 2.5 프로필 스냅샷 / definition fingerprint 저장 여부
 
-**전체 snapshot은 없지만, Phase 5C.1부터 semantic definition fingerprint는 있다.**
+**Phase 5C.3부터 raw profile JSON 전체는 아니지만 semantic definition snapshot과 fingerprint가 있다.**
 
 `ETLLoadRun.profile_definition_sha256`은 `source_columns`·`required_source_columns`·`defaults`만을 key 정렬·공백 없는 canonical JSON으로 만든 SHA-256이다. `profile_name`, `profile_version`, registry ID, display name, 파일 경로·형식, 애플리케이션 코드/런타임은 의도적으로 포함하지 않는다. 따라서 이는 **프로필 정의 지문**이지 전체 ETL runtime 또는 application commit hash가 아니다. migration 이전 legacy row는 `NULL`이며 backfill하지 않는다.
 
-`ETLLoadRun.application_commit_sha`는 Phase 5C.2부터 새 ETL batch가 만든 application Git commit lineage(소문자 40자리 SHA)다. profile definition fingerprint와의 역할 차이, 결정 순서, legacy·dedup 정책 및 재현성 한계는 22장에서 정리한다.
+`ETLLoadRun.profile_definition_snapshot`은 같은 세 semantic field만 JSONB로 저장한다. raw profile JSON, profile ID·name·version, registry, 경로, runtime environment 및 secret은 넣지 않는다. `ETLLoadRun.application_commit_sha`는 Phase 5C.2부터 새 ETL batch가 만든 application Git commit lineage(소문자 40자리 SHA)다.
 
-프로필 JSON 전체 snapshot은 여전히 저장하지 않는다. `input_file_sha256`·`output_file_sha256`·`rejects_file_sha256`은 모두 **파일 bytes**의 해시다. 새 pipeline summary에는 definition fingerprint가 포함되고 loader는 lower-case 64자리 hex만 받아 저장한다.
+`input_file_sha256`·`output_file_sha256`·`rejects_file_sha256`은 모두 **파일 bytes**의 해시다. 새 pipeline summary에는 snapshot과 definition fingerprint가 같은 semantic payload에서 포함되며, loader는 snapshot의 canonical SHA-256 일치를 검증한다.
 
 ### 2.6 과거 버전 archive / registry 존재 여부
 
@@ -1365,6 +1366,28 @@ FastAPI 상세 및 Web ETL 결과는 `application_commit_sha: string | null`을 
 `application_commit_sha`는 Docker image digest, dependency snapshot, OS·환경·DB snapshot, 외부 HTTP 응답 또는 local uncommitted changes snapshot이 아니다. Phase 5C.2는 추적 가능성을 높였지만, 과거 실행 환경 전체를 자동으로 복원하거나 완전한 historical runtime reproduction을 제공하는 기능은 아니다.
 
 ---
+
+## 23. `[현재 구현]` Phase 5C.3 — ETL Profile Definition Snapshot Lineage
+
+### 23.1 목적과 저장 범위
+
+새 ETL batch는 `ETLProfile`에서 만든 semantic definition을 `ETLLoadRun.profile_definition_snapshot`에 immutable JSONB로 저장한다. snapshot의 top-level key는 정확히 `source_columns`, `required_source_columns`, `defaults` 세 개다. raw profile JSON, `profile_name`, `profile_version`, profile ID, display name, registry·파일 경로, runtime 환경 및 secret은 저장하지 않는다.
+
+### 23.2 Fingerprint consistency invariant
+
+pipeline은 한 semantic payload에서 snapshot과 `profile_definition_sha256`을 함께 만든다. loader는 snapshot이 있으면 fingerprint도 반드시 있어야 하고, canonical JSON(key 정렬·공백 없음)의 SHA-256이 fingerprint와 일치하는지 확인한다. `NULL/NULL`과 known fingerprint + `NULL` snapshot은 legacy 호환으로 허용한다. `NULL` fingerprint + known snapshot과 hash mismatch는 안전하게 거부한다.
+
+### 23.3 Legacy와 duplicate
+
+Alembic `20260826_0018`은 nullable `profile_definition_snapshot JSONB`만 추가하며 historical backfill은 하지 않는다. dedup identity는 계속 `(input_file_sha256, profile_name, profile_version)`이다. duplicate 및 IntegrityError 경쟁 fallback은 기존 row를 반환하며 incoming snapshot으로 기존 값을 갱신하지 않는다. 기존 `NULL`도 `NULL`로 남는다.
+
+### 23.4 API와 UI
+
+snapshot은 `GET /api/v1/etl-loads/{id}`와 Web ETL 결과에서만 nullable structured field로 제공한다. list·quality·reconciliation 응답에는 넣지 않는다. Streamlit batch detail은 `실행 당시 저장된 Profile 정의`로 필수 원본 컬럼, 매핑, 기본값을 표시하고 legacy `NULL`은 알 수 없음으로 표시한다. 이는 현재 실행용 Profile Detail과 다른 historical 정보다.
+
+### 23.5 재현성 한계
+
+`profile_definition_snapshot`은 profile semantic definition만 저장한다. Docker image, dependencies, OS·environment, DB state, external response, source CSV bytes 및 uncommitted local code는 저장하지 않으므로 완전한 historical runtime reproduction이나 replay를 제공하지 않는다.
 
 ## 참고
 

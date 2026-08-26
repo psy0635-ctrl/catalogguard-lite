@@ -94,6 +94,7 @@ ETL_LOAD_DETAIL_RESPONSE_KEYS = (
     "input_file_sha256",
     "output_file_sha256",
     "profile_definition_sha256",
+    "profile_definition_snapshot",
     "application_commit_sha",
     "total_rows",
     "loaded_rows",
@@ -293,6 +294,7 @@ ETL_WEB_RUN_RESPONSE_KEYS = (
     "profile_name",
     "profile_version",
     "profile_definition_sha256",
+    "profile_definition_snapshot",
     "application_commit_sha",
     "source_filename",
     "total_rows",
@@ -966,6 +968,33 @@ def _validate_etl_rejection_list_response(data: dict[str, Any]) -> None:
         raise _invalid_etl_response()
 
 
+def _is_valid_profile_definition_snapshot(value: object) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, dict) or set(value) != {
+        "source_columns",
+        "required_source_columns",
+        "defaults",
+    }:
+        return False
+    source_columns = value["source_columns"]
+    required_source_columns = value["required_source_columns"]
+    defaults = value["defaults"]
+    return (
+        isinstance(source_columns, dict)
+        and all(
+            isinstance(source, str)
+            and isinstance(targets, list)
+            and all(isinstance(target, str) for target in targets)
+            for source, targets in source_columns.items()
+        )
+        and isinstance(required_source_columns, list)
+        and all(isinstance(column, str) for column in required_source_columns)
+        and isinstance(defaults, dict)
+        and all(isinstance(column, str) and isinstance(default, str) for column, default in defaults.items())
+    )
+
+
 def _validate_etl_load_detail_response(data: dict[str, Any]) -> None:
     if (
         any(key not in data for key in ETL_LOAD_DETAIL_RESPONSE_KEYS)
@@ -986,6 +1015,7 @@ def _validate_etl_load_detail_response(data: dict[str, Any]) -> None:
                 is None
             )
         )
+        or not _is_valid_profile_definition_snapshot(data["profile_definition_snapshot"])
         or (
             data["application_commit_sha"] is not None
             and (
@@ -1020,6 +1050,7 @@ def _validate_etl_web_run_response(data: dict[str, Any]) -> None:
                 is None
             )
         )
+        or not _is_valid_profile_definition_snapshot(data["profile_definition_snapshot"])
         or (
             data["application_commit_sha"] is not None
             and (

@@ -176,6 +176,12 @@ class ETLStagingProductListResponse(BaseModel):
     offset: int
 
 
+class ETLProfileDefinitionSnapshotResponse(BaseModel):
+    source_columns: dict[str, list[str]]
+    required_source_columns: list[str]
+    defaults: dict[str, str]
+
+
 class ETLLoadDetailResponse(BaseModel):
     etl_load_run_id: int
     source_filename: str
@@ -184,6 +190,7 @@ class ETLLoadDetailResponse(BaseModel):
     input_file_sha256: str
     output_file_sha256: str
     profile_definition_sha256: str | None
+    profile_definition_snapshot: ETLProfileDefinitionSnapshotResponse | None
     application_commit_sha: str | None
     total_rows: int | None
     loaded_rows: int
@@ -225,6 +232,7 @@ class ETLWebRunResponse(BaseModel):
     profile_name: str
     profile_version: str
     profile_definition_sha256: str | None
+    profile_definition_snapshot: ETLProfileDefinitionSnapshotResponse | None
     application_commit_sha: str | None
     source_filename: str
     total_rows: int | None

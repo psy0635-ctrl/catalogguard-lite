@@ -24,12 +24,25 @@ def build_profile_semantic_payload(profile: ETLProfile) -> dict[str, object]:
     }
 
 
-def compute_profile_definition_sha256(profile: ETLProfile) -> str:
-    """Hash canonical profile semantics, not profile JSON bytes or runtime code."""
-    canonical_json = json.dumps(
-        build_profile_semantic_payload(profile),
+def canonicalize_profile_semantic_payload(payload: dict[str, object]) -> str:
+    """Serialize a semantic profile payload using the stable Phase 5C.1 format."""
+    return json.dumps(
+        payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
-    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+def compute_profile_definition_sha256_from_payload(payload: dict[str, object]) -> str:
+    """Hash one already-built semantic payload without rebuilding it."""
+    return hashlib.sha256(
+        canonicalize_profile_semantic_payload(payload).encode("utf-8")
+    ).hexdigest()
+
+
+def compute_profile_definition_sha256(profile: ETLProfile) -> str:
+    """Hash canonical profile semantics, not profile JSON bytes or runtime code."""
+    return compute_profile_definition_sha256_from_payload(
+        build_profile_semantic_payload(profile)
+    )

@@ -2,6 +2,8 @@
 
 import os
 import re
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -62,13 +64,20 @@ def _expected_profile_definition_sha256() -> str:
     return compute_profile_definition_sha256(load_profile(get_profile_path(PROFILE_ID)))
 
 
+def _expected_profile_definition_snapshot() -> dict[str, object]:
+    from etl.profile_fingerprint import build_profile_semantic_payload
+    from etl.profile_loader import get_profile_path, load_profile
+
+    return build_profile_semantic_payload(load_profile(get_profile_path(PROFILE_ID)))
+
+
 def _expected_application_commit_sha() -> str | None:
     from etl.application_lineage import resolve_application_commit_sha
 
     return resolve_application_commit_sha()
 
 
-def _assert_web_upload_persisted(etl_load_run_id: int) -> tuple[str, str | None]:
+def _assert_web_upload_persisted(etl_load_run_id: int) -> tuple[str, dict[str, object], str | None]:
     from sqlalchemy import func, select
 
     from db.models import CatalogProductStaging, ETLLoadRun
@@ -82,7 +91,14 @@ def _assert_web_upload_persisted(etl_load_run_id: int) -> tuple[str, str | None]
         assert load_run.profile_name == "sample_marketplace_vendor"
         assert load_run.profile_version == "2"
         expected_fingerprint = _expected_profile_definition_sha256()
+        expected_snapshot = _expected_profile_definition_snapshot()
         assert load_run.profile_definition_sha256 == expected_fingerprint
+        assert load_run.profile_definition_snapshot == expected_snapshot
+        assert hashlib.sha256(
+            json.dumps(
+                expected_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest() == expected_fingerprint
         expected_application_commit_sha = _expected_application_commit_sha()
         assert load_run.application_commit_sha == expected_application_commit_sha
         assert load_run.initial_source_type == "upload"
@@ -102,7 +118,7 @@ def _assert_web_upload_persisted(etl_load_run_id: int) -> tuple[str, str | None]
             )
         )
         assert staging_product_ids == set(PRODUCT_IDS)
-    return expected_fingerprint, expected_application_commit_sha
+    return expected_fingerprint, expected_snapshot, expected_application_commit_sha
 
 
 def _api_headers(page) -> dict[str, str]:
@@ -162,12 +178,13 @@ def _run_web_etl_upload_scenario(page) -> None:
     match = success_pattern.search(body_text)
     assert match is not None
     etl_load_run_id = int(match.group(1))
-    expected_fingerprint, expected_application_commit_sha = _assert_web_upload_persisted(etl_load_run_id)
+    expected_fingerprint, expected_snapshot, expected_application_commit_sha = _assert_web_upload_persisted(etl_load_run_id)
     detail_response = page.request.get(
         f"{API_URL}/api/v1/etl-loads/{etl_load_run_id}", headers=_api_headers(page)
     )
     assert detail_response.ok, detail_response.text()
     assert detail_response.json()["profile_definition_sha256"] == expected_fingerprint
+    assert detail_response.json()["profile_definition_snapshot"] == expected_snapshot
     assert detail_response.json()["application_commit_sha"] == expected_application_commit_sha
 
     expect(page.locator("body")).to_contain_text("ETL 적재 이력")
@@ -192,6 +209,8 @@ def _run_web_etl_upload_scenario(page) -> None:
     expect(page.locator("body")).to_contain_text("프로필 버전: 2")
     expect(page.locator("body")).to_contain_text("프로필 정의 SHA-256")
     expect(page.locator("body")).to_contain_text(expected_fingerprint)
+    expect(page.locator("body")).to_contain_text("실행 당시 저장된 Profile 정의")
+    expect(page.locator("body")).to_contain_text("sku_code")
     expect(page.locator("body")).to_contain_text("애플리케이션 Commit SHA")
     expect(page.locator("body")).to_contain_text(
         expected_application_commit_sha or "알 수 없음 (legacy/미확인)"
