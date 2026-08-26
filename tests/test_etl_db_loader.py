@@ -131,6 +131,23 @@ def test_normalize_summary_allows_legacy_summary_without_profile_definition_hash
     assert "profile_definition_sha256" not in normalized
 
 
+@pytest.mark.parametrize("value", ["", "A" * 40, "a" * 39, "a" * 41, "g" * 40, 123, []])
+def test_normalize_summary_rejects_noncanonical_application_commit_sha(value):
+    summary = json.loads(make_summary(b"output"))
+    summary["application_commit_sha"] = value
+
+    with pytest.raises(ETLLoadError, match="application_commit_sha"):
+        _normalize_summary(summary)
+
+
+def test_normalize_summary_allows_missing_or_null_application_commit_sha():
+    summary = json.loads(make_summary(b"output"))
+    assert "application_commit_sha" not in _normalize_summary(summary)
+
+    summary["application_commit_sha"] = None
+    assert _normalize_summary(summary)["application_commit_sha"] is None
+
+
 ROWS = [
     {
         "product_group_id": "G001",
@@ -426,6 +443,32 @@ def test_duplicate_legacy_null_profile_definition_remains_unchanged(postgres_ses
     assert second.etl_load_run_id == first.etl_load_run_id
     assert second.profile_definition_sha256 is None
     assert session.get(ETLLoadRun, first.etl_load_run_id).profile_definition_sha256 is None
+
+
+def test_application_commit_sha_is_saved_and_duplicate_does_not_backfill_legacy_null(postgres_session):
+    session, profile_name = postgres_session
+    csv_bytes = make_standard_csv(ROWS)
+    legacy_summary = json.loads(make_summary(csv_bytes, profile_name=profile_name))
+    known_summary = {**legacy_summary, "application_commit_sha": "a" * 40}
+
+    first = load_standard_csv(session, csv_bytes, json.dumps(legacy_summary).encode())
+    duplicate = load_standard_csv(session, csv_bytes, json.dumps(known_summary).encode())
+
+    assert duplicate.created is False
+    assert duplicate.application_commit_sha is None
+    assert session.get(ETLLoadRun, first.etl_load_run_id).application_commit_sha is None
+
+
+def test_application_commit_sha_is_saved_for_a_new_batch(postgres_session):
+    session, profile_name = postgres_session
+    csv_bytes = make_standard_csv(ROWS)
+    summary = json.loads(make_summary(csv_bytes, profile_name=profile_name))
+    summary["application_commit_sha"] = "a" * 40
+
+    outcome = load_standard_csv(session, csv_bytes, json.dumps(summary).encode())
+
+    assert outcome.application_commit_sha == "a" * 40
+    assert session.get(ETLLoadRun, outcome.etl_load_run_id).application_commit_sha == "a" * 40
 
 
 def test_profile_version_change_creates_new_batch(postgres_session):

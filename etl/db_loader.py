@@ -40,10 +40,12 @@ class ETLLoadOutcome:
     initial_source_type: str = ETL_INITIAL_SOURCE_TYPE_UNKNOWN
     initial_source_ref: str | None = None
     profile_definition_sha256: str | None = None
+    application_commit_sha: str | None = None
 
 
 ETLLoadResult = ETLLoadOutcome
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_APPLICATION_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _SUMMARY_FIELDS = (
     "profile_name",
     "profile_version",
@@ -84,6 +86,14 @@ def _validate_profile_definition_sha256(value: object) -> str:
     """
     if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
         raise ETLLoadError("요약 JSON의 profile_definition_sha256 값이 올바르지 않습니다")
+    return value
+
+
+def _validate_application_commit_sha(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or _APPLICATION_COMMIT_SHA_PATTERN.fullmatch(value) is None:
+        raise ETLLoadError("요약 JSON의 application_commit_sha 값이 올바르지 않습니다")
     return value
 
 
@@ -175,6 +185,10 @@ def _normalize_summary(summary: dict[str, object]) -> dict[str, object]:
     if "profile_definition_sha256" in summary:
         normalized_summary["profile_definition_sha256"] = _validate_profile_definition_sha256(
             summary["profile_definition_sha256"],
+        )
+    if "application_commit_sha" in summary:
+        normalized_summary["application_commit_sha"] = _validate_application_commit_sha(
+            summary["application_commit_sha"],
         )
     return normalized_summary
 
@@ -390,6 +404,7 @@ def load_standard_csv(
                     initial_source_type=existing.initial_source_type,
                     initial_source_ref=existing.initial_source_ref,
                     profile_definition_sha256=existing.profile_definition_sha256,
+                    application_commit_sha=existing.application_commit_sha,
                 )
 
             load_run = ETLLoadRun(
@@ -399,6 +414,7 @@ def load_standard_csv(
                 input_file_sha256=summary["input_file_sha256"],
                 output_file_sha256=summary["output_file_sha256"],
                 profile_definition_sha256=summary.get("profile_definition_sha256"),
+                application_commit_sha=summary.get("application_commit_sha"),
                 loaded_rows=summary["loaded_rows"],
                 total_rows=summary["total_rows"],
                 rejected_rows=summary["rejected_rows"],
@@ -434,6 +450,7 @@ def load_standard_csv(
                 initial_source_type=load_run.initial_source_type,
                 initial_source_ref=load_run.initial_source_ref,
                 profile_definition_sha256=load_run.profile_definition_sha256,
+                application_commit_sha=load_run.application_commit_sha,
             )
     except IntegrityError:
         # A concurrent caller may have won the unique identity race.
@@ -462,6 +479,7 @@ def load_standard_csv(
                 initial_source_type=existing.initial_source_type,
                 initial_source_ref=existing.initial_source_ref,
                 profile_definition_sha256=existing.profile_definition_sha256,
+                application_commit_sha=existing.application_commit_sha,
             )
         raise
 

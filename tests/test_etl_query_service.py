@@ -254,6 +254,8 @@ def test_get_etl_load_detail_paginates_products_without_mixing_batches(seeded_ru
     from db.etl_query_service import get_etl_load_detail
 
     session, _profile_prefix, newest, tied, _older = seeded_runs
+    newest.application_commit_sha = "a" * 40
+    session.flush()
 
     detail = get_etl_load_detail(
         session,
@@ -268,6 +270,7 @@ def test_get_etl_load_detail_paginates_products_without_mixing_batches(seeded_ru
     assert detail.rejected_rows == 1
     assert detail.error_counts == {"INVALID_PRICE": 1}
     assert detail.reject_details_stored is True
+    assert detail.application_commit_sha == "a" * 40
     assert detail.products.total == 3
     assert detail.products.limit == 2
     assert detail.products.offset == 1

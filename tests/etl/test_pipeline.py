@@ -132,6 +132,10 @@ def test_run_pipeline_writes_standard_reject_and_summary_files(tmp_path):
     assert summary["output_file_sha256"] == hashlib.sha256(standard_bytes).hexdigest()
     assert summary["rejects_file_sha256"] == hashlib.sha256(rejects_path.read_bytes()).hexdigest()
     assert summary["loaded_rows"] + summary["rejected_rows"] == summary["total_rows"]
+    assert summary["application_commit_sha"] is None or (
+        len(summary["application_commit_sha"]) == 40
+        and set(summary["application_commit_sha"]) <= set("0123456789abcdef")
+    )
     assert "C:\\" not in summary_path.read_text(encoding="utf-8")
 
     with output_path.open(encoding="utf-8", newline="") as output_file:
@@ -150,6 +154,43 @@ def test_run_pipeline_writes_standard_reject_and_summary_files(tmp_path):
         "price",
         "stock",
     ]
+
+
+def test_pipeline_records_known_application_commit_sha(tmp_path, monkeypatch):
+    input_path, profile_path = write_profile_and_source(tmp_path)
+    output_path, rejects_path, summary_path = output_paths(tmp_path)
+    monkeypatch.setattr(pipeline_module, "resolve_application_commit_sha", lambda: "a" * 40)
+
+    run_pipeline(input_path, profile_path, output_path, rejects_path, summary_path)
+
+    assert json.loads(summary_path.read_text(encoding="utf-8"))["application_commit_sha"] == "a" * 40
+
+
+def test_pipeline_records_null_application_commit_sha_when_unknown(tmp_path, monkeypatch):
+    input_path, profile_path = write_profile_and_source(tmp_path)
+    output_path, rejects_path, summary_path = output_paths(tmp_path)
+    monkeypatch.setattr(pipeline_module, "resolve_application_commit_sha", lambda: None)
+
+    run_pipeline(input_path, profile_path, output_path, rejects_path, summary_path)
+
+    assert json.loads(summary_path.read_text(encoding="utf-8"))["application_commit_sha"] is None
+
+
+def test_pipeline_converts_malformed_application_lineage_to_safe_pipeline_error(tmp_path, monkeypatch):
+    from etl.application_lineage import ApplicationCommitLineageError
+
+    input_path, profile_path = write_profile_and_source(tmp_path)
+    output_path, rejects_path, summary_path = output_paths(tmp_path)
+    monkeypatch.setattr(
+        pipeline_module,
+        "resolve_application_commit_sha",
+        lambda: (_ for _ in ()).throw(ApplicationCommitLineageError("raw internal path")),
+    )
+
+    with pytest.raises(ETLPipelineError, match="Application commit SHA configuration is invalid") as error:
+        run_pipeline(input_path, profile_path, output_path, rejects_path, summary_path)
+
+    assert "raw internal path" not in str(error.value)
 
 
 def test_pipeline_output_is_accepted_by_real_catalogguard_validator_and_inspector(tmp_path):

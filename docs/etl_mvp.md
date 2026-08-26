@@ -252,7 +252,9 @@ Airflow는 공급사 ETL 실행 흐름을 관리한다. Celery는 API가 요청�
 -> run_web_etl()
 -> run_pipeline()
 -> load_standard_csv()
--> ETLLoadRun
+   -> ETLLoadRun
+
+ETL batch의 optional `application_commit_sha`는 실행 application Git commit lineage이며, profile definition SHA와 별개입니다. 알 수 없는 경우와 legacy row는 `NULL`이고 backfill하지 않습니다. 이 값은 Docker image digest나 dependency/runtime 전체 snapshot이 아니므로 완전한 실행 재현성을 뜻하지 않습니다.
    -> CatalogProductStaging
    -> ETLRejectedRow
 ```

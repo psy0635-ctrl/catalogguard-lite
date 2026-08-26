@@ -30,6 +30,7 @@ class ETLWebRunOutcome:
     initial_source_type: str = ETL_INITIAL_SOURCE_TYPE_UNKNOWN
     initial_source_ref: str | None = None
     profile_definition_sha256: str | None = None
+    application_commit_sha: str | None = None
 
 
 def _leaf_filename(filename: str) -> str:
@@ -96,6 +97,7 @@ def run_web_etl(
         profile_name=load_run.profile_name,
         profile_version=load_run.profile_version,
         profile_definition_sha256=load_run.profile_definition_sha256,
+        application_commit_sha=load_run.application_commit_sha,
         source_filename=load_run.source_filename,
         total_rows=load_run.total_rows,
         loaded_rows=load_run.loaded_rows,

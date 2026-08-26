@@ -20,6 +20,10 @@ from core.upload_validator import (
     validate_no_nul_bytes,
 )
 from etl.profile_fingerprint import compute_profile_definition_sha256
+from etl.application_lineage import (
+    ApplicationCommitLineageError,
+    resolve_application_commit_sha,
+)
 from etl.profile_loader import ETLProfileValidationError, load_profile
 from etl.transformer import transform_rows
 
@@ -205,6 +209,10 @@ def run_pipeline(
         (output_path, rejects_path, summary_path),
     )
     started_at = datetime.now(UTC).isoformat()
+    try:
+        application_commit_sha = resolve_application_commit_sha()
+    except ApplicationCommitLineageError as error:
+        raise ETLPipelineError("Application commit SHA configuration is invalid") from error
 
     try:
         profile = load_profile(profile_path)
@@ -249,6 +257,7 @@ def run_pipeline(
                 "profile_name": profile.name,
                 "profile_version": profile.version,
                 "profile_definition_sha256": compute_profile_definition_sha256(profile),
+                "application_commit_sha": application_commit_sha,
                 "input_filename": input_path.name,
                 "output_filename": output_path.name,
                 "input_file_sha256": _sha256_bytes(input_bytes),

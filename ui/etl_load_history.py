@@ -1975,6 +1975,16 @@ def _render_etl_load_detail(api_client) -> None:
         fingerprint = detail_response.get("profile_definition_sha256")
         st.code(f"프로필 정의 SHA-256: {fingerprint or '알 수 없음 (legacy batch)'}")
         st.caption("매핑·필수 원본 컬럼·기본값 정의의 지문이며 전체 애플리케이션 코드 hash는 아닙니다.")
+        application_commit_sha = detail_response.get("application_commit_sha")
+        st.code(
+            "애플리케이션 Commit SHA: "
+            f"{application_commit_sha or '알 수 없음 (legacy/미확인)'}"
+        )
+        st.caption(
+            "이 값은 ETL 실행과 연결된 application Git commit을 식별합니다. "
+            "전체 runtime snapshot, Docker image digest, dependency 전체 또는 "
+            "로컬 미커밋 변경을 의미하지 않으므로 완전한 재현성을 보장하지 않습니다."
+        )
 
     products = detail_response.get("products") or {}
     product_items = products.get("items") or []
