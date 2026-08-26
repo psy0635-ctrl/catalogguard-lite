@@ -17,12 +17,13 @@ from db.session import create_database_engine
 
 REVISION = "20260826_0017"
 PREVIOUS_REVISION = "20260825_0016"
+HEAD_REVISION = "20260826_0018"
 COLUMN = "application_commit_sha"
 
 
 def test_application_commit_lineage_migration_is_the_single_alembic_head() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert list(script.get_heads()) == [REVISION]
+    assert list(script.get_heads()) == [HEAD_REVISION]
     revision = script.get_revision(REVISION)
     assert revision is not None
     assert revision.down_revision == PREVIOUS_REVISION

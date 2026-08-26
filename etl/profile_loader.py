@@ -423,6 +423,28 @@ def _validate_defaults(data: dict) -> dict[str, str]:
     return normalized_defaults
 
 
+def normalize_profile_semantic_payload(payload: object) -> dict[str, object]:
+    """Validate and canonicalize the persisted semantic profile snapshot shape.
+
+    This deliberately shares the profile loader's mapping/default validators, so a
+    snapshot cannot gradually become a second, looser production profile schema.
+    """
+    expected_keys = {"source_columns", "required_source_columns", "defaults"}
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
+        raise ETLProfileValidationError("profile semantic snapshot has an invalid shape")
+
+    mapping = _validate_mapping(payload)
+    required_sources = _validate_required_sources(payload, mapping)
+    defaults = _validate_defaults(payload)
+    return {
+        "source_columns": {
+            source: list(targets) for source, targets in mapping.items()
+        },
+        "required_source_columns": list(required_sources),
+        "defaults": defaults,
+    }
+
+
 def load_profile(profile_path: Path) -> ETLProfile:
     try:
         with profile_path.open(encoding="utf-8") as profile_file:

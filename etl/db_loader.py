@@ -15,6 +15,8 @@ from config.settings import (
     ETL_INITIAL_SOURCE_TYPES,
     REQUIRED_FIELDS,
 )
+from etl.profile_fingerprint import compute_profile_definition_sha256_from_payload
+from etl.profile_loader import ETLProfileValidationError, normalize_profile_semantic_payload
 from core.fashion_attribute_validator import is_field_required_for_category
 from core.upload_validator import CsvUploadValidationError, validate_and_read_uploaded_csv
 from db.models import CatalogProductStaging, ETLLoadRun, ETLRejectedRow
@@ -40,6 +42,7 @@ class ETLLoadOutcome:
     initial_source_type: str = ETL_INITIAL_SOURCE_TYPE_UNKNOWN
     initial_source_ref: str | None = None
     profile_definition_sha256: str | None = None
+    profile_definition_snapshot: dict[str, object] | None = None
     application_commit_sha: str | None = None
 
 
@@ -77,16 +80,27 @@ def _normalize_hash(value: str, field_name: str) -> str:
     return normalized
 
 
-def _validate_profile_definition_sha256(value: object) -> str:
+def _validate_profile_definition_sha256(value: object) -> str | None:
     """Validate the profile definition hash without normalizing its spelling.
 
     This is lineage metadata rather than an input/output file hash.  Accepting
     whitespace or upper-case variants would make an invalid producer summary
     look canonical, so the on-the-wire value must already be lower-case hex.
     """
+    if value is None:
+        return None
     if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
         raise ETLLoadError("요약 JSON의 profile_definition_sha256 값이 올바르지 않습니다")
     return value
+
+
+def _normalize_profile_definition_snapshot(value: object) -> dict[str, object] | None:
+    if value is None:
+        return None
+    try:
+        return normalize_profile_semantic_payload(value)
+    except ETLProfileValidationError as error:
+        raise ETLLoadError("요약 JSON의 profile_definition_snapshot 값이 올바르지 않습니다") from error
 
 
 def _validate_application_commit_sha(value: object) -> str | None:
@@ -186,6 +200,21 @@ def _normalize_summary(summary: dict[str, object]) -> dict[str, object]:
         normalized_summary["profile_definition_sha256"] = _validate_profile_definition_sha256(
             summary["profile_definition_sha256"],
         )
+    if "profile_definition_snapshot" in summary:
+        normalized_summary["profile_definition_snapshot"] = _normalize_profile_definition_snapshot(
+            summary["profile_definition_snapshot"]
+        )
+    snapshot = normalized_summary.get("profile_definition_snapshot")
+    fingerprint = normalized_summary.get("profile_definition_sha256")
+    if snapshot is not None:
+        if fingerprint is None:
+            raise ETLLoadError(
+                "요약 JSON의 profile_definition_snapshot에는 profile_definition_sha256가 필요합니다"
+            )
+        if compute_profile_definition_sha256_from_payload(snapshot) != fingerprint:
+            raise ETLLoadError(
+                "요약 JSON의 profile_definition_snapshot과 profile_definition_sha256가 일치하지 않습니다"
+            )
     if "application_commit_sha" in summary:
         normalized_summary["application_commit_sha"] = _validate_application_commit_sha(
             summary["application_commit_sha"],
@@ -404,6 +433,7 @@ def load_standard_csv(
                     initial_source_type=existing.initial_source_type,
                     initial_source_ref=existing.initial_source_ref,
                     profile_definition_sha256=existing.profile_definition_sha256,
+                    profile_definition_snapshot=existing.profile_definition_snapshot,
                     application_commit_sha=existing.application_commit_sha,
                 )
 
@@ -414,6 +444,7 @@ def load_standard_csv(
                 input_file_sha256=summary["input_file_sha256"],
                 output_file_sha256=summary["output_file_sha256"],
                 profile_definition_sha256=summary.get("profile_definition_sha256"),
+                profile_definition_snapshot=summary.get("profile_definition_snapshot"),
                 application_commit_sha=summary.get("application_commit_sha"),
                 loaded_rows=summary["loaded_rows"],
                 total_rows=summary["total_rows"],
@@ -450,6 +481,7 @@ def load_standard_csv(
                 initial_source_type=load_run.initial_source_type,
                 initial_source_ref=load_run.initial_source_ref,
                 profile_definition_sha256=load_run.profile_definition_sha256,
+                profile_definition_snapshot=load_run.profile_definition_snapshot,
                 application_commit_sha=load_run.application_commit_sha,
             )
     except IntegrityError:
@@ -479,6 +511,7 @@ def load_standard_csv(
                 initial_source_type=existing.initial_source_type,
                 initial_source_ref=existing.initial_source_ref,
                 profile_definition_sha256=existing.profile_definition_sha256,
+                profile_definition_snapshot=existing.profile_definition_snapshot,
                 application_commit_sha=existing.application_commit_sha,
             )
         raise

@@ -264,6 +264,9 @@ class ETLLoadRun(Base):
     profile_definition_sha256: Mapped[str | None] = mapped_column(
         String(64), nullable=True
     )
+    profile_definition_snapshot: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     application_commit_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
     loaded_rows: Mapped[int] = mapped_column(Integer, nullable=False)
     total_rows: Mapped[int | None] = mapped_column(Integer, nullable=True)

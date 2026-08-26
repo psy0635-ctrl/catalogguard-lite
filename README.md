@@ -1785,7 +1785,7 @@ API는 내부 FK인 `actor_user_id`를 노출하지 않습니다. `actor_usernam
 
 Web ETL은 `ETLLoadRun`이 실제로 생성될 때만 actor를 저장합니다. 파일 검증이나 `run_pipeline()` 단계에서 실패해 `etl_load_runs` row가 없으면 actor도 없습니다. Promotion·Rollback은 기존 실행 이력 구조상 `succeeded`뿐 아니라 `blocked`(`preview_stale` 포함)·`failed` 상태도 row로 남기며 이 상태들에도 actor를 함께 저장합니다. 컬럼·FK 구조는 15장, 저장 범위는 24장을 참고하세요.
 
-ETL batch는 프로필 정의 지문(`profile_definition_sha256`)과 application Git commit lineage(`application_commit_sha`)를 함께 남길 수 있습니다. 후자는 `CATALOGGUARD_APPLICATION_COMMIT_SHA`, `RAILWAY_GIT_COMMIT_SHA`, local Git `HEAD` 순으로 결정하며, 알 수 없는 경우와 과거 row는 `NULL`입니다. 이는 Docker image digest·전체 dependency·미커밋 로컬 변경을 포함한 runtime snapshot이 아니므로 완전한 재현성을 보장하지 않습니다.
+ETL batch는 semantic profile definition snapshot(`profile_definition_snapshot`)과 그 지문(`profile_definition_sha256`), application Git commit lineage(`application_commit_sha`)를 함께 남길 수 있습니다. snapshot은 매핑·필수 원본 컬럼·기본값만 포함합니다. commit SHA는 `CATALOGGUARD_APPLICATION_COMMIT_SHA`, `RAILWAY_GIT_COMMIT_SHA`, local Git `HEAD` 순으로 결정하며, 알 수 없는 경우와 과거 row는 `NULL`입니다. 이는 Docker image digest·전체 dependency·미커밋 로컬 변경을 포함한 runtime snapshot이 아니므로 완전한 재현성을 보장하지 않습니다.
 
 현재 Access Token만 구현되어 있으며 Refresh Token은 없습니다. 토큰이 만료되면 다시 로그인해야 합니다.
 

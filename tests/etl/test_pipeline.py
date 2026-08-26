@@ -10,6 +10,7 @@ from core.inspection_service import inspect_dataframe
 from core.upload_validator import validate_and_read_uploaded_csv
 from etl import pipeline as pipeline_module
 from etl.pipeline import ETLPipelineError, run_pipeline
+from etl.profile_fingerprint import compute_profile_definition_sha256_from_payload
 from etl.profile_loader import get_profile_path, load_profile
 
 
@@ -132,6 +133,14 @@ def test_run_pipeline_writes_standard_reject_and_summary_files(tmp_path):
     assert summary["output_file_sha256"] == hashlib.sha256(standard_bytes).hexdigest()
     assert summary["rejects_file_sha256"] == hashlib.sha256(rejects_path.read_bytes()).hexdigest()
     assert summary["loaded_rows"] + summary["rejected_rows"] == summary["total_rows"]
+    assert set(summary["profile_definition_snapshot"]) == {
+        "source_columns",
+        "required_source_columns",
+        "defaults",
+    }
+    assert summary["profile_definition_sha256"] == compute_profile_definition_sha256_from_payload(
+        summary["profile_definition_snapshot"]
+    )
     assert summary["application_commit_sha"] is None or (
         len(summary["application_commit_sha"]) == 40
         and set(summary["application_commit_sha"]) <= set("0123456789abcdef")
