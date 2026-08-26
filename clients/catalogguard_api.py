@@ -94,6 +94,7 @@ ETL_LOAD_DETAIL_RESPONSE_KEYS = (
     "input_file_sha256",
     "output_file_sha256",
     "profile_definition_sha256",
+    "application_commit_sha",
     "total_rows",
     "loaded_rows",
     "rejected_rows",
@@ -129,6 +130,7 @@ ETL_REJECTION_ITEM_KEYS = (
 ETL_REJECTION_ERROR_KEYS = ("code", "field", "message")
 ETL_SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 ETL_PROFILE_DEFINITION_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+ETL_APPLICATION_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 CATALOG_PROMOTION_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 CATALOG_RECONCILIATION_RESPONSE_KEYS = (
     "etl_load_run_id",
@@ -291,6 +293,7 @@ ETL_WEB_RUN_RESPONSE_KEYS = (
     "profile_name",
     "profile_version",
     "profile_definition_sha256",
+    "application_commit_sha",
     "source_filename",
     "total_rows",
     "loaded_rows",
@@ -983,6 +986,14 @@ def _validate_etl_load_detail_response(data: dict[str, Any]) -> None:
                 is None
             )
         )
+        or (
+            data["application_commit_sha"] is not None
+            and (
+                not isinstance(data["application_commit_sha"], str)
+                or ETL_APPLICATION_COMMIT_SHA_PATTERN.fullmatch(data["application_commit_sha"])
+                is None
+            )
+        )
         or type(data["loaded_rows"]) is not int
         or data["loaded_rows"] < 0
         or not isinstance(data["created_at"], str)
@@ -1006,6 +1017,14 @@ def _validate_etl_web_run_response(data: dict[str, Any]) -> None:
             and (
                 not isinstance(data["profile_definition_sha256"], str)
                 or ETL_PROFILE_DEFINITION_SHA256_PATTERN.fullmatch(data["profile_definition_sha256"])
+                is None
+            )
+        )
+        or (
+            data["application_commit_sha"] is not None
+            and (
+                not isinstance(data["application_commit_sha"], str)
+                or ETL_APPLICATION_COMMIT_SHA_PATTERN.fullmatch(data["application_commit_sha"])
                 is None
             )
         )

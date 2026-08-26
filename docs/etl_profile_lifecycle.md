@@ -103,6 +103,10 @@ ux_etl_load_runs_input_profile_version
 
 `ETLLoadRun.profile_definition_sha256`은 `source_columns`·`required_source_columns`·`defaults`만을 key 정렬·공백 없는 canonical JSON으로 만든 SHA-256이다. `profile_name`, `profile_version`, registry ID, display name, 파일 경로·형식, 애플리케이션 코드/런타임은 의도적으로 포함하지 않는다. 따라서 이는 **프로필 정의 지문**이지 전체 ETL runtime 또는 application commit hash가 아니다. migration 이전 legacy row는 `NULL`이며 backfill하지 않는다.
 
+### Phase 5C.2 — application commit lineage
+
+`application_commit_sha`는 ETL batch를 만든 application Git commit(소문자 40자리 SHA) lineage이다. `profile_definition_sha256`이 JSON semantic definition fingerprint인 것과 달리 application code의 commit을 식별한다. 새 batch는 `CATALOGGUARD_APPLICATION_COMMIT_SHA`, `RAILWAY_GIT_COMMIT_SHA`, local `git rev-parse HEAD` 순으로 결정하고, 확인하지 못하면 `NULL`을 저장한다. 과거 row와 legacy summary의 `NULL`은 추측 backfill하지 않으며 duplicate 요청도 기존 값을 변경하지 않는다. 두 값을 함께 기록해도 Docker image digest, 전체 dependency, OS, DB 상태, 외부 응답, local uncommitted code를 포함한 historical runtime reproduction은 제공하지 않는다.
+
 프로필 JSON 전체 snapshot은 여전히 저장하지 않는다. `input_file_sha256`·`output_file_sha256`·`rejects_file_sha256`은 모두 **파일 bytes**의 해시다. 새 pipeline summary에는 definition fingerprint가 포함되고 loader는 lower-case 64자리 hex만 받아 저장한다.
 
 ### 2.6 과거 버전 archive / registry 존재 여부
@@ -583,7 +587,7 @@ Phase 3 guardrail이 이제 **archive 전체**를 검사한다. 등록된 모든
 
 **가능해진 것** — 과거 profile JSON 정의를 애플리케이션이 archive 파일에서 읽을 수 있다. "그때 v1이 어떤 매핑이었나"에 저장소가 답한다.
 
-**아직 보장하지 않는 것** — 현재 코드로 v1.json을 실행해도 **과거 v1 배치의 결과를 그대로 재현한다고 말할 수 없다.** v1 → v2 전환에는 JSON 밖의 코드 변경(카테고리별 필수 속성 정책)이 포함됐고, 지금 실행되는 것은 언제나 현재 코드다. `ETLLoadRun`의 definition fingerprint는 semantic JSON 정의만 식별하며, 전체 snapshot·application commit SHA·transformer 코드 버전은 저장하지 않는다(2.3, 2.5). git 이력을 함께 보면 개발자가 당시 코드를 찾을 수는 있지만, 런타임이 자동으로 재현해 주는 기능은 아니다.
+**아직 보장하지 않는 것** — 현재 코드로 v1.json을 실행해도 **과거 v1 배치의 결과를 그대로 재현한다고 말할 수 없다.** v1 → v2 전환에는 JSON 밖의 코드 변경(카테고리별 필수 속성 정책)이 포함됐고, 지금 실행되는 것은 언제나 현재 코드다. `ETLLoadRun`의 definition fingerprint는 semantic JSON 정의만 식별하고, `application_commit_sha`는 application Git commit만 식별한다. 전체 snapshot·Docker image digest·dependency·로컬 미커밋 변경은 저장하지 않으므로 런타임을 자동 재현하는 기능은 아니다.
 
 ### 13.9 `[Phase 4 시점]` 아직 없던 것
 
@@ -781,7 +785,7 @@ Phase 5A까지 activation은 코드 상수였다. 바꾸려면 코드 수정 →
 
 이 차이가 실제로 문제가 되는 선례가 이미 있다. v1 → v2 전환에서 실제로 바뀐 것은 JSON이 아니라 **카테고리별 필수 속성 정책 코드**였다(`80e8ea4`, 5장). 그 코드는 지금도 v2 시점의 것이므로, v1.json을 활성화해도 그 정책은 v1 시절로 돌아가지 않는다.
 
-`ETLLoadRun`의 definition fingerprint는 semantic JSON 정의만 식별한다. 전체 snapshot·application commit SHA·transformer 코드 버전은 여전히 저장하지 않는다(2.3, 2.5). 따라서 activation API는 **"어떤 매핑 정의로 실행할지"를 고르는 기능**이지 "과거 배치를 재현하는 기능"이 아니다. 재현이 목적이라면 코드 버전까지 함께 고정해야 하고, 그것은 이 문서의 어떤 Phase도 아직 제공하지 않는다.
+`ETLLoadRun`의 definition fingerprint는 semantic JSON 정의만 식별하고, `application_commit_sha`는 application Git commit lineage만 식별한다. 전체 runtime snapshot은 여전히 저장하지 않는다(2.3, 2.5). 따라서 activation API는 **"어떤 매핑 정의로 실행할지"를 고르는 기능**이지 "과거 배치를 재현하는 기능"이 아니다. 재현이 목적이라면 Docker image·dependency·환경까지 함께 고정해야 하며, 이 문서의 어떤 Phase도 아직 제공하지 않는다.
 
 ### 16.5 신규 실행 차단
 
@@ -1302,7 +1306,7 @@ Alembic `20260825_0016`은 `etl_load_runs.profile_definition_sha256 VARCHAR(64) 
 
 dedup identity는 계속 `(input_file_sha256, profile_name, profile_version)`이다. 기존 row와 새 요청의 지문이 모두 있고 서로 다르면 pre-check와 `IntegrityError` 경쟁 fallback 모두 안전하게 실패한다. 어느 한쪽이 legacy `NULL`이면 기존 row를 update하거나 backfill하지 않고 그대로 반환한다. Web/S3/HTTP 결과는 생성 여부와 관계없이 실제 DB row에 저장된 값을 반환한다.
 
-`GET /api/v1/etl-loads/{id}`와 Web ETL 결과는 `profile_definition_sha256: string | null`을 반환한다. Python client는 상세와 Web ETL 양쪽에서 non-null 값을 lower-case SHA-256으로 검증한다. Streamlit 상세의 SHA-256 구역은 legacy `NULL`을 `알 수 없음 (legacy batch)`로 보이고, 지문의 semantic 범위와 runtime hash가 아니라는 점을 함께 표시한다. Web upload Chromium E2E는 DB·API·UI가 모두 shared helper의 예상 지문을 보이는지 확인한다.
+`GET /api/v1/etl-loads/{id}`와 Web ETL 결과는 `profile_definition_sha256: string | null`과 `application_commit_sha: string | null`을 반환한다. Python client는 상세와 Web ETL 양쪽에서 non-null 값을 각각 lower-case SHA-256과 lower-case 40자리 Git SHA로 검증한다. Streamlit 상세은 legacy `NULL`을 알 수 없음으로 보이고, definition fingerprint와 commit lineage 어느 것도 runtime hash나 완전한 재현성이 아니라는 점을 함께 표시한다. Web upload Chromium E2E는 DB·API·UI가 모두 shared helper의 예상 지문과 application commit SHA를 보이는지 확인한다.
 
 ### 21.1 한계
 

@@ -32,7 +32,7 @@ REVISION = "20260823_0015"
 def test_activation_history_migration_is_the_single_alembic_head() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert list(script.get_heads()) == ["20260825_0016"]
+    assert list(script.get_heads()) == ["20260826_0017"]
     revision = script.get_revision(REVISION)
     assert revision is not None
     assert revision.down_revision == PREVIOUS_REVISION

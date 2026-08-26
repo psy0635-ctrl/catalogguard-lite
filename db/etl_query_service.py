@@ -107,6 +107,7 @@ class ETLLoadDetail:
     initial_source_type: str = "unknown"
     initial_source_ref: str | None = None
     profile_definition_sha256: str | None = None
+    application_commit_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -388,6 +389,7 @@ def get_etl_load_detail(
         input_file_sha256=load_run.input_file_sha256,
         output_file_sha256=load_run.output_file_sha256,
         profile_definition_sha256=load_run.profile_definition_sha256,
+        application_commit_sha=load_run.application_commit_sha,
         total_rows=load_run.total_rows,
         loaded_rows=load_run.loaded_rows,
         rejected_rows=load_run.rejected_rows,
