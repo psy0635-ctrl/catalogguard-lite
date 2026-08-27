@@ -10,7 +10,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 - `[정책 결정]` — 지켜야 할 규칙. 그 자체로는 코드를 규정하지 않고, 강제 장치는 별도 Phase에서 만든다
 - `[향후 구현]` — 아직 없고, 나중에 만들 때 따를 방향
 
-**시점 표기 규칙**: 각 Phase 절은 그 Phase 시점의 사실을 기록한다. 뒤 Phase가 그것을 바꿨으면 해당 절에 갱신 표시를 남기고, 지금 무엇이 사실인지는 가장 나중 Phase 절이 말한다. 현재 최신은 **Phase 5C.3(23장)** 이다.
+**시점 표기 규칙**: 각 Phase 절은 그 Phase 시점의 사실을 기록한다. 뒤 Phase가 그것을 바꿨으면 해당 절에 갱신 표시를 남기고, 지금 무엇이 사실인지는 가장 나중 Phase 절이 말한다. 현재 최신은 **Phase 5C.4(24장)** 이다.
 
 | Phase | 무엇이 바뀌었나 | 절 |
 | --- | --- | --- |
@@ -30,6 +30,7 @@ ETL Profile의 CREATE / UPDATE / DELETE(Profile CRUD)를 구현하기 **전에**
 | Phase 5C.1 | ETL Profile Definition Fingerprint Lineage | 21장 |
 | Phase 5C.2 | ETL Application Commit SHA Lineage | 22장 |
 | Phase 5C.3 | ETL Profile Definition Snapshot Lineage | 23장 |
+| Phase 5C.4 | Historical ETL Lineage Comparison | 24장 |
 
 ---
 
@@ -1388,6 +1389,26 @@ snapshot은 `GET /api/v1/etl-loads/{id}`와 Web ETL 결과에서만 nullable str
 ### 23.5 재현성 한계
 
 `profile_definition_snapshot`은 profile semantic definition만 저장한다. Docker image, dependencies, OS·environment, DB state, external response, source CSV bytes 및 uncommitted local code는 저장하지 않으므로 완전한 historical runtime reproduction이나 replay를 제공하지 않는다.
+
+---
+
+## 24. `[현재 구현]` Phase 5C.4 — Historical ETL Lineage Comparison
+
+### 24.1 목적과 사용자 흐름
+
+Fingerprint는 두 Profile semantic definition이 같은지 판단하는 지문이고, snapshot은 그 semantic definition 자체이며, `application_commit_sha`는 실행 application의 Git commit lineage다. Streamlit ETL 적재 상세에서 운영자는 기준 batch와 같은 `profile_name`을 가진 다른 batch를 선택해 이 정보를 나란히 비교한다. 비교 후보는 현재 ETL History 목록에 있는 다른 batch로 한정한다.
+
+### 24.2 비교 범위와 legacy 처리
+
+화면은 `input_file_sha256`, `profile_definition_sha256`, `application_commit_sha`를 각각 같음·다름·알 수 없음으로 표시한다. 어느 한쪽이 legacy `NULL`이면 다름으로 추정하지 않고 알 수 없음으로 유지한다. 같은 Profile 이름·버전인데 definition fingerprint가 다르면 lineage 확인이 필요한 이상 징후로 안내하지만, 결과 차이의 원인을 자동으로 확정하지는 않는다.
+
+양쪽 `profile_definition_snapshot`이 있으면 `source_columns`의 추가·제거·변경·순서 변경, `required_source_columns`의 추가·제거·순서 변경, `defaults`의 추가·제거·변경을 semantic diff로 보여 준다. 한쪽 또는 양쪽 snapshot이 없으면 필드 수준 비교가 불가능하거나 정보가 없다고 명시한다.
+
+### 24.3 API·상태·한계
+
+비교 전용 backend endpoint나 client public method는 없다. 현재 detail과 선택한 비교 대상 모두 기존 `GET /api/v1/etl-loads/{id}`를 재사용하며, 현재 선택한 비교 대상 detail은 Streamlit session state에 그 batch ID와 함께 cache한다. batch·검색·페이지 상태가 바뀌면 비교 선택과 cache를 함께 비워 stale 비교를 막는다.
+
+이 기능은 저장된 lineage metadata를 바탕으로 과거 batch 간 차이를 조사하게 한다. Docker image digest, 전체 dependency·OS/environment, 당시 DB 상태, source CSV bytes, external HTTP response, uncommitted source code는 저장하거나 비교하지 않으므로 complete reproducibility나 historical replay를 제공하지 않는다.
 
 ## 참고
 

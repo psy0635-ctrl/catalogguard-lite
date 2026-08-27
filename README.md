@@ -74,6 +74,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - ETL 적재 배치 목록의 파일명·프로필명 검색과 페이지네이션
 - ETL 적재 목록·상세의 전체 행·정상 적재·변환 거부 수와 상세 오류 코드 통계
 - ETL 적재 상세의 input/output SHA-256 및 배치별 staging 상품 페이지네이션
+- Streamlit ETL 적재 상세에서 같은 Profile의 다른 batch를 선택해 입력 SHA-256·Profile definition fingerprint·application commit을 비교하고, 양쪽에 저장된 semantic snapshot이 있으면 매핑·필수 원본 컬럼·기본값 차이를 확인
 - ETL 적재 목록·상세에서 배치를 최초로 만든 입력 경로(업로드/S3/HTTP feed/CLI) 확인. 중복으로 재사용된 배치는 최초 경로를 유지하며, HTTP feed URL 원문이나 S3 bucket 이름은 저장하지 않습니다.
 - Streamlit `ETL 적재 이력` 탭에서 목록·검색·배치 상세·품질 지표·오류 코드·SHA-256·staging 상품·reject 상세 조회
 - Playwright Chromium 실제 브라우저에서 ETL 검색·상세·상품·reject 마스킹과 raw 민감정보 미노출 검증
@@ -1785,7 +1786,7 @@ API는 내부 FK인 `actor_user_id`를 노출하지 않습니다. `actor_usernam
 
 Web ETL은 `ETLLoadRun`이 실제로 생성될 때만 actor를 저장합니다. 파일 검증이나 `run_pipeline()` 단계에서 실패해 `etl_load_runs` row가 없으면 actor도 없습니다. Promotion·Rollback은 기존 실행 이력 구조상 `succeeded`뿐 아니라 `blocked`(`preview_stale` 포함)·`failed` 상태도 row로 남기며 이 상태들에도 actor를 함께 저장합니다. 컬럼·FK 구조는 15장, 저장 범위는 24장을 참고하세요.
 
-ETL batch는 semantic profile definition snapshot(`profile_definition_snapshot`)과 그 지문(`profile_definition_sha256`), application Git commit lineage(`application_commit_sha`)를 함께 남길 수 있습니다. snapshot은 매핑·필수 원본 컬럼·기본값만 포함합니다. commit SHA는 `CATALOGGUARD_APPLICATION_COMMIT_SHA`, `RAILWAY_GIT_COMMIT_SHA`, local Git `HEAD` 순으로 결정하며, 알 수 없는 경우와 과거 row는 `NULL`입니다. 이는 Docker image digest·전체 dependency·미커밋 로컬 변경을 포함한 runtime snapshot이 아니므로 완전한 재현성을 보장하지 않습니다.
+ETL batch는 semantic profile definition snapshot(`profile_definition_snapshot`)과 그 지문(`profile_definition_sha256`), application Git commit lineage(`application_commit_sha`)를 함께 남길 수 있습니다. snapshot은 매핑·필수 원본 컬럼·기본값만 포함합니다. commit SHA는 `CATALOGGUARD_APPLICATION_COMMIT_SHA`, `RAILWAY_GIT_COMMIT_SHA`, local Git `HEAD` 순으로 결정하며, 알 수 없는 경우와 과거 row는 `NULL`입니다. Streamlit ETL 적재 상세는 기존 `GET /api/v1/etl-loads/{id}` 응답을 재사용해 같은 `profile_name`의 다른 batch와 input·definition fingerprint·application commit을 비교하고, 양쪽 snapshot이 있을 때 semantic 차이를 보여 줍니다. legacy `NULL`은 변경으로 처리하지 않고 알 수 없음으로 표시합니다. 이는 Docker image digest·전체 dependency·미커밋 로컬 변경을 포함한 runtime snapshot이 아니므로 완전한 재현성을 보장하지 않습니다.
 
 현재 Access Token만 구현되어 있으며 Refresh Token은 없습니다. 토큰이 만료되면 다시 로그인해야 합니다.
 
@@ -2858,7 +2859,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 웹 ETL은 CSV만 지원하며 Excel/XLSX 업로드는 지원하지 않습니다.
 - 웹 ETL의 ETL 프로필은 서버 allowlist로 고정되어 있으며, 사용자가 새 프로필을 업로드하거나 만드는 기능은 없습니다. 프로필 상세는 조회만 가능합니다. 프로필은 `config/etl/<profile_name>/v<번호>.json` 버전별 archive로 보존하고, 신규 실행에 쓸 버전은 registry의 명시적 배포 기본값 또는 runtime override로만 정합니다(가장 큰 번호를 자동 선택하지 않습니다). `profile_id`는 기존 그대로이며 두 프로필의 배포 기본 버전은 모두 `"2"`입니다. 과거 `v1.json` 정의도 archive에 남아 있으며, 실행 시점에 개별 요청이 버전을 고르는 기능은 없습니다. 보존된 버전 중 무엇을 신규 실행에 쓸지는 activation API·운영 관리 화면에서 프로필 단위로만 정합니다.
 - 이미 공개된 `profile_version`의 매핑이 같은 버전 번호를 유지한 채 바뀌면 pytest가 실패시킵니다(`tests/etl/test_profile_version_guardrail.py`). 현재 active 버전뿐 아니라 archive의 과거 버전까지 검사합니다. 다만 프로필 JSON과 기록된 fingerprint를 함께 고치는 경우와 `etl/transformer.py` 같은 코드 쪽 의미 변경은 자동으로 감지하지 못하며, 실행 중인 서버를 막는 런타임 가드도 아닙니다.
-- 과거 프로필 JSON 정의는 archive에서 읽을 수 있지만, 현재 코드로 과거 배치 결과를 그대로 재현하는 것은 보장하지 않습니다. `v1` → `v2` 전환에는 JSON 밖의 코드 변경도 있었고, `etl_load_runs`에는 프로필 snapshot이나 실행 당시 애플리케이션 버전이 저장되지 않습니다.
+- 과거 프로필 JSON 정의는 archive에서 읽을 수 있지만, 현재 코드로 과거 배치 결과를 그대로 재현하는 것은 보장하지 않습니다. `v1` → `v2` 전환에는 JSON 밖의 코드 변경도 있었습니다. 새 `etl_load_runs`에는 semantic profile snapshot·definition fingerprint·application commit SHA를 저장하지만, Docker image·의존성·OS/environment·당시 DB 상태·원본 CSV bytes·외부 응답·미커밋 코드는 저장하지 않습니다.
 - `active_version`은 **버전 문자열 또는 `None`**입니다. `None`은 비활성이며 신규 ETL 실행(업로드·S3·HTTP feed·Airflow 모두)만 HTTP `409`(`inactive_profile`)로 막고, 버전별 archive와 과거 이력은 삭제하지 않습니다(Deactivate ≠ Delete). 두 프로필의 **배포 기본값**은 계속 `"2"`입니다.
 - 프로필 **정의**는 여전히 code/config입니다. runtime activation만 PostgreSQL로 옮겼고, `source_columns`·`required_source_columns`·`defaults`와 버전 archive의 source of truth는 계속 `config/etl` JSON archive와 코드 registry입니다. DB-backed Profile / ProfileVersion 모델은 없습니다.
 - 사용자 Profile CRUD는 없습니다. 새 프로필 등록·삭제와 프로필 JSON을 수정하는 UI/API 모두 없으며, allowlist는 계속 코드 registry입니다.
@@ -2871,7 +2872,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - Airflow는 effective activation을 HTTP feed fetch 전에 확인합니다. 이미 inactive면 `read_http_feed_csv()`를 호출하지 않고 `etl_profile_inactive`(non-retryable)로 차단됩니다. pre-check 뒤 deactivate되는 race는 `run_web_etl()`의 최종 guard가 처리하지만 HTTP fetch 0회까지 보장하지는 않습니다.
 - activation DB 조회와 외부 source가 동시에 실패할 때의 failure precedence는 사전 검사 순서에 따릅니다. 모든 activation/source failure 우선순위의 재설계는 별도 범위입니다.
 - Activation 변경 범위는 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)의 Phase 5A·5A.1·5B.1·5B.2·5B.3·5B.4·5B.5·5B.6을 참고하세요.
-- `etl_load_runs`는 `profile_name`·`profile_version`만 기록하고 프로필 JSON snapshot이나 매핑 hash는 저장하지 않으므로, 어떤 버전을 썼는지는 알 수 있지만 그 버전의 당시 내용이 보존된다고 DB가 보장하지는 않습니다. 버전 증가 기준과 향후 방향은 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)에 정리했습니다.
+- `etl_load_runs`는 `profile_name`·`profile_version` 외에 semantic profile snapshot·definition fingerprint·application commit SHA를 lineage metadata로 기록합니다. raw profile 전체나 완전한 실행 환경은 보존하지 않으므로, 이 정보는 과거 batch 차이를 조사하는 근거이지 결과 원인을 자동으로 증명하거나 재실행을 보장하는 기능은 아닙니다. 버전 증가 기준과 향후 방향은 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)에 정리했습니다.
 - S3 ingestion은 호출자가 `object_key` 하나를 지정하는 pull 방식입니다. S3 event 알림·Lambda·SQS 기반 자동 수집과 prefix 일괄 처리는 지원하지 않습니다.
 - S3 source를 실제로 호출하는 Streamlit 화면은 없습니다. 현재는 API 직접 호출로만 사용합니다.
 - EC2 Role에 `s3:ListBucket`을 부여하지 않았으므로, 허용 prefix 안에 없는 key는 `404 s3_object_not_found`가 아니라 `502 s3_read_failed`로 응답합니다. 최소권한을 유지하기 위한 의도된 선택입니다.
