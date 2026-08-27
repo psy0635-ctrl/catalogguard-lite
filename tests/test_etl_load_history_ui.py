@@ -1,6 +1,7 @@
 from datetime import datetime
 
 import pandas as pd
+import pytest
 
 from clients import catalogguard_api
 from clients.catalogguard_api import ETLLoadNotFoundError
@@ -629,6 +630,7 @@ class FakeEtlApiClient:
         self,
         *,
         detail_error=None,
+        detail_responses=None,
         list_items=None,
         list_total=None,
         product_total=1,
@@ -797,6 +799,7 @@ class FakeEtlApiClient:
         )
         self.observability_profiles_error = observability_profiles_error
         self.detail_error = detail_error
+        self.detail_responses = detail_responses or {}
         self.list_items = [make_load()] if list_items is None else list_items
         self.list_pages = list_pages
         self.list_total = (
@@ -975,6 +978,16 @@ class FakeEtlApiClient:
         self.detail_calls.append((run_id, params))
         if self.detail_error is not None:
             raise self.detail_error
+        if run_id in self.detail_responses:
+            response = self.detail_responses[run_id]
+            return {
+                **response,
+                "products": {
+                    **response["products"],
+                    "limit": params["product_limit"],
+                    "offset": params["product_offset"],
+                },
+            }
         product = {**make_product(), "product_id": f"SKU-{run_id}"}
         return {
             **make_load(run_id),
@@ -1116,6 +1129,274 @@ def select_etl_batch(app, run_id):
         for widget in app.selectbox
         if widget.key == "etl_load_selected_run_id"
     ).select(run_id).run(timeout=10)
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        ("a", "a", "same"),
+        ("a", "b", "different"),
+        (None, "a", "unknown"),
+        ("a", None, "unknown"),
+        (None, None, "unknown"),
+    ],
+)
+def test_compare_etl_lineage_value_keeps_unknown_distinct_from_different(
+    left,
+    right,
+    expected,
+):
+    assert etl_load_history.compare_etl_lineage_value(left, right) == expected
+
+
+def test_diff_profile_definition_snapshots_reports_mapping_changes_and_reorders():
+    before = {
+        "source_columns": {
+            "keep": ["product_name"],
+            "change": ["price"],
+            "reorder": ["product_group_id", "product_id"],
+            "removed": ["stock"],
+        },
+        "required_source_columns": ["keep"],
+        "defaults": {},
+    }
+    after = {
+        "source_columns": {
+            "keep": ["product_name"],
+            "change": ["sale_price"],
+            "reorder": ["product_id", "product_group_id"],
+            "added": ["category"],
+        },
+        "required_source_columns": ["keep"],
+        "defaults": {},
+    }
+
+    diff = etl_load_history.diff_profile_definition_snapshots(before, after)
+
+    assert diff == {
+        "source_columns": {
+            "added": [{"source": "added", "targets": ["category"]}],
+            "removed": [{"source": "removed", "targets": ["stock"]}],
+            "changed": [
+                {"source": "change", "before": ["price"], "after": ["sale_price"]}
+            ],
+            "reordered": [
+                {
+                    "source": "reorder",
+                    "before": ["product_group_id", "product_id"],
+                    "after": ["product_id", "product_group_id"],
+                }
+            ],
+        },
+        "required_source_columns": {"added": [], "removed": [], "reordered": None},
+        "defaults": {"added": [], "removed": [], "changed": []},
+    }
+
+
+def test_diff_profile_definition_snapshots_reports_required_and_default_changes():
+    before = {
+        "source_columns": {"sku": ["product_id"]},
+        "required_source_columns": ["sku", "name"],
+        "defaults": {"category": "TOP", "stock": "0", "empty": ""},
+    }
+    after = {
+        "source_columns": {"sku": ["product_id"]},
+        "required_source_columns": ["name", "sku"],
+        "defaults": {"category": "OUTER", "seller": "sample", "empty": "filled"},
+    }
+
+    diff = etl_load_history.diff_profile_definition_snapshots(before, after)
+
+    assert diff["required_source_columns"] == {
+        "added": [],
+        "removed": [],
+        "reordered": {"before": ["sku", "name"], "after": ["name", "sku"]},
+    }
+    assert diff["defaults"] == {
+        "added": [{"column": "seller", "value": "sample"}],
+        "removed": [{"column": "stock", "value": "0"}],
+        "changed": [
+            {"column": "category", "before": "TOP", "after": "OUTER"},
+            {"column": "empty", "before": "", "after": "filled"},
+        ],
+    }
+
+
+def test_build_etl_lineage_comparison_marks_legacy_and_snapshot_fingerprint_inconsistency():
+    known_snapshot = {
+        "source_columns": {"sku": ["product_id"]},
+        "required_source_columns": ["sku"],
+        "defaults": {"stock": "0"},
+    }
+    comparison = etl_load_history.build_etl_lineage_comparison(
+        {
+            "profile_name": "supplier",
+            "profile_version": "2",
+            "input_file_sha256": "a" * 64,
+            "profile_definition_sha256": None,
+            "profile_definition_snapshot": known_snapshot,
+            "application_commit_sha": None,
+        },
+        {
+            "profile_name": "supplier",
+            "profile_version": "2",
+            "input_file_sha256": "a" * 64,
+            "profile_definition_sha256": "b" * 64,
+            "profile_definition_snapshot": None,
+            "application_commit_sha": "c" * 40,
+        },
+    )
+
+    assert comparison["input_file_sha256"] == "same"
+    assert comparison["profile_definition_sha256"] == "unknown"
+    assert comparison["application_commit_sha"] == "unknown"
+    assert comparison["snapshot_status"] == etl_load_history.ETL_LINEAGE_SNAPSHOT_PARTIAL
+    assert comparison["snapshot_diff"] is None
+    assert comparison["current_snapshot_without_fingerprint"] is True
+    assert comparison["compare_snapshot_without_fingerprint"] is False
+
+
+def test_build_etl_lineage_comparison_marks_two_missing_snapshots_as_unknown():
+    comparison = etl_load_history.build_etl_lineage_comparison(
+        {
+            "profile_name": "supplier",
+            "profile_version": "2",
+            "input_file_sha256": "a" * 64,
+            "profile_definition_sha256": None,
+            "profile_definition_snapshot": None,
+            "application_commit_sha": None,
+        },
+        {
+            "profile_name": "supplier",
+            "profile_version": "2",
+            "input_file_sha256": "b" * 64,
+            "profile_definition_sha256": None,
+            "profile_definition_snapshot": None,
+            "application_commit_sha": None,
+        },
+    )
+
+    assert comparison["snapshot_status"] == etl_load_history.ETL_LINEAGE_SNAPSHOT_UNKNOWN
+    assert comparison["snapshot_diff"] is None
+    assert comparison["profile_definition_sha256"] == "unknown"
+    assert comparison["application_commit_sha"] == "unknown"
+
+
+def make_lineage_detail(run_id, *, snapshot, fingerprint, commit_sha):
+    return {
+        **make_load(run_id),
+        "input_file_sha256": "a" * 64,
+        "output_file_sha256": "b" * 64,
+        "profile_definition_sha256": fingerprint,
+        "profile_definition_snapshot": snapshot,
+        "application_commit_sha": commit_sha,
+        "error_counts": {},
+        "reject_details_stored": False,
+        "products": {"items": [], "total": 0, "limit": 20, "offset": 0},
+    }
+
+
+def test_etl_load_history_compares_same_profile_batch_lineage_with_existing_detail_client(
+    monkeypatch,
+):
+    current_snapshot = {
+        "source_columns": {"sku": ["product_id"]},
+        "required_source_columns": ["sku"],
+        "defaults": {"category": "TOP"},
+    }
+    compare_snapshot = {
+        "source_columns": {"sku": ["product_group_id"], "name": ["product_name"]},
+        "required_source_columns": ["sku", "name"],
+        "defaults": {"category": "OUTER"},
+    }
+    api_client = FakeEtlApiClient(
+        list_items=[make_load(12), make_load(13)],
+        detail_responses={
+            12: make_lineage_detail(
+                12,
+                snapshot=current_snapshot,
+                fingerprint="a" * 64,
+                commit_sha="b" * 40,
+            ),
+            13: make_lineage_detail(
+                13,
+                snapshot=compare_snapshot,
+                fingerprint="c" * 64,
+                commit_sha="b" * 40,
+            ),
+        },
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    select_etl_batch(app, 12)
+    next(widget for widget in app.button if widget.key == "etl_load_show_detail").click().run(
+        timeout=10
+    )
+    assert api_client.detail_calls == [
+        (12, {"product_limit": 20, "product_offset": 0}),
+    ]
+    compare_selector = next(
+        widget
+        for widget in app.selectbox
+        if widget.key == "etl_lineage_compare_run_id"
+    )
+    compare_selector.select(13).run(timeout=10)
+
+    assert api_client.detail_calls == [
+        (12, {"product_limit": 20, "product_offset": 0}),
+        (13, {"product_limit": 1, "product_offset": 0}),
+    ]
+    body = _body_text(app)
+    assert "Profile definition: 다름" in body
+    assert "Application commit: 같음" in body
+    assert "추가: name → product_name" in body
+    assert "변경: sku · product_id → product_group_id" in body
+    assert "추가: name" in body
+    assert "변경: category · TOP → OUTER" in body
+    assert "Lineage 확인이 필요한 이상 징후" in body
+
+
+def test_etl_load_history_marks_legacy_comparison_values_as_unknown(monkeypatch):
+    snapshot = {
+        "source_columns": {"sku": ["product_id"]},
+        "required_source_columns": ["sku"],
+        "defaults": {"category": "TOP"},
+    }
+    api_client = FakeEtlApiClient(
+        list_items=[make_load(12), make_load(13)],
+        detail_responses={
+            12: make_lineage_detail(
+                12,
+                snapshot=snapshot,
+                fingerprint="a" * 64,
+                commit_sha="b" * 40,
+            ),
+            13: make_lineage_detail(
+                13,
+                snapshot=None,
+                fingerprint=None,
+                commit_sha=None,
+            ),
+        },
+    )
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+    select_etl_batch(app, 12)
+    next(widget for widget in app.button if widget.key == "etl_load_show_detail").click().run(
+        timeout=10
+    )
+    next(
+        widget
+        for widget in app.selectbox
+        if widget.key == "etl_lineage_compare_run_id"
+    ).select(13).run(timeout=10)
+
+    body = _body_text(app)
+    assert "Profile definition: 알 수 없음" in body
+    assert "Application commit: 알 수 없음" in body
+    assert "한 실행의 Profile snapshot이 없어 필드 수준 비교를 할 수 없습니다." in body
 
 
 def test_etl_load_history_shows_rejection_rows_and_paginates(monkeypatch):
