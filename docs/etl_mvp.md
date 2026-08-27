@@ -725,7 +725,7 @@ GET /api/v1/etl-loads/{etl_load_run_id}/rejections?limit=20&offset=0
 
 reject 상세 응답은 저장 여부, 전체 reject 행 수, 페이지 단위의 원본 행 번호·구조화된 오류 배열·마스킹된 동적 원본 컬럼을 반환한다. reject 상세가 저장되지 않은 과거 배치는 `available=false`와 빈 목록을 반환하며, 배치가 없으면 HTTP `404`를 반환한다.
 
-상세 응답에는 배치 기본 정보, 전체·정상·거부 행 수, `error_counts`, reject 상세 저장 여부, 원본·출력 파일 SHA-256과 해당 배치의 staging 상품 목록이 포함된다. 기존 배치는 품질 필드를 `null`로 반환한다. 상품은 staging 상품 `id ASC`로 정렬하며 SQL `LIMIT`·`OFFSET`에서 페이지를 나눈다. 모든 상품 조회와 count에는 요청한 `etl_load_run_id` 조건을 적용해 다른 배치의 상품이 섞이지 않게 한다. 배치가 없으면 HTTP `404`를 반환한다.
+상세 응답에는 배치 기본 정보, 전체·정상·거부 행 수, `error_counts`, reject 상세 저장 여부, 원본·출력 파일 SHA-256, `profile_definition_sha256`, `profile_definition_snapshot`, `application_commit_sha`와 해당 배치의 staging 상품 목록이 포함된다. snapshot은 `source_columns`·`required_source_columns`·`defaults`만 담는다. 기존 배치는 품질·lineage 필드를 `null`로 반환할 수 있다. 상품은 staging 상품 `id ASC`로 정렬하며 SQL `LIMIT`·`OFFSET`에서 페이지를 나눈다. 모든 상품 조회와 count에는 요청한 `etl_load_run_id` 조건을 적용해 다른 배치의 상품이 섞이지 않게 한다. 배치가 없으면 HTTP `404`를 반환한다.
 
 Path의 `etl_load_run_id`는 `1` 이상의 정수만 허용한다. `0`, 음수와 숫자가 아닌 값은 요청 검증 단계에서 HTTP `422`가 된다. nullable 컬럼인 `sale_price`, `description`, `seller`는 값이 없을 때 JSON `null`로 유지한다.
 
@@ -756,6 +756,7 @@ Streamlit에는 공급사 CSV를 업로드해 ETL을 직접 실행하는 `ETL �
 | 검색 | 파일명과 프로필명 검색을 함께 적용하는 AND 조건 |
 | 배치 페이지 | 이전·다음 버튼으로 목록 offset 이동 |
 | 배치 상세 | 배치 ID, 파일명, 프로필, 버전, 전체 입력·정상 적재·변환 거부·정상 처리율, 적재 시각과 input/output SHA-256 전체 표시 |
+| Historical lineage comparison | 현재 목록에서 같은 `profile_name`의 다른 batch를 선택해 기존 detail API 응답의 input SHA-256·definition fingerprint·application commit을 비교하고, 양쪽 snapshot이 있으면 매핑·필수 원본 컬럼·기본값 semantic diff 표시 |
 | 오류 통계 | 오류 코드별 발생 건수를 발생 건수 내림차순·코드 오름차순으로 표시하고 reject 0건은 안내 |
 | reject 상세 | reject 행 페이지네이션, 오류 코드·필드·메시지와 마스킹된 원본 값 표시; 과거 미저장 배치는 안내 |
 | 상품 목록 | 선택한 배치의 staging 상품을 20건씩 표시 |
@@ -780,6 +781,8 @@ ETL 적재 이력 탭
 -> 배치 상세 선택
 -> GET /api/v1/etl-loads/{etl_load_run_id} (product_limit=20)
 -> SHA-256·배치 상품·nullable 필드 표시
+-> 같은 Profile의 다른 batch 선택 시 기존 GET /api/v1/etl-loads/{etl_load_run_id} 재사용
+-> input·definition fingerprint·application commit 및 snapshot semantic diff 비교
 -> GET /api/v1/etl-loads/{etl_load_run_id}/rejections (limit=20)
 -> reject 오류 배열·마스킹된 원본·페이지 표시
 -> 상품 이전·다음
@@ -790,7 +793,7 @@ ETL 적재 이력 탭
 -> 운영 상품 반영 결과와 promotion run 확인
 ```
 
-Streamlit rerun에 대비해 목록·상세·reject 응답과 선택 상태를 ETL 전용 `session_state`에 보관한다. 검색 조건이나 batch가 바뀌면 이전 상세·상품·reject 상태와 promotion preview·승인 상태를 초기화해 stale 데이터가 남거나 다른 batch에 반영되지 않게 한다. preview 요청 중에는 중복 요청을 막고, preview hash가 없거나 승인하지 않은 상태에서는 반영 버튼을 비활성화한다. 성공 후에는 preview·승인 상태를 제거하고 결과만 보존하며, `preview_stale`가 발생하면 이전 preview를 제거해 새 preview를 요구한다. API Client는 preview·promotion 응답의 필수 key, count, action, before/after shape, SHA-256을 검증하고 HTTP 오류를 안전한 사용자 메시지로 변환한다. 순수 helper 테스트와 Streamlit AppTest로 목록·검색·페이지 이동·상세·품질 지표·오류 코드·SHA-256·reject 상세·nullable·404·request ID·promotion 상태 초기화를 검증한다.
+Streamlit rerun에 대비해 목록·상세·reject 응답과 선택 상태를 ETL 전용 `session_state`에 보관한다. 검색 조건이나 batch가 바뀌면 이전 상세·상품·reject 상태와 promotion preview·승인 상태·lineage 비교 대상을 초기화해 stale 데이터가 남거나 다른 batch에 반영되지 않게 한다. 현재 선택한 비교 대상 detail의 성공·실패 결과도 대상 batch ID와 함께 cache해 같은 대상의 rerun 때 재호출하지 않는다. `NULL` lineage는 changed가 아니라 알 수 없음이며, 비교는 저장된 metadata 기준의 조사 화면일 뿐 원인을 자동으로 판정하거나 전체 실행 환경을 재현하지 않는다. preview 요청 중에는 중복 요청을 막고, preview hash가 없거나 승인하지 않은 상태에서는 반영 버튼을 비활성화한다. 성공 후에는 preview·승인 상태를 제거하고 결과만 보존하며, `preview_stale`가 발생하면 이전 preview를 제거해 새 preview를 요구한다. API Client는 preview·promotion 응답의 필수 key, count, action, before/after shape, SHA-256을 검증하고 HTTP 오류를 안전한 사용자 메시지로 변환한다. 순수 helper 테스트와 Streamlit AppTest로 목록·검색·페이지 이동·상세·품질 지표·오류 코드·SHA-256·lineage 비교·reject 상세·nullable·404·request ID·promotion 상태 초기화를 검증한다.
 
 ## Catalog promotion preview와 승인 반영
 

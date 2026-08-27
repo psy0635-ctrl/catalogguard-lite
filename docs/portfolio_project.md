@@ -1138,6 +1138,7 @@ Streamlit은 `CatalogGuardApiClient`를 통해 웹 ETL 실행, 목록·상세 �
 | 목록 | 10건 단위 페이지네이션, 전체 건수, 빈 목록 안내 |
 | 검색 | filename·profile_name 부분 검색과 두 조건 AND |
 | 상세 | 배치 메타데이터, 전체·정상·거부 행, 정상 처리율, 오류 코드 통계, input/output SHA-256 전체 값, 적재 시각, reject 상세와 마스킹된 원본 |
+| lineage 비교 | 같은 Profile의 두 batch에서 입력 SHA-256·definition fingerprint·application commit과 저장된 semantic snapshot 차이를 확인 |
 | 상품 | 선택한 배치의 staging 상품 20건 단위 페이지네이션 |
 | promotion | 선택한 batch의 insert/update/unchanged, 변경 전후, 반영 가능 여부와 차단 사유 표시 |
 | 승인 | 승인 checkbox와 preview hash가 모두 유효할 때만 운영 반영 버튼 활성화 |
@@ -1147,6 +1148,14 @@ Streamlit은 `CatalogGuardApiClient`를 통해 웹 ETL 실행, 목록·상세 �
 | 상태 | 검색·배치·프로필 변경 시 stale 상세·상품·reject·ETL 실행 결과 제거, 실패 상세 요청 중복 호출 방지 |
 
 순수 helper 테스트와 Streamlit AppTest로 목록·검색·빈 결과·페이지 이동·상세·SHA-256·reject 상세·마스킹 원본·nullable·404·request ID·promotion preview·승인·stale 상태 초기화를 검증했습니다. 실제 브라우저 전체 상호작용은 아래 별도 Chromium E2E에서 검증하며, GitHub Actions의 Streamlit startup smoke는 서버 startup과 `/_stcore/health` HTTP 200을 확인합니다.
+
+### Historical ETL lineage comparison
+
+**문제.** `profile_name`과 `profile_version`만으로는 과거 batch가 실제 어떤 Profile semantic definition과 application code로 실행됐는지 충분히 조사하기 어려웠습니다.
+
+**구현.** batch lineage에 Profile definition fingerprint와 snapshot, application Git commit SHA를 저장하고, Streamlit ETL 상세에서 같은 Profile의 다른 batch를 선택해 입력 데이터·Profile 정의·application commit을 비교하게 했습니다. 양쪽 snapshot이 있으면 컬럼 매핑, 필수 원본 컬럼, 기본값의 semantic 차이까지 확인합니다.
+
+**운영 경계.** legacy `NULL`은 변경으로 오판하지 않고 알 수 없음으로 표시합니다. 이 비교는 저장된 lineage metadata를 읽는 조사 도구이며, Docker image·dependency·OS/environment·당시 DB 상태·원본 bytes를 보존하지 않으므로 결과 원인을 자동으로 증명하거나 완전한 실행 재현을 주장하지 않습니다.
 
 ### 실제 Chromium ETL 브라우저 E2E
 
