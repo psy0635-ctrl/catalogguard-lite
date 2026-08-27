@@ -1,3 +1,4 @@
+from collections import Counter
 from datetime import datetime
 from math import ceil
 from typing import Any
@@ -100,6 +101,18 @@ ETL_INACTIVE_PROFILE_RUN_MESSAGE = (
 )
 ETL_INACTIVE_PROFILE_DETAIL_MESSAGE = "선택한 ETL 프로필이 비활성화되었습니다."
 ETL_PROFILE_DEFAULTS_DISPLAY_COLUMNS = ["CatalogGuard 컬럼", "기본값"]
+ETL_LINEAGE_COMPARISON_STATUS_LABELS = {
+    "same": "같음",
+    "different": "다름",
+    "unknown": "알 수 없음",
+}
+ETL_LINEAGE_SNAPSHOT_AVAILABLE = "available"
+ETL_LINEAGE_SNAPSHOT_PARTIAL = "partial"
+ETL_LINEAGE_SNAPSHOT_UNKNOWN = "unknown"
+ETL_LINEAGE_REPRODUCIBILITY_CAPTION = (
+    "이 비교는 저장된 ETL lineage metadata 기준입니다. Docker image, 전체 dependency, "
+    "당시 DB 상태, 외부 응답 등은 포함하지 않으므로 완전한 실행 재현을 의미하지 않습니다."
+)
 ETL_REJECT_DISPLAY_COLUMNS = ["원본 행", "오류 코드", "오류 필드", "오류 메시지"]
 # 세 상태를 화면에서 절대 뭉개지 않습니다. "override 없음"은 비활성이 아니라 배포
 # 기본값을 그대로 따르는 상태입니다.
@@ -293,6 +306,10 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_load_detail_response": None,
     "etl_load_detail_error": None,
     "etl_load_product_offset": 0,
+    "etl_lineage_compare_run_id": None,
+    "etl_lineage_compare_detail_run_id": None,
+    "etl_lineage_compare_detail_response": None,
+    "etl_lineage_compare_detail_error": None,
     "etl_reject_offset": 0,
     "etl_reject_response": None,
     "etl_reject_error": None,
@@ -633,6 +650,158 @@ def build_etl_profile_defaults_dataframe(defaults: dict[str, str]) -> pd.DataFra
         for column, value in defaults.items()
     ]
     return pd.DataFrame(rows, columns=ETL_PROFILE_DEFAULTS_DISPLAY_COLUMNS)
+
+
+def compare_etl_lineage_value(left: object, right: object) -> str:
+    """Compare one nullable lineage scalar without treating unknown as a change."""
+    if left is None or right is None:
+        return "unknown"
+    return "same" if left == right else "different"
+
+
+def _is_profile_definition_snapshot(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"source_columns", "required_source_columns", "defaults"}
+        and isinstance(value["source_columns"], dict)
+        and isinstance(value["required_source_columns"], list)
+        and isinstance(value["defaults"], dict)
+    )
+
+
+def _diff_ordered_values(before: list[str], after: list[str]) -> dict[str, object]:
+    before_counts = Counter(before)
+    after_counts = Counter(after)
+    added = sorted((after_counts - before_counts).elements())
+    removed = sorted((before_counts - after_counts).elements())
+    reordered = not added and not removed and before != after
+    return {
+        "added": added,
+        "removed": removed,
+        "reordered": {"before": before, "after": after} if reordered else None,
+    }
+
+
+def diff_profile_definition_snapshots(
+    before: object,
+    after: object,
+) -> dict[str, object] | None:
+    """Return a semantic profile-definition diff, or None when history is unavailable."""
+    if not _is_profile_definition_snapshot(before) or not _is_profile_definition_snapshot(after):
+        return None
+
+    before_mappings = before["source_columns"]
+    after_mappings = after["source_columns"]
+    before_sources = set(before_mappings)
+    after_sources = set(after_mappings)
+    changed_mappings: list[dict[str, object]] = []
+    reordered_mappings: list[dict[str, object]] = []
+    for source in sorted(before_sources & after_sources):
+        previous_targets = list(before_mappings[source])
+        next_targets = list(after_mappings[source])
+        if previous_targets == next_targets:
+            continue
+        entry = {
+            "source": source,
+            "before": previous_targets,
+            "after": next_targets,
+        }
+        if sorted(previous_targets) == sorted(next_targets):
+            reordered_mappings.append(entry)
+        else:
+            changed_mappings.append(entry)
+
+    before_defaults = before["defaults"]
+    after_defaults = after["defaults"]
+    before_default_keys = set(before_defaults)
+    after_default_keys = set(after_defaults)
+    changed_defaults = [
+        {"column": column, "before": before_defaults[column], "after": after_defaults[column]}
+        for column in sorted(before_default_keys & after_default_keys)
+        if before_defaults[column] != after_defaults[column]
+    ]
+
+    return {
+        "source_columns": {
+            "added": [
+                {"source": source, "targets": list(after_mappings[source])}
+                for source in sorted(after_sources - before_sources)
+            ],
+            "removed": [
+                {"source": source, "targets": list(before_mappings[source])}
+                for source in sorted(before_sources - after_sources)
+            ],
+            "changed": changed_mappings,
+            "reordered": reordered_mappings,
+        },
+        "required_source_columns": _diff_ordered_values(
+            list(before["required_source_columns"]),
+            list(after["required_source_columns"]),
+        ),
+        "defaults": {
+            "added": [
+                {"column": column, "value": after_defaults[column]}
+                for column in sorted(after_default_keys - before_default_keys)
+            ],
+            "removed": [
+                {"column": column, "value": before_defaults[column]}
+                for column in sorted(before_default_keys - after_default_keys)
+            ],
+            "changed": changed_defaults,
+        },
+    }
+
+
+def build_etl_lineage_comparison(
+    current_detail: dict[str, Any],
+    compare_detail: dict[str, Any],
+) -> dict[str, object]:
+    """Build display-ready lineage states without touching Streamlit session state."""
+    current_snapshot = current_detail.get("profile_definition_snapshot")
+    compare_snapshot = compare_detail.get("profile_definition_snapshot")
+    current_has_snapshot = _is_profile_definition_snapshot(current_snapshot)
+    compare_has_snapshot = _is_profile_definition_snapshot(compare_snapshot)
+    if current_has_snapshot and compare_has_snapshot:
+        snapshot_status = ETL_LINEAGE_SNAPSHOT_AVAILABLE
+    elif current_has_snapshot or compare_has_snapshot:
+        snapshot_status = ETL_LINEAGE_SNAPSHOT_PARTIAL
+    else:
+        snapshot_status = ETL_LINEAGE_SNAPSHOT_UNKNOWN
+
+    current_fingerprint = current_detail.get("profile_definition_sha256")
+    compare_fingerprint = compare_detail.get("profile_definition_sha256")
+    return {
+        "input_file_sha256": compare_etl_lineage_value(
+            current_detail.get("input_file_sha256"), compare_detail.get("input_file_sha256")
+        ),
+        "profile_definition_sha256": compare_etl_lineage_value(
+            current_fingerprint, compare_fingerprint
+        ),
+        "application_commit_sha": compare_etl_lineage_value(
+            current_detail.get("application_commit_sha"), compare_detail.get("application_commit_sha")
+        ),
+        "snapshot_status": snapshot_status,
+        "snapshot_diff": diff_profile_definition_snapshots(
+            current_snapshot, compare_snapshot
+        ),
+        "current_snapshot_without_fingerprint": current_has_snapshot
+        and current_fingerprint is None,
+        "compare_snapshot_without_fingerprint": compare_has_snapshot
+        and compare_fingerprint is None,
+        "same_version_different_fingerprint": (
+            current_detail.get("profile_name") == compare_detail.get("profile_name")
+            and current_detail.get("profile_version") == compare_detail.get("profile_version")
+            and compare_etl_lineage_value(current_fingerprint, compare_fingerprint)
+            == "different"
+        ),
+    }
+
+
+def build_etl_lineage_compare_option_label(item: dict[str, Any]) -> str:
+    return (
+        f"#{item.get('etl_load_run_id')} · {format_etl_datetime(item.get('created_at'))} "
+        f"· Profile v{item.get('profile_version')}"
+    )
 
 
 def build_etl_rejection_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
@@ -981,6 +1150,15 @@ def build_catalog_promotion_audit_dataframe(
     return pd.DataFrame(rows, columns=PROMOTION_AUDIT_DISPLAY_COLUMNS)
 
 
+def reset_etl_lineage_comparison_state(session_state) -> None:
+    """Forget a comparison tied to the previously selected ETL batch."""
+    # selectbox가 이미 만들어진 뒤에도 안전하게 초기화하려면 대입 대신 key를 제거합니다.
+    session_state.pop("etl_lineage_compare_run_id", None)
+    session_state["etl_lineage_compare_detail_run_id"] = None
+    session_state["etl_lineage_compare_detail_response"] = None
+    session_state["etl_lineage_compare_detail_error"] = None
+
+
 def reset_etl_load_detail_state(session_state) -> None:
     session_state["etl_load_detail_requested"] = False
     session_state["etl_load_detail_response"] = None
@@ -989,6 +1167,7 @@ def reset_etl_load_detail_state(session_state) -> None:
     session_state["etl_reject_offset"] = 0
     session_state["etl_reject_response"] = None
     session_state["etl_reject_error"] = None
+    reset_etl_lineage_comparison_state(session_state)
 
 
 def apply_etl_load_search(session_state) -> None:
@@ -1614,6 +1793,243 @@ def _fetch_etl_load_detail(api_client, session_state) -> dict[str, Any] | None:
         return None
 
 
+def _fetch_etl_lineage_compare_detail(
+    api_client,
+    session_state,
+    compare_run_id: int,
+) -> dict[str, Any] | None:
+    """Fetch only the selected comparison batch, caching success and failure per ID."""
+    cached_run_id = session_state.get("etl_lineage_compare_detail_run_id")
+    if cached_run_id == compare_run_id:
+        cached_response = session_state.get("etl_lineage_compare_detail_response")
+        if isinstance(cached_response, dict):
+            return cached_response
+        if session_state.get("etl_lineage_compare_detail_error") is not None:
+            return None
+
+    session_state["etl_lineage_compare_detail_run_id"] = compare_run_id
+    session_state["etl_lineage_compare_detail_response"] = None
+    session_state["etl_lineage_compare_detail_error"] = None
+    try:
+        # 비교에는 lineage만 필요하지만 기존 detail 계약의 product_limit 최소값은 1입니다.
+        response = api_client.get_etl_load_detail(
+            compare_run_id,
+            product_limit=1,
+            product_offset=0,
+        )
+        session_state["etl_lineage_compare_detail_response"] = response
+        return response
+    except (
+        ETLLoadNotFoundError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        session_state["etl_lineage_compare_detail_error"] = error
+        return None
+
+
+def _format_lineage_value(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        return "알 수 없음"
+    return value
+
+
+def _render_profile_definition_snapshot_diff(diff: dict[str, object]) -> None:
+    source_columns = diff["source_columns"]
+    required_columns = diff["required_source_columns"]
+    defaults = diff["defaults"]
+    has_changes = any(
+        (
+            source_columns["added"],
+            source_columns["removed"],
+            source_columns["changed"],
+            source_columns["reordered"],
+            required_columns["added"],
+            required_columns["removed"],
+            required_columns["reordered"],
+            defaults["added"],
+            defaults["removed"],
+            defaults["changed"],
+        )
+    )
+    if not has_changes:
+        st.info("저장된 Profile semantic definition 차이가 없습니다.")
+        return
+
+    st.markdown("#### 컬럼 매핑")
+    mapping_lines = [
+        f"- 추가: {item['source']} → {', '.join(item['targets'])}"
+        for item in source_columns["added"]
+    ] + [
+        f"- 제거: {item['source']} → {', '.join(item['targets'])}"
+        for item in source_columns["removed"]
+    ] + [
+        f"- 변경: {item['source']} · {', '.join(item['before'])} → "
+        f"{', '.join(item['after'])}"
+        for item in source_columns["changed"]
+    ] + [
+        f"- 순서만 변경: {item['source']} · {', '.join(item['before'])} → "
+        f"{', '.join(item['after'])}"
+        for item in source_columns["reordered"]
+    ]
+    st.markdown("\n".join(mapping_lines) if mapping_lines else "변경 없음")
+
+    st.markdown("#### 필수 원본 컬럼")
+    required_lines = [
+        *(f"- 추가: {column}" for column in required_columns["added"]),
+        *(f"- 제거: {column}" for column in required_columns["removed"]),
+    ]
+    reordered_required = required_columns["reordered"]
+    if reordered_required is not None:
+        required_lines.append(
+            "- 순서만 변경: "
+            f"{', '.join(reordered_required['before'])} → "
+            f"{', '.join(reordered_required['after'])}"
+        )
+    st.markdown("\n".join(required_lines) if required_lines else "변경 없음")
+
+    st.markdown("#### 기본값")
+    default_lines = [
+        f"- 추가: {item['column']} = {item['value']}"
+        for item in defaults["added"]
+    ] + [
+        f"- 제거: {item['column']} = {item['value']}"
+        for item in defaults["removed"]
+    ] + [
+        f"- 변경: {item['column']} · {item['before']} → {item['after']}"
+        for item in defaults["changed"]
+    ]
+    st.markdown("\n".join(default_lines) if default_lines else "변경 없음")
+
+
+def _render_etl_lineage_comparison(api_client, current_detail: dict[str, Any]) -> None:
+    """Render the optional, same-profile historical lineage comparison in detail."""
+    st.subheader("다른 실행과 비교")
+    current_run_id = current_detail.get("etl_load_run_id")
+    current_profile_name = current_detail.get("profile_name")
+    list_response = st.session_state.get("etl_load_list_response")
+    list_items = list_response.get("items", []) if isinstance(list_response, dict) else []
+    candidates = [
+        item
+        for item in list_items
+        if item.get("etl_load_run_id") != current_run_id
+        and item.get("profile_name") == current_profile_name
+    ]
+    if not candidates:
+        st.info("현재 목록에 같은 공급사 프로필의 비교 가능한 다른 실행이 없습니다.")
+        return
+
+    candidate_ids = [item["etl_load_run_id"] for item in candidates]
+    selected_compare_id = st.session_state.get("etl_lineage_compare_run_id")
+    if selected_compare_id not in candidate_ids:
+        st.session_state.pop("etl_lineage_compare_run_id", None)
+    labels = {
+        item["etl_load_run_id"]: build_etl_lineage_compare_option_label(item)
+        for item in candidates
+    }
+    st.selectbox(
+        "다른 실행과 비교",
+        options=[None, *candidate_ids],
+        format_func=lambda run_id: (
+            "비교할 ETL 실행을 선택하세요."
+            if run_id is None
+            else labels.get(run_id, str(run_id))
+        ),
+        key="etl_lineage_compare_run_id",
+    )
+    compare_run_id = st.session_state.get("etl_lineage_compare_run_id")
+    if compare_run_id is None:
+        st.caption("같은 공급사 프로필의 다른 batch를 선택하면 lineage를 비교합니다.")
+        return
+
+    compare_detail = _fetch_etl_lineage_compare_detail(
+        api_client,
+        st.session_state,
+        int(compare_run_id),
+    )
+    if compare_detail is None:
+        error = st.session_state.get("etl_lineage_compare_detail_error")
+        if error is not None:
+            st.error(
+                build_etl_api_error_display_message(
+                    "비교 대상 정보를 불러오지 못했습니다.", error
+                )
+            )
+        return
+
+    comparison = build_etl_lineage_comparison(current_detail, compare_detail)
+    current_column, compare_column = st.columns(2)
+    with current_column:
+        st.caption("기준 batch")
+        st.write(f"Batch ID: {current_detail.get('etl_load_run_id')}")
+        st.write(f"실행 시각: {format_etl_datetime(current_detail.get('created_at'))}")
+        st.write(
+            "Profile: "
+            f"{current_detail.get('profile_name')} v{current_detail.get('profile_version')}"
+        )
+    with compare_column:
+        st.caption("비교 batch")
+        st.write(f"Batch ID: {compare_detail.get('etl_load_run_id')}")
+        st.write(f"실행 시각: {format_etl_datetime(compare_detail.get('created_at'))}")
+        st.write(
+            "Profile: "
+            f"{compare_detail.get('profile_name')} v{compare_detail.get('profile_version')}"
+        )
+
+    st.markdown("#### Lineage 비교")
+    for label, key in (
+        ("입력 데이터", "input_file_sha256"),
+        ("Profile definition", "profile_definition_sha256"),
+        ("Application commit", "application_commit_sha"),
+    ):
+        st.write(f"{label}: {ETL_LINEAGE_COMPARISON_STATUS_LABELS[comparison[key]]}")
+    if comparison["input_file_sha256"] == "different":
+        st.info(
+            "입력 데이터가 다릅니다. 결과 차이를 Profile 또는 commit 변경 때문이라고 "
+            "단정할 수 없습니다."
+        )
+    if comparison["same_version_different_fingerprint"]:
+        st.warning(
+            "동일한 Profile 이름/버전인데 저장된 Profile definition fingerprint가 다릅니다. "
+            "Lineage 확인이 필요한 이상 징후입니다."
+        )
+    if (
+        comparison["current_snapshot_without_fingerprint"]
+        or comparison["compare_snapshot_without_fingerprint"]
+    ):
+        st.warning(
+            "Lineage 정보 불일치: Profile snapshot은 있지만 fingerprint가 없는 실행이 있습니다."
+        )
+
+    with st.expander("Lineage 값 상세"):
+        st.code(
+            "기준 입력 SHA-256: "
+            f"{_format_lineage_value(current_detail.get('input_file_sha256'))}\n"
+            "비교 입력 SHA-256: "
+            f"{_format_lineage_value(compare_detail.get('input_file_sha256'))}\n"
+            "기준 Profile definition SHA-256: "
+            f"{_format_lineage_value(current_detail.get('profile_definition_sha256'))}\n"
+            "비교 Profile definition SHA-256: "
+            f"{_format_lineage_value(compare_detail.get('profile_definition_sha256'))}\n"
+            "기준 Application commit SHA: "
+            f"{_format_lineage_value(current_detail.get('application_commit_sha'))}\n"
+            "비교 Application commit SHA: "
+            f"{_format_lineage_value(compare_detail.get('application_commit_sha'))}"
+        )
+
+    snapshot_status = comparison["snapshot_status"]
+    st.markdown("#### Profile semantic definition 차이")
+    if snapshot_status == ETL_LINEAGE_SNAPSHOT_AVAILABLE:
+        _render_profile_definition_snapshot_diff(comparison["snapshot_diff"])
+    elif snapshot_status == ETL_LINEAGE_SNAPSHOT_PARTIAL:
+        st.info("한 실행의 Profile snapshot이 없어 필드 수준 비교를 할 수 없습니다.")
+    else:
+        st.info("두 실행 모두 저장된 Profile snapshot이 없어 비교 정보가 없습니다.")
+    st.caption(ETL_LINEAGE_REPRODUCIBILITY_CAPTION)
+
+
 def _fetch_etl_rejections(api_client, session_state) -> dict[str, Any] | None:
     if session_state.get("etl_reject_response") is not None:
         return session_state["etl_reject_response"]
@@ -2006,6 +2422,8 @@ def _render_etl_load_detail(api_client) -> None:
             width="stretch",
             hide_index=True,
         )
+
+    _render_etl_lineage_comparison(api_client, detail_response)
 
     products = detail_response.get("products") or {}
     product_items = products.get("items") or []
