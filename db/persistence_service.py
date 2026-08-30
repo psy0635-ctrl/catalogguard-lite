@@ -1,6 +1,6 @@
 # 역할: InspectionReport를 하나의 트랜잭션으로 PostgreSQL에 저장합니다.
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import PurePath
 import re
 
@@ -73,6 +73,25 @@ class InspectionList:
     total: int
     limit: int
     offset: int
+
+
+@dataclass(frozen=True)
+class InspectionQualityTrendPoint:
+    date: date
+    run_count: int
+    error_run_count: int
+    warning_run_count: int
+    normal_run_count: int
+    total_products: int
+    total_issues: int
+    error_count: int
+    warning_count: int
+
+
+@dataclass(frozen=True)
+class InspectionQualityTrend:
+    inspection_version: str
+    items: list[InspectionQualityTrendPoint]
 
 
 @dataclass(frozen=True)
@@ -375,4 +394,39 @@ def list_inspections(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+def get_inspection_quality_trend(
+    session: Session,
+    *,
+    filename: str | None = None,
+    created_at_start: datetime | None = None,
+    created_at_end_exclusive: datetime | None = None,
+    status_filter: str | None = None,
+) -> InspectionQualityTrend:
+    rows = repositories.get_inspection_quality_trend_rows(
+        session,
+        inspection_version=INSPECTION_VERSION,
+        filename=filename,
+        created_at_start=created_at_start,
+        created_at_end_exclusive=created_at_end_exclusive,
+        status_filter=status_filter,
+    )
+    return InspectionQualityTrend(
+        inspection_version=INSPECTION_VERSION,
+        items=[
+            InspectionQualityTrendPoint(
+                date=row.date,
+                run_count=row.run_count,
+                error_run_count=row.error_run_count,
+                warning_run_count=row.warning_run_count,
+                normal_run_count=row.normal_run_count,
+                total_products=row.total_products,
+                total_issues=row.total_issues,
+                error_count=row.error_count,
+                warning_count=row.warning_count,
+            )
+            for row in rows
+        ],
     )

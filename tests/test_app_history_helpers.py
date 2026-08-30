@@ -76,6 +76,7 @@ class FakeAppStreamlit:
         self.dataframes = []
         self.columns_calls = []
         self.metrics = []
+        self.line_charts = []
         self.downloads = []
 
     def subheader(self, message):
@@ -123,6 +124,10 @@ class FakeAppStreamlit:
             (self.active_column, dataframe.copy(deep=True), kwargs.copy())
         )
         self.call_log.append(("dataframe", self.active_column))
+
+    def line_chart(self, dataframe, **kwargs):
+        self.line_charts.append((self.active_column, dataframe.copy(deep=True), kwargs.copy()))
+        self.call_log.append(("line_chart", self.active_column))
 
     def download_button(self, label, **kwargs):
         self.downloads.append((label, kwargs.copy()))
@@ -212,6 +217,99 @@ def assert_prepared_history_summary_download_is_cleared(
 ) -> None:
     assert app_module.HISTORY_SUMMARY_DOWNLOAD_CACHE_STATE_KEY not in session_state
     assert app_module.HISTORY_SUMMARY_DOWNLOAD_ERROR_STATE_KEY not in session_state
+
+
+def make_quality_trend_response(items=None) -> dict:
+    return {
+        "inspection_version": "13",
+        "items": [
+            {
+                "date": "2026-08-27",
+                "run_count": 3,
+                "error_run_count": 1,
+                "warning_run_count": 1,
+                "normal_run_count": 1,
+                "total_products": 60,
+                "total_issues": 8,
+                "error_count": 5,
+                "warning_count": 3,
+            }
+        ]
+        if items is None
+        else items,
+    }
+
+
+def test_render_inspection_quality_trend_displays_metrics_chart_and_dataframe(
+    app_module,
+    monkeypatch,
+):
+    fake_st = FakeAppStreamlit()
+    client_calls = []
+    response = make_quality_trend_response()
+    api_client = SimpleNamespace(
+        get_inspection_quality_trend=lambda **params: client_calls.append(params) or response
+    )
+    monkeypatch.setattr(app_module, "st", fake_st)
+
+    app_module.render_inspection_quality_trend(
+        api_client,
+        {"filename": "products", "start_date": "2026-08-01", "status": "warning"},
+    )
+
+    assert client_calls == [
+        {"filename": "products", "start_date": "2026-08-01", "status": "warning"}
+    ]
+    assert fake_st.subheaders == ["검수 품질 추세"]
+    assert fake_st.captions == ["현재 검수 버전 13 기준"]
+    assert [label for _, label, _ in fake_st.metrics] == [
+        "신규 검수",
+        "전체 상품",
+        "전체 문제",
+    ]
+    assert len(fake_st.line_charts) == 1
+    assert list(fake_st.line_charts[0][1].columns) == ["오류", "주의"]
+    assert len(fake_st.dataframes) == 1
+    assert list(fake_st.dataframes[0][1].columns) == [
+        "날짜",
+        "신규 검수",
+        "오류 검수",
+        "주의 검수",
+        "정상 검수",
+        "전체 상품",
+        "전체 문제",
+        "오류",
+        "주의",
+    ]
+
+
+def test_render_inspection_quality_trend_handles_empty_and_api_errors_in_its_section(
+    app_module,
+    monkeypatch,
+):
+    fake_st = FakeAppStreamlit()
+    empty_client = SimpleNamespace(
+        get_inspection_quality_trend=lambda **params: make_quality_trend_response(items=[])
+    )
+    monkeypatch.setattr(app_module, "st", fake_st)
+
+    app_module.render_inspection_quality_trend(empty_client, {})
+
+    assert fake_st.infos == ["선택한 조건에 해당하는 검수 추세 데이터가 없습니다."]
+    assert fake_st.metrics == []
+    assert fake_st.line_charts == []
+    assert fake_st.dataframes == []
+
+    error_client = SimpleNamespace(
+        get_inspection_quality_trend=lambda **params: (_ for _ in ()).throw(
+            app_module.CatalogGuardApiResponseError("private error", request_id=VALID_REQUEST_ID)
+        )
+    )
+    app_module.render_inspection_quality_trend(error_client, {})
+
+    assert len(fake_st.errors) == 1
+    assert "검수 품질 추세를 불러오는 중 오류가 발생했습니다." in fake_st.errors[0]
+    assert VALID_REQUEST_ID in fake_st.errors[0]
 
 
 def test_build_api_error_display_message_appends_request_id_once(app_module):

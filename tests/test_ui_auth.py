@@ -30,6 +30,9 @@ class FakeAuthApiClient:
         # app.py의 다른 탭도 같은 로그인 후 client를 사용하므로 최소 no-op만 제공합니다.
         return {"items": [], "total": 0, "limit": params.get("limit", 20), "offset": 0}
 
+    def get_inspection_quality_trend(self, **params):
+        return {"inspection_version": "13", "items": []}
+
 
 def _patch_auth_api_client(monkeypatch, api_client):
     monkeypatch.setattr(ui_auth, "create_catalogguard_api_client", lambda: api_client)

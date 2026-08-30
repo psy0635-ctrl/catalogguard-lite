@@ -1,6 +1,6 @@
 # 역할: FastAPI CSV 검수 엔드포인트의 성공, 오류, 개인정보 마스킹 응답을 테스트합니다.
 import hashlib
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +25,7 @@ from db.session import get_session
 
 client = TestClient(app)
 ENDPOINT = "/api/v1/inspections"
+QUALITY_TREND_ENDPOINT = "/api/v1/inspections/quality-trend"
 
 
 @pytest.fixture(autouse=True)
@@ -669,6 +670,133 @@ def test_list_inspections_api_returns_empty_list(fake_inspection_persistence):
         "limit": 20,
         "offset": 0,
     }
+
+
+def test_quality_trend_api_returns_current_version_and_passes_history_filters(
+    fake_inspection_persistence,
+    monkeypatch,
+):
+    calls = []
+    trend = SimpleNamespace(
+        inspection_version=INSPECTION_VERSION,
+        items=[
+            SimpleNamespace(
+                date=date(2026, 8, 27),
+                run_count=3,
+                error_run_count=1,
+                warning_run_count=1,
+                normal_run_count=1,
+                total_products=60,
+                total_issues=8,
+                error_count=5,
+                warning_count=3,
+            )
+        ],
+    )
+
+    def fake_get_quality_trend(session, **kwargs):
+        calls.append({"session": session, **kwargs})
+        return trend
+
+    monkeypatch.setattr(
+        inspections_route,
+        "get_inspection_quality_trend",
+        fake_get_quality_trend,
+        raising=False,
+    )
+
+    response = client.get(
+        QUALITY_TREND_ENDPOINT,
+        params={
+            "filename": "  products  ",
+            "start_date": "2026-08-01",
+            "end_date": "2026-08-31",
+            "status": "warning",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "inspection_version": INSPECTION_VERSION,
+        "items": [
+            {
+                "date": "2026-08-27",
+                "run_count": 3,
+                "error_run_count": 1,
+                "warning_run_count": 1,
+                "normal_run_count": 1,
+                "total_products": 60,
+                "total_issues": 8,
+                "error_count": 5,
+                "warning_count": 3,
+            }
+        ],
+    }
+    assert calls == [
+        {
+            "session": fake_inspection_persistence.session,
+            "filename": "products",
+            "created_at_start": datetime(2026, 7, 31, 15, 0, tzinfo=timezone.utc),
+            "created_at_end_exclusive": datetime(
+                2026, 8, 31, 15, 0, tzinfo=timezone.utc
+            ),
+            "status_filter": "warning",
+        }
+    ]
+
+
+@pytest.mark.parametrize("role", ["viewer", "operator"])
+def test_quality_trend_api_allows_viewer_and_operator(monkeypatch, role):
+    override_current_user(role=role)
+    monkeypatch.setattr(
+        inspections_route,
+        "get_inspection_quality_trend",
+        lambda session, **kwargs: SimpleNamespace(
+            inspection_version=INSPECTION_VERSION,
+            items=[],
+        ),
+        raising=False,
+    )
+
+    response = client.get(QUALITY_TREND_ENDPOINT)
+
+    assert response.status_code == 200
+    assert response.json() == {"inspection_version": INSPECTION_VERSION, "items": []}
+
+
+def test_quality_trend_api_rejects_anonymous_user(monkeypatch):
+    clear_current_user_override()
+    monkeypatch.setattr(
+        inspections_route,
+        "get_inspection_quality_trend",
+        lambda session, **kwargs: SimpleNamespace(
+            inspection_version=INSPECTION_VERSION,
+            items=[],
+        ),
+        raising=False,
+    )
+
+    response = client.get(QUALITY_TREND_ENDPOINT)
+
+    assert response.status_code == 401
+
+
+def test_quality_trend_api_rejects_invalid_date_range_without_service_call(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        inspections_route,
+        "get_inspection_quality_trend",
+        lambda session, **kwargs: calls.append((session, kwargs)),
+        raising=False,
+    )
+
+    response = client.get(
+        QUALITY_TREND_ENDPOINT,
+        params={"start_date": "2026-08-02", "end_date": "2026-08-01"},
+    )
+
+    assert response.status_code == 422
+    assert calls == []
 
 
 @pytest.mark.parametrize("query", ["limit=0", "limit=101", "offset=-1"])

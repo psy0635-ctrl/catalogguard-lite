@@ -13,6 +13,8 @@ from api.schemas import (
     InspectionDetailResponse,
     InspectionListItemResponse,
     InspectionListResponse,
+    InspectionQualityTrendPointResponse,
+    InspectionQualityTrendResponse,
     InspectionResponse,
     InspectionResultItem,
     InspectionSummary,
@@ -26,8 +28,10 @@ from core.upload_validator import (
 from db.persistence_service import (
     InspectionDetail,
     InspectionList,
+    InspectionQualityTrend,
     find_existing_inspection_run,
     get_inspection_detail,
+    get_inspection_quality_trend,
     list_inspections,
     save_inspection_report,
 )
@@ -149,6 +153,28 @@ def build_inspection_list_response(
     )
 
 
+def build_inspection_quality_trend_response(
+    trend: InspectionQualityTrend,
+) -> InspectionQualityTrendResponse:
+    return InspectionQualityTrendResponse(
+        inspection_version=trend.inspection_version,
+        items=[
+            InspectionQualityTrendPointResponse(
+                date=item.date,
+                run_count=item.run_count,
+                error_run_count=item.error_run_count,
+                warning_run_count=item.warning_run_count,
+                normal_run_count=item.normal_run_count,
+                total_products=item.total_products,
+                total_issues=item.total_issues,
+                error_count=item.error_count,
+                warning_count=item.warning_count,
+            )
+            for item in trend.items
+        ],
+    )
+
+
 def normalize_filename_query(filename: str | None) -> str | None:
     # 공백뿐인 filename은 검색 조건이 아니라 "전체 목록" 요청으로 처리합니다.
     cleaned_filename = "" if filename is None else filename.strip()
@@ -215,6 +241,35 @@ def list_inspection_runs(
     )
 
     return build_inspection_list_response(inspection_list)
+
+
+@router.get(
+    "/api/v1/inspections/quality-trend",
+    response_model=InspectionQualityTrendResponse,
+)
+def get_inspection_quality_trend_route(
+    filename: str | None = Query(default=None, max_length=100),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    inspection_status: InspectionStatusQuery | None = Query(
+        default=None,
+        alias="status",
+    ),
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> InspectionQualityTrendResponse:
+    created_at_start, created_at_end_exclusive = build_created_at_bounds(
+        start_date=start_date,
+        end_date=end_date,
+    )
+    trend = get_inspection_quality_trend(
+        session,
+        filename=normalize_filename_query(filename),
+        created_at_start=created_at_start,
+        created_at_end_exclusive=created_at_end_exclusive,
+        status_filter=inspection_status,
+    )
+    return build_inspection_quality_trend_response(trend)
 
 
 @router.post(

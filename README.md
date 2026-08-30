@@ -486,6 +486,8 @@ FastAPI (인증·RBAC 통과 후 작업 등록)
 
 저장된 검수 실행을 파일명, 날짜 범위와 검수 상태로 검색하고 페이지 단위로 확인할 수 있습니다. 목록에는 실행 사용자를 표시하며, migration 이전 legacy row처럼 actor가 `NULL`이면 `알 수 없음`으로 표시합니다. 현재 검색 조건에 맞는 전체 검수 이력 요약도 실행 사용자를 포함한 CSV로 준비해 내려받을 수 있습니다.
 
+검수 이력 영역에서는 현재 `INSPECTION_VERSION` 기준의 일별 검수 품질 추세도 볼 수 있습니다. PostgreSQL이 `Asia/Seoul` 날짜로 신규 `InspectionRun`을 직접 집계해 신규 검수, 전체 상품, 전체 문제와 일별 오류·주의를 표시합니다. 이는 사용자 요청량이나 업로드 횟수 통계가 아니며, 과거 검수 버전과 섞어 비교하지 않습니다.
+
 ![CatalogGuard Lite 검수 이력 목록과 검색 화면](docs/images/04_history_list.png)
 
 ### 검수 이력 상세 결과
@@ -2916,7 +2918,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - custom VPC·private subnet 기반 네트워크 구성의 Terraform 코드화
 - Refresh Token, 회원가입, password reset, OAuth/MFA/SSO, 로그인 rate limit
 - 중복 저장 이벤트 로그 또는 감사 기록 검토
-- 기간별 검수 추세와 파일 간 비교 통계 추가
+- 파일 간 검수 결과 비교
 - 대용량 CSV 처리 성능 개선
 - 카테고리와 가격 이상치 기준을 설정 파일이나 관리 화면에서 조정
 - 상품 그룹 내 상품명 일관성 검수

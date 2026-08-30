@@ -2081,3 +2081,198 @@ def test_persistence_imports_without_database_url(monkeypatch):
     assert api_module.app.title == "CatalogGuard Lite API"
     assert db_models.InspectionRun.__tablename__ == "inspection_runs"
     assert hasattr(persistence_module, "save_inspection_report")
+
+
+def test_quality_trend_aggregates_current_version_by_kst_day_and_filters(
+    database_session,
+):
+    """The aggregate stays in PostgreSQL and never mixes inspection rule versions."""
+    session, created_source_filenames = database_session
+    source_filenames = [unique_filename("trend_alpha"), unique_filename("trend_beta")]
+    created_source_filenames.extend(source_filenames)
+    runs = [
+        InspectionRun(
+            source_filename=source_filenames[0],
+            inspection_version=INSPECTION_VERSION,
+            total_products=10,
+            total_issues=3,
+            error_count=2,
+            warning_count=1,
+            created_at=datetime(2026, 8, 26, 16, 0, tzinfo=timezone.utc),
+        ),
+        InspectionRun(
+            source_filename=source_filenames[0],
+            inspection_version=INSPECTION_VERSION,
+            total_products=5,
+            total_issues=1,
+            error_count=0,
+            warning_count=1,
+            created_at=datetime(2026, 8, 27, 3, 0, tzinfo=timezone.utc),
+        ),
+        InspectionRun(
+            source_filename=source_filenames[1],
+            inspection_version=INSPECTION_VERSION,
+            total_products=7,
+            total_issues=0,
+            error_count=0,
+            warning_count=0,
+            created_at=datetime(2026, 8, 27, 16, 0, tzinfo=timezone.utc),
+        ),
+        InspectionRun(
+            source_filename=source_filenames[0],
+            inspection_version="12",
+            total_products=999,
+            total_issues=999,
+            error_count=999,
+            warning_count=0,
+            created_at=datetime(2026, 8, 26, 16, 0, tzinfo=timezone.utc),
+        ),
+    ]
+    session.add_all(runs)
+    session.commit()
+
+    result = persistence_service.get_inspection_quality_trend(
+        session,
+        filename="trend_alpha",
+        created_at_start=datetime(2026, 8, 26, 15, 0, tzinfo=timezone.utc),
+        created_at_end_exclusive=datetime(2026, 8, 27, 15, 0, tzinfo=timezone.utc),
+        status_filter=None,
+    )
+
+    assert result.inspection_version == INSPECTION_VERSION
+    assert result.items == [
+        persistence_service.InspectionQualityTrendPoint(
+            date=datetime(2026, 8, 27).date(),
+            run_count=2,
+            error_run_count=1,
+            warning_run_count=1,
+            normal_run_count=0,
+            total_products=15,
+            total_issues=4,
+            error_count=2,
+            warning_count=2,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status_filter", "expected_counts"),
+    [
+        ("error", (1, 1, 0, 0)),
+        ("warning", (1, 0, 1, 0)),
+        ("normal", (1, 0, 0, 1)),
+    ],
+)
+def test_quality_trend_classifies_runs_and_keeps_the_count_invariant(
+    database_session,
+    status_filter,
+    expected_counts,
+):
+    session, created_source_filenames = database_session
+    source_filename = unique_filename("trend_status")
+    created_source_filenames.append(source_filename)
+    created_at = datetime(2026, 8, 27, 3, 0, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            InspectionRun(
+                source_filename=source_filename,
+                inspection_version=INSPECTION_VERSION,
+                total_products=1,
+                total_issues=1,
+                error_count=1,
+                warning_count=0,
+                created_at=created_at,
+            ),
+            InspectionRun(
+                source_filename=source_filename,
+                inspection_version=INSPECTION_VERSION,
+                total_products=1,
+                total_issues=1,
+                error_count=0,
+                warning_count=1,
+                created_at=created_at,
+            ),
+            InspectionRun(
+                source_filename=source_filename,
+                inspection_version=INSPECTION_VERSION,
+                total_products=1,
+                total_issues=0,
+                error_count=0,
+                warning_count=0,
+                created_at=created_at,
+            ),
+        ]
+    )
+    session.commit()
+
+    result = persistence_service.get_inspection_quality_trend(
+        session,
+        filename=source_filename,
+        status_filter=status_filter,
+    )
+
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert (
+        item.run_count,
+        item.error_run_count,
+        item.warning_run_count,
+        item.normal_run_count,
+    ) == expected_counts
+    assert item.run_count == (
+        item.error_run_count + item.warning_run_count + item.normal_run_count
+    )
+
+
+def test_quality_trend_separates_kst_dates_without_creating_empty_buckets(
+    database_session,
+):
+    session, created_source_filenames = database_session
+    source_filename = unique_filename("trend_dates")
+    created_source_filenames.append(source_filename)
+    session.add_all(
+        [
+            InspectionRun(
+                source_filename=source_filename,
+                inspection_version=INSPECTION_VERSION,
+                total_products=1,
+                total_issues=0,
+                error_count=0,
+                warning_count=0,
+                created_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
+            ),
+            InspectionRun(
+                source_filename=source_filename,
+                inspection_version=INSPECTION_VERSION,
+                total_products=2,
+                total_issues=2,
+                error_count=2,
+                warning_count=0,
+                created_at=datetime(2026, 8, 27, 15, 0, tzinfo=timezone.utc),
+            ),
+        ]
+    )
+    session.commit()
+
+    result = persistence_service.get_inspection_quality_trend(
+        session,
+        filename=source_filename,
+    )
+
+    assert [item.date.isoformat() for item in result.items] == [
+        "2026-08-26",
+        "2026-08-28",
+    ]
+    assert [item.run_count for item in result.items] == [1, 1]
+
+
+def test_quality_trend_returns_empty_items_for_unmatched_history_filter(database_session):
+    session, _ = database_session
+
+    result = persistence_service.get_inspection_quality_trend(
+        session,
+        filename=unique_filename("trend_missing"),
+    )
+
+    assert result.inspection_version == INSPECTION_VERSION
+    assert result.items == []
