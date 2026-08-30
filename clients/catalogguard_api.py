@@ -23,6 +23,18 @@ VALID_INSPECTION_STATUS_FILTERS = {"error", "warning", "normal"}
 REQUEST_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 LIST_RESPONSE_KEYS = ("items", "total", "limit", "offset")
+INSPECTION_QUALITY_TREND_RESPONSE_KEYS = ("inspection_version", "items")
+INSPECTION_QUALITY_TREND_ITEM_KEYS = (
+    "date",
+    "run_count",
+    "error_run_count",
+    "warning_run_count",
+    "normal_run_count",
+    "total_products",
+    "total_issues",
+    "error_count",
+    "warning_count",
+)
 CREATE_RESPONSE_KEYS = ("inspection_run_id", "summary", "results")
 DETAIL_RESPONSE_KEYS = (
     "inspection_run_id",
@@ -549,6 +561,37 @@ def _validate_etl_load_quality_trend_item(item: object) -> bool:
         loaded_rows=item["loaded_rows"],
         rejected_rows=item["rejected_rows"],
         error_counts=None,
+    )
+
+
+def _validate_inspection_quality_trend_response(data: dict[str, Any]) -> None:
+    items = data.get("items")
+    if (
+        any(key not in data for key in INSPECTION_QUALITY_TREND_RESPONSE_KEYS)
+        or not isinstance(data.get("inspection_version"), str)
+        or not data["inspection_version"].strip()
+        or not isinstance(items, list)
+        or any(not _validate_inspection_quality_trend_item(item) for item in items)
+    ):
+        raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+
+
+def _validate_inspection_quality_trend_item(item: object) -> bool:
+    if not isinstance(item, dict) or any(
+        key not in item for key in INSPECTION_QUALITY_TREND_ITEM_KEYS
+    ):
+        return False
+    try:
+        date.fromisoformat(item["date"])
+    except (TypeError, ValueError):
+        return False
+    count_fields = INSPECTION_QUALITY_TREND_ITEM_KEYS[1:]
+    if any(type(item[field]) is not int or item[field] < 0 for field in count_fields):
+        return False
+    return item["run_count"] == (
+        item["error_run_count"]
+        + item["warning_run_count"]
+        + item["normal_run_count"]
     )
 
 
@@ -1789,6 +1832,34 @@ class CatalogGuardApiClient:
             params=params,
         )
         self._validate_response_keys(data, LIST_RESPONSE_KEYS)
+        return data
+
+    def get_inspection_quality_trend(
+        self,
+        *,
+        filename: str | None = None,
+        start_date: date | str | None = None,
+        end_date: date | str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, str] = {}
+        normalized_filename = "" if filename is None else str(filename).strip()
+        if len(normalized_filename) > 100:
+            raise ValueError("filename must be 100 characters or fewer")
+        if normalized_filename:
+            params["filename"] = normalized_filename
+        normalized_start_date = self._normalize_date_param(start_date)
+        normalized_end_date = self._normalize_date_param(end_date)
+        if normalized_start_date:
+            params["start_date"] = normalized_start_date
+        if normalized_end_date:
+            params["end_date"] = normalized_end_date
+        normalized_status = self._normalize_status_param(status)
+        if normalized_status:
+            params["status"] = normalized_status
+
+        data = self._get_json("/api/v1/inspections/quality-trend", params=params)
+        _validate_inspection_quality_trend_response(data)
         return data
 
     def create_inspection(

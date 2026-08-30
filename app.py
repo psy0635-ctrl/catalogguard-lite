@@ -310,6 +310,82 @@ def build_history_dataframe(items: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=HISTORY_DISPLAY_COLUMNS)
 
 
+def build_inspection_quality_trend_dataframe(items: list[dict]) -> pd.DataFrame:
+    rows = [
+        {
+            "날짜": item["date"],
+            "신규 검수": item["run_count"],
+            "오류 검수": item["error_run_count"],
+            "주의 검수": item["warning_run_count"],
+            "정상 검수": item["normal_run_count"],
+            "전체 상품": item["total_products"],
+            "전체 문제": item["total_issues"],
+            "오류": item["error_count"],
+            "주의": item["warning_count"],
+        }
+        for item in items
+    ]
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "날짜",
+            "신규 검수",
+            "오류 검수",
+            "주의 검수",
+            "정상 검수",
+            "전체 상품",
+            "전체 문제",
+            "오류",
+            "주의",
+        ],
+    )
+
+
+def render_inspection_quality_trend(api_client, request_params: dict[str, str]) -> None:
+    st.subheader("검수 품질 추세")
+    try:
+        response = api_client.get_inspection_quality_trend(**request_params)
+    except CatalogGuardApiConnectionError as error:
+        st.error(
+            build_api_error_display_message(
+                "검수 품질 추세 서버에 연결할 수 없습니다.", error
+            )
+        )
+        return
+    except CatalogGuardApiTimeoutError as error:
+        st.error(
+            build_api_error_display_message(
+                "검수 품질 추세 서버 응답 시간이 초과되었습니다.", error
+            )
+        )
+        return
+    except CatalogGuardApiResponseError as error:
+        st.error(
+            build_api_error_display_message(
+                "검수 품질 추세를 불러오는 중 오류가 발생했습니다.", error
+            )
+        )
+        return
+    except ValueError:
+        st.error("검수 품질 추세 검색 조건이 올바르지 않습니다.")
+        return
+
+    st.caption(f"현재 검수 버전 {response['inspection_version']} 기준")
+    items = response["items"]
+    if not items:
+        st.info("선택한 조건에 해당하는 검수 추세 데이터가 없습니다.")
+        return
+
+    dataframe = build_inspection_quality_trend_dataframe(items)
+    metric_columns = st.columns(3)
+    metric_columns[0].metric("신규 검수", int(dataframe["신규 검수"].sum()))
+    metric_columns[1].metric("전체 상품", int(dataframe["전체 상품"].sum()))
+    metric_columns[2].metric("전체 문제", int(dataframe["전체 문제"].sum()))
+    chart_dataframe = dataframe.set_index("날짜")[["오류", "주의"]]
+    st.line_chart(chart_dataframe, width="stretch")
+    st.dataframe(dataframe, width="stretch", hide_index=True)
+
+
 def build_history_summary_dataframe(items: list[dict]) -> pd.DataFrame:
     rows = []
     for item in items:
@@ -1500,6 +1576,13 @@ def render_inspection_history_list(api_client) -> None:
     filter_caption = build_history_filter_caption(st.session_state)
     if filter_caption:
         st.caption(filter_caption)
+
+    trend_request_params = {
+        key: value
+        for key, value in request_params.items()
+        if key in {"filename", "start_date", "end_date", "status"}
+    }
+    render_inspection_quality_trend(api_client, trend_request_params)
 
     history_dataframe = build_history_dataframe(history_response["items"])
     filename_query = get_history_filename_query(st.session_state)

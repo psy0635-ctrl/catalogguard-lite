@@ -24,6 +24,23 @@ LIST_RESPONSE = {
     "offset": 0,
 }
 
+QUALITY_TREND_RESPONSE = {
+    "inspection_version": "13",
+    "items": [
+        {
+            "date": "2026-08-27",
+            "run_count": 3,
+            "error_run_count": 1,
+            "warning_run_count": 1,
+            "normal_run_count": 1,
+            "total_products": 60,
+            "total_issues": 8,
+            "error_count": 5,
+            "warning_count": 3,
+        }
+    ],
+}
+
 DETAIL_RESPONSE = {
     "inspection_run_id": 11,
     "source_filename": "products_dev.csv",
@@ -1019,6 +1036,49 @@ def test_list_inspections_rejects_too_long_filename_without_request():
         client.list_inspections(filename="a" * 101)
 
     assert session.calls == []
+
+
+def test_get_inspection_quality_trend_sends_existing_history_filters():
+    client, session = make_client(response=FakeResponse(payload=QUALITY_TREND_RESPONSE))
+
+    data = client.get_inspection_quality_trend(
+        filename="  products  ",
+        start_date=date(2026, 8, 1),
+        end_date="2026-08-31",
+        status="warning",
+    )
+
+    assert data == QUALITY_TREND_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/inspections/quality-trend",
+            "params": {
+                "filename": "products",
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-31",
+                "status": "warning",
+            },
+            "timeout": 5.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"inspection_version": "", "items": []},
+        {"inspection_version": "13", "items": [{**QUALITY_TREND_RESPONSE["items"][0], "date": "not-a-date"}]},
+        {"inspection_version": "13", "items": [{**QUALITY_TREND_RESPONSE["items"][0], "error_count": -1}]},
+        {"inspection_version": "13", "items": [{**QUALITY_TREND_RESPONSE["items"][0], "run_count": True}]},
+        {"inspection_version": "13", "items": [{**QUALITY_TREND_RESPONSE["items"][0], "normal_run_count": 2}]},
+    ],
+)
+def test_get_inspection_quality_trend_rejects_invalid_contract(payload):
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.get_inspection_quality_trend()
 
 
 ETL_LOAD_LIST_RESPONSE = {

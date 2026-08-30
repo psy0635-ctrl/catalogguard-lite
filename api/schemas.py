@@ -1,5 +1,5 @@
 # 역할: CSV 검수 API가 반환하는 JSON 응답 구조를 Pydantic 모델로 정의합니다.
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -57,6 +57,23 @@ class InspectionListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class InspectionQualityTrendPointResponse(BaseModel):
+    date: date
+    run_count: int = Field(ge=0)
+    error_run_count: int = Field(ge=0)
+    warning_run_count: int = Field(ge=0)
+    normal_run_count: int = Field(ge=0)
+    total_products: int = Field(ge=0)
+    total_issues: int = Field(ge=0)
+    error_count: int = Field(ge=0)
+    warning_count: int = Field(ge=0)
+
+
+class InspectionQualityTrendResponse(BaseModel):
+    inspection_version: str = Field(min_length=1)
+    items: list[InspectionQualityTrendPointResponse]
 
 
 class ETLLoadListItemResponse(BaseModel):

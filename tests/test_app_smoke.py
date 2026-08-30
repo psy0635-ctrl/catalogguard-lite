@@ -201,6 +201,33 @@ class FakeInspectionApiClient:
     def list_inspections(self, **params):
         return {"items": [], "total": 0, "limit": params["limit"], "offset": 0}
 
+    def get_inspection_quality_trend(self, **params):
+        return {"inspection_version": "13", "items": []}
+
+    def list_etl_profiles(self, **params):
+        return {"items": []}
+
+    def list_unknown_size_tokens(self, **params):
+        return {"items": []}
+
+    def get_etl_load_quality_summary(self, **params):
+        raise catalogguard_api.CatalogGuardApiConfigurationError("not configured")
+
+    def get_etl_load_quality_trend(self, **params):
+        return {"items": []}
+
+    def get_etl_quality_observability_profiles(self):
+        return {"items": []}
+
+    def list_etl_loads(self, **params):
+        return {"items": [], "total": 0, "limit": 20, "offset": 0}
+
+    def list_catalog_promotions(self, **params):
+        return {"items": [], "total": 0, "limit": 20, "offset": 0}
+
+    def list_catalog_promotion_rollbacks(self, **params):
+        return {"items": [], "total": 0, "limit": 20, "offset": 0}
+
 
 def find_widget(widgets, label):
     return next(widget for widget in widgets if widget.label == label)

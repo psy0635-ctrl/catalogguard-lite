@@ -1,10 +1,10 @@
 # 역할: 검수 실행과 상세 검수 결과를 DB에 저장하는 순수 Repository 함수들을 제공합니다.
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from config.settings import INSPECTION_VERSION
@@ -24,6 +24,19 @@ class InspectionResultCreate:
     reason: str
     recommendation: str
     risk_level: str
+
+
+@dataclass(frozen=True)
+class InspectionQualityTrendRow:
+    date: date
+    run_count: int
+    error_run_count: int
+    warning_run_count: int
+    normal_run_count: int
+    total_products: int
+    total_issues: int
+    error_count: int
+    warning_count: int
 
 
 def create_inspection_run(
@@ -248,3 +261,70 @@ def count_inspection_runs(
         status_filter=status_filter,
     )
     return int(session.scalar(statement) or 0)
+
+
+def get_inspection_quality_trend_rows(
+    session: Session,
+    *,
+    inspection_version: str,
+    filename: str | None = None,
+    created_at_start: datetime | None = None,
+    created_at_end_exclusive: datetime | None = None,
+    status_filter: InspectionRunStatusFilter | None = None,
+) -> list[InspectionQualityTrendRow]:
+    """Aggregate inspection runs by their PostgreSQL Asia/Seoul calendar day."""
+    korea_date = func.date(
+        func.timezone("Asia/Seoul", InspectionRun.created_at)
+    ).label("date")
+    error_run_count = func.coalesce(
+        func.sum(case((InspectionRun.error_count > 0, 1), else_=0)), 0
+    ).label("error_run_count")
+    warning_run_count = func.coalesce(
+        func.sum(
+            case(
+                ((InspectionRun.error_count == 0) & (InspectionRun.warning_count > 0), 1),
+                else_=0,
+            )
+        ),
+        0,
+    ).label("warning_run_count")
+    normal_run_count = func.coalesce(
+        func.sum(
+            case(
+                ((InspectionRun.error_count == 0) & (InspectionRun.warning_count == 0), 1),
+                else_=0,
+            )
+        ),
+        0,
+    ).label("normal_run_count")
+    statement = apply_inspection_run_filters(
+        select(
+            korea_date,
+            func.count(InspectionRun.id).label("run_count"),
+            error_run_count,
+            warning_run_count,
+            normal_run_count,
+            func.coalesce(func.sum(InspectionRun.total_products), 0).label("total_products"),
+            func.coalesce(func.sum(InspectionRun.total_issues), 0).label("total_issues"),
+            func.coalesce(func.sum(InspectionRun.error_count), 0).label("error_count"),
+            func.coalesce(func.sum(InspectionRun.warning_count), 0).label("warning_count"),
+        ).where(InspectionRun.inspection_version == inspection_version),
+        filename=filename,
+        created_at_start=created_at_start,
+        created_at_end_exclusive=created_at_end_exclusive,
+        status_filter=status_filter,
+    ).group_by(korea_date).order_by(korea_date.asc())
+    return [
+        InspectionQualityTrendRow(
+            date=row.date,
+            run_count=int(row.run_count),
+            error_run_count=int(row.error_run_count),
+            warning_run_count=int(row.warning_run_count),
+            normal_run_count=int(row.normal_run_count),
+            total_products=int(row.total_products),
+            total_issues=int(row.total_issues),
+            error_count=int(row.error_count),
+            warning_count=int(row.warning_count),
+        )
+        for row in session.execute(statement).all()
+    ]
