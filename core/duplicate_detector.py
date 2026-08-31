@@ -200,8 +200,18 @@ def find_duplicate_product_names(products: list[Product]) -> list[ValidationIssu
 
         duplicate_indexes: set[int] = set()
         for first_index, (_, first_product) in enumerate(duplicate_rows):
+            # Every row in this name bucket is already a duplicate candidate.
+            if len(duplicate_indexes) == len(duplicate_rows):
+                break
+
             for second_index in range(first_index + 1, len(duplicate_rows)):
                 _, second_product = duplicate_rows[second_index]
+                # A resolved pair cannot add a new issue candidate.
+                if (
+                    first_index in duplicate_indexes
+                    and second_index in duplicate_indexes
+                ):
+                    continue
                 if is_same_group_normal_option(first_product, second_product):
                     continue
                 duplicate_indexes.add(first_index)

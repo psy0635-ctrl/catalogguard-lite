@@ -201,11 +201,17 @@ def _duplicate_dataset_report(row_count: int) -> dict[str, object]:
     products = load_products_from_dataframe(dataframe)
     rules_timing, issues = measure(lambda: run_all_rules(products))
     profile = _rule_profile(products)
+    duplicate_product_name = next(
+        item
+        for item in profile
+        if item["rule"] == "check_duplicate_product_name"
+    )
     return {
         "csv_bytes": len(csv_bytes),
         "products": len(products),
         "issues": len(issues),
         "rules_total_ms": rules_timing,
+        "duplicate_product_name": duplicate_product_name,
         "top_rules": profile[:3],
     }
 
