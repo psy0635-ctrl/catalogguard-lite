@@ -1150,6 +1150,7 @@ def test_get_inspection_comparison_rejects_invalid_ids_without_request(base_run_
         make_comparison_response(base_only_issue_count=-1),
         make_comparison_response(changed_items=[{"side": "invalid"}]),
         make_comparison_response(base_run={**make_comparison_response()["base_run"], "inspection_version": ""}),
+        make_comparison_response(base_run={**make_comparison_response()["base_run"], "inspection_version": "12"}),
         make_comparison_response(summary_delta={"total_products_delta": "-1"}),
         make_comparison_response(error_field_comparisons=[{"error_field": "가격", "base_count": 1, "target_count": 0, "delta": "-1"}]),
         make_comparison_response(base_only_issue_count=0),

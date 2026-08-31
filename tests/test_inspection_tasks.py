@@ -68,6 +68,7 @@ def make_state(
 
 
 def test_new_csv_task_runs_inspection_once_and_cleans_up_file(tmp_path, monkeypatch) -> None:
+    from config.settings import INSPECTION_VERSION
     import workers.inspection_tasks as tasks
 
     job_id = "8d4c3d84-cf1d-4cdb-83a4-4ebf9d6bf5f6"
@@ -78,6 +79,7 @@ def test_new_csv_task_runs_inspection_once_and_cleans_up_file(tmp_path, monkeypa
     write_session = FakeSession()
     sessions = [precheck_session, write_session]
     calls: list[str] = []
+    identity_versions: list[str] = []
     save_kwargs = []
 
     monkeypatch.setattr(tasks, "get_redis_job_store", lambda: store)
@@ -91,7 +93,11 @@ def test_new_csv_task_runs_inspection_once_and_cleans_up_file(tmp_path, monkeypa
     monkeypatch.setattr(
         tasks,
         "find_existing_inspection_run",
-        lambda *args, **kwargs: calls.append("identity") or None,
+        lambda _session, *, file_sha256, inspection_version: (
+            calls.append("identity")
+            or identity_versions.append(inspection_version)
+            or None
+        ),
     )
     monkeypatch.setattr(
         tasks,
@@ -116,6 +122,8 @@ def test_new_csv_task_runs_inspection_once_and_cleans_up_file(tmp_path, monkeypa
     tasks.inspect_csv_task.run(job_id, str(job_file))
 
     assert calls == ["validate", "identity", "inspect", "save"]
+    assert identity_versions == [INSPECTION_VERSION]
+    assert save_kwargs[0]["inspection_version"] == INSPECTION_VERSION
     assert save_kwargs[0]["actor_user_id"] == 41
     assert save_kwargs[0]["actor_username"] == "operator01"
     assert [update["status"] for update in store.updates] == [

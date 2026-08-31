@@ -2377,6 +2377,8 @@ curl.exe "http://127.0.0.1:8001/api/v1/inspections?limit=10&offset=0&filename=pr
 - 파일명이 같아도 CSV bytes가 다르면 새로운 이력으로 저장합니다.
 - 같은 CSV라도 검수 규칙 버전이 달라지면 다시 검수하고 새 이력으로 저장할 수 있습니다.
 
+검수 결과 의미가 달라질 때 version을 올리는 기준, 과거 run 보존, 자동 backfill 불가 사유, Trend·Comparison의 version 경계는 [Inspection Version Lifecycle Policy](docs/inspection_version_policy.md)에 정리했습니다.
+
 상품 그룹 내 중복 색상·사이즈 옵션 규칙을 추가할 때 검수 버전을 `"3"`으로 올렸고, 상품 그룹 카테고리 일관성 규칙을 추가하면서 `"4"`로 올렸습니다. 선택적 `sale_price`와 정상가·할인가 관계 규칙을 추가하면서 `"5"`로 올렸습니다. 상품 그룹 사이즈 체계 일관성 규칙을 추가하면서 `"6"`으로 올렸습니다. `SHOES`와 `BAG`를 공식 허용 카테고리로 확장하면서 `"7"`로 올렸습니다. 카테고리별 가격 이상치 비교가 기존 카테고리 별칭 정규화를 재사용하도록 통일하면서 `"8"`로 올렸습니다. 같은 CSV라도 카테고리 표기가 섞여 있으면 가격 그룹이 합쳐져 `가격 이상치` 결과가 달라질 수 있으므로, 기존 검수 결과를 그대로 재사용하지 않기 위한 것입니다. 카테고리별 필수 패션 속성 정책을 추가해 `BAG`의 `size`를 선택 값으로 바꾸면서 `"9"`로 올렸습니다. 버전 8까지 `필수 값 누락` 오류가 발생하던 빈 `size`의 `BAG` 상품이 버전 9에서는 정상 처리되므로, 같은 CSV를 다시 올렸을 때 버전 8 결과를 재사용해 새 정책이 적용되지 않는 일을 막기 위한 것입니다. `size`가 선택 값인 카테고리의 빈 `size`도 완전 중복 비교에 포함하면서 `"10"`으로 올렸습니다. 버전 9까지 완전 중복 검사에서 빠지던 빈 `size`의 `BAG` 상품이 버전 10에서는 `완전 중복 상품` 오류로 표시되므로, 같은 CSV가 버전 9 결과를 재사용해 새 검사 범위가 적용되지 않는 일을 막기 위한 것입니다. `BAG`처럼 `size`가 선택 값인 canonical 카테고리의 빈 `size`를 `상품 옵션 조합 중복` 비교에도 포함하면서 `"11"`로 올렸습니다. 버전 10까지 아무 오류도 만들지 않던 "같은 그룹·같은 색상·빈 `size`이면서 완전 중복은 아닌" 상품이 버전 11에서는 `상품 옵션 조합 중복` 오류로 표시되므로, 같은 CSV가 버전 10 결과를 재사용하지 않도록 한 것입니다. 사이즈·색상 별칭 비교에서 값 안쪽의 연속 공백을 정리하도록 보강하면서 `"12"`로 올렸습니다. 버전 11까지 `free  size`처럼 별칭에 공백이 더 들어간 값은 표준값을 찾지 못해 `상품 옵션 조합 중복`과 `사이즈 표기 비표준` 검사에서 모두 빠졌지만 버전 12에서는 `free size`와 같은 값으로 비교되므로, 같은 CSV가 버전 11 결과를 재사용하지 않도록 한 것입니다. 이번에 별칭 조회에서 공백뿐 아니라 하이픈(`-`)과 언더스코어(`_`) 차이도 무시하도록 확장하면서 현재 `INSPECTION_VERSION`을 `"13"`으로 올렸습니다. 버전 12까지 `free-size`·`free_size`·`extra_large`처럼 등록된 별칭의 구분자만 다른 값은 표준값을 찾지 못해 아무 오류도 만들지 않았지만 버전 13에서는 기존 별칭과 같은 값으로 비교되므로, 같은 CSV가 버전 12 결과를 재사용하지 않도록 한 것입니다. 별칭 사전 자체는 바뀌지 않았고 `/`와 `.`는 계속 구분자로 취급하지 않습니다. 같은 CSV라도 새 검수 기준으로 다시 검사할 수 있도록 inspection identity에 사용하는 규칙 버전을 올린 것이며, 동일 CSV라도 버전 6, 버전 7, 버전 8은 별도 검수 결과로 저장할 수 있습니다. 버전 6에서 `카테고리 오류`가 발생하던 canonical `SHOES`·`BAG` 상품이 버전 7에서는 정상 카테고리로 처리되고, 같은 이유로 완전 중복 검사 대상에도 포함되므로 같은 CSV의 결과가 달라질 수 있습니다. 파일 해시와 검수 버전을 함께 사용하는 기존 중복 저장 방지 기준은 그대로 유지됩니다. DB 스키마 변경은 없어 이 기능을 위한 Alembic migration은 추가하지 않았으며, 과거 이력과 기존 migration의 `"1"` backfill 값은 그대로 유지합니다.
 
 PostgreSQL에는 다음 partial unique index가 있습니다.
@@ -2907,8 +2909,6 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 ## 26. 향후 개선 방향
 
 - 운영 정책에 맞는 금지어, 개인정보, 카테고리 규칙 확장
-- 검수 규칙 변경 시 `inspection_version` 관리 정책 수립
-- 과거 이력 backfill 정책 검토
 - 검수 이력 삭제와 보관 정책
 - dedup 요청자를 포함한 요청 단위 감사 event가 필요할 경우 별도 audit event 모델 검토
 - Rollback 실행 이력만 목록으로 조회하는 전용 GET API
@@ -2943,7 +2943,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 원본 CSV 파일과 원문 개인정보를 DB에 저장하지 않는 현재 원칙을 유지합니다.
 - 검수 결과 컬럼을 바꾸면 `core/presentation.py`, `api/routes/inspections.py`, `db/persistence_service.py`, `app.py`의 상세 CSV 변환 로직과 관련 테스트를 함께 확인합니다.
 - DB 모델을 바꾸면 SQLAlchemy 모델과 Alembic 마이그레이션을 함께 수정합니다.
-- 검수 규칙을 바꿔 같은 CSV도 다시 검수해야 하는 경우 `config/settings.py`의 `INSPECTION_VERSION`을 함께 올립니다.
+- 검수 규칙을 바꿔 같은 CSV도 다시 검수해야 하는 경우 [Inspection Version Lifecycle Policy](docs/inspection_version_policy.md)를 적용해 `config/settings.py`의 `INSPECTION_VERSION`을 함께 올립니다.
 - `inspection_version`에는 DB `server_default`를 두지 않고 애플리케이션에서 명시적으로 저장합니다.
 - `DATABASE_URL`, `TEST_DATABASE_URL`, `CATALOGGUARD_JWT_SECRET` 같은 비밀번호·secret 포함 환경변수는 저장소에 커밋하지 않습니다.
 - ETL 프로필의 activation 상태와 정의를 섞지 않습니다. 프로필 정의·버전 archive를 바꿀 때는 `config/etl`의 버전별 JSON과 `etl/profile_loader.py`의 registry를, 신규 실행 대상 버전을 바꿀 때는 activation API를 사용합니다. `etl_profile_activations`를 프로필 정의 저장소나 변경 이력 표로 읽지 않습니다.
