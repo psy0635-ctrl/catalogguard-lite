@@ -489,6 +489,8 @@ FastAPI (인증·RBAC 통과 후 작업 등록)
 
 저장된 검수 실행을 파일명, 날짜 범위와 검수 상태로 검색하고 페이지 단위로 확인할 수 있습니다. 목록에는 실행 사용자를 표시하며, migration 이전 legacy row처럼 actor가 `NULL`이면 `알 수 없음`으로 표시합니다. 현재 검색 조건에 맞는 전체 검수 이력 요약도 실행 사용자를 포함한 CSV로 준비해 내려받을 수 있습니다.
 
+검수 이력은 현재 삭제 API·soft delete·자동 TTL 없이 보관합니다. 이는 영구 보관을 약속하는 정책이 아니며, 물리 삭제가 history·CSV·Trend·Comparison·dedup에 미치는 영향과 미래 삭제의 감사·권한 조건은 [Inspection History Retention Policy](docs/inspection_history_retention_policy.md)를 따릅니다.
+
 검수 이력 영역에서는 현재 `INSPECTION_VERSION` 기준의 일별 검수 품질 추세도 볼 수 있습니다. PostgreSQL이 `Asia/Seoul` 날짜로 신규 `InspectionRun`을 직접 집계해 신규 검수, 전체 상품, 전체 문제와 일별 오류·주의를 표시합니다. 이는 사용자 요청량이나 업로드 횟수 통계가 아니며, 과거 검수 버전과 섞어 비교하지 않습니다.
 
 같은 목록에서 두 실행을 선택하면 저장된 issue row를 비교할 수 있습니다. API는 공통 문제 수, 기준 실행에만 있는 문제 수, 비교 실행에만 있는 문제 수와 오류 항목별 `기준/비교/변화`를 제공합니다. 이 비교는 전체 상품 diff가 아니며, 문제 행이 보이지 않는다고 수정되었다거나 문제 행이 새로 보인다고 신규 오류라고 단정하지 않습니다.
@@ -2860,7 +2862,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - `terraform test`는 mock provider 기반이므로 계산된 설정값만 검증합니다. 실제 AWS API 응답, 계정 quota, IAM 권한 부족 같은 문제는 이 test로 확인할 수 없습니다.
 - mock provider는 코드에서 설정하지 않은 속성에도 임의 값을 채우므로, EC2에 `key_name`을 지정하지 않았다는 사실은 test가 아니라 코드 리뷰로 확인합니다.
 - Terraform 코드의 IMDSv2 강제와 루트 볼륨 암호화는 수동 구성에 없던 값이며, apply하지 않았으므로 실제 인스턴스에는 반영되어 있지 않습니다.
-- 저장된 검수 이력 삭제 기능은 구현되어 있지 않습니다.
+- 검수 이력에는 application 삭제 API·soft delete·자동 TTL이 없으며, 보관 기간은 아직 확정하지 않았습니다. 삭제가 필요해지면 [Inspection History Retention Policy](docs/inspection_history_retention_policy.md)의 audit·RBAC·영향 분석 조건을 먼저 충족해야 합니다.
 - 전체 요약 CSV는 목록 API를 반복 조회하므로 다운로드 중 DB 내용이 바뀌는 상황의 완전한 스냅샷 보장은 별도 트랜잭션/내보내기 API가 필요합니다.
 - 실제 외부 공급사 운영 데이터와 연동하지 않았습니다.
 - 웹 ETL은 업로드부터 staging 적재까지 하나의 동기 HTTP 요청으로 처리하며, 비동기(Celery) 처리는 아직 없습니다.
@@ -2909,7 +2911,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 ## 26. 향후 개선 방향
 
 - 운영 정책에 맞는 금지어, 개인정보, 카테고리 규칙 확장
-- 검수 이력 삭제와 보관 정책
+- 실제 retention 요구가 확정될 경우 검수 이력 deletion audit event와 보관 실행 방식 설계
 - dedup 요청자를 포함한 요청 단위 감사 event가 필요할 경우 별도 audit event 모델 검토
 - Rollback 실행 이력만 목록으로 조회하는 전용 GET API
 - Prometheus 서버 구축과 scrape 설정, Grafana 대시보드
