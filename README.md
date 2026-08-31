@@ -12,7 +12,7 @@ https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
 
 > 공개 Streamlit 앱과 로컬 전체 시스템의 기능 범위는 다를 수 있습니다. 검수 이력과 ETL 적재 이력의 검색·상세 조회는 로컬 또는 별도 배포 환경에서 FastAPI 서버와 PostgreSQL이 함께 실행되어야 사용할 수 있습니다.
 
-프로젝트의 설계·검증 과정은 [포트폴리오 상세 문서](docs/portfolio_project.md), 공급사 변환·HTTP feed Airflow orchestration 흐름은 [ETL MVP 문서](docs/etl_mvp.md), PostgreSQL 쿼리 검증은 [SQL 성능 분석 문서](docs/sql_performance_analysis.md), 합성 fixture 기준의 발표 진행은 [Release / Portfolio Demo Runbook](docs/demo_runbook.md)에서 확인할 수 있습니다.
+프로젝트의 설계·검증 과정은 [포트폴리오 상세 문서](docs/portfolio_project.md), 공급사 변환·HTTP feed Airflow orchestration 흐름은 [ETL MVP 문서](docs/etl_mvp.md), PostgreSQL 쿼리 검증은 [SQL 성능 분석 문서](docs/sql_performance_analysis.md), CSV 검수 pipeline 기준선은 [Inspection Pipeline Performance Baseline](docs/inspection_pipeline_performance_baseline.md), 합성 fixture 기준의 발표 진행은 [Release / Portfolio Demo Runbook](docs/demo_runbook.md)에서 확인할 수 있습니다.
 
 ## 2. 프로젝트 목적
 
@@ -2706,6 +2706,8 @@ python scripts/benchmark_inspection.py --rows 100 1000 5000 10000 --repeat 3 --w
 
 측정 환경은 로컬 개발 PC이며 DB·네트워크 시간, 실제 동시 접속과 운영 트래픽은 포함하지 않습니다. 이 측정은 Streamlit과 FastAPI의 이중 검수를 제거하는 근거로 사용했습니다. 현재 비동기 경로는 Redis/Celery로 요청 수명과 검수 작업을 분리하지만, 대규모 트래픽 성능을 입증하는 자료로 해석하지 않습니다.
 
+위의 과거 전체 동기 검수 측정과 별도로, 현재 pipeline의 validation·masking·product loading·rule별·presentation 비용과 concentrated duplicate shape를 분해한 Before baseline은 [Inspection Pipeline Performance Baseline](docs/inspection_pipeline_performance_baseline.md)에 기록합니다. 이는 DB query plan 분석인 [SQL 성능 분석 문서](docs/sql_performance_analysis.md)와 다른 측정입니다.
+
 ### GitHub Actions 자동 테스트
 
 `.github/workflows/test.yml`의 `Test` workflow는 `main` 브랜치 push와 `main` 브랜치를 대상으로 한 pull request에서 실행됩니다. 일반 `test` job은 Python 3.11, PostgreSQL 18·Redis 7.4, Alembic, E2E 제외 pytest, 실제 Celery Worker·FastAPI·비동기 CSV 검수 E2E와 Streamlit startup smoke를 실행합니다. 또한 `Dockerfile.aws` image build, `api`·`services`·`workers`와 Celery task import, 실행 UID `10001`, PostgreSQL migration, 기본 CMD의 Uvicorn 시작과 `/health` HTTP `200`을 검증합니다. 이 AWS 검증은 GitHub Actions Ubuntu의 Docker packaging/runtime smoke이며 실제 AWS 배포는 수행하지 않습니다. 별도 `browser-e2e` job은 PostgreSQL 18 service와 Playwright Chromium을 준비하고 `scripts/run_etl_browser_e2e.py`로 ETL CLI·Loader·FastAPI·Streamlit·실제 브라우저 흐름을 검증하며, 실패 시에만 browser artifact를 업로드합니다. 세 번째 `kubernetes-smoke` job은 고정 버전 kind/kubectl로 실제 Kubernetes cluster를 만들고, 같은 `Dockerfile.aws` image를 `k8s/` manifest로 배포해 PostgreSQL rollout·Alembic Migration Job·FastAPI rollout·`/health`·`/ready`까지 검증합니다(자세한 흐름은 16장 참고). 이 job도 실패 시에만 `kubectl get/describe/logs` 기반 진단 정보를 출력하며 Secret 값은 출력하지 않습니다. 네 번째 `terraform-validate` job은 고정 버전 Terraform `1.15.8`로 `terraform/`의 `fmt -check -recursive`·`init -backend=false`·`validate`·mock provider `test`를 실행합니다. 실제 AWS 자격 증명을 사용하지 않고 `terraform apply`·`destroy`·`import`도 수행하지 않으므로 AWS 리소스와 비용이 발생하지 않습니다(자세한 흐름은 16장 참고).
@@ -2925,7 +2927,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - custom VPC·private subnet 기반 네트워크 구성의 Terraform 코드화
 - Refresh Token, 회원가입, password reset, OAuth/MFA/SSO, 로그인 rate limit
 - 중복 저장 이벤트 로그 또는 감사 기록 검토
-- 대용량 CSV 처리 성능 개선
+- concentrated duplicate bucket 성능 개선 검토(측정된 pair comparison contract를 보존하는 별도 작업)
 - 카테고리와 가격 이상치 기준을 설정 파일이나 관리 화면에서 조정
 - 상품 그룹 내 상품명 일관성 검수
 - 카테고리별 사이즈 형식 검수
