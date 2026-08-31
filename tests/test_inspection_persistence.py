@@ -508,6 +508,30 @@ def test_save_inspection_report_persists_run_and_multiple_results(database_sessi
     assert "높음" in {result.risk_level for result in persisted_run.results}
 
 
+def test_database_cascade_deletes_results_with_inspection_run(database_session):
+    """The database FK, not an application DELETE feature, owns this cleanup."""
+    session, created_source_filenames = database_session
+    source_filename = unique_filename("cascade")
+    created_source_filenames.append(source_filename)
+    report = make_report([{**BASE_ROW, "price": "0"}])
+    inspection_run_id = save_inspection_report_id(
+        session,
+        source_filename=source_filename,
+        report=report,
+        file_sha256=make_file_hash(source_filename.encode("utf-8")),
+        inspection_version=INSPECTION_VERSION,
+    )
+
+    assert count_inspection_results(session, inspection_run_id=inspection_run_id) == 1
+
+    # SQL-level parent deletion verifies PostgreSQL ON DELETE CASCADE directly.
+    session.execute(delete(InspectionRun).where(InspectionRun.id == inspection_run_id))
+    session.commit()
+
+    assert session.get(InspectionRun, inspection_run_id) is None
+    assert count_inspection_results(session, inspection_run_id=inspection_run_id) == 0
+
+
 def test_save_inspection_report_returns_existing_run_for_same_hash_and_version(
     database_session,
 ):
