@@ -640,6 +640,8 @@ TOP 5 제한은 집계 함수가 아닌 UI에서 적용하였습니다. 통계 �
 
 이 측정으로 Streamlit과 FastAPI가 각각 전체 검수를 수행하는 구조보다 서버를 단일 검수 기준으로 두는 작업을 우선했습니다. 이후 긴 검수를 요청 수명과 분리할 수 있도록 Redis Job Store와 Celery Worker를 추가했고, Streamlit에서는 즉시 검수를 기본값으로 유지하면서 백그라운드 검수를 선택할 수 있게 연결했습니다. 백그라운드 상태는 무한 폴링 없이 사용자가 새로고침 버튼을 눌러 확인합니다.
 
+후속 Before baseline은 SQL query plan과 application pipeline을 분리해 1,000·5,000·10,000행 합성 CSV의 validation·masking·product loading·rule·presentation 단계를 측정했습니다. 일반 normal dataset에서는 rule 실행이 가장 큰 단계였고, 같은 name/variant bucket을 집중한 별도 데이터에서는 duplicate pair comparison 증가가 두드러졌습니다. 측정 없이 최적화하지 않고 다음 후보를 하나로 제한했으며, 상세 수치·환경·메모리 한계는 [Inspection Pipeline Performance Baseline](inspection_pipeline_performance_baseline.md)에 정리했습니다.
+
 ### Streamlit·FastAPI 이중 검수 제거와 비동기 선택
 
 기존 흐름은 Streamlit에서 업로드한 DataFrame을 먼저 전체 검수한 뒤 저장 시 FastAPI에 같은 파일을 다시 보내 서버가 다시 검수하는 구조였습니다. 최신 흐름은 다음과 같이 바꾸었습니다.
