@@ -76,6 +76,45 @@ class InspectionQualityTrendResponse(BaseModel):
     items: list[InspectionQualityTrendPointResponse]
 
 
+class InspectionComparisonRunResponse(BaseModel):
+    inspection_run_id: int = Field(ge=1)
+    source_filename: str
+    created_at: datetime
+    inspection_version: str = Field(min_length=1)
+    summary: InspectionSummary
+
+
+class InspectionComparisonSummaryDeltaResponse(BaseModel):
+    # 모든 변화량은 비교 실행 - 기준 실행 방향이며 음수를 허용합니다.
+    total_products_delta: int
+    total_issues_delta: int
+    error_count_delta: int
+    warning_count_delta: int
+
+
+class InspectionComparisonChangedItemResponse(InspectionResultItem):
+    side: Literal["base_only", "target_only"]
+    count: int = Field(ge=1)
+
+
+class InspectionErrorFieldComparisonResponse(BaseModel):
+    error_field: str
+    base_count: int = Field(ge=0)
+    target_count: int = Field(ge=0)
+    delta: int
+
+
+class InspectionComparisonResponse(BaseModel):
+    base_run: InspectionComparisonRunResponse
+    target_run: InspectionComparisonRunResponse
+    summary_delta: InspectionComparisonSummaryDeltaResponse
+    common_issue_count: int = Field(ge=0)
+    base_only_issue_count: int = Field(ge=0)
+    target_only_issue_count: int = Field(ge=0)
+    changed_items: list[InspectionComparisonChangedItemResponse]
+    error_field_comparisons: list[InspectionErrorFieldComparisonResponse]
+
+
 class ETLLoadListItemResponse(BaseModel):
     etl_load_run_id: int
     source_filename: str

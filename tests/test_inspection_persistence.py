@@ -1083,6 +1083,139 @@ def test_get_inspection_detail_handles_zero_result_run(monkeypatch):
     assert detail.results == []
 
 
+def _comparison_detail(run_id, *, version="13", total_products=1, results=()):
+    return persistence_service.InspectionDetail(
+        inspection_run_id=run_id,
+        source_filename=f"run_{run_id}.csv",
+        created_at=datetime(2026, 8, 31, tzinfo=timezone.utc),
+        total_products=total_products,
+        total_issues=len(results),
+        error_count=sum(item.status == "오류" for item in results),
+        warning_count=sum(item.status == "주의" for item in results),
+        results=list(results),
+        inspection_version=version,
+    )
+
+
+def _comparison_issue(product_id, *, error_field="가격", status="오류"):
+    return repositories.InspectionResultCreate(
+        product_group_id="G001",
+        product_id=product_id,
+        status=status,
+        error_field=error_field,
+        reason=f"{error_field} 문제",
+        recommendation=f"{error_field} 확인",
+        risk_level="높음",
+    )
+
+
+def test_inspection_run_comparison_uses_multiset_and_sorts_field_deltas(monkeypatch):
+    duplicated = _comparison_issue("P001")
+    base = _comparison_detail(
+        10,
+        total_products=5,
+        results=[duplicated, duplicated, _comparison_issue("P002", error_field="재고")],
+    )
+    target = _comparison_detail(
+        11,
+        total_products=3,
+        results=[_comparison_issue("P001"), _comparison_issue("P003", error_field="카테고리")],
+    )
+    monkeypatch.setattr(
+        persistence_service,
+        "get_inspection_detail",
+        lambda _session, *, inspection_run_id: {10: base, 11: target}.get(inspection_run_id),
+    )
+
+    comparison = persistence_service.get_inspection_run_comparison(
+        object(), base_run_id=10, target_run_id=11
+    )
+
+    assert comparison.common_issue_count == 1
+    assert comparison.base_only_issue_count == 2
+    assert comparison.target_only_issue_count == 1
+    assert comparison.total_products_delta == -2
+    assert comparison.total_issues_delta == -1
+    assert [(item.side, item.product_id, item.count) for item in comparison.changed_items] == [
+        ("base_only", "P001", 1),
+        ("base_only", "P002", 1),
+        ("target_only", "P003", 1),
+    ]
+    assert [item.error_field for item in comparison.error_field_comparisons] == [
+        "가격", "재고", "카테고리"
+    ]
+    assert comparison.base_run.total_issues == (
+        comparison.common_issue_count + comparison.base_only_issue_count
+    )
+    assert comparison.target_run.total_issues == (
+        comparison.common_issue_count + comparison.target_only_issue_count
+    )
+
+
+def test_inspection_run_comparison_handles_empty_runs_and_rejects_invalid_pairs(monkeypatch):
+    empty = _comparison_detail(10, results=[])
+    other_version = _comparison_detail(11, version="12", results=[])
+    monkeypatch.setattr(
+        persistence_service,
+        "get_inspection_detail",
+        lambda _session, *, inspection_run_id: {10: empty, 11: other_version}.get(inspection_run_id),
+    )
+
+    assert persistence_service.get_inspection_run_comparison(
+        object(), base_run_id=10, target_run_id=12
+    ) is None
+    with pytest.raises(ValueError, match="different"):
+        persistence_service.get_inspection_run_comparison(
+            object(), base_run_id=10, target_run_id=10
+        )
+    with pytest.raises(ValueError, match="versions"):
+        persistence_service.get_inspection_run_comparison(
+            object(), base_run_id=10, target_run_id=11
+        )
+
+
+def test_inspection_run_comparison_reads_two_saved_postgres_runs(database_session):
+    session, created_source_filenames = database_session
+    base_filename = unique_filename("comparison_base")
+    target_filename = unique_filename("comparison_target")
+    created_source_filenames.extend([base_filename, target_filename])
+    base_run_id = save_inspection_report_id(
+        session,
+        source_filename=base_filename,
+        report=make_report([{**BASE_ROW, "price": "0"}]),
+    )
+    target_run_id = save_inspection_report_id(
+        session,
+        source_filename=target_filename,
+        report=make_report(
+            [
+                {**BASE_ROW, "price": "0"},
+                {
+                    **BASE_ROW,
+                    "product_group_id": "G002",
+                    "product_id": "P002",
+                    "product_name": "다른 상품",
+                    "price": "0",
+                },
+            ]
+        ),
+    )
+
+    comparison = persistence_service.get_inspection_run_comparison(
+        session,
+        base_run_id=base_run_id,
+        target_run_id=target_run_id,
+    )
+
+    assert comparison is not None
+    assert comparison.common_issue_count == 1
+    assert comparison.base_only_issue_count == 0
+    assert comparison.target_only_issue_count == 1
+    assert comparison.target_run.total_issues == (
+        comparison.common_issue_count + comparison.target_only_issue_count
+    )
+
+
 def test_list_inspections_maps_repository_rows_and_total(monkeypatch):
     session = object()
     created_at = pd.Timestamp("2026-07-04T12:30:00+09:00").to_pydatetime()

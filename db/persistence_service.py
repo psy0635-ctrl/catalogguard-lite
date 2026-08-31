@@ -1,4 +1,5 @@
 # 역할: InspectionReport를 하나의 트랜잭션으로 PostgreSQL에 저장합니다.
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import PurePath
@@ -52,6 +53,9 @@ class InspectionDetail:
     error_count: int
     warning_count: int
     results: list[InspectionResultCreate]
+    # 상세 조회 public contract에는 필요 없지만, 실행 간 비교에서는 두 실행의
+    # 검수 규칙이 같은지 확인해야 하므로 내부 객체에만 둡니다.
+    inspection_version: str
     actor_username: str | None = None
 
 
@@ -98,6 +102,42 @@ class InspectionQualityTrend:
 class InspectionSaveOutcome:
     inspection_run_id: int
     created: bool
+
+
+@dataclass(frozen=True)
+class InspectionComparisonIssueItem:
+    side: str
+    product_group_id: str
+    product_id: str
+    status: str
+    error_field: str
+    reason: str
+    recommendation: str
+    risk_level: str
+    count: int
+
+
+@dataclass(frozen=True)
+class InspectionErrorFieldComparison:
+    error_field: str
+    base_count: int
+    target_count: int
+    delta: int
+
+
+@dataclass(frozen=True)
+class InspectionRunComparison:
+    base_run: InspectionDetail
+    target_run: InspectionDetail
+    total_products_delta: int
+    total_issues_delta: int
+    error_count_delta: int
+    warning_count_delta: int
+    common_issue_count: int
+    base_only_issue_count: int
+    target_only_issue_count: int
+    changed_items: list[InspectionComparisonIssueItem]
+    error_field_comparisons: list[InspectionErrorFieldComparison]
 
 
 def normalize_source_filename(source_filename: str | None) -> str:
@@ -342,7 +382,116 @@ def get_inspection_detail(
         error_count=inspection_run.error_count,
         warning_count=inspection_run.warning_count,
         results=result_items,
+        inspection_version=getattr(inspection_run, "inspection_version", INSPECTION_VERSION),
         actor_username=inspection_run.actor_username,
+    )
+
+
+def _issue_signature(
+    item: InspectionResultCreate,
+) -> tuple[str, str, str, str, str, str, str]:
+    """Return the MVP identity for a saved issue row.
+
+    InspectionResult has no independent rule/issue code.  We deliberately use
+    every stored issue field and omit only per-row database identity/timestamps.
+    None is normalized as the public detail response does (an empty string).
+    """
+    return (
+        _clean_text_value(item.product_group_id),
+        _clean_text_value(item.product_id),
+        _clean_text_value(item.status),
+        _clean_text_value(item.error_field),
+        _clean_text_value(item.reason),
+        _clean_text_value(item.recommendation),
+        _clean_text_value(item.risk_level),
+    )
+
+
+def get_inspection_run_comparison(
+    session: Session,
+    *,
+    base_run_id: int,
+    target_run_id: int,
+) -> InspectionRunComparison | None:
+    """Compare two stored runs with multiset semantics.
+
+    The existing detail lookup makes two predictable SELECTs per run (run and
+    its results), and never performs a query per issue.
+    """
+    if base_run_id == target_run_id:
+        raise ValueError("base_run_id and target_run_id must be different")
+
+    base_run = get_inspection_detail(session, inspection_run_id=base_run_id)
+    target_run = get_inspection_detail(session, inspection_run_id=target_run_id)
+    if base_run is None or target_run is None:
+        return None
+    if base_run.inspection_version != target_run.inspection_version:
+        raise ValueError("inspection versions must match")
+
+    base_counts = Counter(_issue_signature(item) for item in base_run.results)
+    target_counts = Counter(_issue_signature(item) for item in target_run.results)
+    common_counts = base_counts & target_counts
+    base_only_counts = base_counts - target_counts
+    target_only_counts = target_counts - base_counts
+
+    changed_items: list[InspectionComparisonIssueItem] = []
+    for side, counts in (
+        ("base_only", base_only_counts),
+        ("target_only", target_only_counts),
+    ):
+        for signature in sorted(counts):
+            (
+                product_group_id,
+                product_id,
+                issue_status,
+                error_field,
+                reason,
+                recommendation,
+                risk_level,
+            ) = signature
+            changed_items.append(
+                InspectionComparisonIssueItem(
+                    side=side,
+                    product_group_id=product_group_id,
+                    product_id=product_id,
+                    status=issue_status,
+                    error_field=error_field,
+                    reason=reason,
+                    recommendation=recommendation,
+                    risk_level=risk_level,
+                    count=counts[signature],
+                )
+            )
+
+    base_error_fields = Counter(
+        _clean_text_value(item.error_field) for item in base_run.results
+    )
+    target_error_fields = Counter(
+        _clean_text_value(item.error_field) for item in target_run.results
+    )
+    error_field_comparisons = [
+        InspectionErrorFieldComparison(
+            error_field=error_field,
+            base_count=base_error_fields[error_field],
+            target_count=target_error_fields[error_field],
+            delta=target_error_fields[error_field] - base_error_fields[error_field],
+        )
+        for error_field in base_error_fields.keys() | target_error_fields.keys()
+    ]
+    error_field_comparisons.sort(key=lambda item: (-abs(item.delta), item.error_field))
+
+    return InspectionRunComparison(
+        base_run=base_run,
+        target_run=target_run,
+        total_products_delta=target_run.total_products - base_run.total_products,
+        total_issues_delta=target_run.total_issues - base_run.total_issues,
+        error_count_delta=target_run.error_count - base_run.error_count,
+        warning_count_delta=target_run.warning_count - base_run.warning_count,
+        common_issue_count=sum(common_counts.values()),
+        base_only_issue_count=sum(base_only_counts.values()),
+        target_only_issue_count=sum(target_only_counts.values()),
+        changed_items=changed_items,
+        error_field_comparisons=error_field_comparisons,
     )
 
 

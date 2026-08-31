@@ -61,6 +61,22 @@ HISTORY_DETAIL_DISPLAY_COLUMNS = [
     "수정 권장사항",
     "위험 수준",
 ]
+COMPARISON_CHANGED_ITEM_DISPLAY_COLUMNS = [
+    "상품 그룹 ID",
+    "상품 ID",
+    "검수 상태",
+    "오류 항목",
+    "오류 이유",
+    "수정 권장사항",
+    "위험 수준",
+    "개수",
+]
+COMPARISON_ERROR_FIELD_DISPLAY_COLUMNS = [
+    "오류 항목",
+    "기준 개수",
+    "비교 개수",
+    "변화 (비교 - 기준)",
+]
 WINDOWS_RESERVED_FILENAME_CHARS = re.compile(r'[\\/:\*\?"<>\|]+')
 HISTORY_INVALID_DATE_RANGE_MESSAGE = "시작일은 종료일보다 늦을 수 없습니다."
 HISTORY_SUMMARY_DOWNLOAD_EMPTY_MESSAGE = "다운로드할 검수 이력이 없습니다."
@@ -555,6 +571,41 @@ def build_history_detail_dataframe(results: list[dict]) -> pd.DataFrame:
         for result in results
     ]
     return pd.DataFrame(rows, columns=HISTORY_DETAIL_DISPLAY_COLUMNS)
+
+
+def build_comparison_changed_items_dataframe(
+    items: list[dict],
+    *,
+    side: str,
+) -> pd.DataFrame:
+    rows = [
+        {
+            "상품 그룹 ID": item.get("product_group_id"),
+            "상품 ID": item.get("product_id"),
+            "검수 상태": item.get("status"),
+            "오류 항목": item.get("error_field"),
+            "오류 이유": item.get("reason"),
+            "수정 권장사항": item.get("recommendation"),
+            "위험 수준": item.get("risk_level"),
+            "개수": item.get("count"),
+        }
+        for item in items
+        if item.get("side") == side
+    ]
+    return pd.DataFrame(rows, columns=COMPARISON_CHANGED_ITEM_DISPLAY_COLUMNS)
+
+
+def build_comparison_error_field_dataframe(items: list[dict]) -> pd.DataFrame:
+    rows = [
+        {
+            "오류 항목": item.get("error_field"),
+            "기준 개수": item.get("base_count"),
+            "비교 개수": item.get("target_count"),
+            "변화 (비교 - 기준)": item.get("delta"),
+        }
+        for item in items
+    ]
+    return pd.DataFrame(rows, columns=COMPARISON_ERROR_FIELD_DISPLAY_COLUMNS)
 
 
 def build_history_detail_csv(dataframe: pd.DataFrame) -> bytes:
@@ -1531,6 +1582,106 @@ def render_history_summary_download(api_client, session_state, *, total: int) ->
     )
 
 
+def render_inspection_run_comparison(api_client, history_items: list[dict]) -> None:
+    """Render an explicitly-triggered comparison for runs visible in this history page."""
+    st.subheader("검수 실행 비교")
+    run_options = [
+        item["inspection_run_id"]
+        for item in history_items
+        if type(item.get("inspection_run_id")) is int
+    ]
+    if len(run_options) < 2:
+        st.info("비교하려면 검수 이력이 2개 이상 필요합니다.")
+        return
+
+    option_labels = {
+        item["inspection_run_id"]: format_history_option_label(item)
+        for item in history_items
+        if type(item.get("inspection_run_id")) is int
+    }
+    base_run_id = st.selectbox(
+        "기준 실행",
+        options=run_options,
+        format_func=lambda run_id: option_labels.get(run_id, str(run_id)),
+        key="comparison_base_run_selector",
+    )
+    target_options = [run_id for run_id in run_options if run_id != base_run_id]
+    target_run_id = st.selectbox(
+        "비교 실행",
+        options=target_options,
+        format_func=lambda run_id: option_labels.get(run_id, str(run_id)),
+        key="comparison_target_run_selector",
+    )
+    if not st.button("비교", key="comparison_run_button"):
+        return
+
+    try:
+        comparison = api_client.get_inspection_comparison(base_run_id, target_run_id)
+    except InspectionNotFoundError as error:
+        st.error(build_api_error_display_message("검수 실행 결과를 찾을 수 없습니다.", error))
+        return
+    except CatalogGuardApiConnectionError as error:
+        st.error(build_api_error_display_message("검수 비교 서버에 연결할 수 없습니다.", error))
+        return
+    except CatalogGuardApiTimeoutError as error:
+        st.error(build_api_error_display_message("검수 비교 서버 응답 시간이 초과되었습니다.", error))
+        return
+    except CatalogGuardApiResponseError as error:
+        st.error(build_api_error_display_message("검수 실행을 비교하는 중 오류가 발생했습니다.", error))
+        return
+    except ValueError:
+        st.error("비교할 검수 실행 선택이 올바르지 않습니다.")
+        return
+
+    base_run = comparison["base_run"]
+    target_run = comparison["target_run"]
+    summary_delta = comparison["summary_delta"]
+    st.write(f"기준 파일: {base_run['source_filename']}")
+    st.write(f"비교 파일: {target_run['source_filename']}")
+    st.write(f"검수 버전: {base_run['inspection_version']}")
+    st.caption("변화 방향: 비교 - 기준")
+    summary_columns = st.columns(4)
+    summary_columns[0].metric("전체 상품 변화", summary_delta["total_products_delta"])
+    summary_columns[1].metric("전체 문제 변화", summary_delta["total_issues_delta"])
+    summary_columns[2].metric("오류 변화", summary_delta["error_count_delta"])
+    summary_columns[3].metric("주의 변화", summary_delta["warning_count_delta"])
+
+    issue_columns = st.columns(3)
+    issue_columns[0].metric("공통 문제", comparison["common_issue_count"])
+    issue_columns[1].metric("기준 실행에만 있음", comparison["base_only_issue_count"])
+    issue_columns[2].metric("비교 실행에만 있음", comparison["target_only_issue_count"])
+
+    st.write("문제 항목별 변화")
+    error_field_dataframe = build_comparison_error_field_dataframe(
+        comparison["error_field_comparisons"]
+    )
+    if error_field_dataframe.empty:
+        st.info("해당 문제 없음")
+    else:
+        st.dataframe(error_field_dataframe, width="stretch", hide_index=True)
+
+    for side, title in (
+        ("base_only", "기준 실행에만 있는 문제"),
+        ("target_only", "비교 실행에만 있는 문제"),
+    ):
+        st.write(title)
+        dataframe = build_comparison_changed_items_dataframe(
+            comparison["changed_items"], side=side
+        )
+        if dataframe.empty:
+            st.info("해당 문제 없음")
+        else:
+            st.dataframe(dataframe, width="stretch", hide_index=True)
+
+    st.warning(
+        "비교 실행에서 문제가 보이지 않는다고 해서 해당 문제가 수정되었다고 단정할 수 없습니다. "
+        "상품이 비교 파일에 포함되지 않았을 수도 있습니다."
+    )
+    st.warning(
+        "상품 수와 파일 구성이 다르면 문제 건수 감소만으로 품질 개선을 판단할 수 없습니다."
+    )
+
+
 def render_inspection_history_list(api_client) -> None:
     render_history_filename_search_controls()
     if st.session_state.get("history_filter_error"):
@@ -1631,6 +1782,8 @@ def render_inspection_history_list(api_client) -> None:
                 st.session_state.selected_inspection_run_id = int(selected_run_id)
                 st.session_state.history_view_mode = "detail"
                 st.rerun()
+
+    render_inspection_run_comparison(api_client, history_response["items"])
 
     current_page, total_pages, has_previous, has_next = calculate_history_pagination(
         total=total,
