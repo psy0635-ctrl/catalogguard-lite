@@ -337,6 +337,97 @@ def test_find_duplicate_product_names_handles_multiple_products_pairwise():
     assert all("rows 2, 4" in issue.message for issue in issues)
 
 
+def test_find_duplicate_product_names_keeps_complete_issue_payload_and_order_for_mixed_bucket():
+    products = [
+        make_product(product_id="P001", product_name="기본 티셔츠", color="BLACK", size="M"),
+        make_product(product_id="P002", product_name="기본 티셔츠", color="NAVY", size="M"),
+        make_product(product_id="P003", product_name="기본 티셔츠", color="BLACK", size="M"),
+        make_product(
+            product_group_id="G002",
+            product_id="P004",
+            product_name="기본 티셔츠",
+            color="NAVY",
+            size="M",
+        ),
+    ]
+
+    issues = find_duplicate_product_names(products)
+
+    expected_message = (
+        "product_name '기본 티셔츠' normalized to '기본티셔츠' duplicates rows "
+        "2, 3, 4, 5 with product_ids 'P001, P002, P003, P004'"
+    )
+    assert [asdict(issue) for issue in issues] == [
+        {
+            "rule": "duplicate_product_name",
+            "severity": "warning",
+            "product_id": "P001",
+            "product_group_id": "G001",
+            "message": expected_message,
+        },
+        {
+            "rule": "duplicate_product_name",
+            "severity": "warning",
+            "product_id": "P002",
+            "product_group_id": "G001",
+            "message": expected_message,
+        },
+        {
+            "rule": "duplicate_product_name",
+            "severity": "warning",
+            "product_id": "P003",
+            "product_group_id": "G001",
+            "message": expected_message,
+        },
+        {
+            "rule": "duplicate_product_name",
+            "severity": "warning",
+            "product_id": "P004",
+            "product_group_id": "G002",
+            "message": expected_message,
+        },
+    ]
+
+
+def test_find_duplicate_product_names_keeps_three_distinct_normal_options_clean():
+    products = [
+        make_product(product_id="P001", product_name="기본 티셔츠", color="BLACK", size="M"),
+        make_product(product_id="P002", product_name="기본 티셔츠", color="NAVY", size="M"),
+        make_product(product_id="P003", product_name="기본 티셔츠", color="WHITE", size="M"),
+    ]
+
+    assert find_duplicate_product_names(products) == []
+
+
+def test_find_duplicate_product_names_skips_resolved_pairs_in_concentrated_bucket(
+    monkeypatch,
+):
+    products = [
+        make_product(product_id=f"P{index:03d}", product_name="집중 중복 상품")
+        for index in range(100)
+    ]
+    comparison_count = 0
+    original_is_same_group_normal_option = duplicate_detector.is_same_group_normal_option
+
+    def count_normal_option_comparisons(first, second):
+        nonlocal comparison_count
+        comparison_count += 1
+        return original_is_same_group_normal_option(first, second)
+
+    monkeypatch.setattr(
+        duplicate_detector,
+        "is_same_group_normal_option",
+        count_normal_option_comparisons,
+    )
+
+    issues = find_duplicate_product_names(products)
+
+    assert [issue.product_id for issue in issues] == [
+        f"P{index:03d}" for index in range(100)
+    ]
+    assert comparison_count < len(products) * (len(products) - 1) // 2
+
+
 def test_find_duplicate_product_ids_still_flags_duplicate_id_with_different_options():
     products = [
         make_product(
