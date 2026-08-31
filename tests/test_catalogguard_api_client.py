@@ -41,6 +41,46 @@ QUALITY_TREND_RESPONSE = {
     ],
 }
 
+
+def make_comparison_response(**overrides):
+    base_summary = {"total_products": 5, "total_issues": 1, "error_count": 1, "warning_count": 0}
+    target_summary = {"total_products": 4, "total_issues": 0, "error_count": 0, "warning_count": 0}
+    payload = {
+        "base_run": {
+            "inspection_run_id": 11,
+            "source_filename": "base.csv",
+            "created_at": "2026-08-31T00:00:00Z",
+            "inspection_version": "13",
+            "summary": base_summary,
+        },
+        "target_run": {
+            "inspection_run_id": 12,
+            "source_filename": "target.csv",
+            "created_at": "2026-08-31T00:01:00Z",
+            "inspection_version": "13",
+            "summary": target_summary,
+        },
+        "summary_delta": {
+            "total_products_delta": -1,
+            "total_issues_delta": -1,
+            "error_count_delta": -1,
+            "warning_count_delta": 0,
+        },
+        "common_issue_count": 0,
+        "base_only_issue_count": 1,
+        "target_only_issue_count": 0,
+        "changed_items": [{
+            "side": "base_only", "product_group_id": "G001", "product_id": "P001",
+            "status": "오류", "error_field": "가격", "reason": "가격 문제",
+            "recommendation": "가격 확인", "risk_level": "높음", "count": 1,
+        }],
+        "error_field_comparisons": [
+            {"error_field": "가격", "base_count": 1, "target_count": 0, "delta": -1}
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
 DETAIL_RESPONSE = {
     "inspection_run_id": 11,
     "source_filename": "products_dev.csv",
@@ -1079,6 +1119,48 @@ def test_get_inspection_quality_trend_rejects_invalid_contract(payload):
 
     with pytest.raises(client_module.CatalogGuardApiResponseError):
         client.get_inspection_quality_trend()
+
+
+def test_get_inspection_comparison_sends_ids_and_accepts_negative_delta():
+    response = make_comparison_response()
+    client, session = make_client(response=FakeResponse(payload=response))
+
+    assert client.get_inspection_comparison(11, 12) == response
+    assert session.calls == [{
+        "url": "https://api.example.com/api/v1/inspections/comparison",
+        "params": {"base_run_id": 11, "target_run_id": 12},
+        "timeout": 5.0,
+    }]
+
+
+@pytest.mark.parametrize("base_run_id,target_run_id", [(0, 12), (True, 12), (11, 11), (11, "12")])
+def test_get_inspection_comparison_rejects_invalid_ids_without_request(base_run_id, target_run_id):
+    client, session = make_client(response=FakeResponse(payload=make_comparison_response()))
+
+    with pytest.raises(ValueError):
+        client.get_inspection_comparison(base_run_id, target_run_id)
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        make_comparison_response(common_issue_count=True),
+        make_comparison_response(base_only_issue_count=-1),
+        make_comparison_response(changed_items=[{"side": "invalid"}]),
+        make_comparison_response(base_run={**make_comparison_response()["base_run"], "inspection_version": ""}),
+        make_comparison_response(summary_delta={"total_products_delta": "-1"}),
+        make_comparison_response(error_field_comparisons=[{"error_field": "가격", "base_count": 1, "target_count": 0, "delta": "-1"}]),
+        make_comparison_response(base_only_issue_count=0),
+    ],
+)
+def test_get_inspection_comparison_rejects_invalid_contract(payload):
+    client_module = import_client_module()
+    client, _ = make_client(response=FakeResponse(payload=payload))
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.get_inspection_comparison(11, 12)
 
 
 ETL_LOAD_LIST_RESPONSE = {

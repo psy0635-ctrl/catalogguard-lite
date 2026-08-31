@@ -35,6 +35,27 @@ INSPECTION_QUALITY_TREND_ITEM_KEYS = (
     "error_count",
     "warning_count",
 )
+INSPECTION_COMPARISON_RESPONSE_KEYS = (
+    "base_run", "target_run", "summary_delta", "common_issue_count",
+    "base_only_issue_count", "target_only_issue_count", "changed_items",
+    "error_field_comparisons",
+)
+INSPECTION_COMPARISON_RUN_KEYS = (
+    "inspection_run_id", "source_filename", "created_at", "inspection_version", "summary",
+)
+INSPECTION_COMPARISON_SUMMARY_KEYS = (
+    "total_products", "total_issues", "error_count", "warning_count",
+)
+INSPECTION_COMPARISON_DELTA_KEYS = (
+    "total_products_delta", "total_issues_delta", "error_count_delta", "warning_count_delta",
+)
+INSPECTION_COMPARISON_CHANGED_ITEM_KEYS = (
+    "side", "product_group_id", "product_id", "status", "error_field", "reason",
+    "recommendation", "risk_level", "count",
+)
+INSPECTION_ERROR_FIELD_COMPARISON_KEYS = (
+    "error_field", "base_count", "target_count", "delta",
+)
 CREATE_RESPONSE_KEYS = ("inspection_run_id", "summary", "results")
 DETAIL_RESPONSE_KEYS = (
     "inspection_run_id",
@@ -593,6 +614,89 @@ def _validate_inspection_quality_trend_item(item: object) -> bool:
         + item["warning_run_count"]
         + item["normal_run_count"]
     )
+
+
+def _is_non_negative_int(value: object) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _validate_inspection_comparison_run(value: object) -> bool:
+    if not isinstance(value, dict) or any(
+        key not in value for key in INSPECTION_COMPARISON_RUN_KEYS
+    ):
+        return False
+    summary = value["summary"]
+    return (
+        type(value["inspection_run_id"]) is int
+        and value["inspection_run_id"] >= 1
+        and isinstance(value["source_filename"], str)
+        and isinstance(value["created_at"], str)
+        and isinstance(value["inspection_version"], str)
+        and bool(value["inspection_version"].strip())
+        and isinstance(summary, dict)
+        and all(key in summary for key in INSPECTION_COMPARISON_SUMMARY_KEYS)
+        and all(_is_non_negative_int(summary[key]) for key in INSPECTION_COMPARISON_SUMMARY_KEYS)
+    )
+
+
+def _validate_inspection_comparison_changed_item(value: object) -> bool:
+    if not isinstance(value, dict) or any(
+        key not in value for key in INSPECTION_COMPARISON_CHANGED_ITEM_KEYS
+    ):
+        return False
+    return (
+        value["side"] in {"base_only", "target_only"}
+        and all(isinstance(value[field], str) for field in INSPECTION_COMPARISON_CHANGED_ITEM_KEYS[1:-1])
+        and type(value["count"]) is int
+        and value["count"] >= 1
+    )
+
+
+def _validate_inspection_error_field_comparison(value: object) -> bool:
+    if not isinstance(value, dict) or any(
+        key not in value for key in INSPECTION_ERROR_FIELD_COMPARISON_KEYS
+    ):
+        return False
+    return (
+        isinstance(value["error_field"], str)
+        and _is_non_negative_int(value["base_count"])
+        and _is_non_negative_int(value["target_count"])
+        and type(value["delta"]) is int
+        and value["delta"] == value["target_count"] - value["base_count"]
+    )
+
+
+def _validate_inspection_comparison_response(data: dict[str, Any]) -> None:
+    if any(key not in data for key in INSPECTION_COMPARISON_RESPONSE_KEYS):
+        raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+    base_run, target_run, delta = data["base_run"], data["target_run"], data["summary_delta"]
+    changed_items = data["changed_items"]
+    field_comparisons = data["error_field_comparisons"]
+    if not (
+        _validate_inspection_comparison_run(base_run)
+        and _validate_inspection_comparison_run(target_run)
+        and isinstance(delta, dict)
+        and all(key in delta for key in INSPECTION_COMPARISON_DELTA_KEYS)
+        and all(type(delta[key]) is int for key in INSPECTION_COMPARISON_DELTA_KEYS)
+        and all(_is_non_negative_int(data[key]) for key in ("common_issue_count", "base_only_issue_count", "target_only_issue_count"))
+        and isinstance(changed_items, list)
+        and all(_validate_inspection_comparison_changed_item(item) for item in changed_items)
+        and isinstance(field_comparisons, list)
+        and all(_validate_inspection_error_field_comparison(item) for item in field_comparisons)
+    ):
+        raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+    base_summary, target_summary = base_run["summary"], target_run["summary"]
+    if (
+        base_run["inspection_run_id"] == target_run["inspection_run_id"]
+        or base_run["inspection_version"] != target_run["inspection_version"]
+        or data["common_issue_count"] + data["base_only_issue_count"] != base_summary["total_issues"]
+        or data["common_issue_count"] + data["target_only_issue_count"] != target_summary["total_issues"]
+        or any(
+            delta[delta_key] != target_summary[summary_key] - base_summary[summary_key]
+            for delta_key, summary_key in zip(INSPECTION_COMPARISON_DELTA_KEYS, INSPECTION_COMPARISON_SUMMARY_KEYS, strict=True)
+        )
+    ):
+        raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
 
 
 def _validate_etl_quality_observability_profile_list_response(
@@ -1860,6 +1964,26 @@ class CatalogGuardApiClient:
 
         data = self._get_json("/api/v1/inspections/quality-trend", params=params)
         _validate_inspection_quality_trend_response(data)
+        return data
+
+    def get_inspection_comparison(
+        self,
+        base_run_id: int,
+        target_run_id: int,
+    ) -> dict[str, Any]:
+        if type(base_run_id) is not int or base_run_id <= 0:
+            raise ValueError("base_run_id must be a positive integer")
+        if type(target_run_id) is not int or target_run_id <= 0:
+            raise ValueError("target_run_id must be a positive integer")
+        if base_run_id == target_run_id:
+            raise ValueError("base_run_id and target_run_id must be different")
+
+        data = self._get_json(
+            "/api/v1/inspections/comparison",
+            params={"base_run_id": base_run_id, "target_run_id": target_run_id},
+            raise_not_found=True,
+        )
+        _validate_inspection_comparison_response(data)
         return data
 
     def create_inspection(

@@ -26,6 +26,7 @@ from db.session import get_session
 client = TestClient(app)
 ENDPOINT = "/api/v1/inspections"
 QUALITY_TREND_ENDPOINT = "/api/v1/inspections/quality-trend"
+COMPARISON_ENDPOINT = "/api/v1/inspections/comparison"
 
 
 @pytest.fixture(autouse=True)
@@ -797,6 +798,118 @@ def test_quality_trend_api_rejects_invalid_date_range_without_service_call(monke
 
     assert response.status_code == 422
     assert calls == []
+
+
+def _comparison_service_result():
+    result = SimpleNamespace(
+        product_group_id="G001",
+        product_id="P001",
+        status="오류",
+        error_field="가격",
+        reason="가격 문제",
+        recommendation="가격 확인",
+        risk_level="높음",
+        count=1,
+    )
+    run = lambda run_id, filename, total_products, total_issues: SimpleNamespace(
+        inspection_run_id=run_id,
+        source_filename=filename,
+        created_at=datetime(2026, 8, 31, tzinfo=timezone.utc),
+        inspection_version="13",
+        total_products=total_products,
+        total_issues=total_issues,
+        error_count=total_issues,
+        warning_count=0,
+    )
+    return SimpleNamespace(
+        base_run=run(11, "base.csv", 5, 1),
+        target_run=run(12, "target.csv", 4, 0),
+        total_products_delta=-1,
+        total_issues_delta=-1,
+        error_count_delta=-1,
+        warning_count_delta=0,
+        common_issue_count=0,
+        base_only_issue_count=1,
+        target_only_issue_count=0,
+        changed_items=[SimpleNamespace(side="base_only", **result.__dict__)],
+        error_field_comparisons=[
+            SimpleNamespace(error_field="가격", base_count=1, target_count=0, delta=-1)
+        ],
+    )
+
+
+def test_inspection_comparison_api_returns_static_route_response(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        inspections_route,
+        "get_inspection_run_comparison",
+        lambda session, *, base_run_id, target_run_id: calls.append(
+            (session, base_run_id, target_run_id)
+        ) or _comparison_service_result(),
+    )
+
+    response = client.get(COMPARISON_ENDPOINT, params={"base_run_id": 11, "target_run_id": 12})
+
+    assert response.status_code == 200
+    assert response.json()["summary_delta"]["total_issues_delta"] == -1
+    assert response.json()["changed_items"][0]["side"] == "base_only"
+    assert calls and calls[0][1:] == (11, 12)
+
+
+def test_inspection_comparison_api_requires_auth_and_allows_viewer(monkeypatch):
+    monkeypatch.setattr(
+        inspections_route,
+        "get_inspection_run_comparison",
+        lambda *args, **kwargs: _comparison_service_result(),
+    )
+    clear_current_user_override()
+
+    anonymous_response = client.get(
+        COMPARISON_ENDPOINT,
+        params={"base_run_id": 11, "target_run_id": 12},
+    )
+    override_current_user(role="viewer")
+    viewer_response = client.get(
+        COMPARISON_ENDPOINT,
+        params={"base_run_id": 11, "target_run_id": 12},
+    )
+
+    assert anonymous_response.status_code == 401
+    assert viewer_response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("params", "status_code"),
+    [
+        ({"base_run_id": 11, "target_run_id": 11}, 422),
+        ({"base_run_id": 0, "target_run_id": 12}, 422),
+    ],
+)
+def test_inspection_comparison_api_rejects_invalid_run_pair(monkeypatch, params, status_code):
+    monkeypatch.setattr(
+        inspections_route,
+        "get_inspection_run_comparison",
+        lambda *args, **kwargs: pytest.fail("service should not be called"),
+    )
+
+    response = client.get(COMPARISON_ENDPOINT, params=params)
+
+    assert response.status_code == status_code
+
+
+def test_inspection_comparison_api_maps_missing_and_version_mismatch(monkeypatch):
+    monkeypatch.setattr(
+        inspections_route,
+        "get_inspection_run_comparison",
+        lambda *args, **kwargs: None,
+    )
+    assert client.get(COMPARISON_ENDPOINT, params={"base_run_id": 11, "target_run_id": 12}).status_code == 404
+
+    def raise_version_mismatch(*args, **kwargs):
+        raise ValueError("inspection versions must match")
+
+    monkeypatch.setattr(inspections_route, "get_inspection_run_comparison", raise_version_mismatch)
+    assert client.get(COMPARISON_ENDPOINT, params={"base_run_id": 11, "target_run_id": 12}).status_code == 422
 
 
 @pytest.mark.parametrize("query", ["limit=0", "limit=101", "offset=-1"])

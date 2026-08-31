@@ -498,6 +498,93 @@ def test_build_history_dataframe_returns_empty_dataframe_with_display_columns(
     assert list(dataframe.columns) == app_module.HISTORY_DISPLAY_COLUMNS
 
 
+def _comparison_response():
+    return {
+        "base_run": {
+            "inspection_run_id": 11,
+            "source_filename": "base.csv",
+            "inspection_version": "13",
+        },
+        "target_run": {
+            "inspection_run_id": 12,
+            "source_filename": "target.csv",
+            "inspection_version": "13",
+        },
+        "summary_delta": {
+            "total_products_delta": -1,
+            "total_issues_delta": -1,
+            "error_count_delta": -1,
+            "warning_count_delta": 0,
+        },
+        "common_issue_count": 0,
+        "base_only_issue_count": 1,
+        "target_only_issue_count": 0,
+        "changed_items": [{
+            "side": "base_only", "product_group_id": "G001", "product_id": "P001",
+            "status": "오류", "error_field": "가격", "reason": "가격 문제",
+            "recommendation": "가격 확인", "risk_level": "높음", "count": 1,
+        }],
+        "error_field_comparisons": [
+            {"error_field": "가격", "base_count": 1, "target_count": 0, "delta": -1}
+        ],
+    }
+
+
+def test_comparison_dataframes_map_changed_items_and_empty_side(app_module):
+    response = _comparison_response()
+
+    base_dataframe = app_module.build_comparison_changed_items_dataframe(
+        response["changed_items"], side="base_only"
+    )
+    target_dataframe = app_module.build_comparison_changed_items_dataframe(
+        response["changed_items"], side="target_only"
+    )
+    field_dataframe = app_module.build_comparison_error_field_dataframe(
+        response["error_field_comparisons"]
+    )
+
+    assert list(base_dataframe.columns) == app_module.COMPARISON_CHANGED_ITEM_DISPLAY_COLUMNS
+    assert base_dataframe.iloc[0]["개수"] == 1
+    assert target_dataframe.empty
+    assert field_dataframe.iloc[0]["변화 (비교 - 기준)"] == -1
+
+
+def test_render_inspection_run_comparison_waits_for_button_and_isolates_errors(
+    app_module, monkeypatch
+):
+    items = [make_history_item(11), make_history_item(12)]
+    fake_st = FakeAppStreamlit(
+        selectbox_values={"기준 실행": 11, "비교 실행": 12}
+    )
+    calls = []
+    client = SimpleNamespace(
+        get_inspection_comparison=lambda base, target: calls.append((base, target)) or _comparison_response()
+    )
+    monkeypatch.setattr(app_module, "st", fake_st)
+
+    app_module.render_inspection_run_comparison(client, items)
+    assert calls == []
+
+    fake_st.button = lambda label, **kwargs: label == "비교"
+    app_module.render_inspection_run_comparison(client, items)
+
+    assert calls == [(11, 12)]
+    assert "검수 실행 비교" in fake_st.subheaders
+    assert "변화 방향: 비교 - 기준" in fake_st.captions
+    assert any(label == "전체 문제 변화" for _, label, _ in fake_st.metrics)
+    assert len(fake_st.dataframes) == 2
+    assert len(fake_st.warnings) == 2
+
+
+def test_render_inspection_run_comparison_requires_two_visible_runs(app_module, monkeypatch):
+    fake_st = FakeAppStreamlit()
+    monkeypatch.setattr(app_module, "st", fake_st)
+
+    app_module.render_inspection_run_comparison(SimpleNamespace(), [make_history_item(11)])
+
+    assert fake_st.infos == ["비교하려면 검수 이력이 2개 이상 필요합니다."]
+
+
 def test_apply_history_filename_search_trims_query_and_resets_offset(app_module):
     session_state = {
         "history_filename_input": "  products  ",

@@ -378,11 +378,17 @@ CSV 검수 화면과 저장된 검수 이력 상세 화면은 같은 통계 UI�
 
 ### 검수 이력 저장과 조회
 
-FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경에서는 검수 결과를 PostgreSQL에 이력으로 저장할 수 있습니다. 검수 이력 화면에서는 파일명, 날짜 범위와 검수 상태로 저장된 실행을 검색하고 페이지 단위로 조회하며, 현재 검색 조건에 맞는 전체 이력 요약을 CSV로 내려받을 수 있습니다.
+FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경에서는 검수 결과를 PostgreSQL에 이력으로 저장할 수 있습니다. 검수 이력 화면에서는 파일명, 날짜 범위와 검수 상태로 저장된 실행을 검색하고 페이지 단위로 조회하며, 현재 검색 조건에 맞는 전체 이력 요약을 CSV로 내려받을 수 있습니다. 현재 목록의 두 실행은 버튼을 눌렀을 때만 비교 API를 호출해 요약 변화, 오류 항목별 변화, 공통 문제와 각 실행에만 있는 문제를 확인할 수 있습니다.
 
 ### 검수 품질 추세 MVP
 
-단건 검수 결과와 목록만으로는 시간 흐름에 따른 품질 변화를 파악하기 어렵습니다. 이를 위해 `inspection_runs`를 PostgreSQL에서 `Asia/Seoul` 일자별로 직접 aggregate하고, 현재 `INSPECTION_VERSION`만 조건으로 고립해 신규 검수·전체 상품·전체 문제와 오류·주의·정상 검수 수를 표시했습니다. 이 지표는 dedup 후 새로 생성된 `InspectionRun`의 품질 추세이며 요청량·업로드 횟수 통계가 아닙니다. 과거 버전 혼합 비교, 0건 날짜 bucket 생성, 파일 간 결과 비교는 이 MVP 범위에 포함하지 않았습니다.
+단건 검수 결과와 목록만으로는 시간 흐름에 따른 품질 변화를 파악하기 어렵습니다. 이를 위해 `inspection_runs`를 PostgreSQL에서 `Asia/Seoul` 일자별로 직접 aggregate하고, 현재 `INSPECTION_VERSION`만 조건으로 고립해 신규 검수·전체 상품·전체 문제와 오류·주의·정상 검수 수를 표시했습니다. 이 지표는 dedup 후 새로 생성된 `InspectionRun`의 품질 추세이며 요청량·업로드 횟수 통계가 아닙니다. 과거 버전 혼합 비교와 0건 날짜 bucket 생성은 이 MVP 범위에 포함하지 않았습니다.
+
+### 검수 실행 비교 MVP
+
+`GET /api/v1/inspections/comparison?base_run_id=&target_run_id=`는 같은 `inspection_version`의 두 저장 실행만 비교합니다. `InspectionResult`에 독립 rule code가 없으므로 `product_group_id`, `product_id`, `status`, `error_field`, `reason`, `recommendation`, `risk_level` 전체를 signature로 삼아 `Counter` multiset으로 계산합니다. 따라서 같은 signature가 한 실행에 여러 번 있어도 공통/기준 실행에만 있음/비교 실행에만 있음 개수를 보존합니다.
+
+이 기능은 저장된 issue row 비교이지 전체 상품 row diff가 아닙니다. 정상 상품 row와 비교 파일에서 빠진 상품을 보관하지 않으므로 `base_only`를 해결됨으로, `target_only`를 신규 오류로 해석하지 않습니다. 파일 규모와 구성이 다르면 단순 문제 수 변화로 품질 향상·악화를 자동 판정하지 않으며, changed issue item pagination도 아직 제공하지 않습니다.
 
 사용자는 저장된 실행을 검색하고 하나를 선택한 뒤 문제별 오류 이유와 수정 권장사항을 확인하고 상세 결과를 CSV로 내려받습니다. 상세 화면에서는 파일명, 검수 시간, 요약 수치와 문제별 위험 수준도 함께 확인할 수 있습니다.
 

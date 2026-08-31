@@ -11,6 +11,11 @@ from sqlalchemy.orm import Session
 from api.dependencies import require_operator, require_viewer
 from api.schemas import (
     InspectionDetailResponse,
+    InspectionComparisonChangedItemResponse,
+    InspectionComparisonResponse,
+    InspectionComparisonRunResponse,
+    InspectionComparisonSummaryDeltaResponse,
+    InspectionErrorFieldComparisonResponse,
     InspectionListItemResponse,
     InspectionListResponse,
     InspectionQualityTrendPointResponse,
@@ -31,6 +36,7 @@ from db.persistence_service import (
     InspectionQualityTrend,
     find_existing_inspection_run,
     get_inspection_detail,
+    get_inspection_run_comparison,
     get_inspection_quality_trend,
     list_inspections,
     save_inspection_report,
@@ -175,6 +181,61 @@ def build_inspection_quality_trend_response(
     )
 
 
+def build_inspection_comparison_response(
+    comparison,
+) -> InspectionComparisonResponse:
+    def build_run(run) -> InspectionComparisonRunResponse:
+        return InspectionComparisonRunResponse(
+            inspection_run_id=run.inspection_run_id,
+            source_filename=run.source_filename,
+            created_at=run.created_at,
+            inspection_version=run.inspection_version,
+            summary=InspectionSummary(
+                total_products=run.total_products,
+                total_issues=run.total_issues,
+                error_count=run.error_count,
+                warning_count=run.warning_count,
+            ),
+        )
+
+    return InspectionComparisonResponse(
+        base_run=build_run(comparison.base_run),
+        target_run=build_run(comparison.target_run),
+        summary_delta=InspectionComparisonSummaryDeltaResponse(
+            total_products_delta=comparison.total_products_delta,
+            total_issues_delta=comparison.total_issues_delta,
+            error_count_delta=comparison.error_count_delta,
+            warning_count_delta=comparison.warning_count_delta,
+        ),
+        common_issue_count=comparison.common_issue_count,
+        base_only_issue_count=comparison.base_only_issue_count,
+        target_only_issue_count=comparison.target_only_issue_count,
+        changed_items=[
+            InspectionComparisonChangedItemResponse(
+                side=item.side,
+                product_group_id=item.product_group_id,
+                product_id=item.product_id,
+                status=item.status,
+                error_field=item.error_field,
+                reason=item.reason,
+                recommendation=item.recommendation,
+                risk_level=item.risk_level,
+                count=item.count,
+            )
+            for item in comparison.changed_items
+        ],
+        error_field_comparisons=[
+            InspectionErrorFieldComparisonResponse(
+                error_field=item.error_field,
+                base_count=item.base_count,
+                target_count=item.target_count,
+                delta=item.delta,
+            )
+            for item in comparison.error_field_comparisons
+        ],
+    )
+
+
 def normalize_filename_query(filename: str | None) -> str | None:
     # 공백뿐인 filename은 검색 조건이 아니라 "전체 목록" 요청으로 처리합니다.
     cleaned_filename = "" if filename is None else filename.strip()
@@ -270,6 +331,41 @@ def get_inspection_quality_trend_route(
         status_filter=inspection_status,
     )
     return build_inspection_quality_trend_response(trend)
+
+
+@router.get(
+    "/api/v1/inspections/comparison",
+    response_model=InspectionComparisonResponse,
+)
+def get_inspection_comparison_route(
+    base_run_id: int = Query(ge=1),
+    target_run_id: int = Query(ge=1),
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> InspectionComparisonResponse:
+    if base_run_id == target_run_id:
+        raise HTTPException(status_code=422, detail="서로 다른 검수 실행을 선택해 주세요.")
+
+    try:
+        comparison = get_inspection_run_comparison(
+            session,
+            base_run_id=base_run_id,
+            target_run_id=target_run_id,
+        )
+    except ValueError as error:
+        if str(error) == "inspection versions must match":
+            raise HTTPException(
+                status_code=422,
+                detail="같은 검수 버전의 실행만 비교할 수 있습니다.",
+            ) from error
+        raise
+
+    if comparison is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="검수 실행 결과를 찾을 수 없습니다.",
+        )
+    return build_inspection_comparison_response(comparison)
 
 
 @router.post(
