@@ -68,7 +68,8 @@ def _update_failed_job(store, job_id: str, error_code: str, message: str) -> Non
 )
 def inspect_csv_task(job_id: str, job_file_path: str) -> None:
     store = get_redis_job_store()
-    session = None
+    precheck_session = None
+    write_session = None
     try:
         state: InspectionJobState | None = store.get_job(job_id)
         if state is None:
@@ -86,16 +87,17 @@ def inspect_csv_task(job_id: str, job_file_path: str) -> None:
             file_bytes,
         )
         file_sha256 = hashlib.sha256(file_bytes).hexdigest()
-        session = get_session_factory()()
+        session_factory = get_session_factory()
+        precheck_session = session_factory()
         existing_run = find_existing_inspection_run(
-            session,
+            precheck_session,
             file_sha256=file_sha256,
             inspection_version=INSPECTION_VERSION,
         )
 
         if existing_run is not None:
             detail = get_inspection_detail(
-                session,
+                precheck_session,
                 inspection_run_id=existing_run.id,
             )
             if detail is None:
@@ -109,13 +111,15 @@ def inspect_csv_task(job_id: str, job_file_path: str) -> None:
             )
             return
 
-        # SQLAlchemy starts an implicit read transaction for the identity lookup.
-        # The persistence service owns its own transaction, so close the read
-        # transaction before calling save_inspection_report().
-        session.rollback()
+        # The identity lookup starts a read transaction through SQLAlchemy
+        # autobegin.  The persistence service owns the write transaction, so
+        # use a distinct Session instead of ending a normal lookup with rollback().
+        precheck_session.close()
+        precheck_session = None
         report = inspect_dataframe(dataframe)
+        write_session = session_factory()
         save_outcome = save_inspection_report(
-            session,
+            write_session,
             source_filename=state.source_filename or file_path.name,
             report=report,
             file_sha256=file_sha256,
@@ -128,7 +132,7 @@ def inspect_csv_task(job_id: str, job_file_path: str) -> None:
             summary = _summary_from_report(report)
         else:
             detail = get_inspection_detail(
-                session,
+                write_session,
                 inspection_run_id=save_outcome.inspection_run_id,
             )
             if detail is None:
@@ -146,18 +150,24 @@ def inspect_csv_task(job_id: str, job_file_path: str) -> None:
     except CsvUploadValidationError:
         _update_failed_job(store, job_id, "invalid_csv", INVALID_CSV_MESSAGE)
     except SQLAlchemyError:
-        if session is not None:
-            session.rollback()
+        if precheck_session is not None:
+            precheck_session.rollback()
+        if write_session is not None:
+            write_session.rollback()
         worker_logger.exception("database error while inspecting CSV", extra={"job_id": job_id})
         _update_failed_job(store, job_id, "database_error", INSPECTION_FAILURE_MESSAGE)
     except Exception:
-        if session is not None:
-            session.rollback()
+        if precheck_session is not None:
+            precheck_session.rollback()
+        if write_session is not None:
+            write_session.rollback()
         worker_logger.exception("unexpected error while inspecting CSV", extra={"job_id": job_id})
         _update_failed_job(store, job_id, "inspection_failed", INSPECTION_FAILURE_MESSAGE)
     finally:
-        if session is not None:
-            session.close()
+        if precheck_session is not None:
+            precheck_session.close()
+        if write_session is not None:
+            write_session.close()
         try:
             if is_safe_job_file_path(job_id, job_file_path):
                 Path(job_file_path).unlink(missing_ok=True)

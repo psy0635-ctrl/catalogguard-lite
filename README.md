@@ -2937,7 +2937,6 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - DB-backed Profile / ProfileVersion 모델 도입 여부 검토(현재 정의는 code/config)
 - 실제 운영 공급사·production catalog 연동과 배포 환경 promotion 검증
 - 증분 ETL과 대용량 streaming 처리
-- Async worker(`workers/inspection_tasks.py`)의 세션 트랜잭션 경계 정리(현재는 `session.rollback()`으로 사전 조회를 분리하며, sync 경로와 다른 방식)
 
 ## 27. 개발 시 주의사항
 
@@ -2950,6 +2949,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - ETL 프로필의 activation 상태와 정의를 섞지 않습니다. 프로필 정의·버전 archive를 바꿀 때는 `config/etl`의 버전별 JSON과 `etl/profile_loader.py`의 registry를, 신규 실행 대상 버전을 바꿀 때는 activation API를 사용합니다. `etl_profile_activations`를 프로필 정의 저장소나 변경 이력 표로 읽지 않습니다.
 - effective active version 계산은 `etl.profile_loader.resolve_etl_profile_activation()` 한 곳에서만 합니다. Web·S3·HTTP feed·Airflow가 각자 DB를 읽어 판단하면 같은 프로필이 경로마다 다르게 활성으로 보일 수 있습니다.
 - 같은 요청 안에서 다른 목적의 SQLAlchemy Session이 필요하면(예: 쓰기 트랜잭션을 시작하기 전의 빠른 조회) `Depends(get_session)`을 재사용해 같은 Session을 공유하지 말고, `Depends(get_session, use_cache=False)`로 독립된 Session을 받습니다. 같은 Session에서 SELECT가 먼저 실행되면 SQLAlchemy가 트랜잭션을 암묵적으로 시작(autobegin)시켜, 이후 Service가 여는 `with session.begin()`과 충돌합니다(`api/routes/inspections.py`의 `precheck_session` 참고).
+- Async inspection worker도 동일하게 사전 중복 조회와 저장에 별도 SQLAlchemy Session을 사용합니다. 사전 조회 Session은 정상 SELECT autobegin을 `rollback()`으로 정리하지 않고 닫은 뒤, 저장 Service가 별도 write Session의 트랜잭션을 소유합니다.
 - 같은 Session을 계속 써야 하는 activation 사전 검사 경로에서는 `db/etl_profile_activation_service.py`의 `end_activation_read_transaction()`으로 조회가 연 read 트랜잭션을 정리합니다. 이 함수는 무조건 `rollback()`하지 않고 `session.new`·`session.dirty`·`session.deleted`에 보류 중인 ORM 쓰기가 있으면 먼저 실패시킵니다. 무조건 rollback하면 나중에 이 앞에 추가된 쓰기가 조용히 사라지고, 지금까지 그것을 시끄럽게 알려 주던 `session.begin()`의 실패 신호도 함께 지워지기 때문입니다.
 - `requirements.txt`와 `requirements-api.txt`의 역할이 나뉘어 있으므로 로컬 전체 시스템에서는 두 파일을 모두 설치합니다.
 - 파일명 검색을 수정할 때는 `%`, `_`, `\`가 일반 문자처럼 검색되는지 확인합니다.

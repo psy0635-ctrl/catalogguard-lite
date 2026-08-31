@@ -74,13 +74,15 @@ def test_new_csv_task_runs_inspection_once_and_cleans_up_file(tmp_path, monkeypa
     job_file = tmp_path / "job.csv"
     job_file.write_bytes(b"csv bytes")
     store = FakeJobStore(make_state(job_id))
-    session = FakeSession()
+    precheck_session = FakeSession()
+    write_session = FakeSession()
+    sessions = [precheck_session, write_session]
     calls: list[str] = []
     save_kwargs = []
 
     monkeypatch.setattr(tasks, "get_redis_job_store", lambda: store)
     monkeypatch.setattr(tasks, "is_safe_job_file_path", lambda *_: True)
-    monkeypatch.setattr(tasks, "get_session_factory", lambda: lambda: session)
+    monkeypatch.setattr(tasks, "get_session_factory", lambda: lambda: sessions.pop(0))
     monkeypatch.setattr(
         tasks,
         "validate_and_read_uploaded_csv",
@@ -128,8 +130,11 @@ def test_new_csv_task_runs_inspection_once_and_cleans_up_file(tmp_path, monkeypa
         "error_count": 1,
         "warning_count": 1,
     }
-    assert session.rollback_calls == 1
-    assert session.close_calls == 1
+    assert precheck_session.rollback_calls == 0
+    assert precheck_session.close_calls == 1
+    assert write_session.rollback_calls == 0
+    assert write_session.close_calls == 1
+    assert sessions == []
     assert not job_file.exists()
 
 
@@ -140,12 +145,20 @@ def test_duplicate_csv_task_skips_inspection_and_save(tmp_path, monkeypatch) -> 
     job_file = tmp_path / "job.csv"
     job_file.write_bytes(b"csv bytes")
     store = FakeJobStore(make_state(job_id))
-    session = FakeSession()
+    precheck_session = FakeSession()
+    write_session_created = False
     calls: list[str] = []
 
     monkeypatch.setattr(tasks, "get_redis_job_store", lambda: store)
     monkeypatch.setattr(tasks, "is_safe_job_file_path", lambda *_: True)
-    monkeypatch.setattr(tasks, "get_session_factory", lambda: lambda: session)
+    def session_factory():
+        nonlocal write_session_created
+        if write_session_created:
+            raise AssertionError("duplicate job must not create a write session")
+        write_session_created = True
+        return precheck_session
+
+    monkeypatch.setattr(tasks, "get_session_factory", lambda: session_factory)
     monkeypatch.setattr(
         tasks,
         "validate_and_read_uploaded_csv",
@@ -185,7 +198,8 @@ def test_duplicate_csv_task_skips_inspection_and_save(tmp_path, monkeypatch) -> 
     assert store.updates[-1]["status"] == "succeeded"
     assert store.updates[-1]["created"] is False
     assert store.updates[-1]["inspection_run_id"] == 77
-    assert session.close_calls == 1
+    assert precheck_session.rollback_calls == 0
+    assert precheck_session.close_calls == 1
     assert not job_file.exists()
 
 
@@ -230,11 +244,13 @@ def test_database_error_task_rolls_back_closes_and_records_safe_failure(
     job_file = tmp_path / "job.csv"
     job_file.write_bytes(b"csv bytes")
     store = FakeJobStore(make_state(job_id))
-    session = FakeSession()
+    precheck_session = FakeSession()
+    write_session = FakeSession()
+    sessions = [precheck_session, write_session]
 
     monkeypatch.setattr(tasks, "get_redis_job_store", lambda: store)
     monkeypatch.setattr(tasks, "is_safe_job_file_path", lambda *_: True)
-    monkeypatch.setattr(tasks, "get_session_factory", lambda: lambda: session)
+    monkeypatch.setattr(tasks, "get_session_factory", lambda: lambda: sessions.pop(0))
     monkeypatch.setattr(
         tasks,
         "validate_and_read_uploaded_csv",
@@ -256,8 +272,58 @@ def test_database_error_task_rolls_back_closes_and_records_safe_failure(
         "검수 작업을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요."
     )
     assert "postgres" not in store.updates[-1]["safe_error_message"]
-    assert session.rollback_calls == 1
-    assert session.close_calls == 1
+    assert precheck_session.rollback_calls == 1
+    assert precheck_session.close_calls == 1
+    assert write_session.rollback_calls == 0
+    assert write_session.close_calls == 0
+    assert not job_file.exists()
+
+
+def test_write_database_error_rolls_back_only_write_session_and_cleans_up_file(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import workers.inspection_tasks as tasks
+    from sqlalchemy.exc import SQLAlchemyError
+
+    job_id = "8d4c3d84-cf1d-4cdb-83a4-4ebf9d6bf5f6"
+    job_file = tmp_path / "job.csv"
+    job_file.write_bytes(b"csv bytes")
+    store = FakeJobStore(make_state(job_id))
+    precheck_session = FakeSession()
+    write_session = FakeSession()
+    sessions = [precheck_session, write_session]
+
+    monkeypatch.setattr(tasks, "get_redis_job_store", lambda: store)
+    monkeypatch.setattr(tasks, "is_safe_job_file_path", lambda *_: True)
+    monkeypatch.setattr(tasks, "get_session_factory", lambda: lambda: sessions.pop(0))
+    monkeypatch.setattr(
+        tasks,
+        "validate_and_read_uploaded_csv",
+        lambda *args, **kwargs: "dataframe",
+    )
+    monkeypatch.setattr(tasks, "find_existing_inspection_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        tasks,
+        "inspect_dataframe",
+        lambda dataframe: SimpleNamespace(summary=SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "save_inspection_report",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            SQLAlchemyError("postgres password must not leak")
+        ),
+    )
+
+    tasks.inspect_csv_task.run(job_id, str(job_file))
+
+    assert store.updates[-1]["status"] == "failed"
+    assert store.updates[-1]["error_code"] == "database_error"
+    assert precheck_session.rollback_calls == 0
+    assert precheck_session.close_calls == 1
+    assert write_session.rollback_calls == 1
+    assert write_session.close_calls == 1
     assert not job_file.exists()
 
 
