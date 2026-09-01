@@ -34,27 +34,51 @@ def _compact(value: str) -> str:
     return value.replace(" ", "")
 
 
+def _build_category_keyword_search_index() -> list[tuple[str, list[tuple[str, str, str]]]]:
+    """Prepare keyword search values once for one mismatch inspection."""
+    search_index = []
+    for category, keywords in CATEGORY_KEYWORDS.items():
+        category_keywords = []
+        for keyword in keywords:
+            normalized_keyword = normalize_product_name_for_category(keyword)
+            if not normalized_keyword:
+                continue
+            category_keywords.append(
+                (keyword, normalized_keyword, _compact(normalized_keyword))
+            )
+        search_index.append((category, category_keywords))
+
+    return search_index
+
+
+def _find_category_keyword_matches_from_normalized_name(
+    normalized_name: str,
+    keyword_search_index: list[tuple[str, list[tuple[str, str, str]]]],
+) -> dict[str, list[str]]:
+    compact_name = _compact(normalized_name)
+    matches: dict[str, list[str]] = {}
+
+    for category, keywords in keyword_search_index:
+        for keyword, normalized_keyword, compact_keyword in keywords:
+
+            if (
+                normalized_keyword in normalized_name
+                or compact_keyword in compact_name
+            ):
+                matches.setdefault(category, []).append(keyword)
+
+    return matches
+
+
 def _find_category_keyword_matches(product_name: object) -> dict[str, list[str]]:
     normalized_name = normalize_product_name_for_category(product_name)
     if not normalized_name:
         return {}
 
-    compact_name = _compact(normalized_name)
-    matches: dict[str, list[str]] = {}
-
-    for category, keywords in CATEGORY_KEYWORDS.items():
-        for keyword in keywords:
-            normalized_keyword = normalize_product_name_for_category(keyword)
-            if not normalized_keyword:
-                continue
-
-            if (
-                normalized_keyword in normalized_name
-                or _compact(normalized_keyword) in compact_name
-            ):
-                matches.setdefault(category, []).append(keyword)
-
-    return matches
+    return _find_category_keyword_matches_from_normalized_name(
+        normalized_name,
+        _build_category_keyword_search_index(),
+    )
 
 
 def find_categories_from_product_name(product_name: object) -> set[str]:
@@ -63,15 +87,20 @@ def find_categories_from_product_name(product_name: object) -> set[str]:
 
 def find_category_mismatches(products: list[Product]) -> list[ValidationIssue]:
     issues = []
+    keyword_search_index = _build_category_keyword_search_index()
 
     for product in products:
         current_category = normalize_category(product.category)
-        if not normalize_product_name_for_category(product.product_name):
+        normalized_name = normalize_product_name_for_category(product.product_name)
+        if not normalized_name:
             continue
         if not current_category:
             continue
 
-        keyword_matches = _find_category_keyword_matches(product.product_name)
+        keyword_matches = _find_category_keyword_matches_from_normalized_name(
+            normalized_name,
+            keyword_search_index,
+        )
         inferred_categories = set(keyword_matches)
         # 여러 카테고리 키워드가 동시에 보이면 애매하므로 불일치라고 단정하지 않습니다.
         if len(inferred_categories) != 1:
