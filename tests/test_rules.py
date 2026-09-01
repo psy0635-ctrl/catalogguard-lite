@@ -1,4 +1,6 @@
 # 역할: 핵심 검수 규칙들이 상품 데이터 오류를 정확히 찾아내는지 테스트합니다.
+from dataclasses import asdict
+
 import pytest
 
 from config.settings import (
@@ -922,6 +924,101 @@ def test_check_content_safety_uses_deterministic_field_and_rule_order():
     assert "field 'product_name'" in issues[0].message
     assert "field 'description'" in issues[1].message
     assert "field 'seller'" in issues[2].message
+
+
+def test_check_content_safety_preserves_exact_mixed_payload_and_product_order():
+    products = [
+        make_product(
+            product_group_id="G100",
+            product_id="P100",
+            product_name="카카오톡 카톡",
+            description=(
+                "외부   결제 test@example.com TEST@example.com "
+                "010-1234-5678 01012345678 000000-1234567 "
+                "000000-1234567 입금 123-456-789012"
+            ),
+            seller="송금 987-654-321098",
+        ),
+        make_product(
+            product_group_id="G200",
+            product_id="P200",
+            seller="직거래 가능",
+        ),
+    ]
+
+    issues = [asdict(issue) for issue in check_prohibited_and_personal_information(products)]
+
+    assert issues == [
+        {
+            "rule": "prohibited_term", "severity": "error", "product_id": "P100",
+            "product_group_id": "G100",
+            "message": "field 'product_name' contains prohibited term '카카오톡'",
+        },
+        {
+            "rule": "prohibited_term", "severity": "error", "product_id": "P100",
+            "product_group_id": "G100",
+            "message": "field 'product_name' contains prohibited term '카톡'",
+        },
+        {
+            "rule": "prohibited_term", "severity": "error", "product_id": "P100",
+            "product_group_id": "G100",
+            "message": "field 'description' contains prohibited term '외부 결제'",
+        },
+        {
+            "rule": "email_address", "severity": "error", "product_id": "P100",
+            "product_group_id": "G100",
+            "message": "field 'description' contains email address 'te**@example.com'",
+        },
+        {
+            "rule": "phone_number", "severity": "error", "product_id": "P100",
+            "product_group_id": "G100",
+            "message": "field 'description' contains phone number '010-****-5678'",
+        },
+        {
+            "rule": "resident_registration_number", "severity": "error", "product_id": "P100",
+            "product_group_id": "G100",
+            "message": "field 'description' contains resident registration number '000000-*******'",
+        },
+        {
+            "rule": "suspected_bank_account", "severity": "warning", "product_id": "P100",
+            "product_group_id": "G100",
+            "message": "field 'description' contains suspected bank account '123-***-***012'",
+        },
+        {
+            "rule": "suspected_bank_account", "severity": "warning", "product_id": "P100",
+            "product_group_id": "G100",
+            "message": "field 'seller' contains suspected bank account '987-***-***098'",
+        },
+        {
+            "rule": "prohibited_term", "severity": "error", "product_id": "P200",
+            "product_group_id": "G200",
+            "message": "field 'seller' contains prohibited term '직거래'",
+        },
+    ]
+
+
+def test_check_content_safety_normalizes_each_nonempty_field_once(monkeypatch):
+    products = [
+        make_product(
+            product_id=f"P{index:03d}",
+            product_name="Synthetic item",
+            description="SYNTHETIC CATALOG ITEM",
+            seller="SYNTHETIC SELLER",
+        )
+        for index in range(100)
+    ]
+    normalization_call_count = 0
+    original_normalize = rules.normalize_content_text
+
+    def count_normalize(value: str) -> str:
+        nonlocal normalization_call_count
+        normalization_call_count += 1
+        return original_normalize(value)
+
+    monkeypatch.setattr(rules, "normalize_content_text", count_normalize)
+
+    assert check_prohibited_and_personal_information(products) == []
+    assert normalization_call_count <= 100 * 3 + 7 + 5 + 4
 
 
 def test_check_content_safety_preserves_product_and_group_ids():
