@@ -53,16 +53,29 @@ def iter_scannable_fields(product: Product):
         yield field_name, getattr(product, field_name, "")
 
 
+def _build_normalized_terms(terms: tuple[str, ...]) -> list[tuple[str, str]]:
+    """원본 표시값과 검색용 normalized 값을 같은 순서로 준비합니다."""
+    return [(term, normalize_content_text(term)) for term in terms]
+
+
+def _find_prohibited_terms_from_normalized_text(
+    normalized_text: str,
+    normalized_prohibited_terms: list[tuple[str, str]],
+) -> list[str]:
+    return [
+        original_term
+        for original_term, normalized_term in normalized_prohibited_terms
+        if normalized_term and normalized_term in normalized_text
+    ]
+
+
 def find_prohibited_terms(text: str) -> list[str]:
     normalized_text = normalize_content_text(text)
-    found_terms = []
-
-    for term in PROHIBITED_TERMS:
-        normalized_term = normalize_content_text(term)
-        if normalized_term and normalized_term in normalized_text:
-            found_terms.append(term)
-
-    return found_terms
+    normalized_prohibited_terms = _build_normalized_terms(PROHIBITED_TERMS)
+    return _find_prohibited_terms_from_normalized_text(
+        normalized_text,
+        normalized_prohibited_terms,
+    )
 
 
 def find_unique_pattern_values(pattern: re.Pattern[str], text: str) -> list[str]:
@@ -100,20 +113,32 @@ def spans_overlap(first: tuple[int, int], second: tuple[int, int]) -> bool:
     return first[0] < second[1] and second[0] < first[1]
 
 
-def has_bank_account_context(text: str) -> bool:
-    # 긴 숫자만으로 계좌라고 판단하지 않도록, 주변 문맥어가 있는지 먼저 봅니다.
-    normalized_text = normalize_content_text(text)
+def _has_bank_account_context_from_normalized_text(
+    normalized_text: str,
+    normalized_context_terms: list[tuple[str, str]],
+) -> bool:
     return any(
-        normalize_content_text(term) in normalized_text
-        for term in BANK_ACCOUNT_CONTEXT_TERMS
+        normalized_term in normalized_text
+        for _, normalized_term in normalized_context_terms
     )
 
 
-def find_suspected_bank_account_matches(
+def has_bank_account_context(text: str) -> bool:
+    # 긴 숫자만으로 계좌라고 판단하지 않도록, 주변 문맥어가 있는지 먼저 봅니다.
+    normalized_text = normalize_content_text(text)
+    normalized_context_terms = _build_normalized_terms(BANK_ACCOUNT_CONTEXT_TERMS)
+    return _has_bank_account_context_from_normalized_text(
+        normalized_text,
+        normalized_context_terms,
+    )
+
+
+def _find_suspected_bank_account_matches_with_context(
     text: str,
     occupied_spans: list[tuple[int, int]],
+    has_context: bool,
 ) -> list[re.Match[str]]:
-    if not has_bank_account_context(text):
+    if not has_context:
         return []
 
     matches = []
@@ -133,6 +158,17 @@ def find_suspected_bank_account_matches(
         matches.append(match)
 
     return matches
+
+
+def find_suspected_bank_account_matches(
+    text: str,
+    occupied_spans: list[tuple[int, int]],
+) -> list[re.Match[str]]:
+    return _find_suspected_bank_account_matches_with_context(
+        text,
+        occupied_spans,
+        has_bank_account_context(text),
+    )
 
 
 def mask_account_number(value: str) -> str:
@@ -388,6 +424,8 @@ def check_prohibited_and_personal_information(
 ) -> list[ValidationIssue]:
     """상품 텍스트에서 금지어와 개인정보 형태를 찾습니다."""
     issues = []
+    normalized_prohibited_terms = _build_normalized_terms(PROHIBITED_TERMS)
+    normalized_context_terms = _build_normalized_terms(BANK_ACCOUNT_CONTEXT_TERMS)
 
     for product in products:
         for field_name, value in iter_scannable_fields(product):
@@ -395,7 +433,11 @@ def check_prohibited_and_personal_information(
                 continue
 
             # 한 필드 안에서는 금지어 -> 이메일 -> 전화번호 -> 주민번호 -> 계좌 의심 순서로 검사합니다.
-            for term in find_prohibited_terms(value):
+            normalized_value = normalize_content_text(value)
+            for term in _find_prohibited_terms_from_normalized_text(
+                normalized_value,
+                normalized_prohibited_terms,
+            ):
                 issues.append(
                     ValidationIssue(
                         rule="prohibited_term",
@@ -471,9 +513,14 @@ def check_prohibited_and_personal_information(
                     *resident_registration_number_matches,
                 ]
             ]
-            for account_match in find_suspected_bank_account_matches(
+            has_context = _has_bank_account_context_from_normalized_text(
+                normalized_value,
+                normalized_context_terms,
+            )
+            for account_match in _find_suspected_bank_account_matches_with_context(
                 value,
                 occupied_spans,
+                has_context,
             ):
                 issues.append(
                     ValidationIssue(

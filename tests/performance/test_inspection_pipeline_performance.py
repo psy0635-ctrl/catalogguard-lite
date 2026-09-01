@@ -25,7 +25,11 @@ from core.inspection_service import build_inspection_summary, inspect_dataframe
 from core.loader import load_products_from_dataframe
 from core.presentation import build_result_dataframe
 from core.privacy import create_masked_preview
-from core.rules import RULES, run_all_rules
+from core.rules import (
+    RULES,
+    check_prohibited_and_personal_information,
+    run_all_rules,
+)
 from core.upload_validator import validate_and_read_uploaded_csv
 
 
@@ -214,6 +218,54 @@ def _duplicate_dataset_report(row_count: int) -> dict[str, object]:
         "duplicate_product_name": duplicate_product_name,
         "top_rules": profile[:3],
     }
+
+
+def _content_safety_products(row_count: int) -> list[object]:
+    """Create no-issue products outside the focused rule timing window."""
+    dataframe = pd.DataFrame(build_synthetic_rows("normal_unique", row_count))
+    products = load_products_from_dataframe(dataframe)
+    assert len(products) == row_count
+    assert all(product.product_name and product.description and product.seller for product in products)
+    return products
+
+
+@pytest.mark.performance
+def test_content_safety_scan_before_after_benchmark() -> None:
+    """Focused opt-in benchmark for content-safety normalization work only."""
+    _require_opt_in()
+
+    report = {}
+    for row_count in PIPELINE_ROWS:
+        products = _content_safety_products(row_count)
+        timing, issues = measure(
+            lambda products=products: check_prohibited_and_personal_information(products)
+        )
+        assert issues == []
+        report[str(row_count)] = {
+            "products": len(products),
+            "issues": len(issues),
+            **timing,
+        }
+
+    print(
+        json.dumps(
+            {
+                "benchmark": "focused_content_safety_scan",
+                "environment": {
+                    "python": sys.version,
+                    "pandas": pd.__version__,
+                    "inspection_version": INSPECTION_VERSION,
+                },
+                "repetitions": {
+                    "warmup": WARMUP_REPETITIONS,
+                    "measured": MEASURED_REPETITIONS,
+                },
+                "results": report,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 @pytest.mark.performance
