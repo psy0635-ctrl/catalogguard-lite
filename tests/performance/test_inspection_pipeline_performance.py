@@ -268,6 +268,53 @@ def test_content_safety_scan_before_after_benchmark() -> None:
     )
 
 
+def _current_rule_profile_report(dataset: str) -> dict[str, object]:
+    csv_bytes = build_csv_bytes(dataset, 10_000)
+    dataframe = validate_and_read_uploaded_csv(BENCHMARK_FILENAME, csv_bytes)
+    products = load_products_from_dataframe(dataframe)
+    rules_total, issues = measure(lambda: run_all_rules(products))
+    profile = _rule_profile(products)
+
+    assert len(products) == 10_000
+    assert len(profile) == len(RULES)
+    assert all(item["issue_count"] >= 0 for item in profile)
+    return {
+        "dataset": dataset,
+        "products": len(products),
+        "issues": len(issues),
+        "rules_total_ms": rules_total,
+        "rule_profile": profile,
+    }
+
+
+@pytest.mark.performance
+@pytest.mark.parametrize("dataset", ["normal_unique", "issue_heavy"])
+def test_current_10000_rule_profile(dataset: str) -> None:
+    """Profile every current rule without changing inspection behavior."""
+    _require_opt_in()
+
+    report = _current_rule_profile_report(dataset)
+    print(
+        json.dumps(
+            {
+                "benchmark": "post_optimization_rule_profile",
+                "environment": {
+                    "python": sys.version,
+                    "pandas": pd.__version__,
+                    "inspection_version": INSPECTION_VERSION,
+                },
+                "repetitions": {
+                    "warmup": WARMUP_REPETITIONS,
+                    "measured": MEASURED_REPETITIONS,
+                },
+                "report": report,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
 @pytest.mark.performance
 def test_inspection_pipeline_before_baseline() -> None:
     _require_opt_in()
