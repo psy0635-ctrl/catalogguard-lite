@@ -113,7 +113,7 @@ issue-heavy가 더 높은 것은 result issue와 presentation object가 추가�
 
 근거는 같은 1,000행 concentrated dataset에서 해당 rule 중앙값이 1,044.298ms이고 rules total 1,238.939ms의 대부분을 차지했다는 점이다. 다만 normal_unique 10,000행에서는 15.283ms뿐이므로, 다음 PR은 실제 grouping·정상 옵션 예외·issue ordering contract를 보존하는지 먼저 검증한 뒤 알고리즘을 변경해야 한다. 이번 PR은 그 최적화를 구현하지 않는다.
 
-후속 작업은 이 Before baseline의 Python 3.14.7 수치를 변경하지 않고, 별도 Python 3.11.9 환경에서 contract와 비교 횟수 감소를 재검증했다. 결과와 재현 조건은 [Duplicate Product Name Performance Optimization](duplicate_product_name_performance_optimization.md)에 기록한다.
+후속 작업은 이 Before baseline의 Python 3.14.7 수치를 변경하지 않고, 별도 Python 3.11.9 환경에서 contract와 비교 횟수 감소를 재검증했다. 결과와 재현 조건은 [Duplicate Product Name Performance Optimization](duplicate_product_name_performance_optimization.md)에 기록한다. 같은 historical baseline을 유지한 category mismatch keyword 전처리 최적화의 별도 측정은 [Category Mismatch Keyword Scan Performance Optimization](category_mismatch_performance_optimization.md)에 기록한다.
 
 ## 13. 재현과 한계
 

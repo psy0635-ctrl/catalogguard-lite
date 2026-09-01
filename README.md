@@ -12,7 +12,7 @@ https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
 
 > 공개 Streamlit 앱과 로컬 전체 시스템의 기능 범위는 다를 수 있습니다. 검수 이력과 ETL 적재 이력의 검색·상세 조회는 로컬 또는 별도 배포 환경에서 FastAPI 서버와 PostgreSQL이 함께 실행되어야 사용할 수 있습니다.
 
-프로젝트의 설계·검증 과정은 [포트폴리오 상세 문서](docs/portfolio_project.md), 공급사 변환·HTTP feed Airflow orchestration 흐름은 [ETL MVP 문서](docs/etl_mvp.md), PostgreSQL 쿼리 검증은 [SQL 성능 분석 문서](docs/sql_performance_analysis.md), CSV 검수 pipeline 기준선은 [Inspection Pipeline Performance Baseline](docs/inspection_pipeline_performance_baseline.md), concentrated duplicate-name 최적화 검증은 [Duplicate Product Name Performance Optimization](docs/duplicate_product_name_performance_optimization.md), 합성 fixture 기준의 발표 진행은 [Release / Portfolio Demo Runbook](docs/demo_runbook.md)에서 확인할 수 있습니다.
+프로젝트의 설계·검증 과정은 [포트폴리오 상세 문서](docs/portfolio_project.md), 공급사 변환·HTTP feed Airflow orchestration 흐름은 [ETL MVP 문서](docs/etl_mvp.md), PostgreSQL 쿼리 검증은 [SQL 성능 분석 문서](docs/sql_performance_analysis.md), CSV 검수 pipeline 기준선은 [Inspection Pipeline Performance Baseline](docs/inspection_pipeline_performance_baseline.md), concentrated duplicate-name 최적화 검증은 [Duplicate Product Name Performance Optimization](docs/duplicate_product_name_performance_optimization.md), category mismatch keyword scan 최적화 검증은 [Category Mismatch Keyword Scan Performance Optimization](docs/category_mismatch_performance_optimization.md), 합성 fixture 기준의 발표 진행은 [Release / Portfolio Demo Runbook](docs/demo_runbook.md)에서 확인할 수 있습니다.
 
 ## 2. 프로젝트 목적
 
@@ -2706,7 +2706,7 @@ python scripts/benchmark_inspection.py --rows 100 1000 5000 10000 --repeat 3 --w
 
 측정 환경은 로컬 개발 PC이며 DB·네트워크 시간, 실제 동시 접속과 운영 트래픽은 포함하지 않습니다. 이 측정은 Streamlit과 FastAPI의 이중 검수를 제거하는 근거로 사용했습니다. 현재 비동기 경로는 Redis/Celery로 요청 수명과 검수 작업을 분리하지만, 대규모 트래픽 성능을 입증하는 자료로 해석하지 않습니다.
 
-위의 과거 전체 동기 검수 측정과 별도로, 현재 pipeline의 validation·masking·product loading·rule별·presentation 비용과 concentrated duplicate shape를 분해한 Before baseline은 [Inspection Pipeline Performance Baseline](docs/inspection_pipeline_performance_baseline.md)에 기록합니다. 같은 concentrated bucket에서 duplicate-name pair 비교를 줄인 후속 검증은 [Duplicate Product Name Performance Optimization](docs/duplicate_product_name_performance_optimization.md)에 분리해 기록했으며, SQL query plan 분석인 [SQL 성능 분석 문서](docs/sql_performance_analysis.md)와는 다른 측정입니다.
+위의 과거 전체 동기 검수 측정과 별도로, 현재 pipeline의 validation·masking·product loading·rule별·presentation 비용과 concentrated duplicate shape를 분해한 Before baseline은 [Inspection Pipeline Performance Baseline](docs/inspection_pipeline_performance_baseline.md)에 기록합니다. 같은 concentrated bucket에서 duplicate-name pair 비교를 줄인 후속 검증은 [Duplicate Product Name Performance Optimization](docs/duplicate_product_name_performance_optimization.md)에, category mismatch keyword 준비 비용을 줄인 검증은 [Category Mismatch Keyword Scan Performance Optimization](docs/category_mismatch_performance_optimization.md)에 분리해 기록했으며, SQL query plan 분석인 [SQL 성능 분석 문서](docs/sql_performance_analysis.md)와는 다른 측정입니다.
 
 ### GitHub Actions 자동 테스트
 

@@ -3,6 +3,8 @@ from dataclasses import asdict
 
 import pandas as pd
 
+import core.category_mismatch_detector as category_mismatch_detector
+from config.settings import CATEGORY_KEYWORDS
 from core.category_mismatch_detector import (
     detect_category_mismatches,
     find_categories_from_product_name,
@@ -151,6 +153,100 @@ def test_find_category_mismatches_treats_multiple_keywords_in_same_category_as_o
 
     assert find_categories_from_product_name("러닝 운동화 스니커즈") == {"신발"}
     assert find_category_mismatches(products) == []
+
+
+def test_find_category_mismatches_preserves_exact_issue_payload_and_order():
+    products = [
+        make_product(
+            product_group_id="G001",
+            product_id="P001",
+            product_name="오버핏 반팔 티셔츠",
+            category="SHOES",
+        ),
+        make_product(
+            product_group_id="G002",
+            product_id="P002",
+            product_name="남성 러닝 운동화",
+            category="신발",
+        ),
+        make_product(
+            product_group_id="G003",
+            product_id="P003",
+            product_name="운동화 티셔츠 세트",
+            category="BAG",
+        ),
+        make_product(
+            product_group_id="G004",
+            product_id="P004",
+            product_name="데일리 패션 상품",
+            category="TOP",
+        ),
+        make_product(
+            product_group_id="G005",
+            product_id="P005",
+            product_name="데님 청바지",
+            category="BAG",
+        ),
+    ]
+
+    assert [asdict(issue) for issue in find_category_mismatches(products)] == [
+        {
+            "rule": "product_category_mismatch",
+            "severity": "warning",
+            "product_id": "P001",
+            "product_group_id": "G001",
+            "message": (
+                "product_name keyword '티셔츠' implies category '상의' "
+                "but current category is '신발'"
+            ),
+        },
+        {
+            "rule": "product_category_mismatch",
+            "severity": "warning",
+            "product_id": "P005",
+            "product_group_id": "G005",
+            "message": (
+                "product_name keyword '청바지' implies category '하의' "
+                "but current category is '가방'"
+            ),
+        },
+    ]
+
+
+def test_find_category_mismatches_preserves_first_matching_keyword():
+    products = [
+        make_product(product_name="러닝 운동화 스니커즈", category="TOP"),
+    ]
+
+    issues = find_category_mismatches(products)
+
+    assert len(issues) == 1
+    assert "keyword '운동화'" in issues[0].message
+
+
+def test_find_category_mismatches_precomputes_keyword_normalization_once(monkeypatch):
+    products = [
+        make_product(product_id=f"P{index:03d}", product_name=f"Synthetic item {index:03d}")
+        for index in range(100)
+    ]
+    normalize_call_count = 0
+    original_normalize = category_mismatch_detector.normalize_product_name_for_category
+
+    def count_normalize_calls(value: object) -> str:
+        nonlocal normalize_call_count
+        normalize_call_count += 1
+        return original_normalize(value)
+
+    monkeypatch.setattr(
+        category_mismatch_detector,
+        "normalize_product_name_for_category",
+        count_normalize_calls,
+    )
+
+    assert find_category_mismatches(products) == []
+
+    keyword_count = sum(len(keywords) for keywords in CATEGORY_KEYWORDS.values())
+    assert normalize_call_count <= len(products) + keyword_count + 5
 
 
 def test_find_category_mismatches_handles_english_category_aliases():
