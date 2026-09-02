@@ -82,7 +82,16 @@ def test_validate_csv_filename_accepts_csv_extension_case_insensitively(filename
 
 @pytest.mark.parametrize(
     "filename",
-    ["products.xlsx", "products.txt", "products.exe", "products", None, ""],
+    [
+        "products.xlsx",
+        "products.txt",
+        "products.exe",
+        "products",
+        ".csv",
+        "uploads/.csv",
+        None,
+        "",
+    ],
 )
 def test_validate_csv_filename_rejects_non_csv_extension(filename):
     with pytest.raises(CsvUploadValidationError, match="CSV 파일만 업로드"):
