@@ -181,8 +181,8 @@ def read_s3_csv_object(
     finally:
         try:
             body.close()
-        except Exception as error:
-            _raise_read_error(error)
+        except Exception:  # noqa: BLE001 - 정리 실패가 이미 읽은 본문 결과를 가리지 않게 합니다.
+            _log_s3_failure("s3_read_failed")
 
     if not isinstance(content, bytes):
         _log_s3_failure("s3_read_failed")

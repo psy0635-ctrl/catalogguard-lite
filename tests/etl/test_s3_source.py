@@ -23,9 +23,16 @@ from etl.s3_source import (
 
 
 class FakeBody:
-    def __init__(self, content: bytes, *, read_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        content: bytes,
+        *,
+        read_error: Exception | None = None,
+        close_error: Exception | None = None,
+    ) -> None:
         self.content = content
         self.read_error = read_error
+        self.close_error = close_error
         self.read_sizes: list[int] = []
         self.closed = False
 
@@ -37,6 +44,8 @@ class FakeBody:
 
     def close(self) -> None:
         self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class FakeClientError(Exception):
@@ -274,6 +283,20 @@ def test_download_reads_at_bounded_size_and_closes_body(monkeypatch):
     read_s3_csv_object("products.csv", client=client)
 
     assert body.read_sizes == [MAX_UPLOAD_SIZE_BYTES + 1]
+    assert body.closed is True
+
+
+def test_successful_download_is_not_rejected_when_body_close_fails(monkeypatch):
+    monkeypatch.setenv("CATALOGGUARD_ETL_S3_BUCKET", "catalogguard-source")
+    body = FakeBody(b"supplier,csv\n", close_error=OSError("close details"))
+    client = FakeS3Client(
+        head_response={"ContentLength": len(body.content)},
+        object_response={"ContentLength": len(body.content), "Body": body},
+    )
+
+    result = read_s3_csv_object("products.csv", client=client)
+
+    assert result.content == body.content
     assert body.closed is True
 
 
