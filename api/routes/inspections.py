@@ -4,7 +4,7 @@ import hashlib
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Path, Query, UploadFile, status
 import pandas as pd
 from sqlalchemy.orm import Session
 
@@ -449,7 +449,7 @@ async def create_inspection(
     response_model=InspectionDetailResponse,
 )
 def get_inspection(
-    inspection_run_id: int,
+    inspection_run_id: int = Path(..., ge=1),
     _current_user=Depends(require_viewer),
     session: Session = Depends(get_session),
 ) -> InspectionDetailResponse:
