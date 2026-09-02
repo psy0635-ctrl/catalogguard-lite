@@ -89,11 +89,12 @@ def test_validate_csv_filename_accepts_csv_extension_case_insensitively(filename
         "products",
         ".csv",
         "uploads/.csv",
+        "products\x00.csv",
         None,
         "",
     ],
 )
-def test_validate_csv_filename_rejects_non_csv_extension(filename):
+def test_validate_csv_filename_rejects_invalid_filename(filename):
     with pytest.raises(CsvUploadValidationError, match="CSV 파일만 업로드"):
         validate_csv_filename(filename)
 

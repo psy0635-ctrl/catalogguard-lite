@@ -30,7 +30,11 @@ def validate_csv_filename(filename: str | None) -> None:
         raise CsvUploadValidationError("CSV 파일만 업로드할 수 있습니다.")
 
     basename = str(filename).replace("\\", "/").split("/")[-1].strip()
-    if not basename.casefold().endswith(".csv") or not basename[:-4].strip():
+    if (
+        "\x00" in basename
+        or not basename.casefold().endswith(".csv")
+        or not basename[:-4].strip()
+    ):
         raise CsvUploadValidationError("CSV 파일만 업로드할 수 있습니다.")
 
 
