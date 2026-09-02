@@ -68,14 +68,22 @@ def _update_failed_job(store, job_id: str, error_code: str, message: str) -> Non
 )
 def inspect_csv_task(job_id: str, job_file_path: str) -> None:
     store = get_redis_job_store()
+    state: InspectionJobState | None = store.get_job(job_id)
+    if state is None:
+        worker_logger.warning("inspection job disappeared before execution", extra={"job_id": job_id})
+        return
+    if state.status in {"succeeded", "failed"}:
+        # Broker redelivery must not replace a completed result after its input
+        # file has already been cleaned up.
+        worker_logger.info(
+            "inspection job is already terminal; skipping replay",
+            extra={"job_id": job_id, "status": state.status},
+        )
+        return
+
     precheck_session = None
     write_session = None
     try:
-        state: InspectionJobState | None = store.get_job(job_id)
-        if state is None:
-            worker_logger.warning("inspection job disappeared before execution", extra={"job_id": job_id})
-            return
-
         store.update_job(job_id, status="running")
         if not is_safe_job_file_path(job_id, job_file_path):
             raise ValueError("inspection job file path is outside the configured job directory")

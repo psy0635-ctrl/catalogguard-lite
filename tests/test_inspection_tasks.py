@@ -1,5 +1,9 @@
+from dataclasses import replace
+import logging
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from services.redis_job_store import InspectionJobState
 
@@ -209,6 +213,58 @@ def test_duplicate_csv_task_skips_inspection_and_save(tmp_path, monkeypatch) -> 
     assert precheck_session.rollback_calls == 0
     assert precheck_session.close_calls == 1
     assert not job_file.exists()
+
+
+@pytest.mark.parametrize(
+    ("terminal_status", "result_fields"),
+    [
+        (
+            "succeeded",
+            {
+                "created": True,
+                "inspection_run_id": 123,
+                "summary": {
+                    "total_products": 5,
+                    "total_issues": 2,
+                    "error_count": 1,
+                    "warning_count": 1,
+                },
+            },
+        ),
+        (
+            "failed",
+            {
+                "error_code": "inspection_failed",
+                "safe_error_message": "검수 작업을 처리하지 못했습니다.",
+            },
+        ),
+    ],
+)
+def test_replayed_terminal_task_preserves_result_without_touching_file(
+    tmp_path, monkeypatch, caplog, terminal_status, result_fields
+) -> None:
+    """A redelivered task must preserve a terminal job after file cleanup."""
+    import workers.inspection_tasks as tasks
+
+    job_id = "8d4c3d84-cf1d-4cdb-83a4-4ebf9d6bf5f6"
+    terminal_state = replace(
+        make_state(job_id),
+        status=terminal_status,
+        **result_fields,
+    )
+    store = FakeJobStore(terminal_state)
+    cleaned_job_file = tmp_path / "already-cleaned.csv"
+
+    monkeypatch.setattr(tasks, "get_redis_job_store", lambda: store)
+    monkeypatch.setattr(tasks, "is_safe_job_file_path", lambda *_: True)
+
+    with caplog.at_level(logging.INFO, logger="catalogguard.inspection_worker"):
+        tasks.inspect_csv_task.run(job_id, str(cleaned_job_file))
+
+    assert store.updates == []
+    assert store.state == terminal_state
+    assert not cleaned_job_file.exists()
+    assert "inspection job is already terminal; skipping replay" in caplog.messages
 
 
 def test_invalid_csv_task_records_safe_failure_and_cleans_up(tmp_path, monkeypatch) -> None:
