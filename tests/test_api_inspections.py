@@ -976,10 +976,12 @@ def test_get_inspection_api_returns_404_when_inspection_is_missing(
     assert fake_inspection_persistence.detail_calls[0]["inspection_run_id"] == 999999
 
 
+@pytest.mark.parametrize("inspection_run_id", ["abc", "0", "-1"])
 def test_get_inspection_api_rejects_invalid_id_without_service_call(
     fake_inspection_persistence,
+    inspection_run_id,
 ):
-    response = client.get(f"{ENDPOINT}/abc")
+    response = client.get(f"{ENDPOINT}/{inspection_run_id}")
 
     assert response.status_code == 422
     assert fake_inspection_persistence.detail_calls == []
