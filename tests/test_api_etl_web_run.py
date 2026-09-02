@@ -192,6 +192,7 @@ def test_empty_upload_returns_safe_400(monkeypatch):
 
     assert response.status_code == 400
     assert response.json()["detail"]["code"] == "invalid_upload"
+    assert response.headers["X-Request-ID"]
 
 
 def test_pipeline_failure_returns_safe_400_without_traceback(monkeypatch):

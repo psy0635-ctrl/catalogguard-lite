@@ -1360,6 +1360,7 @@ def test_inspection_api_rejects_non_csv_extension():
 
     assert response.status_code == 400
     assert response.json()["detail"] == "CSV 파일만 업로드할 수 있습니다."
+    assert response.headers["X-Request-ID"]
 
 
 def test_inspection_api_rejects_empty_file():
