@@ -184,7 +184,11 @@ def read_http_feed_csv(
     """Read the configured trusted HTTP feed CSV with a bounded response read."""
     feed_url = _require_allowed_feed_url()
     source_filename = get_catalogguard_etl_http_feed_filename()
-    validate_csv_filename(source_filename)
+    try:
+        validate_csv_filename(source_filename)
+    except CsvUploadValidationError:
+        # The filename is server configuration, not client-provided upload input.
+        _raise_not_configured("http_feed_filename_invalid")
     open_url = _no_redirect_opener() if opener is None else opener
 
     try:
