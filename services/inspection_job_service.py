@@ -89,7 +89,14 @@ class InspectionJobService:
             self._enqueue(job_id, str(job_file_path))
         except Exception as error:
             if job_file_path is not None:
-                self._delete_file(job_id, job_file_path)
+                try:
+                    self._delete_file(job_id, job_file_path)
+                except Exception:
+                    # Cleanup failure must not replace the safe enqueue failure response.
+                    job_logger.exception(
+                        "failed to remove inspection job file",
+                        extra={"job_id": job_id},
+                    )
             try:
                 self._job_store.delete_job(job_id)
             except Exception:
