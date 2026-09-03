@@ -281,7 +281,11 @@ def run_pipeline(
         )
     except OSError as error:
         for temporary_path in temporary_paths:
-            temporary_path.unlink(missing_ok=True)
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                # Temporary-output cleanup is secondary to the write failure.
+                pass
         raise ETLPipelineError("Output files could not be saved") from error
     _replace_temporary_files(
         [

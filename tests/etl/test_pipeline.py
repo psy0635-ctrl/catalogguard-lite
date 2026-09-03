@@ -306,6 +306,33 @@ def test_pipeline_cleans_temporary_outputs_when_summary_write_fails(tmp_path, mo
     assert not list(output_path.parent.glob("*.tmp"))
 
 
+def test_pipeline_preserves_summary_write_error_when_temp_cleanup_fails(
+    tmp_path, monkeypatch
+):
+    input_path, profile_path = write_profile_and_source(tmp_path)
+    output_path, rejects_path, summary_path = output_paths(tmp_path)
+
+    def fail_summary_write(*args, **kwargs):
+        raise OSError("simulated summary write failure")
+
+    original_unlink = pipeline_module.Path.unlink
+
+    def fail_first_temp_cleanup(path, *args, **kwargs):
+        if path.name.startswith(f".{output_path.name}."):
+            raise OSError("simulated temporary cleanup failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "_write_json_temp", fail_summary_write)
+    monkeypatch.setattr(pipeline_module.Path, "unlink", fail_first_temp_cleanup)
+
+    with pytest.raises(ETLPipelineError, match="could not be saved") as raised:
+        run_pipeline(input_path, profile_path, output_path, rejects_path, summary_path)
+
+    assert isinstance(raised.value.__cause__, OSError)
+    assert str(raised.value.__cause__) == "simulated summary write failure"
+    assert not list(output_path.parent.glob(f".{rejects_path.name}.*.tmp"))
+
+
 def test_repository_sample_profile_converts_mixed_supplier_fixture(tmp_path):
     output_path, rejects_path, summary_path = output_paths(tmp_path)
 
