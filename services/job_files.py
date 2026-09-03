@@ -21,8 +21,16 @@ def write_job_file(job_id: str | UUID, file_bytes: bytes) -> Path:
 
     final_path = get_job_file_path(job_id)
     temporary_path = job_directory / f".{_job_id_text(job_id)}.tmp"
-    temporary_path.write_bytes(file_bytes)
-    temporary_path.replace(final_path)
+    try:
+        temporary_path.write_bytes(file_bytes)
+        temporary_path.replace(final_path)
+    except OSError:
+        # A failed atomic publish must not leave uploaded CSV content behind.
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return final_path
 
 
