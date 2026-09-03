@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 
 def test_job_file_is_server_named_and_removed_after_cleanup(tmp_path, monkeypatch) -> None:
     import services.job_files as job_files
@@ -30,3 +32,24 @@ def test_job_file_cleanup_does_not_follow_untrusted_path(tmp_path, monkeypatch) 
     job_files.delete_job_file(job_id, outside_path)
 
     assert outside_path.read_bytes() == b"must remain"
+
+
+def test_job_file_write_removes_temporary_file_when_publish_fails(
+    tmp_path, monkeypatch
+) -> None:
+    import services.job_files as job_files
+
+    monkeypatch.setenv("INSPECTION_JOB_DIR", str(tmp_path))
+    job_id = "8d4c3d84-cf1d-4cdb-83a4-4ebf9d6bf5f6"
+    temporary_path = tmp_path / f".{job_id}.tmp"
+
+    def fail_publish(_temporary_path, _final_path):
+        raise OSError("temporary file is locked")
+
+    monkeypatch.setattr(job_files.Path, "replace", fail_publish)
+
+    with pytest.raises(OSError, match="locked"):
+        job_files.write_job_file(job_id, b"csv bytes")
+
+    assert not temporary_path.exists()
+    assert not (tmp_path / f"{job_id}.csv").exists()
