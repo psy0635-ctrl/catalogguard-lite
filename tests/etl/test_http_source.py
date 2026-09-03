@@ -174,7 +174,7 @@ def test_invalid_configured_filename_is_rejected_before_any_request(monkeypatch)
     monkeypatch.setenv("CATALOGGUARD_ETL_HTTP_FEED_FILENAME", "catalog.txt")
     opener = FakeOpener(FakeResponse(CSV_BYTES))
 
-    with pytest.raises(CsvUploadValidationError):
+    with pytest.raises(HTTPFeedNotConfiguredError):
         read_http_feed_csv(opener=opener)
 
     assert opener.calls == []

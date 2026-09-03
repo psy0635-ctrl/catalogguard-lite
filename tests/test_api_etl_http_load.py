@@ -281,6 +281,17 @@ def test_http_csv_validation_error_is_invalid_upload_without_web_metric(monkeypa
     assert response.json()["detail"]["code"] == "invalid_upload"
 
 
+def test_invalid_configured_feed_filename_returns_503(monkeypatch):
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
+    monkeypatch.setenv("CATALOGGUARD_ETL_HTTP_FEED_URL", SECRET_FEED_URL)
+    monkeypatch.setenv("CATALOGGUARD_ETL_HTTP_FEED_FILENAME", "supplier.txt")
+
+    response = client.post(ENDPOINT, json=REQUEST)
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "http_feed_not_configured"
+
+
 @pytest.mark.parametrize(
     ("error", "expected_status", "expected_code"),
     [
