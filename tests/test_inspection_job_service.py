@@ -96,3 +96,27 @@ def test_enqueue_failure_deletes_file_and_redis_job() -> None:
             Path(f"C:/inspection-jobs/{store.created[0]['job_id']}.csv"),
         )
     ]
+
+
+def test_enqueue_failure_preserves_safe_error_when_file_cleanup_fails() -> None:
+    store = FakeJobStore()
+
+    def fail_file_cleanup(job_id, path) -> None:
+        raise OSError("simulated cleanup failure")
+
+    service = InspectionJobService(
+        job_store=store,
+        write_file=lambda job_id, file_bytes: Path(f"C:/inspection-jobs/{job_id}.csv"),
+        delete_file=fail_file_cleanup,
+        enqueue=lambda job_id, file_path: (_ for _ in ()).throw(
+            ConnectionError("broker unavailable")
+        ),
+    )
+
+    with pytest.raises(
+        InspectionJobEnqueueError, match="검수 작업을 시작하지 못했습니다"
+    ) as raised:
+        service.submit(filename="products.csv", file_bytes=b"csv")
+
+    assert isinstance(raised.value.__cause__, ConnectionError)
+    assert store.deleted == [store.created[0]["job_id"]]
