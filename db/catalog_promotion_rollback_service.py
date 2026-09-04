@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -27,6 +28,7 @@ ROLLBACK_PREVIEW_STALE_MESSAGE = "The rollback preview is stale. Create a new pr
 ROLLBACK_CONFLICT_MESSAGE = "Rollback was blocked because the current catalog state differs from the selected promotion."
 ROLLBACK_NOT_ELIGIBLE_MESSAGE = "The selected promotion run cannot be rolled back."
 ROLLBACK_FAILED_MESSAGE = "Rollback could not be completed."
+rollback_logger = logging.getLogger("catalogguard.catalog_promotion_rollback")
 
 RollbackAction = Literal["delete", "restore"]
 RollbackStatus = Literal["succeeded", "blocked"]
@@ -341,6 +343,20 @@ def _create_terminal_run(
     return run
 
 
+def _rollback_session_best_effort(
+    session: Session,
+    *,
+    target_promotion_run_id: int,
+) -> None:
+    try:
+        session.rollback()
+    except Exception:
+        rollback_logger.exception(
+            "failed to roll back catalog promotion rollback session",
+            extra={"target_promotion_run_id": target_promotion_run_id},
+        )
+
+
 def _record_failed_run(
     session: Session,
     *,
@@ -365,7 +381,10 @@ def _record_failed_run(
             )
             return run.id
     except Exception:
-        session.rollback()
+        _rollback_session_best_effort(
+            session,
+            target_promotion_run_id=target_promotion_run_id,
+        )
         return None
 
 
@@ -498,7 +517,10 @@ def execute_catalog_promotion_rollback(
     except (CatalogPromotionRollbackNotFoundError, CatalogPromotionRollbackAlreadyExecutedError):
         raise
     except Exception:
-        session.rollback()
+        _rollback_session_best_effort(
+            session,
+            target_promotion_run_id=promotion_run_id,
+        )
         failed_run_id = _record_failed_run(
             session,
             target_promotion_run_id=promotion_run_id,
