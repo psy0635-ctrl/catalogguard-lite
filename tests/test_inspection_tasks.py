@@ -51,6 +51,12 @@ class FakeSession:
         self.close_calls += 1
 
 
+class FailingRollbackSession(FakeSession):
+    def rollback(self) -> None:
+        super().rollback()
+        raise RuntimeError("database connection dropped during rollback")
+
+
 def make_state(
     job_id: str,
     *,
@@ -340,6 +346,44 @@ def test_database_error_task_rolls_back_closes_and_records_safe_failure(
     assert precheck_session.close_calls == 1
     assert write_session.rollback_calls == 0
     assert write_session.close_calls == 0
+    assert not job_file.exists()
+
+
+def test_database_error_with_rollback_failure_still_records_failure_and_cleans_up(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import workers.inspection_tasks as tasks
+    from sqlalchemy.exc import SQLAlchemyError
+
+    job_id = "8d4c3d84-cf1d-4cdb-83a4-4ebf9d6bf5f6"
+    job_file = tmp_path / "job.csv"
+    job_file.write_bytes(b"csv bytes")
+    store = FakeJobStore(make_state(job_id))
+    precheck_session = FailingRollbackSession()
+
+    monkeypatch.setattr(tasks, "get_redis_job_store", lambda: store)
+    monkeypatch.setattr(tasks, "is_safe_job_file_path", lambda *_: True)
+    monkeypatch.setattr(tasks, "get_session_factory", lambda: lambda: precheck_session)
+    monkeypatch.setattr(
+        tasks,
+        "validate_and_read_uploaded_csv",
+        lambda *args, **kwargs: "dataframe",
+    )
+    monkeypatch.setattr(
+        tasks,
+        "find_existing_inspection_run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            SQLAlchemyError("primary inspection database failure")
+        ),
+    )
+
+    tasks.inspect_csv_task.run(job_id, str(job_file))
+
+    assert store.state.status == "failed"
+    assert store.state.error_code == "database_error"
+    assert precheck_session.rollback_calls == 1
+    assert precheck_session.close_calls == 1
     assert not job_file.exists()
 
 

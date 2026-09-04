@@ -61,6 +61,16 @@ def _update_failed_job(store, job_id: str, error_code: str, message: str) -> Non
         )
 
 
+def _rollback_session_best_effort(session, *, job_id: str) -> None:
+    try:
+        session.rollback()
+    except Exception:
+        worker_logger.exception(
+            "failed to roll back inspection database session",
+            extra={"job_id": job_id},
+        )
+
+
 @celery_app.task(
     bind=False,
     name="catalogguard.inspect_csv",
@@ -159,16 +169,16 @@ def inspect_csv_task(job_id: str, job_file_path: str) -> None:
         _update_failed_job(store, job_id, "invalid_csv", INVALID_CSV_MESSAGE)
     except SQLAlchemyError:
         if precheck_session is not None:
-            precheck_session.rollback()
+            _rollback_session_best_effort(precheck_session, job_id=job_id)
         if write_session is not None:
-            write_session.rollback()
+            _rollback_session_best_effort(write_session, job_id=job_id)
         worker_logger.exception("database error while inspecting CSV", extra={"job_id": job_id})
         _update_failed_job(store, job_id, "database_error", INSPECTION_FAILURE_MESSAGE)
     except Exception:
         if precheck_session is not None:
-            precheck_session.rollback()
+            _rollback_session_best_effort(precheck_session, job_id=job_id)
         if write_session is not None:
-            write_session.rollback()
+            _rollback_session_best_effort(write_session, job_id=job_id)
         worker_logger.exception("unexpected error while inspecting CSV", extra={"job_id": job_id})
         _update_failed_job(store, job_id, "inspection_failed", INSPECTION_FAILURE_MESSAGE)
     finally:
