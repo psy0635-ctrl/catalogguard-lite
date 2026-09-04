@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -34,6 +35,7 @@ PREVIEW_STALE_MESSAGE = (
     "미리보기 이후 데이터가 변경되었습니다. 새로운 preview를 확인해 주세요."
 )
 PROMOTION_FAILED_MESSAGE = "운영 상품 반영 중 오류가 발생했습니다."
+promotion_logger = logging.getLogger("catalogguard.catalog_promotion")
 
 PromotionExecutionStatus = Literal["succeeded", "blocked"]
 
@@ -194,6 +196,16 @@ def _create_catalog_product_change(
     )
 
 
+def _rollback_session_best_effort(session: Session, *, etl_load_run_id: int) -> None:
+    try:
+        session.rollback()
+    except Exception:
+        promotion_logger.exception(
+            "failed to roll back catalog promotion session",
+            extra={"etl_load_run_id": etl_load_run_id},
+        )
+
+
 def _insert_catalog_product(
     session: Session,
     *,
@@ -294,7 +306,7 @@ def _record_failed_run(
             )
             return run.id
     except Exception:
-        session.rollback()
+        _rollback_session_best_effort(session, etl_load_run_id=etl_load_run_id)
         return None
 
 
@@ -485,7 +497,7 @@ def execute_catalog_promotion(
     except ETLLoadRunNotFoundError:
         raise
     except Exception:
-        session.rollback()
+        _rollback_session_best_effort(session, etl_load_run_id=etl_load_run_id)
         failed_run_id = None
         if locked_load_run_id is not None:
             failed_run_id = _record_failed_run(

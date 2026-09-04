@@ -72,6 +72,97 @@ def test_invalid_expected_hash_is_rejected_before_database_access(invalid_hash):
         )
 
 
+def test_promotion_rollback_failure_does_not_mask_primary_failure_or_failed_run(
+    monkeypatch,
+):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from sqlalchemy.exc import SQLAlchemyError
+
+    import db.catalog_promotion_service as promotion_service
+
+    class ScalarResult:
+        def __init__(self, *, first=None, all_items=None) -> None:
+            self._first = first
+            self._all_items = all_items or []
+
+        def first(self):
+            return self._first
+
+        def all(self):
+            return self._all_items
+
+    class FailingRollbackSession:
+        def __init__(self) -> None:
+            self._results = [
+                ScalarResult(first=SimpleNamespace(id=101)),
+                ScalarResult(),
+                ScalarResult(all_items=[]),
+            ]
+            self.flush_calls = 0
+            self.rollback_calls = 0
+
+        def begin(self):
+            return nullcontext()
+
+        def scalars(self, _statement):
+            return self._results.pop(0)
+
+        def add(self, _instance) -> None:
+            pass
+
+        def flush(self) -> None:
+            self.flush_calls += 1
+            if self.flush_calls == 2:
+                raise SQLAlchemyError("primary promotion database failure")
+
+        def rollback(self) -> None:
+            self.rollback_calls += 1
+            raise RuntimeError("database connection dropped during rollback")
+
+    preview = SimpleNamespace(
+        promotion_eligible=True,
+        blocked_reasons=[],
+        preview_hash="a" * 64,
+        preview_schema_version=1,
+        inspection_version="13",
+        error_count=0,
+        warning_count=0,
+        items=[],
+    )
+    failed_run_ids: list[int] = []
+    session = FailingRollbackSession()
+
+    monkeypatch.setattr(
+        promotion_service,
+        "preview_catalog_promotion",
+        lambda *_args, **_kwargs: preview,
+    )
+    monkeypatch.setattr(
+        promotion_service,
+        "_record_failed_run",
+        lambda _session, *, etl_load_run_id, **_kwargs: failed_run_ids.append(
+            etl_load_run_id
+        )
+        or 909,
+    )
+
+    with pytest.raises(
+        promotion_service.CatalogPromotionExecutionFailedError
+    ) as raised:
+        promotion_service.execute_catalog_promotion(
+            session,
+            etl_load_run_id=101,
+            confirmation=True,
+            expected_preview_hash="a" * 64,
+        )
+
+    assert raised.value.promotion_run_id == 909
+    assert session.rollback_calls == 1
+    assert failed_run_ids == [101]
+
+
 @pytest.fixture()
 def postgres_promotion():
     database_url = get_optional_database_url()
