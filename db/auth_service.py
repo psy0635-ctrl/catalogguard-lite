@@ -1,6 +1,8 @@
 # 역할: users 테이블 조회, 로그인 인증, 초기 계정 생성(bootstrap CLI 전용)을 담당합니다.
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -10,6 +12,7 @@ from db.models import User
 
 
 VALID_ROLES = ("viewer", "operator")
+auth_logger = logging.getLogger("catalogguard.auth")
 
 
 class UserAlreadyExistsError(ValueError):
@@ -84,7 +87,10 @@ def create_user(
             return user
     except IntegrityError as error:
         # A concurrent caller may have won the unique username race.
-        session.rollback()
+        try:
+            session.rollback()
+        except Exception:
+            auth_logger.exception("failed to roll back user creation session")
         raise UserAlreadyExistsError(
             f"username already exists: {normalized_username}"
         ) from error

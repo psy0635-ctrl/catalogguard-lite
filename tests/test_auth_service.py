@@ -1,8 +1,10 @@
 # 역할: db/auth_service.py의 사용자 생성, 로그인 인증, 중복/역할 검증을 실제 PostgreSQL로 테스트합니다.
 from uuid import uuid4
+from contextlib import nullcontext
 
 import pytest
 from sqlalchemy import delete
+from sqlalchemy.exc import IntegrityError
 
 from config.database import get_optional_database_url
 from core.security import verify_password
@@ -77,6 +79,45 @@ def test_create_user_rejects_duplicate_username(postgres_session):
             create_user(session, username=username, password="pw-two", role="operator")
     finally:
         _cleanup_users(session_factory, [username])
+
+
+def test_create_user_rollback_failure_does_not_mask_duplicate_username():
+    class FailingRollbackSession:
+        def __init__(self) -> None:
+            self.rollback_calls = 0
+
+        def begin(self):
+            return nullcontext()
+
+        def scalar(self, _statement):
+            return None
+
+        def add(self, _user) -> None:
+            pass
+
+        def flush(self) -> None:
+            raise IntegrityError(
+                "INSERT INTO users",
+                {},
+                RuntimeError("primary unique constraint failure"),
+            )
+
+        def rollback(self) -> None:
+            self.rollback_calls += 1
+            raise RuntimeError("secondary rollback failure")
+
+    session = FailingRollbackSession()
+
+    with pytest.raises(UserAlreadyExistsError) as raised:
+        create_user(
+            session,
+            username="duplicate-user",
+            password="synthetic-test-password",
+            role="viewer",
+        )
+
+    assert session.rollback_calls == 1
+    assert "secondary rollback failure" not in str(raised.value)
 
 
 def test_create_user_rejects_invalid_role(postgres_session):
