@@ -6,6 +6,12 @@
 
 ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl`의 버전별 JSON archive와 코드 registry가 source of truth입니다. PostgreSQL에 두는 것은 두 가지뿐입니다. 신규 ETL 실행에 실제로 적용할 **runtime current-state**(`etl_profile_activations`, 프로필당 row 0 또는 1)와, **성공한 운영 명령의 append-only 이력**(`etl_profile_activation_events`)입니다. 덕분에 재배포 없이 보존된 버전 중 하나를 활성화하거나 신규 실행을 비활성화할 수 있고, 그 뒤에 "누가 어떤 명령을 실행했는가"도 따로 남습니다. viewer는 상태와 이력을 조회하고, operator는 `PUT /api/v1/etl-profiles/{profile_id}/activation`과 Streamlit `ETL 프로필 운영 관리` 화면에서 변경하거나 `DELETE`로 runtime override를 지워 배포 기본값으로 되돌립니다. 프로필 JSON 자체를 편집하거나 새 프로필을 등록하는 기능은 아닙니다.
 
+## 1. 현재 상태와 최근 검증
+
+현재 정책은 **Feature Freeze + Continuous Maintenance Development**입니다. 대형 새 기능은 추가하지 않고, 실제 오류·transaction·데이터 무결성·오류 처리·회귀 문제를 유지개발로 계속 다룹니다.
+
+최근에는 PostgreSQL 18.4의 일회성 테스트 DB에서 Alembic `upgrade head`(`20260826_0018`)를 적용하고, ETL DB Loader 69건과 ETL Profile Activation 37건을 실제로 검증했습니다. 이는 프로젝트가 PostgreSQL 18.4만 지원한다는 뜻이 아니라, 해당 환경에서 핵심 transaction 계약을 확인한 기록입니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
+
 공개 Streamlit 앱은 아래 주소에서 확인할 수 있습니다.
 
 https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
@@ -646,6 +652,9 @@ catalogguard-lite/
       20260813_0013_add_etl_initial_source_lineage.py
       20260822_0014_create_etl_profile_activations.py
       20260823_0015_create_etl_profile_activation_events.py
+      20260825_0016_add_etl_profile_definition_sha256.py
+      20260826_0017_add_etl_application_commit_sha.py
+      20260826_0018_add_etl_profile_definition_snapshot.py
   data/
     dev/
       category_mismatch_test.csv
@@ -776,7 +785,8 @@ catalogguard-lite/
 | `alembic/versions/20260810_0012_add_inspection_actor_audit.py` | `inspection_runs`에 `actor_user_id`(FK `ON DELETE SET NULL`)·`actor_username` nullable 컬럼을 추가하는 Inspection Actor Audit 마이그레이션 |
 | `alembic/versions/20260813_0013_add_etl_initial_source_lineage.py` | `etl_load_runs`에 최초 입력 경로를 기록하는 `initial_source_type`·`initial_source_ref`를 추가하는 ETL lineage 마이그레이션 |
 | `alembic/versions/20260822_0014_create_etl_profile_activations.py` | 프로필당 runtime activation 상태 한 행을 저장하는 `etl_profile_activations` 테이블 생성 마이그레이션. 빈 표로 시작하므로 적용해도 기존 동작이 바뀌지 않습니다 |
-| `alembic/versions/20260823_0015_create_etl_profile_activation_events.py` | 성공한 activation 운영 명령을 쌓는 append-only `etl_profile_activation_events` 테이블과 조회 index 생성 마이그레이션(현재 head). **빈 표로 시작하며 기존 current-state row로 과거 이력을 backfill하지 않습니다** |
+| `alembic/versions/20260823_0015_create_etl_profile_activation_events.py` | 성공한 activation 운영 명령을 쌓는 append-only `etl_profile_activation_events` 테이블과 조회 index 생성 마이그레이션. **빈 표로 시작하며 기존 current-state row로 과거 이력을 backfill하지 않습니다** |
+| `alembic/versions/20260825_0016_add_etl_profile_definition_sha256.py`·`20260826_0017_add_etl_application_commit_sha.py`·`20260826_0018_add_etl_profile_definition_snapshot.py` | `etl_load_runs`에 프로필 정의 fingerprint·실행 commit·정의 JSONB snapshot lineage를 추가하는 순차 마이그레이션. `0018`이 현재 단일 head입니다 |
 | `.github/workflows/test.yml` | 일반 테스트와 분리된 `browser-e2e`·`kubernetes-smoke` job을 포함해 PostgreSQL·Chromium 실제 브라우저 흐름과 kind 실제 Kubernetes 배포까지 실행하는 GitHub Actions workflow |
 | `k8s/dev-postgres.yaml`, `k8s/migration-job.yaml`, `k8s/catalogguard-api.yaml` | kind CI 전용 PostgreSQL, Alembic Migration Job, FastAPI Deployment/Service manifest |
 | `.env.example` | 로컬 PostgreSQL 연결 환경변수 예시 |
@@ -1179,7 +1189,7 @@ $env:CATALOGGUARD_JWT_SECRET="로컬에서만 사용할 임의의 긴 문자열"
 | `CATALOGGUARD_ETL_S3_BUCKET` | 없음 | `POST /api/v1/etl-loads/s3`가 읽을 S3 bucket. 요청으로 bucket을 지정할 수 없으며, 미설정 시 이 endpoint는 `503`(`s3_not_configured`) |
 | `CATALOGGUARD_ETL_S3_PREFIX` | 없음 | 허용할 object key prefix(예: `incoming/catalogguard/`). 앞뒤 `/`는 정규화하며, 설정 시 이 prefix로 시작하지 않는 `object_key`는 S3 호출 전에 `400`(`s3_key_not_allowed`)으로 차단. 미설정이면 prefix 제한 없이 해당 bucket 전체가 대상이 되므로 설정을 권장 |
 | `CATALOGGUARD_ETL_HTTP_FEED_URL` | 없음 | `POST /api/v1/etl-loads/http`가 읽을 신뢰 공급사 CSV feed URL(예: `https://supplier.example.invalid/catalog.csv`). 요청으로 URL을 지정할 수 없으며, 미설정 시 이 endpoint는 `503`(`http_feed_not_configured`). 외부 host는 `https`만 허용하고 평문 `http`는 loopback host에서만 허용 |
-| `CATALOGGUARD_ETL_HTTP_FEED_FILENAME` | `supplier_feed.csv` | HTTP feed로 받은 CSV를 기존 ETL에 넘길 때 사용할 `source_filename`. 응답 헤더에서 추출하지 않고 서버 설정으로만 정하며, `.csv`가 아니면 `400`(`invalid_upload`) |
+| `CATALOGGUARD_ETL_HTTP_FEED_FILENAME` | `supplier_feed.csv` | HTTP feed로 받은 CSV를 기존 ETL에 넘길 때 사용할 `source_filename`. 응답 헤더에서 추출하지 않고 서버 설정으로만 정하며, `.csv`가 아니면 사용자 입력 오류가 아닌 안전한 서버 설정 오류(`503`)로 처리 |
 
 실제 `CATALOGGUARD_JWT_SECRET` 값은 저장소에 커밋하지 않으며, 이 문서에도 실제 값을 적지 않습니다.
 
@@ -1195,7 +1205,7 @@ python -m alembic upgrade head
 python -m alembic history
 ```
 
-현재 Alembic head는 `20260823_0015`입니다.
+현재 Alembic head는 `20260826_0018`입니다.
 
 `20260703_0001_create_inspection_tables.py`는 다음 테이블을 만듭니다.
 
@@ -1284,7 +1294,7 @@ upgrade 동작은 다음 순서입니다.
 
 upgrade는 빈 표를 만들 뿐이므로 적용해도 기존 동작이 바뀌지 않습니다. downgrade는 unique index와 테이블을 제거해 runtime override를 모두 버리고 배포 registry 기본값으로 돌아가며, 프로필 archive와 과거 `etl_load_runs`는 이 표와 무관하므로 그대로 남습니다.
 
-`20260823_0015_create_etl_profile_activation_events.py`(`down_revision=20260822_0014`)는 **성공한 activation 운영 명령**을 쌓는 `etl_profile_activation_events` 테이블을 추가합니다. 현재 단일 head입니다.
+`20260823_0015_create_etl_profile_activation_events.py`(`down_revision=20260822_0014`)는 **성공한 activation 운영 명령**을 쌓는 `etl_profile_activation_events` 테이블을 추가합니다.
 
 - `profile_id`(`VARCHAR(100)`, `NOT NULL`): 위 표와 같은 이유로 **FK를 걸지 않고** allowlist 검증은 애플리케이션이 합니다
 - `action`(`VARCHAR(20)`, `NOT NULL`): CHECK constraint가 `activate`·`deactivate`·`reset` 세 값만 허용합니다
@@ -1319,7 +1329,9 @@ psql "$env:DATABASE_URL" -c "\d etl_profile_activation_events"
 
 같은 방식으로 로컬 disposable PostgreSQL 18에서 빈 DB의 `upgrade head`, `downgrade 20260803_0007`, `downgrade 20260728_0006`, 재-upgrade와 단일 head도 확인했다. `20260805_0009`도 같은 방식으로 `downgrade 20260803_0008` 뒤 재-upgrade와 단일 head(`20260805_0009`)를 disposable PostgreSQL 18에서 확인했다.
 
-`tests/test_inspection_actor_migration.py`·`tests/test_catalog_promotion_migration.py`·`tests/test_etl_profile_activation_history_migration.py`는 `alembic.script.ScriptDirectory`로 현재 단일 head가 `20260823_0015`인지 확인합니다. 마지막 파일은 실제 PostgreSQL에서 `0014 → 0015` upgrade, downgrade 뒤 재-upgrade, 그리고 **기존 current-state row가 있어도 이력이 backfill되지 않는다는 것**까지 확인합니다. CI의 `Apply database migrations` step은 고정 revision이 아니라 `upgrade head`를 실행하므로 현재 migration chain 전체를 적용합니다.
+`20260825_0016_add_etl_profile_definition_sha256.py`·`20260826_0017_add_etl_application_commit_sha.py`·`20260826_0018_add_etl_profile_definition_snapshot.py`는 각각 `etl_load_runs`에 프로필 정의 fingerprint, 실행 애플리케이션 commit SHA, 프로필 정의 JSONB snapshot을 추가해 적재 시점 lineage를 보존합니다. 현재 단일 head는 `20260826_0018`입니다.
+
+`tests/test_inspection_actor_migration.py`·`tests/test_catalog_promotion_migration.py`·`tests/test_etl_profile_activation_history_migration.py`는 역사적 migration 계약을 확인합니다. CI의 `Apply database migrations` step은 고정 revision이 아니라 `upgrade head`를 실행하므로 현재 migration chain 전체를 적용합니다.
 
 ## 16. FastAPI 실행 방법
 
@@ -2658,6 +2670,26 @@ Streamlit `ETL 프로필 운영 관리`와 운영 이력은 전용 Chromium E2E(
 
 promotion preview의 응답 schema와 hash 형식, blocked reason, insert/update/unchanged 계산, confirmation 요구, stale preview, 안전한 오류 mapping, Streamlit 상태 초기화와 중복 제출 방지를 테스트했습니다. promotion E2E는 브라우저 성공 메시지에 의존하지 않고 `catalog_products`, `catalog_promotion_runs`, `catalog_product_changes`의 PostgreSQL 최종 상태와 `applying` 잔존 여부까지 확인합니다. rollback은 서비스·API 계층의 PostgreSQL 통합 테스트에 더해, 조회 계층(query service·API·client)과 Streamlit History/Detail/Change Audit AppTest, 실제 Chromium Browser E2E까지 검증합니다.
 
+### 최근 PostgreSQL 18.4 transaction 검증
+
+최근 별도 disposable PostgreSQL 18.4 DB에 Alembic `upgrade head`를 적용한 뒤, `TEST_DATABASE_URL`을 사용하는 두 파일을 실제로 실행했습니다. 이는 현재 전체 suite 수치가 아니라 **파일별 PostgreSQL transaction 검증 범위**입니다.
+
+| 검증 범위 | 최종 결과 | 확인한 계약 |
+|---|---:|---|
+| `tests/test_etl_db_loader.py` | **69 passed** | 같은 ETL identity 재처리 시 기존 batch를 재사용해 staging data를 중복 생성하지 않는지, 상품·reject 저장 중 실패하면 batch가 반쪽 상태로 남지 않도록 rollback되는지 |
+| `tests/test_etl_profile_activation_service.py` | **37 passed** | activation 조회가 시작한 read transaction을 끝내 후속 write transaction을 열 수 있는지, 보류 중인 ORM write를 조용히 rollback하지 않고 오류로 보호하는지 |
+
+선택 실행은 ETL DB Loader `3 passed, 66 deselected`, Activation `2 passed, 35 deselected`였고, 최종 파일별 실행에서는 failures·skips·warnings가 없었습니다. transaction은 여러 DB 작업을 하나의 성공/실패 단위로 묶고, rollback은 실패 시 그 단위의 변경을 이전 상태로 되돌리는 동작입니다.
+
+### 최근 유지개발 안정성 개선
+
+최근 유지개발은 기능을 늘리기보다 실패 경로의 **원래 오류를 cleanup·rollback 오류가 가리지 않게 하는 것**에 집중했습니다.
+
+- Celery broker가 terminal inspection job을 다시 전달해도 기존 `succeeded`·`failed` 결과와 정리된 입력 파일을 건드리지 않고 replay를 건너뜁니다.
+- inspection 임시 CSV publish 실패와 enqueue 실패 뒤의 cleanup, ETL write 실패 뒤의 temporary cleanup에서 보조 정리 오류가 주된 실패를 덮지 않게 했습니다.
+- 서버가 설정한 HTTP feed filename이 잘못됐을 때 이를 사용자 upload 오류로 오인하지 않고 안전한 서버 설정 오류로 처리합니다.
+- Async inspection, promotion, promotion rollback, duplicate-user 생성에서 rollback 자체가 실패해도 원래 domain failure·failed audit·job cleanup 흐름을 유지합니다.
+
 ### 실제 브라우저 ETL E2E
 
 실제 Chromium 브라우저 E2E는 ETL reject fixture와 promotion fixture를 각각 `etl.cli`·`etl.load_cli`로 처리하고 테스트 PostgreSQL에 적재한 뒤, runner가 FastAPI와 Streamlit을 직접 시작합니다. Authentication 도입 후에는 두 시나리오 모두 시작 시 `browser_e2e_operator` 계정을 `scripts/create_user.py`로 생성하고, Streamlit 로그인 폼에서 실제 로그인한 뒤 기존 흐름을 이어갑니다. promotion 시나리오는 `ETL 적재 이력` 탭에서 파일명·프로필명으로 batch를 검색하고, 실제 combobox 선택, preview, 변경 전·후 표, 승인 checkbox, 반영 버튼 상태, promotion 성공 또는 중복 메시지를 확인합니다. 이후 테스트 코드가 PostgreSQL의 succeeded run 1건, 운영 상품 insert/update, audit 존재, applying run 0건을 직접 확인합니다. 같은 시나리오는 이어서 Promotion 실행 이력·상품 변경 Audit, Rollback Preview·승인·실행, reload 없이 갱신되는 Rollback 실행 이력, Rollback 실행 상세, 그리고 `상품 Rollback 변경 Audit` 화면까지 진행합니다. Change Audit 영역에서는 표 컬럼(`원본 Audit ID`·`외부 상품 ID`·`변경 유형`·`변경 필드`·`변경 전`·`변경 후`), `상품 삭제` 표시, delete의 `삭제됨` 표시, 실제 변경 필드와 fixture 상품 표시, 전체 change 건수 caption과 pagination 버튼 비활성화를 확인하고, PostgreSQL에서는 rollback change 2건이 모두 `delete`인지, `original_audit_id` 집합이 원본 `catalog_product_changes.id` 집합과 일치하는지, 되돌린 뒤 운영 상품이 0건인지를 함께 확인합니다. reject 시나리오는 별도로 마스킹과 raw 민감정보 미노출, console/page error 0건을 확인합니다. 이 E2E는 로그인·ETL 검색·promotion·rollback 화면을 다루며, 웹 ETL CSV 업로드 화면 자체를 실제 브라우저에서 검증하는 전용 시나리오는 아직 없습니다. 웹 ETL selectbox를 추가할 때 이 검색 필드와 accessible label(`공급사 프로필`)이 겹쳐 기존 E2E의 `get_by_label()`이 strict-mode violation으로 실패한 적이 있으며, selectbox label을 `ETL 실행 프로필`로 분리해 해결했습니다. 로그인 폼의 `아이디`·`비밀번호` label도 기존 UI label과 겹치지 않도록 새로 붙였습니다.
@@ -2911,6 +2943,8 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - `.env` 자동 로딩은 구현되어 있지 않으므로 로컬에서는 PowerShell 환경변수를 직접 설정해야 합니다.
 
 ## 26. 향후 개선 방향
+
+현재는 Feature Freeze 상태이므로 아래 항목은 확정된 개발 약속이 아닙니다. 실제 사용자 요구·운영 데이터·성능 baseline이 확인될 때 우선순위를 다시 판단하며, 대형 확장보다 안정성·관찰성·데이터 품질 검증을 우선합니다.
 
 - 운영 정책에 맞는 금지어, 개인정보, 카테고리 규칙 확장
 - 실제 retention 요구가 확정될 경우 검수 이력 deletion audit event와 보관 실행 방식 설계

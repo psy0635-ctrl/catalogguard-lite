@@ -256,7 +256,7 @@ Streamlit ETL 프로필 운영 관리
 | Reset 기능 commit `0a2a80f` 기준 로컬 테스트 | 로컬 PostgreSQL 통합 환경에서 `python -m pytest tests/` 결과 `2427 passed`, `6 deselected`, `0 failed`, 5 warnings. 관련 5개 파일 묶음은 `603 passed`(service 37 · API 49 · client 325 · Streamlit AppTest 141 · RBAC 51). `6 deselected`는 `pytest.ini`의 기본 `-m "not e2e and not performance"`입니다. **이 commit에 대한 CI run은 아직 없습니다.** CI는 `python -m pytest -q`로 저장소 전체를 수집해 `airflow/tests/`까지 포함하므로 이 로컬 수치와 직접 비교할 수 없습니다 |
 | ETL Profile Activation History 검증 | 성공한 activate·deactivate·reset 명령마다 event 1건, 같은 `PUT`·no-op reset도 기록, 실패 요청은 기록 없음, 상태 변경과 event INSERT의 same-transaction rollback, reset event의 실제 적용 버전이 배포 기본값, 사용자 삭제 후 `actor_user_id` `NULL`·이름 snapshot 유지, 응답에 `actor_user_id` 미노출, `0015` upgrade의 backfill 없음, 화면이 reset을 비활성화로 표시하지 않음, 이력 조회 실패의 화면 격리를 migration·service·API·client·Streamlit AppTest·PostgreSQL 통합 테스트로 확인 |
 | History 기능 commit `b14e16f` 기준 로컬 테스트 | 로컬 PostgreSQL 16 통합 환경에서 `python -m pytest tests/`(e2e·performance 제외) 결과 `2543 passed`, `0 failed`. 핵심 7개 파일 묶음은 `723 passed`(history migration 5 · history service 35 · activation service 37 · API 69 · client 369 · Streamlit AppTest 154 · RBAC 54). **이 commit에 대한 CI run은 아직 없습니다.** CI는 저장소 전체를 수집해 `airflow/tests/`까지 포함하므로 이 로컬 수치와 직접 비교할 수 없습니다 |
-| 최신 Alembic head | `20260823_0015`(ETL profile activation events, single head) |
+| 최신 Alembic head | `20260826_0018`(ETL profile definition fingerprint·application commit·JSONB definition snapshot lineage까지 적용한 single head) |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
 
 ## 6.6 핵심 구현 구조
@@ -2014,3 +2014,34 @@ migration은 **빈 표를 만듭니다.** 기존 current-state row를 보고 과
 - **Profile CRUD는 없습니다.** 프로필 정의와 버전 archive의 source of truth는 계속 `config/etl` JSON archive와 코드 registry입니다
 - 운영 관리 화면(운영 이력 포함)은 전용 Chromium E2E로 검증합니다. 이 시나리오는 disposable local PostgreSQL에서 snapshot 기반 cleanup을 수행합니다
 - Airflow의 feed fetch 전 inactive guard와 failure precedence 정책은 6.24 시점 그대로 남아 있습니다
+
+## 6.27 현재 유지개발과 PostgreSQL transaction 검증
+
+### 현재 상태
+
+프로젝트는 **Feature Freeze + Continuous Maintenance Development** 상태입니다. 대형 기능을 계속 추가하는 대신, 실제 오류·transaction·데이터 무결성·오류 처리·회귀 문제를 좁은 범위로 유지개발합니다. 따라서 아래 내용은 기능 홍보가 아니라 현재 구현의 실패 경로와 검증 범위를 설명하는 기록입니다.
+
+### 오류 우선순위 보호
+
+실패 처리에서 중요한 원칙은 **주된 오류를 보조 cleanup 또는 rollback 오류가 가리지 않게 하는 것**입니다. 예를 들어 inspection job은 terminal 상태의 broker redelivery를 다시 실행하지 않고, 임시 CSV publish 실패·enqueue 실패·ETL temporary cleanup 실패는 원래 실패 결과를 보존합니다. Async inspection, promotion, promotion rollback, duplicate username 생성에서도 rollback이 추가로 실패하더라도 원래 domain error와 failed audit 또는 job cleanup 흐름을 유지합니다. HTTP feed의 잘못된 filename은 사용자 업로드 오류가 아니라 서버 설정 오류로 분류합니다.
+
+이 설계는 "모든 실패를 복구한다"는 주장이 아닙니다. 실패 사실과 주된 원인을 잃지 않고, 후속 정리와 안전한 상태 기록을 가능한 범위에서 계속 수행하도록 한 것입니다.
+
+### PostgreSQL 18.4에서 확인한 ETL transaction 계약
+
+Alembic `upgrade head`로 `20260826_0018`까지 적용한 disposable PostgreSQL 18.4 환경에서 다음 파일을 실제로 실행했습니다. 이 숫자는 저장소 전체 테스트 수가 아니라 해당 PostgreSQL 검증 범위입니다.
+
+| 범위 | 결과 | 의미 |
+|---|---:|---|
+| ETL DB Loader | **69 passed** | 같은 ETL identity가 반복돼도 기존 batch를 재사용해 staging data를 중복 생성하지 않으며, 상품 또는 reject 저장 실패 시 batch 전체가 rollback되어 반쪽 상태가 남지 않음 |
+| ETL Profile Activation | **37 passed** | activation 조회가 시작한 read transaction을 끝내 후속 write transaction을 열 수 있으며, 보류 중인 write는 조용히 rollback하지 않고 오류로 보호 |
+
+선택 검증도 각각 `3 passed, 66 deselected`와 `2 passed, 35 deselected`였으며, 최종 파일별 실행의 failures·skips·warnings는 0이었습니다. 여기서 transaction은 여러 DB 작업을 하나의 성공/실패 단위로 묶는 것이고, rollback은 실패한 단위의 변경을 되돌리는 것입니다.
+
+### 성능 개선 기록의 해석
+
+concentrated duplicate-product-name 입력에서 pair 비교 호출 수를 **4,950에서 99로** 줄인 검증이 있습니다(`opt-in performance benchmark: 1 passed`). 이는 비교 호출 횟수 감소를 확인한 결과이며, 처리 시간이나 전체 시스템 성능이 50배 향상됐다는 주장은 아닙니다. 당시 전체 테스트 결과(`2299 passed, 382 skipped, 10 deselected, 1 warning`)도 이 최적화가 검증된 시점의 별도 범위로만 해석합니다.
+
+### 다음 판단 기준
+
+향후 개선은 실제 사용자 데이터로 Rule 품질을 검증하고, 운영 관찰성을 보완하며, 성능 baseline을 계속 관찰하는 방향을 우선합니다. 추천 시스템·대규모 cloud 확장·무제한 Rule 추가는 현재 핵심 계획이 아니며, production 요구가 생겼을 때만 별도 근거로 판단합니다. 기존 `codex/content-safety-subprofile` profiling/backlog 맥락은 보존합니다.
