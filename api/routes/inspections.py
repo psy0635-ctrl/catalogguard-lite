@@ -24,7 +24,7 @@ from api.schemas import (
     InspectionResultItem,
     InspectionSummary,
 )
-from config.settings import INSPECTION_VERSION
+from config.settings import INSPECTION_VERSION, MAX_UPLOAD_SIZE_BYTES
 from core.inspection_service import InspectionReport, inspect_dataframe
 from core.upload_validator import (
     CsvUploadValidationError,
@@ -378,7 +378,7 @@ async def create_inspection(
     session: Session = Depends(get_session),
     precheck_session: Session = Depends(get_session, use_cache=False),
 ) -> InspectionResponse:
-    file_bytes = await file.read()
+    file_bytes = await file.read(MAX_UPLOAD_SIZE_BYTES + 1)
 
     try:
         dataframe = validate_and_read_uploaded_csv(file.filename, file_bytes)

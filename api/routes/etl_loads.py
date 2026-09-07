@@ -111,7 +111,7 @@ from etl.profile_loader import (
     list_etl_profiles,
     registered_profile_versions,
 )
-from config.settings import ETL_HTTP_FEED_SOURCE_REF
+from config.settings import ETL_HTTP_FEED_SOURCE_REF, MAX_UPLOAD_SIZE_BYTES
 from etl.s3_source import (
     S3KeyNotAllowedError,
     S3NotConfiguredError,
@@ -1168,7 +1168,7 @@ async def create_etl_load_run(
 ) -> ETLWebRunResponse:
     # run_web_etl()에 넘기는 값과 로그에 남기는 값이 갈라지지 않도록 한 곳에서 정합니다.
     request_source_type = "upload"
-    file_bytes = await file.read()
+    file_bytes = await file.read(MAX_UPLOAD_SIZE_BYTES + 1)
     try:
         outcome = run_web_etl(
             session,

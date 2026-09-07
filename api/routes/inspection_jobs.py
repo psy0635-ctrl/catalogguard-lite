@@ -10,6 +10,7 @@ from api.schemas import (
     InspectionJobSubmissionResponse,
     InspectionSummary,
 )
+from config.settings import MAX_UPLOAD_SIZE_BYTES
 from services.inspection_job_service import (
     InspectionJobEnqueueError,
     InspectionJobService,
@@ -31,7 +32,7 @@ async def submit_inspection_job(
     service: InspectionJobService = Depends(get_inspection_job_service),
     current_user=Depends(require_operator),
 ) -> InspectionJobSubmissionResponse:
-    file_bytes = await file.read()
+    file_bytes = await file.read(MAX_UPLOAD_SIZE_BYTES + 1)
     try:
         submission = service.submit(
             filename=file.filename,
