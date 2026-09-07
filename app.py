@@ -26,7 +26,11 @@ from core.product_template import (
     build_product_template_csv,
     get_product_template_filename,
 )
-from core.result_exporter import build_result_filename, build_validation_result_csv
+from core.result_exporter import (
+    build_result_filename,
+    build_validation_result_csv,
+    prepare_export_dataframe,
+)
 from core.upload_validator import (
     CsvUploadValidationError,
     validate_and_read_uploaded_csv,
@@ -610,7 +614,9 @@ def build_comparison_error_field_dataframe(items: list[dict]) -> pd.DataFrame:
 
 def build_history_detail_csv(dataframe: pd.DataFrame) -> bytes:
     ordered_dataframe = dataframe.reindex(columns=HISTORY_DETAIL_DISPLAY_COLUMNS)
-    return ordered_dataframe.to_csv(index=False).encode("utf-8-sig")
+    return prepare_export_dataframe(ordered_dataframe).to_csv(index=False).encode(
+        "utf-8-sig"
+    )
 
 
 def build_history_download_filename(
