@@ -128,6 +128,26 @@ def test_build_history_detail_csv_preserves_korean_values(app_module):
     assert "동일한 상품 ID가 여러 상품에 사용되었습니다." in csv_text
 
 
+def test_build_history_detail_csv_escapes_formula_like_cells(app_module):
+    dataframe = make_detail_dataframe(app_module)
+    dataframe.loc[0, "상품 그룹 ID"] = "=1+1"
+    dataframe.loc[0, "상품 ID"] = "+1+1"
+    dataframe.loc[0, "오류 이유"] = "-1+1"
+    dataframe.loc[0, "수정 권장사항"] = "@SUM(1,1)"
+
+    exported = pd.read_csv(
+        io.BytesIO(app_module.build_history_detail_csv(dataframe)),
+        encoding="utf-8-sig",
+        dtype=object,
+        keep_default_na=False,
+    )
+
+    assert exported.loc[0, "상품 그룹 ID"] == "'=1+1"
+    assert exported.loc[0, "상품 ID"] == "'+1+1"
+    assert exported.loc[0, "오류 이유"] == "'-1+1"
+    assert exported.loc[0, "수정 권장사항"] == "'@SUM(1,1)"
+
+
 def test_build_history_download_filename_avoids_duplicate_csv_extension(app_module):
     filename = app_module.build_history_download_filename(3, "products_dev.csv")
 
