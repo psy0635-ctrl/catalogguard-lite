@@ -27,6 +27,8 @@ from core.product_template import (
     get_product_template_filename,
 )
 from core.result_exporter import (
+    CorrectionWorksheetUnavailableError,
+    build_correction_worksheet_csv,
     build_result_filename,
     build_validation_result_csv,
     prepare_export_dataframe,
@@ -1330,25 +1332,44 @@ def render_uploaded_inspection_result(
     )
 
     st.caption(f"현재 조건에 맞는 검수 결과: {len(filtered_result_df)}건")
-    if filtered_result_df.empty:
-        st.info("선택한 조건에 맞는 검수 결과가 없습니다.")
-        return
-
-    st.dataframe(
-        filtered_result_df,
-        height=calculate_dataframe_height(len(filtered_result_df)),
-        width="stretch",
-        hide_index=True,
-    )
     source_filename = (
         detail_response.get("source_filename") or fallback_source_filename
     )
-    st.download_button(
-        "현재 필터 결과 CSV 다운로드",
-        data=build_validation_result_csv(filtered_result_df),
-        file_name=build_result_filename(source_filename),
-        mime="text/csv",
-    )
+    if filtered_result_df.empty:
+        st.info("선택한 조건에 맞는 검수 결과가 없습니다.")
+    else:
+        st.dataframe(
+            filtered_result_df,
+            height=calculate_dataframe_height(len(filtered_result_df)),
+            width="stretch",
+            hide_index=True,
+        )
+        st.download_button(
+            "현재 필터 결과 CSV 다운로드",
+            data=build_validation_result_csv(filtered_result_df),
+            file_name=build_result_filename(source_filename),
+            mime="text/csv",
+        )
+
+    try:
+        correction_worksheet_csv = build_correction_worksheet_csv(
+            detail_response.get("results", [])
+        )
+    except CorrectionWorksheetUnavailableError as error:
+        st.info(str(error))
+    else:
+        st.caption(
+            "검수 오류와 수정 권장사항을 원본 논리 행별로 정리한 작업용 CSV입니다."
+        )
+        st.download_button(
+            "수정 작업표 CSV 다운로드",
+            data=correction_worksheet_csv,
+            file_name=build_result_filename(source_filename).replace(
+                "_validation_results.csv",
+                "_correction_worksheet.csv",
+            ),
+            mime="text/csv",
+        )
 
 
 def render_csv_inspection_tab() -> None:

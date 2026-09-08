@@ -510,6 +510,93 @@ def test_app_background_job_posts_once_refreshes_with_get_and_reuses_result_ui(
     assert api_client.detail_calls == [10]
 
 
+def test_app_offers_correction_worksheet_for_source_identified_results(monkeypatch):
+    detail_response = make_detail_response()
+    detail_response["results"] = [
+        {
+            **GROUP_CATEGORY_RESULTS[0],
+            "source_row_number": 2,
+        },
+        {
+            **GROUP_CATEGORY_RESULTS[1],
+            "source_row_number": 2,
+        },
+        {
+            **GROUP_CATEGORY_RESULTS[3],
+            "source_row_number": 5,
+        },
+    ]
+    detail_response["summary"] = {
+        "total_products": 2,
+        "total_issues": 3,
+        "error_count": 3,
+        "warning_count": 0,
+    }
+    api_client = FakeInspectionApiClient(detail_responses=[detail_response])
+    monkeypatch.setattr(
+        catalogguard_api,
+        "create_catalogguard_api_client",
+        lambda: api_client,
+    )
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
+
+    app.file_uploader[0].upload(
+        "group_category_consistency_test.csv",
+        GROUP_CATEGORY_TEST_CSV,
+        "text/csv",
+    ).run(timeout=10)
+    find_widget(app.button, "검수 실행 및 이력 저장").click().run(timeout=10)
+
+    worksheet_downloads = [
+        download
+        for download in app.get("download_button")
+        if download.proto.label == "수정 작업표 CSV 다운로드"
+    ]
+    assert len(app.exception) == 0
+    assert len(worksheet_downloads) == 1
+    assert worksheet_downloads[0].proto.url.endswith(".csv")
+    assert "검수 오류와 수정 권장사항을 원본 논리 행별로 정리한 작업용 CSV입니다." in [
+        caption.value for caption in app.caption
+    ]
+
+
+def test_app_blocks_correction_worksheet_without_complete_source_identity(monkeypatch):
+    api_client = FakeInspectionApiClient()
+    monkeypatch.setattr(
+        catalogguard_api,
+        "create_catalogguard_api_client",
+        lambda: api_client,
+    )
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
+
+    app.file_uploader[0].upload(
+        "group_category_consistency_test.csv",
+        GROUP_CATEGORY_TEST_CSV,
+        "text/csv",
+    ).run(timeout=10)
+    find_widget(app.button, "검수 실행 및 이력 저장").click().run(timeout=10)
+
+    assert len(app.exception) == 0
+    assert not [
+        download
+        for download in app.get("download_button")
+        if download.proto.label == "수정 작업표 CSV 다운로드"
+    ]
+    assert "이전 검수 이력은 원본 행 식별 정보가 없어 수정 작업표를 제공할 수 없습니다." in [
+        info.value for info in app.info
+    ]
+
+
 def test_app_background_duplicate_result_preserves_created_false(monkeypatch):
     api_client = FakeInspectionApiClient(
         created=False,
