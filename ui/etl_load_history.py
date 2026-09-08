@@ -1,5 +1,6 @@
 from collections import Counter
 from datetime import datetime
+import json
 from math import ceil
 from typing import Any
 
@@ -23,6 +24,7 @@ from clients.catalogguard_api import (
     ETLProfileNotFoundError,
     ETLUnsupportedProfileError,
 )
+from core.result_exporter import prepare_export_dataframe
 from ui.auth import get_authenticated_api_client, is_operator
 
 
@@ -30,6 +32,7 @@ ETL_LOAD_LIMIT = 10
 ETL_QUALITY_TREND_LIMIT = 10
 ETL_PRODUCT_LIMIT = 20
 ETL_REJECT_LIMIT = 20
+ETL_REJECTION_EXPORT_PAGE_SIZE = 100
 UNKNOWN_SIZE_TOKEN_LIMIT = 20
 PROMOTION_HISTORY_LIMIT = 10
 PROMOTION_AUDIT_LIMIT = 10
@@ -114,6 +117,13 @@ ETL_LINEAGE_REPRODUCIBILITY_CAPTION = (
     "당시 DB 상태, 외부 응답 등은 포함하지 않으므로 완전한 실행 재현을 의미하지 않습니다."
 )
 ETL_REJECT_DISPLAY_COLUMNS = ["원본 행", "오류 코드", "오류 필드", "오류 메시지"]
+ETL_REJECTION_EXPORT_COLUMNS = [
+    "source_row_number",
+    "error_code",
+    "error_field",
+    "error_message",
+    "masked_source_data",
+]
 # 세 상태를 화면에서 절대 뭉개지 않습니다. "override 없음"은 비활성이 아니라 배포
 # 기본값을 그대로 따르는 상태입니다.
 ETL_PROFILE_ADMIN_RUNTIME_NO_OVERRIDE = "런타임 override 없음 (배포 기본값 사용)"
@@ -313,6 +323,8 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_reject_offset": 0,
     "etl_reject_response": None,
     "etl_reject_error": None,
+    "etl_reject_export_download": None,
+    "etl_reject_export_error": None,
     "catalog_reconciliation_batch_id": None,
     "catalog_reconciliation_offset": 0,
     "catalog_reconciliation_response": None,
@@ -821,6 +833,114 @@ def build_etl_rejection_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=ETL_REJECT_DISPLAY_COLUMNS)
 
 
+def build_etl_rejection_export_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
+    """Convert persisted, masked rejection rows into a fixed CSV shape."""
+    rows = []
+    for item in items:
+        errors = item.get("errors") or []
+        masked_source_data = item.get("masked_source_data")
+        rows.append(
+            {
+                "source_row_number": item.get("source_row_number"),
+                "error_code": ", ".join(
+                    str(error.get("code", ""))
+                    for error in errors
+                    if isinstance(error, dict)
+                ),
+                "error_field": ", ".join(
+                    str(error.get("field", ""))
+                    for error in errors
+                    if isinstance(error, dict)
+                ),
+                "error_message": ", ".join(
+                    str(error.get("message", ""))
+                    for error in errors
+                    if isinstance(error, dict)
+                ),
+                # Rejections persist this field only after the ETL sanitizer has
+                # removed detectable personal information.  The export must not
+                # consult any raw upload data or attempt to reconstruct it.
+                "masked_source_data": json.dumps(
+                    masked_source_data if isinstance(masked_source_data, dict) else {},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            }
+        )
+    return pd.DataFrame(rows, columns=ETL_REJECTION_EXPORT_COLUMNS)
+
+
+def build_etl_rejection_csv(items: list[dict[str, Any]]) -> bytes:
+    """Build a formula-safe UTF-8 BOM CSV from masked rejection API rows."""
+    dataframe = build_etl_rejection_export_dataframe(items)
+    export_dataframe = prepare_export_dataframe(dataframe)
+    return export_dataframe.to_csv(index=False).encode("utf-8-sig")
+
+
+def build_etl_rejection_download_filename(etl_load_run_id: int) -> str:
+    return f"etl_load_{etl_load_run_id}_rejections.csv"
+
+
+def fetch_all_etl_rejections(
+    api_client,
+    *,
+    etl_load_run_id: int,
+    page_size: int = ETL_REJECTION_EXPORT_PAGE_SIZE,
+) -> list[dict[str, Any]]:
+    """Read every rejection page or fail without returning a partial export."""
+    if page_size < 1:
+        raise ValueError("rejection export page size must be positive")
+
+    collected_items: list[dict[str, Any]] = []
+    seen_rejected_row_ids: set[int] = set()
+    expected_total: int | None = None
+    offset = 0
+
+    while True:
+        response = api_client.list_etl_rejections(
+            etl_load_run_id,
+            limit=page_size,
+            offset=offset,
+        )
+        if not isinstance(response, dict):
+            raise ValueError("invalid rejection export response")
+
+        total = response.get("total")
+        items = response.get("items")
+        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+            raise ValueError("invalid rejection export total")
+        if not isinstance(items, list):
+            raise ValueError("invalid rejection export items")
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            raise ValueError("rejection export total changed during fetch")
+
+        if total == 0:
+            return []
+        if response.get("available") is not True or not items:
+            raise ValueError("incomplete rejection export response")
+
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("invalid rejection export item")
+            rejected_row_id = item.get("rejected_row_id")
+            if (
+                isinstance(rejected_row_id, bool)
+                or not isinstance(rejected_row_id, int)
+                or rejected_row_id in seen_rejected_row_ids
+            ):
+                raise ValueError("duplicate or invalid rejection export item")
+            seen_rejected_row_ids.add(rejected_row_id)
+            collected_items.append(item)
+
+        if len(collected_items) == total:
+            return collected_items
+        if len(collected_items) > total or offset + page_size >= total:
+            raise ValueError("incomplete rejection export response")
+        offset += page_size
+
+
 def build_unknown_size_token_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
     rows = [
         {"사이즈 토큰": item.get("token"), "개수": item.get("count")}
@@ -1167,6 +1287,8 @@ def reset_etl_load_detail_state(session_state) -> None:
     session_state["etl_reject_offset"] = 0
     session_state["etl_reject_response"] = None
     session_state["etl_reject_error"] = None
+    session_state["etl_reject_export_download"] = None
+    session_state["etl_reject_export_error"] = None
     reset_etl_lineage_comparison_state(session_state)
 
 
@@ -2076,6 +2198,75 @@ def _render_etl_error(error: Exception, *, detail: bool = False) -> None:
     st.error(build_etl_api_error_display_message(message, error))
 
 
+def _clear_etl_rejection_export_download(session_state) -> None:
+    session_state["etl_reject_export_download"] = None
+    session_state["etl_reject_export_error"] = None
+
+
+def _render_etl_rejection_export(api_client, *, etl_load_run_id: int) -> None:
+    prepared_download = st.session_state.get("etl_reject_export_download")
+    if not (
+        isinstance(prepared_download, dict)
+        and prepared_download.get("etl_load_run_id") == etl_load_run_id
+    ):
+        st.session_state["etl_reject_export_download"] = None
+        prepared_download = None
+
+    if st.button(
+        "거부 행 CSV 다운로드 준비",
+        key="etl_reject_export_prepare",
+    ):
+        try:
+            items = fetch_all_etl_rejections(
+                api_client,
+                etl_load_run_id=etl_load_run_id,
+            )
+            if not items:
+                _clear_etl_rejection_export_download(st.session_state)
+                st.info("다운로드할 거부 행이 없습니다.")
+                return
+            prepared_download = {
+                "etl_load_run_id": etl_load_run_id,
+                "csv_bytes": build_etl_rejection_csv(items),
+                "file_name": build_etl_rejection_download_filename(etl_load_run_id),
+                "total": len(items),
+            }
+            st.session_state["etl_reject_export_download"] = prepared_download
+            st.session_state["etl_reject_export_error"] = None
+        except (
+            CatalogGuardApiConfigurationError,
+            CatalogGuardApiConnectionError,
+            CatalogGuardApiTimeoutError,
+            CatalogGuardApiResponseError,
+            ETLLoadNotFoundError,
+            ValueError,
+        ) as error:
+            _clear_etl_rejection_export_download(st.session_state)
+            st.session_state["etl_reject_export_error"] = error
+
+    export_error = st.session_state.get("etl_reject_export_error")
+    if export_error is not None:
+        st.error(
+            build_etl_api_error_display_message(
+                "전체 거부 행 CSV를 준비하지 못했습니다.",
+                export_error,
+            )
+        )
+        return
+
+    if not isinstance(prepared_download, dict):
+        return
+
+    st.caption(f"준비된 전체 {prepared_download['total']}개 거부 행을 다운로드합니다.")
+    st.download_button(
+        "거부 행 CSV 다운로드",
+        data=prepared_download["csv_bytes"],
+        file_name=prepared_download["file_name"],
+        mime="text/csv",
+        key="etl_reject_export_download",
+    )
+
+
 def _render_etl_rejections(api_client, detail_response: dict[str, Any]) -> None:
     if not detail_response.get("reject_details_stored", False):
         st.info(
@@ -2107,6 +2298,10 @@ def _render_etl_rejections(api_client, detail_response: dict[str, Any]) -> None:
     for item in items:
         with st.expander(f"원본 행 {item.get('source_row_number')} - 마스킹 원본"):
             st.json(item.get("masked_source_data") or {})
+
+    selected_run_id = st.session_state.get("etl_load_selected_run_id")
+    if isinstance(selected_run_id, int):
+        _render_etl_rejection_export(api_client, etl_load_run_id=selected_run_id)
 
     total = max(0, int(response.get("total", 0)))
     current_page, total_pages, has_previous, has_next = calculate_etl_pagination(
