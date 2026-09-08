@@ -110,7 +110,9 @@ def test_product_template_converts_to_product():
     products = load_products_from_dataframe(validated_df)
 
     assert len(products) == 1
-    assert asdict(products[0]) == asdict(EXAMPLE_TEMPLATE_PRODUCT)
+    expected_product = asdict(EXAMPLE_TEMPLATE_PRODUCT)
+    expected_product["source_row_number"] = 2
+    assert asdict(products[0]) == expected_product
 
 
 def test_product_template_example_product_passes_all_rules():

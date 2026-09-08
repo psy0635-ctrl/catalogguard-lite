@@ -126,6 +126,7 @@ def find_inconsistent_group_categories(
                         product_id=product.product_id,
                         product_group_id=product.product_group_id,
                         message=message,
+                        source_row_number=product.source_row_number,
                     ),
                 )
             )

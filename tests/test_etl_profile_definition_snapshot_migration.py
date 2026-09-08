@@ -18,12 +18,13 @@ from db.session import create_database_engine
 
 REVISION = "20260826_0018"
 PREVIOUS_REVISION = "20260826_0017"
+HEAD_REVISION = "20260908_0019"
 COLUMN = "profile_definition_snapshot"
 
 
 def test_profile_definition_snapshot_migration_is_the_single_alembic_head() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert list(script.get_heads()) == [REVISION]
+    assert list(script.get_heads()) == [HEAD_REVISION]
     revision = script.get_revision(REVISION)
     assert revision is not None
     assert revision.down_revision == PREVIOUS_REVISION

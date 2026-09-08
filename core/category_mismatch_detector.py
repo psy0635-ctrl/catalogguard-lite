@@ -122,6 +122,7 @@ def find_category_mismatches(products: list[Product]) -> list[ValidationIssue]:
                     f"'{inferred_category}' but current category is "
                     f"'{current_category}'"
                 ),
+                source_row_number=product.source_row_number,
             )
         )
 

@@ -19,6 +19,8 @@ class Product:
     sale_price_provided: bool = False
     description: str = ""
     seller: str = ""
+    # CSV의 물리 줄이 아니라 header를 포함한 논리적 record 번호입니다.
+    source_row_number: int | None = None
 
 
 @dataclass
@@ -30,3 +32,5 @@ class ValidationIssue:
     product_id: str
     product_group_id: str
     message: str
+    # 원본 상품 record와의 연결용 metadata이며 검수 판정 자체는 바꾸지 않습니다.
+    source_row_number: int | None = None

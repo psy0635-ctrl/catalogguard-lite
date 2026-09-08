@@ -223,6 +223,7 @@ def check_missing_required_fields(products: list[Product]) -> list[ValidationIss
                     product_id=product.product_id,
                     product_group_id=product.product_group_id,
                     message=f"'{field}' is missing",
+                    source_row_number=product.source_row_number,
                 )
             )
     return issues
@@ -250,6 +251,7 @@ def check_non_standard_color(
                     f"color '{product.color}' should be standardized to "
                     f"'{standard_color}'"
                 ),
+                source_row_number=product.source_row_number,
             )
         )
     return issues
@@ -277,6 +279,7 @@ def check_non_standard_size(
                     f"size '{product.size}' should be standardized to "
                     f"'{standard_size}'"
                 ),
+                source_row_number=product.source_row_number,
             )
         )
     return issues
@@ -293,6 +296,7 @@ def check_invalid_category(products: list[Product]) -> list[ValidationIssue]:
                     product_id=product.product_id,
                     product_group_id=product.product_group_id,
                     message=f"category '{product.category}' is not one of {sorted(VALID_CATEGORIES)}",
+                    source_row_number=product.source_row_number,
                 )
             )
     return issues
@@ -309,6 +313,7 @@ def check_stock(products: list[Product]) -> list[ValidationIssue]:
                     product_id=product.product_id,
                     product_group_id=product.product_group_id,
                     message="stock is missing or not a number",
+                    source_row_number=product.source_row_number,
                 )
             )
         elif product.stock < 0:
@@ -319,6 +324,7 @@ def check_stock(products: list[Product]) -> list[ValidationIssue]:
                     product_id=product.product_id,
                     product_group_id=product.product_group_id,
                     message=f"stock {product.stock} is negative",
+                    source_row_number=product.source_row_number,
                 )
             )
         elif product.stock == 0:
@@ -329,6 +335,7 @@ def check_stock(products: list[Product]) -> list[ValidationIssue]:
                     product_id=product.product_id,
                     product_group_id=product.product_group_id,
                     message="stock is 0",
+                    source_row_number=product.source_row_number,
                 )
             )
     return issues
@@ -345,6 +352,7 @@ def check_price(products: list[Product]) -> list[ValidationIssue]:
                     product_id=product.product_id,
                     product_group_id=product.product_group_id,
                     message="price is missing or not a number",
+                    source_row_number=product.source_row_number,
                 )
             )
         elif product.price <= 0:
@@ -355,6 +363,7 @@ def check_price(products: list[Product]) -> list[ValidationIssue]:
                     product_id=product.product_id,
                     product_group_id=product.product_group_id,
                     message=f"price {product.price} is not positive",
+                    source_row_number=product.source_row_number,
                 )
             )
     return issues
@@ -375,6 +384,7 @@ def check_sale_price(products: list[Product]) -> list[ValidationIssue]:
                     product_id=product.product_id,
                     product_group_id=product.product_group_id,
                     message="sale_price is missing or not a number",
+                    source_row_number=product.source_row_number,
                 )
             )
             continue
@@ -387,6 +397,7 @@ def check_sale_price(products: list[Product]) -> list[ValidationIssue]:
                     product_id=product.product_id,
                     product_group_id=product.product_group_id,
                     message=f"sale_price {product.sale_price} is not positive",
+                    source_row_number=product.source_row_number,
                 )
             )
             continue
@@ -405,6 +416,7 @@ def check_sale_price(products: list[Product]) -> list[ValidationIssue]:
                         f"sale_price {product.sale_price} is greater than "
                         f"price {product.price}"
                     ),
+                    source_row_number=product.source_row_number,
                 )
             )
     return issues
@@ -447,6 +459,7 @@ def check_prohibited_and_personal_information(
                         message=(
                             f"field '{field_name}' contains prohibited term '{term}'"
                         ),
+                        source_row_number=product.source_row_number,
                     )
                 )
 
@@ -461,6 +474,7 @@ def check_prohibited_and_personal_information(
                             f"field '{field_name}' contains email address "
                             f"'{mask_email(email_address)}'"
                         ),
+                        source_row_number=product.source_row_number,
                     )
                 )
 
@@ -489,6 +503,7 @@ def check_prohibited_and_personal_information(
                             f"field '{field_name}' contains phone number "
                             f"'{mask_phone_number(phone_match.group())}'"
                         ),
+                        source_row_number=product.source_row_number,
                     )
                 )
 
@@ -503,6 +518,7 @@ def check_prohibited_and_personal_information(
                             f"field '{field_name}' contains resident registration "
                             f"number '{mask_resident_registration_number(rrn_match.group())}'"
                         ),
+                        source_row_number=product.source_row_number,
                     )
                 )
 
@@ -532,6 +548,7 @@ def check_prohibited_and_personal_information(
                             f"field '{field_name}' contains suspected bank account "
                             f"'{mask_account_number(account_match.group())}'"
                         ),
+                        source_row_number=product.source_row_number,
                     )
                 )
 

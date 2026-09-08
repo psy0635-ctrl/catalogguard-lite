@@ -655,6 +655,7 @@ catalogguard-lite/
       20260825_0016_add_etl_profile_definition_sha256.py
       20260826_0017_add_etl_application_commit_sha.py
       20260826_0018_add_etl_profile_definition_snapshot.py
+      20260908_0019_add_inspection_source_row_number.py
   data/
     dev/
       category_mismatch_test.csv
@@ -786,7 +787,7 @@ catalogguard-lite/
 | `alembic/versions/20260813_0013_add_etl_initial_source_lineage.py` | `etl_load_runs`에 최초 입력 경로를 기록하는 `initial_source_type`·`initial_source_ref`를 추가하는 ETL lineage 마이그레이션 |
 | `alembic/versions/20260822_0014_create_etl_profile_activations.py` | 프로필당 runtime activation 상태 한 행을 저장하는 `etl_profile_activations` 테이블 생성 마이그레이션. 빈 표로 시작하므로 적용해도 기존 동작이 바뀌지 않습니다 |
 | `alembic/versions/20260823_0015_create_etl_profile_activation_events.py` | 성공한 activation 운영 명령을 쌓는 append-only `etl_profile_activation_events` 테이블과 조회 index 생성 마이그레이션. **빈 표로 시작하며 기존 current-state row로 과거 이력을 backfill하지 않습니다** |
-| `alembic/versions/20260825_0016_add_etl_profile_definition_sha256.py`·`20260826_0017_add_etl_application_commit_sha.py`·`20260826_0018_add_etl_profile_definition_snapshot.py` | `etl_load_runs`에 프로필 정의 fingerprint·실행 commit·정의 JSONB snapshot lineage를 추가하는 순차 마이그레이션. `0018`이 현재 단일 head입니다 |
+| `alembic/versions/20260825_0016_add_etl_profile_definition_sha256.py`·`20260826_0017_add_etl_application_commit_sha.py`·`20260826_0018_add_etl_profile_definition_snapshot.py`·`20260908_0019_add_inspection_source_row_number.py` | ETL profile lineage와 `inspection_results.source_row_number`를 추가하는 순차 마이그레이션. `0019`가 현재 단일 head입니다 |
 | `.github/workflows/test.yml` | 일반 테스트와 분리된 `browser-e2e`·`kubernetes-smoke` job을 포함해 PostgreSQL·Chromium 실제 브라우저 흐름과 kind 실제 Kubernetes 배포까지 실행하는 GitHub Actions workflow |
 | `k8s/dev-postgres.yaml`, `k8s/migration-job.yaml`, `k8s/catalogguard-api.yaml` | kind CI 전용 PostgreSQL, Alembic Migration Job, FastAPI Deployment/Service manifest |
 | `.env.example` | 로컬 PostgreSQL 연결 환경변수 예시 |
@@ -1205,7 +1206,7 @@ python -m alembic upgrade head
 python -m alembic history
 ```
 
-현재 Alembic head는 `20260826_0018`입니다.
+현재 Alembic head는 `20260908_0019`입니다.
 
 `20260703_0001_create_inspection_tables.py`는 다음 테이블을 만듭니다.
 
@@ -1329,7 +1330,7 @@ psql "$env:DATABASE_URL" -c "\d etl_profile_activation_events"
 
 같은 방식으로 로컬 disposable PostgreSQL 18에서 빈 DB의 `upgrade head`, `downgrade 20260803_0007`, `downgrade 20260728_0006`, 재-upgrade와 단일 head도 확인했다. `20260805_0009`도 같은 방식으로 `downgrade 20260803_0008` 뒤 재-upgrade와 단일 head(`20260805_0009`)를 disposable PostgreSQL 18에서 확인했다.
 
-`20260825_0016_add_etl_profile_definition_sha256.py`·`20260826_0017_add_etl_application_commit_sha.py`·`20260826_0018_add_etl_profile_definition_snapshot.py`는 각각 `etl_load_runs`에 프로필 정의 fingerprint, 실행 애플리케이션 commit SHA, 프로필 정의 JSONB snapshot을 추가해 적재 시점 lineage를 보존합니다. 현재 단일 head는 `20260826_0018`입니다.
+`20260825_0016_add_etl_profile_definition_sha256.py`·`20260826_0017_add_etl_application_commit_sha.py`·`20260826_0018_add_etl_profile_definition_snapshot.py`는 각각 `etl_load_runs`에 프로필 정의 fingerprint, 실행 애플리케이션 commit SHA, 프로필 정의 JSONB snapshot을 추가해 적재 시점 lineage를 보존합니다. `20260908_0019_add_inspection_source_row_number.py`는 `inspection_results.source_row_number` nullable 정수와 2 이상 논리 row 제약을 추가합니다. 현재 단일 head는 `20260908_0019`입니다.
 
 `tests/test_inspection_actor_migration.py`·`tests/test_catalog_promotion_migration.py`·`tests/test_etl_profile_activation_history_migration.py`는 역사적 migration 계약을 확인합니다. CI의 `Apply database migrations` step은 고정 revision이 아니라 `upgrade head`를 실행하므로 현재 migration chain 전체를 적용합니다.
 
@@ -2383,7 +2384,7 @@ curl.exe "http://127.0.0.1:8001/api/v1/inspections?limit=10&offset=0&filename=pr
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
 | `file_sha256` | `String(64)`, nullable | CSV bytes의 SHA-256 hex 문자열입니다. migration 이전 기존 이력은 NULL입니다. |
-| `inspection_version` | `String(20)`, nullable 아님 | 검수 규칙 버전입니다. 현재 `INSPECTION_VERSION` 값은 `"13"`입니다. DB `server_default`는 없습니다. |
+| `inspection_version` | `String(20)`, nullable 아님 | 검수 결과 저장 계약 버전입니다. 현재 `INSPECTION_VERSION` 값은 `"14"`입니다. DB `server_default`는 없습니다. |
 
 중복 판단 기준은 같은 `file_sha256`과 같은 `inspection_version`입니다.
 
@@ -2394,6 +2395,8 @@ curl.exe "http://127.0.0.1:8001/api/v1/inspections?limit=10&offset=0&filename=pr
 검수 결과 의미가 달라질 때 version을 올리는 기준, 과거 run 보존, 자동 backfill 불가 사유, Trend·Comparison의 version 경계는 [Inspection Version Lifecycle Policy](docs/inspection_version_policy.md)에 정리했습니다.
 
 상품 그룹 내 중복 색상·사이즈 옵션 규칙을 추가할 때 검수 버전을 `"3"`으로 올렸고, 상품 그룹 카테고리 일관성 규칙을 추가하면서 `"4"`로 올렸습니다. 선택적 `sale_price`와 정상가·할인가 관계 규칙을 추가하면서 `"5"`로 올렸습니다. 상품 그룹 사이즈 체계 일관성 규칙을 추가하면서 `"6"`으로 올렸습니다. `SHOES`와 `BAG`를 공식 허용 카테고리로 확장하면서 `"7"`로 올렸습니다. 카테고리별 가격 이상치 비교가 기존 카테고리 별칭 정규화를 재사용하도록 통일하면서 `"8"`로 올렸습니다. 같은 CSV라도 카테고리 표기가 섞여 있으면 가격 그룹이 합쳐져 `가격 이상치` 결과가 달라질 수 있으므로, 기존 검수 결과를 그대로 재사용하지 않기 위한 것입니다. 카테고리별 필수 패션 속성 정책을 추가해 `BAG`의 `size`를 선택 값으로 바꾸면서 `"9"`로 올렸습니다. 버전 8까지 `필수 값 누락` 오류가 발생하던 빈 `size`의 `BAG` 상품이 버전 9에서는 정상 처리되므로, 같은 CSV를 다시 올렸을 때 버전 8 결과를 재사용해 새 정책이 적용되지 않는 일을 막기 위한 것입니다. `size`가 선택 값인 카테고리의 빈 `size`도 완전 중복 비교에 포함하면서 `"10"`으로 올렸습니다. 버전 9까지 완전 중복 검사에서 빠지던 빈 `size`의 `BAG` 상품이 버전 10에서는 `완전 중복 상품` 오류로 표시되므로, 같은 CSV가 버전 9 결과를 재사용해 새 검사 범위가 적용되지 않는 일을 막기 위한 것입니다. `BAG`처럼 `size`가 선택 값인 canonical 카테고리의 빈 `size`를 `상품 옵션 조합 중복` 비교에도 포함하면서 `"11"`로 올렸습니다. 버전 10까지 아무 오류도 만들지 않던 "같은 그룹·같은 색상·빈 `size`이면서 완전 중복은 아닌" 상품이 버전 11에서는 `상품 옵션 조합 중복` 오류로 표시되므로, 같은 CSV가 버전 10 결과를 재사용하지 않도록 한 것입니다. 사이즈·색상 별칭 비교에서 값 안쪽의 연속 공백을 정리하도록 보강하면서 `"12"`로 올렸습니다. 버전 11까지 `free  size`처럼 별칭에 공백이 더 들어간 값은 표준값을 찾지 못해 `상품 옵션 조합 중복`과 `사이즈 표기 비표준` 검사에서 모두 빠졌지만 버전 12에서는 `free size`와 같은 값으로 비교되므로, 같은 CSV가 버전 11 결과를 재사용하지 않도록 한 것입니다. 이번에 별칭 조회에서 공백뿐 아니라 하이픈(`-`)과 언더스코어(`_`) 차이도 무시하도록 확장하면서 현재 `INSPECTION_VERSION`을 `"13"`으로 올렸습니다. 버전 12까지 `free-size`·`free_size`·`extra_large`처럼 등록된 별칭의 구분자만 다른 값은 표준값을 찾지 못해 아무 오류도 만들지 않았지만 버전 13에서는 기존 별칭과 같은 값으로 비교되므로, 같은 CSV가 버전 12 결과를 재사용하지 않도록 한 것입니다. 별칭 사전 자체는 바뀌지 않았고 `/`와 `.`는 계속 구분자로 취급하지 않습니다. 같은 CSV라도 새 검수 기준으로 다시 검사할 수 있도록 inspection identity에 사용하는 규칙 버전을 올린 것이며, 동일 CSV라도 버전 6, 버전 7, 버전 8은 별도 검수 결과로 저장할 수 있습니다. 버전 6에서 `카테고리 오류`가 발생하던 canonical `SHOES`·`BAG` 상품이 버전 7에서는 정상 카테고리로 처리되고, 같은 이유로 완전 중복 검사 대상에도 포함되므로 같은 CSV의 결과가 달라질 수 있습니다. 파일 해시와 검수 버전을 함께 사용하는 기존 중복 저장 방지 기준은 그대로 유지됩니다. DB 스키마 변경은 없어 이 기능을 위한 Alembic migration은 추가하지 않았으며, 과거 이력과 기존 migration의 `"1"` backfill 값은 그대로 유지합니다.
+
+Version 14는 `inspection_results.source_row_number`를 nullable 정수로 추가합니다. CSV header를 1로 보고 첫 상품 logical record는 2이며, quoted multiline field도 하나의 record입니다. 기존 v13 결과는 `NULL`로 보존하고 backfill하지 않습니다. 같은 bytes라도 v13 결과를 재사용하지 않도록 inspection version을 14로 올렸으며, 화면·CSV 다운로드의 기존 7개 표시 열은 바꾸지 않습니다.
 
 PostgreSQL에는 다음 partial unique index가 있습니다.
 
@@ -2868,7 +2871,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - category 계층 관계를 비교하거나 상품 그룹을 자동 분리하지 않습니다.
 - 카테고리별 가격 이상치는 같은 카테고리의 유효 가격이 5개 이상일 때만 계산됩니다.
 - migration 이전 기존 이력은 `file_sha256=NULL`이라 과거 이력까지 소급해 중복 판단할 수 없습니다.
-- `INSPECTION_VERSION`은 검수 규칙이 변경될 때 개발자가 직접 올려야 합니다.
+- `INSPECTION_VERSION`은 같은 CSV의 저장 결과 계약이 변경될 때 개발자가 직접 올려야 합니다.
 - 공개 Streamlit 앱에서는 FastAPI와 PostgreSQL 연동 상태에 따라 검수 이력 기능을 사용할 수 없을 수 있습니다.
 - Refresh Token은 없으며 Access Token이 만료되면 다시 로그인해야 합니다.
 - 회원가입 API, 비밀번호 찾기/재설정 기능은 없습니다. 계정은 `scripts/create_user.py` bootstrap CLI로만 만듭니다.

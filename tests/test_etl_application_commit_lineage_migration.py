@@ -17,7 +17,7 @@ from db.session import create_database_engine
 
 REVISION = "20260826_0017"
 PREVIOUS_REVISION = "20260825_0016"
-HEAD_REVISION = "20260826_0018"
+HEAD_REVISION = "20260908_0019"
 COLUMN = "application_commit_sha"
 
 

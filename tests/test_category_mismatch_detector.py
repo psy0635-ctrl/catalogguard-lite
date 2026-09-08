@@ -189,7 +189,11 @@ def test_find_category_mismatches_preserves_exact_issue_payload_and_order():
         ),
     ]
 
-    assert [asdict(issue) for issue in find_category_mismatches(products)] == [
+    issues = [asdict(issue) for issue in find_category_mismatches(products)]
+    assert [
+        {field: value for field, value in issue.items() if field != "source_row_number"}
+        for issue in issues
+    ] == [
         {
             "rule": "product_category_mismatch",
             "severity": "warning",
@@ -211,6 +215,7 @@ def test_find_category_mismatches_preserves_exact_issue_payload_and_order():
             ),
         },
     ]
+    assert all(issue["source_row_number"] is None for issue in issues)
 
 
 def test_find_category_mismatches_preserves_first_matching_keyword():

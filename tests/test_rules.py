@@ -947,8 +947,16 @@ def test_check_content_safety_preserves_exact_mixed_payload_and_product_order():
     ]
 
     issues = [asdict(issue) for issue in check_prohibited_and_personal_information(products)]
+    issue_payloads = [
+        {
+            field: value
+            for field, value in issue.items()
+            if field != "source_row_number"
+        }
+        for issue in issues
+    ]
 
-    assert issues == [
+    assert issue_payloads == [
         {
             "rule": "prohibited_term", "severity": "error", "product_id": "P100",
             "product_group_id": "G100",
@@ -995,6 +1003,7 @@ def test_check_content_safety_preserves_exact_mixed_payload_and_product_order():
             "message": "field 'seller' contains prohibited term '직거래'",
         },
     ]
+    assert all(issue["source_row_number"] is None for issue in issues)
 
 
 def test_check_content_safety_normalizes_each_nonempty_field_once(monkeypatch):

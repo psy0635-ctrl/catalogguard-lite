@@ -177,6 +177,7 @@ def find_duplicate_product_ids(products: list[Product]) -> list[ValidationIssue]
                     product_id=product_id,
                     product_group_id=product.product_group_id,
                     message=f"product_id '{product_id}' is duplicated in rows {row_text}",
+                    source_row_number=product.source_row_number,
                 )
             )
 
@@ -240,6 +241,7 @@ def find_duplicate_product_names(products: list[Product]) -> list[ValidationIssu
                         f"'{normalized_name}' duplicates rows {row_text} "
                         f"with product_ids '{product_id_text}'"
                     ),
+                    source_row_number=product.source_row_number,
                 )
             )
 
@@ -276,6 +278,7 @@ def find_duplicate_product_content(
                     f"'{first_product.product_group_id}' with same product_name, "
                     "category, color, size, and price"
                 ),
+                source_row_number=product.source_row_number,
             )
         )
 
@@ -374,6 +377,7 @@ def find_duplicate_variant_combinations(
                         product_id=product.product_id,
                         product_group_id=product.product_group_id,
                         message=message,
+                        source_row_number=product.source_row_number,
                     ),
                 )
             )

@@ -5,6 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from config.settings import DEV_DATA_PATH
+from core.inspection_service import inspect_dataframe
+from core.upload_validator import validate_and_read_uploaded_csv
 from services.redis_job_store import InspectionJobState
 
 
@@ -153,6 +156,44 @@ def test_new_csv_task_runs_inspection_once_and_cleans_up_file(tmp_path, monkeypa
     assert write_session.rollback_calls == 0
     assert write_session.close_calls == 1
     assert sessions == []
+    assert not job_file.exists()
+
+
+def test_async_inspection_preserves_the_same_source_rows_as_sync(tmp_path, monkeypatch) -> None:
+    """Async persists the shared inspection report, not a display-only reconstruction."""
+    import workers.inspection_tasks as tasks
+
+    job_id = "5f815bf5-fc4a-49fe-8056-2c4e3c9c0d4c"
+    file_bytes = DEV_DATA_PATH.read_bytes()
+    sync_report = inspect_dataframe(
+        validate_and_read_uploaded_csv("products.csv", file_bytes)
+    )
+    assert sync_report.result_records
+    job_file = tmp_path / "job.csv"
+    job_file.write_bytes(file_bytes)
+    store = FakeJobStore(make_state(job_id))
+    precheck_session = FakeSession()
+    write_session = FakeSession()
+    sessions = [precheck_session, write_session]
+    saved_reports = []
+
+    monkeypatch.setattr(tasks, "get_redis_job_store", lambda: store)
+    monkeypatch.setattr(tasks, "is_safe_job_file_path", lambda *_: True)
+    monkeypatch.setattr(tasks, "get_session_factory", lambda: lambda: sessions.pop(0))
+    monkeypatch.setattr(tasks, "find_existing_inspection_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        tasks,
+        "save_inspection_report",
+        lambda *args, **kwargs: saved_reports.append(kwargs["report"])
+        or SimpleNamespace(inspection_run_id=123, created=True),
+    )
+
+    tasks.inspect_csv_task.run(job_id, str(job_file))
+
+    assert len(saved_reports) == 1
+    assert [record["source_row_number"] for record in saved_reports[0].result_records] == [
+        record["source_row_number"] for record in sync_report.result_records
+    ]
     assert not job_file.exists()
 
 
