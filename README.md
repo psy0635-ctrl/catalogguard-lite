@@ -8,9 +8,9 @@ ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl`의 버전�
 
 ## 1. 현재 상태와 최근 검증
 
-현재 정책은 **Feature Freeze + Continuous Maintenance Development**입니다. 대형 새 기능은 추가하지 않고, 실제 오류·transaction·데이터 무결성·오류 처리·회귀 문제를 유지개발로 계속 다룹니다.
+현재 정책은 **Feature Freeze + Continuous Maintenance Development**입니다. 대형 새 기능은 추가하지 않고, 실제 오류·transaction·데이터 무결성·오류 처리·회귀 문제를 유지개발로 계속 다룹니다. 다만 이미 있는 사용자 workflow의 끊어진 지점을 좁은 범위에서 연결하는 변경은 실제 코드·회귀 검증을 거쳐 진행할 수 있습니다.
 
-최근에는 PostgreSQL 18.4의 일회성 테스트 DB에서 Alembic `upgrade head`(`20260826_0018`)를 적용하고, ETL DB Loader 69건과 ETL Profile Activation 37건을 실제로 검증했습니다. 이는 프로젝트가 PostgreSQL 18.4만 지원한다는 뜻이 아니라, 해당 환경에서 핵심 transaction 계약을 확인한 기록입니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
+현재 Alembic 단일 head는 `20260908_0019`이며, `INSPECTION_VERSION`은 `14`입니다. 최근 main은 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 GitHub Actions 검증을 통과했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
 
 공개 Streamlit 앱은 아래 주소에서 확인할 수 있습니다.
 
@@ -78,6 +78,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - `total_rows`, `loaded_rows`, `rejected_rows`, `error_counts`의 PostgreSQL JSONB 저장과 기존 배치 NULL 호환
 - reject CSV의 SHA-256·행 수·구조화된 오류 배열 검증과 `etl_rejected_rows` JSONB 저장
 - reject 원본 값의 개인정보·계좌번호 마스킹과 API·Streamlit reject 상세 조회
+- ETL 적재 상세의 거부 행 전체 페이지를 수집해, 마스킹된 원본·오류 사유만 담은 거부 행 CSV 다운로드(중간 조회 실패 시 부분 파일 미제공)
 - DB에서 staging 부모 배치를 삭제할 때의 상품 행 cascade와 음수 stock·price·sale_price 방지 제약
 - ETL 적재 배치 목록의 파일명·프로필명 검색과 페이지네이션
 - ETL 적재 목록·상세의 전체 행·정상 적재·변환 거부 수와 상세 오류 코드 통계
@@ -160,6 +161,7 @@ CSV 검수 탭
 -> 오류/주의 상세 결과 확인
 -> 상태, 오류 항목, 상품 ID로 필터
 -> 현재 필터 결과 CSV 다운로드
+-> 동일 원본 논리 행의 issue와 수정 권장사항을 묶은 Correction Worksheet CSV 다운로드
 -> 검수 실행 및 이력 저장 버튼 클릭
 -> FastAPI가 검수·저장하고 상세 결과 반환
 -> 반환된 결과를 화면에 표시
@@ -202,6 +204,7 @@ API 오류 발생
 -> 파일 해시와 행 수 검증
 -> PostgreSQL staging 적재
 -> 오류 배열·마스킹된 reject 원본 저장
+-> ETL 적재 상세에서 거부 행 확인 및 전체 거부 행 CSV 다운로드
 -> 중복 적재 방지
 -> ETL 적재 배치 목록·상세 API 조회
 -> ETL 품질 요약·추이·품질 관찰로 공급사별 Reject 비율 변화와 주요 오류 코드 확인(조회 전용)
