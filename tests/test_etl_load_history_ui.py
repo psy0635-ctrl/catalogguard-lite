@@ -1,3 +1,6 @@
+import csv
+import io
+import json
 from datetime import datetime
 
 import pandas as pd
@@ -519,6 +522,177 @@ def test_build_etl_rejection_dataframe_flattens_errors_and_keeps_masked_source_v
         "오류 필드": "price, stock",
         "오류 메시지": "bad price, negative",
     }
+
+
+def _rejection_item(
+    row_number: int,
+    *,
+    error_message: str = "가격 형식이 올바르지 않습니다.",
+    source_data: dict[str, str] | None = None,
+) -> dict:
+    return {
+        "rejected_row_id": 300 + row_number,
+        "source_row_number": row_number,
+        "errors": [
+            {
+                "code": "INVALID_PRICE",
+                "field": "price",
+                "message": error_message,
+            }
+        ],
+        "masked_source_data": source_data or {"product_name": "테스트 상품"},
+        "created_at": "2026-09-08T12:00:00Z",
+    }
+
+
+class PagedRejectionApiClient:
+    def __init__(self, items: list[dict], *, fail_offset: int | None = None):
+        self.items = items
+        self.fail_offset = fail_offset
+        self.calls: list[tuple[int, dict]] = []
+
+    def list_etl_rejections(self, run_id: int, **params):
+        self.calls.append((run_id, params))
+        offset = params["offset"]
+        if offset == self.fail_offset:
+            raise RuntimeError("rejection page fetch failed")
+        limit = params["limit"]
+        return {
+            "available": bool(self.items),
+            "items": self.items[offset : offset + limit],
+            "total": len(self.items),
+            "limit": limit,
+            "offset": offset,
+        }
+
+
+def test_fetch_all_etl_rejections_collects_every_page_in_order():
+    items = [_rejection_item(row_number) for row_number in (2, 3, 4)]
+    api_client = PagedRejectionApiClient(items)
+
+    result = etl_load_history.fetch_all_etl_rejections(
+        api_client,
+        etl_load_run_id=12,
+        page_size=2,
+    )
+
+    assert [item["source_row_number"] for item in result] == [2, 3, 4]
+    assert api_client.calls == [
+        (12, {"limit": 2, "offset": 0}),
+        (12, {"limit": 2, "offset": 2}),
+    ]
+
+
+def test_fetch_all_etl_rejections_does_not_return_partial_items_after_page_failure():
+    api_client = PagedRejectionApiClient(
+        [_rejection_item(row_number) for row_number in (2, 3, 4)],
+        fail_offset=2,
+    )
+
+    with pytest.raises(RuntimeError, match="rejection page fetch failed"):
+        etl_load_history.fetch_all_etl_rejections(
+            api_client,
+            etl_load_run_id=12,
+            page_size=2,
+        )
+
+    assert api_client.calls == [
+        (12, {"limit": 2, "offset": 0}),
+        (12, {"limit": 2, "offset": 2}),
+    ]
+
+
+def test_fetch_all_etl_rejections_returns_no_items_for_a_zero_rejection_run():
+    api_client = PagedRejectionApiClient([])
+
+    assert (
+        etl_load_history.fetch_all_etl_rejections(
+            api_client,
+            etl_load_run_id=12,
+            page_size=2,
+        )
+        == []
+    )
+    assert api_client.calls == [(12, {"limit": 2, "offset": 0})]
+
+
+@pytest.mark.parametrize("formula_prefix", ["=1+1", "+123", "-123", "@SUM(A1:A2)"])
+def test_build_etl_rejection_csv_uses_bom_formula_protection_and_masked_source_data(
+    formula_prefix,
+):
+    csv_bytes = etl_load_history.build_etl_rejection_csv(
+        [
+            _rejection_item(
+                2,
+                error_message=formula_prefix,
+                source_data={
+                    "description": f'{formula_prefix}, "인용"\n다음 줄',
+                    "seller": "te**@example.com",
+                },
+            )
+        ]
+    )
+
+    assert csv_bytes.startswith(b"\xef\xbb\xbf")
+    [row] = list(csv.DictReader(io.StringIO(csv_bytes.decode("utf-8-sig"))))
+    assert list(row) == [
+        "source_row_number",
+        "error_code",
+        "error_field",
+        "error_message",
+        "masked_source_data",
+    ]
+    assert row["error_message"] == f"'{formula_prefix}"
+    assert json.loads(row["masked_source_data"]) == {
+        "description": f'{formula_prefix}, "인용"\n다음 줄',
+        "seller": "te**@example.com",
+    }
+    assert "test@example.com" not in csv_bytes.decode("utf-8-sig")
+
+
+def test_build_etl_rejection_download_filename_uses_only_the_load_run_id():
+    assert (
+        etl_load_history.build_etl_rejection_download_filename(12)
+        == "etl_load_12_rejections.csv"
+    )
+
+
+def test_render_etl_rejection_export_prepares_and_exposes_download(monkeypatch):
+    class FakeStreamlit:
+        def __init__(self):
+            self.session_state = {}
+            self.downloads = []
+
+        def button(self, label, *, key):
+            assert label == "거부 행 CSV 다운로드 준비"
+            assert key == "etl_reject_export_prepare"
+            return True
+
+        def caption(self, _value):
+            pass
+
+        def download_button(self, label, **kwargs):
+            self.downloads.append({"label": label, **kwargs})
+
+        def info(self, _value):
+            raise AssertionError("non-empty rejection export must not show empty state")
+
+        def error(self, value):
+            raise AssertionError(f"rejection export must not fail: {value}")
+
+    fake_streamlit = FakeStreamlit()
+    api_client = PagedRejectionApiClient([_rejection_item(2)])
+    monkeypatch.setattr(etl_load_history, "st", fake_streamlit)
+
+    etl_load_history._render_etl_rejection_export(api_client, etl_load_run_id=12)
+
+    assert api_client.calls == [(12, {"limit": 100, "offset": 0})]
+    assert len(fake_streamlit.downloads) == 1
+    download = fake_streamlit.downloads[0]
+    assert download["label"] == "거부 행 CSV 다운로드"
+    assert download["file_name"] == "etl_load_12_rejections.csv"
+    assert download["mime"] == "text/csv"
+    assert download["data"].startswith(b"\xef\xbb\xbf")
 
 
 def test_build_etl_load_option_label_contains_identity_fields():
