@@ -147,7 +147,7 @@ Quick Demo와 Full Demo가 모두 `sample_marketplace_vendor_v1` 프로필을 �
 | 시간 | 실행 · 화면에서 확인 | 설명 · 정상 결과 |
 |---|---|---|
 | 0:00–0:40 | “공급사 CSV는 바로 운영 catalog로 가지 않는다”를 말하고 `ETL 적재 이력`을 연다. 상단의 `ETL 품질 요약`·`최근 ETL 품질 추이`를 보고, `ETL 품질 관찰`에서 `sample_marketplace_vendor`를 선택한다. | 변환·품질 gate를 거쳐 staging에 먼저 저장한다. 최신 배치와 직전 배치의 Reject 비율, 변화량 `%p`, 방향, 주요 오류 코드가 보인다. 준비한 두 batch만 있으면 `-33.33%p`·`개선`이다. |
-| 0:40–1:20 | 목록에서 `etl_browser_vendor.csv` batch를 선택해 `상세 조회`를 누르고, `3 / 2 / 1`과 오류 코드별 건수, reject 상세의 마스킹된 원본을 보여 준다. | 가격을 숫자로 바꿀 수 없고 음수 재고인 행은 staging에 들어가지 않는다. reject 상세에는 원문 이메일·전화번호·계좌/식별번호 형태를 노출하지 않는다. |
+| 0:40–1:20 | 목록에서 `etl_browser_vendor.csv` batch를 선택해 `상세 조회`를 누르고, `3 / 2 / 1`과 오류 코드별 건수, reject 상세의 마스킹된 원본, `거부 행 CSV 다운로드`를 보여 준다. | 가격을 숫자로 바꿀 수 없고 음수 재고인 행은 staging에 들어가지 않는다. 다운로드 파일도 마스킹된 원본과 오류 사유만 포함하며, 원문 이메일·전화번호·계좌/식별번호 형태를 노출하지 않는다. |
 | 1:20–2:20 | `etl_browser_promotion_vendor.csv` clean batch를 직접 선택해 `운영 반영 미리보기`를 연다. checkbox 전 비활성 버튼과 상품별 변경 전·후를 보인다. | preview는 DB를 바꾸지 않는다. 확인 뒤에만 `운영 상품에 반영`이 가능하고, 성공하면 promotion audit이 남는다. |
 | 2:20–2:50 | 성공 Promotion의 `Rollback Preview`를 열고 checkbox 후 실행한 뒤 rollback change audit을 연다. | rollback도 preview와 별도 승인 절차를 거친다. delete/restore와 실행 사용자가 audit에 남는다. |
 | 2:50–3:00 | 한 줄로 마무리한다. | “문제를 분리하고, 사람이 확인한 변경만 반영하며, 되돌린 기록도 남깁니다.” |
@@ -159,8 +159,8 @@ Quick Demo와 Full Demo가 모두 `sample_marketplace_vendor_v1` 프로필을 �
 ### 1. Inspection으로 문제를 먼저 보인다 (약 1분)
 
 - **실행:** `CSV 검수`에서 `data/dev/category_mismatch_test.csv`를 업로드하고 `즉시 검수`를 선택한다.
-- **화면에서 확인:** 업로드 미리보기, 검수 요약, `카테고리 오류`·`상품명·카테고리 불일치`·`상품 그룹 카테고리 불일치` 필터를 보여 준다.
-- **설명:** CatalogGuard는 정답 category를 추론하거나 자동 수정하지 않고, 사람이 확인할 품질 근거를 남긴다.
+- **화면에서 확인:** 업로드 미리보기, 검수 요약, `카테고리 오류`·`상품명·카테고리 불일치`·`상품 그룹 카테고리 불일치` 필터와 `수정 작업표 CSV 다운로드`를 보여 준다.
+- **설명:** CatalogGuard는 정답 category를 추론하거나 자동 수정하지 않고, 사람이 확인할 품질 근거를 남긴다. 수정 작업표는 같은 원본 논리 행의 여러 issue를 한 행으로 정리한 작업용 CSV이며 원본 복구·재업로드 파일이 아니다.
 - **정상 결과:** 세 rule의 결과가 필터와 상세 목록에서 보인다.
 
 시간이 남으면 `price_anomaly_test.csv`의 가격 이상치 2건, 또는 `privacy_masking_test.csv`의 의심 패턴 탐지와 미리보기 마스킹을 **별도 1분**으로 보여 준다. 이는 기본 흐름에 중복해 넣지 않는다.

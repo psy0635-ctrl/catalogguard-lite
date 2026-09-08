@@ -60,6 +60,9 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, 
 29. Airflow HTTP feed DAG가 비활성 프로필을 generic `catalogguard_etl_unexpected`로 실패시키던 것을 전용 코드 `etl_profile_inactive`(non-retryable)로 분리했습니다. 운영자가 의도적으로 내린 프로필은 network timeout·HTTP 5xx·일시적 DB 오류와 달리 재시도로 회복되지 않기 때문입니다. Airflow와 로그에는 `CatalogGuard HTTP feed ingestion failed [etl_profile_inactive]`처럼 안전한 코드 하나만 남기고 `profile_id`·feed URL·raw 예외는 노출하지 않았습니다. effective activation pre-check에서 이미 inactive면 `read_http_feed_csv()`를 호출하지 않으며, read transaction을 끝낸 뒤 fetch한다. 다만 그 직후 deactivate되는 race에서는 fetch가 시작될 수 있고 `run_web_etl()`의 최종 guard가 ETL load를 막는다.
 30. runtime override를 한 번 만들면 배포 기본값으로 돌아갈 방법이 없다는 한계를, `PUT`에 `null`을 재사용하지 않고 `DELETE /api/v1/etl-profiles/{profile_id}/activation`을 별도 endpoint로 분리해 해결했습니다. `null`은 "운영자가 명시적으로 내렸다"는 상태를 저장하는 것이고 reset은 그 상태 자체를 지우는 것이라, 둘을 합치면 배포 기본값이 바뀔 때 운영자의 결정이 조용히 뒤집히기 때문입니다. reset은 명시적 비활성 override를 지우면서 프로필을 **다시 활성화할 수 있으므로** 단순한 정리 조작으로 보이지 않도록 Streamlit에서 되돌린 뒤 적용될 버전을 미리 표시하고 확인 checkbox를 거치게 했고, override가 이미 없어도 `200`을 주는 idempotent 계약으로 두되 없는 `profile_id`는 `404`로 구분했습니다. `204` 대신 기존 activation 응답을 그대로 돌려줘 호출자가 reset 직후 상태를 다시 조회하지 않게 했습니다.
 31. reset이 current-state row를 지우면서 actor와 시각까지 함께 지운다는 한계를, current-state 표는 그대로 두고 성공한 activate·deactivate·reset 명령을 별도 append-only 표(`etl_profile_activation_events`)에 기록해 해결했습니다. 기록 단위를 "상태가 달라진 순간"이 아니라 "서버가 성공으로 처리한 운영 명령"으로 정해 같은 버전을 다시 활성화하거나 override 없는 프로필을 다시 reset해도 event를 남기고, 실패한 요청은 남기지 않았습니다. 상태 변경과 이력 INSERT를 같은 transaction으로 묶어 이력 기록이 실패하면 상태 변경도 rollback되게 했고, current-state row 하나로는 알 수 없는 과거 이력을 추측해 backfill하지 않아 이 기록은 마이그레이션 `20260823_0015` 적용 이후의 명령부터 시작합니다.
+32. ETL에서 거부된 행을 화면에서만 확인하면 후속 수정 작업으로 옮기기 어려웠습니다. 선택한 적재 batch의 rejection API를 페이지 끝까지 읽어 `source_row_number`, 오류 코드·필드·메시지와 **마스킹된** 원본만 CSV로 내보내고, 중간 페이지 조회가 실패하면 부분 파일을 제공하지 않도록 했습니다. CSV는 UTF-8 BOM과 수식 삽입 방어를 적용하며 raw 업로드 데이터는 다시 읽거나 복원하지 않습니다.
+33. inspection issue가 어느 원본 상품 record에서 나왔는지는 빈 상품 ID나 중복 상품 ID만으로 안정적으로 판단할 수 없었습니다. CSV header를 1로 두고 첫 상품 logical record를 2로 계산한 `source_row_number`를 Product·ValidationIssue·InspectionResult·상세 API까지 전달해 저장했습니다. quoted multiline field도 하나의 logical record로 계산하며, 기존 결과는 임의 backfill하지 않고 `NULL`로 유지했습니다. 이 저장 결과 계약의 경계를 만들기 위해 `INSPECTION_VERSION`을 14로 올렸습니다.
+34. 기존 issue-level CSV는 문제 한 건마다 한 행이어서 한 상품을 수정할 때 여러 행을 오가야 했습니다. 현재 검수 결과에서만 `source_row_number`를 grouping key로 사용해 같은 원본 행의 issue와 수정 권장사항을 한 작업 행으로 정리한 Correction Worksheet CSV를 추가했습니다. 상품 ID와 상품 그룹 ID는 표시 정보일 뿐 identity가 아니며, legacy 또는 일부 `NULL` 결과는 오해를 막기 위해 부분 작업표를 만들지 않습니다. 이 파일은 자동 수정·원본 복구·재업로드용 CSV가 아닙니다.
 
 ### Airflow ETL orchestration: 문제와 해결
 
@@ -117,6 +120,7 @@ staging load·idempotency·lineage를 함께 검증했다.
 -> 필터 적용 전 전체 검수 결과 통계 확인
 -> 검수 결과 필터링
 -> 현재 필터 결과 CSV 다운로드
+-> 원본 논리 행별 Correction Worksheet CSV 다운로드(현재 검수 결과, source row 정보가 완전한 경우)
 ```
 
 업로드 후 앱 내부 흐름은 다음과 같습니다.
@@ -137,6 +141,7 @@ staging load·idempotency·lineage를 함께 검증했다.
 -> build_inspection_statistics(result_df)
 -> render_inspection_statistics(result_df)
 -> build_validation_result_csv(filtered_result_df)
+-> build_correction_worksheet_csv(raw_results)
 ```
 
 공급사 파일은 다음 CLI 흐름으로 표준화한 뒤 기존 업로드 검증·검수 서비스에 연결할 수 있습니다.
@@ -173,6 +178,7 @@ catalogguard_ready.csv + etl_summary.json
 -> etl_load_runs + catalog_products_staging 한 트랜잭션 저장
 -> GET /api/v1/etl-loads로 배치 검색
 -> GET /api/v1/etl-loads/{etl_load_run_id}로 배치별 상품 조회
+-> GET /api/v1/etl-loads/{etl_load_run_id}/rejections를 끝까지 조회해 마스킹된 거부 행 CSV 준비
 -> Streamlit ETL 적재 이력 탭에서 목록·상세·페이지네이션 표시
 -> 사용자가 batch 직접 선택
 -> POST /api/v1/etl-loads/{etl_load_run_id}/promotion-preview
@@ -215,6 +221,7 @@ Streamlit ETL 프로필 운영 관리
 | pandas | 3.0.3 |
 | 데이터베이스 | PostgreSQL, SQLAlchemy, psycopg |
 | 마이그레이션 | Alembic |
+| 현재 검수 버전 | `INSPECTION_VERSION = "14"` |
 | 비동기 처리 | Redis, Celery |
 | 관측성 | prometheus-client 0.25.0 (HTTP·Web ETL metric instrumentation MVP, Prometheus 서버는 미구축) |
 | Kubernetes(CI 검증) | kind v0.32.0, kubectl v1.36.2, node kindest/node:v1.36.1(SHA-256 digest 고정), FastAPI+PostgreSQL만 배포(Redis/Celery/Streamlit 미배포) |
@@ -367,6 +374,10 @@ CSV 업로드는 `core/upload_validator.py`에서 사전에 검사합니다.
 - 위험 수준
 
 CSV 다운로드는 `core/result_exporter.py`에서 처리합니다. 다운로드 전 결과 DataFrame을 복사하고, Excel에서 수식으로 해석될 수 있는 문자열을 안전하게 바꾼 뒤 UTF-8 BOM CSV bytes로 변환합니다.
+
+현재 검수 결과에서는 기존 issue-level CSV와 별도로 Correction Worksheet CSV를 제공합니다. 이 작업표는 `source_row_number`가 같은 issue를 한 행에 모아 문제 수, 대표 검수 상태, 오류 항목·이유와 수정 권장사항을 정리합니다. `product_id`가 비어 있거나 중복돼도 원본 논리 행 번호로 구분하며, 모든 issue에 source row 정보가 있는 경우에만 만들기 때문에 legacy 또는 일부 `NULL` 결과를 억지로 섞지 않습니다. 원본 CSV를 복원·자동 수정하거나 다시 업로드하는 파일은 아닙니다.
+
+ETL 거부 행 CSV는 이 작업표와 다른 단계의 산출물입니다. ETL 변환·적재 전에 거부된 source row의 오류와 마스킹된 원본을 내보내며, Inspection을 통과한 상품의 여러 검수 issue를 집계하지 않습니다.
 
 검수 통계에서는 필터 적용 전 전체 결과를 기준으로 다음 항목을 분석합니다.
 
@@ -2019,7 +2030,7 @@ migration은 **빈 표를 만듭니다.** 기존 current-state row를 보고 과
 
 ### 현재 상태
 
-프로젝트는 **Feature Freeze + Continuous Maintenance Development** 상태입니다. 대형 기능을 계속 추가하는 대신, 실제 오류·transaction·데이터 무결성·오류 처리·회귀 문제를 좁은 범위로 유지개발합니다. 따라서 아래 내용은 기능 홍보가 아니라 현재 구현의 실패 경로와 검증 범위를 설명하는 기록입니다.
+프로젝트는 **Feature Freeze + Continuous Maintenance Development** 상태입니다. 대형 기능을 계속 추가하는 대신, 실제 오류·transaction·데이터 무결성·오류 처리·회귀 문제를 좁은 범위로 유지개발합니다. 최근에는 ETL 거부 행을 안전하게 내보내고, inspection issue를 원본 논리 행에 연결한 뒤, 그 결과를 수정 작업표로 이어 주는 기존 workflow 보완을 진행했습니다. 따라서 아래 내용은 기능 홍보가 아니라 현재 구현의 실패 경로와 검증 범위를 설명하는 기록입니다.
 
 ### 오류 우선순위 보호
 
@@ -2029,7 +2040,7 @@ migration은 **빈 표를 만듭니다.** 기존 current-state row를 보고 과
 
 ### PostgreSQL 18.4에서 확인한 ETL transaction 계약
 
-Alembic `upgrade head`로 `20260826_0018`까지 적용한 disposable PostgreSQL 18.4 환경에서 다음 파일을 실제로 실행했습니다. 이 숫자는 저장소 전체 테스트 수가 아니라 해당 PostgreSQL 검증 범위입니다.
+Alembic `upgrade head`로 당시 head였던 `20260826_0018`까지 적용한 disposable PostgreSQL 18.4 환경에서 다음 파일을 실제로 실행했습니다. 이 숫자는 저장소 전체 테스트 수가 아니라 해당 PostgreSQL 검증 범위입니다. 현재 head는 inspection result의 nullable `source_row_number`를 추가한 `20260908_0019`이며, 과거 검증 수치를 최신 전체 검증 수치처럼 읽지 않습니다.
 
 | 범위 | 결과 | 의미 |
 |---|---:|---|
