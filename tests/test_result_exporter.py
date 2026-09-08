@@ -4,6 +4,7 @@ import io
 import pandas as pd
 import pytest
 
+import core.result_exporter as result_exporter
 from config.settings import DEV_DATA_PATH
 from core.loader import load_products
 from core.models import ValidationIssue
@@ -30,6 +31,29 @@ def read_exported_csv(csv_bytes: bytes) -> pd.DataFrame:
         dtype=object,
         keep_default_na=False,
     )
+
+
+def make_inspection_result(
+    *,
+    source_row_number: int | None,
+    product_group_id: str = "G001",
+    product_id: str = "P001",
+    status: str = "오류",
+    error_field: str = "가격 오류",
+    reason: str = "가격 형식이 올바르지 않습니다.",
+    recommendation: str = "가격 값을 확인하세요.",
+    risk_level: str = "높음",
+) -> dict:
+    return {
+        "source_row_number": source_row_number,
+        "product_group_id": product_group_id,
+        "product_id": product_id,
+        "status": status,
+        "error_field": error_field,
+        "reason": reason,
+        "recommendation": recommendation,
+        "risk_level": risk_level,
+    }
 
 
 def make_result_dataframe() -> pd.DataFrame:
@@ -229,3 +253,110 @@ def test_products_dev_export_matches_filtered_validation_results_after_option_fi
     assert "P001" not in set(exported_df["상품 ID"])
     assert "P002" not in set(exported_df["상품 ID"])
     assert PRICE_RECOMMENDATION in set(exported_df["수정 권장사항"])
+
+
+def test_correction_worksheet_groups_issues_by_source_row_and_sorts_rows():
+    results = [
+        make_inspection_result(
+            source_row_number=5,
+            product_id="P002",
+            error_field="재고 오류",
+            reason="재고가 음수입니다.",
+            recommendation="재고를 0 이상으로 입력하세요.",
+        ),
+        make_inspection_result(
+            source_row_number=2,
+            status="주의",
+            error_field="카테고리 주의",
+            reason="카테고리를 확인하세요.",
+            recommendation="카테고리를 수정하세요.",
+            risk_level="중간",
+        ),
+        make_inspection_result(
+            source_row_number=2,
+            error_field="가격 오류",
+            reason="가격 형식이 올바르지 않습니다.",
+            recommendation="가격 값을 확인하세요.",
+        ),
+        make_inspection_result(
+            source_row_number=2,
+            error_field="가격 오류",
+            reason="가격 형식이 올바르지 않습니다.",
+            recommendation="가격 값을 확인하세요.",
+        ),
+    ]
+
+    worksheet = result_exporter.build_correction_worksheet_dataframe(results)
+
+    assert worksheet["원본 행"].tolist() == [2, 5]
+    row_two = worksheet.iloc[0]
+    assert row_two["문제 수"] == 3
+    assert row_two["대표 검수 상태"] == "오류"
+    assert row_two["오류 항목"] == "카테고리 주의\n가격 오류"
+    assert row_two["오류 이유"] == (
+        "카테고리를 확인하세요.\n가격 형식이 올바르지 않습니다.\n가격 형식이 올바르지 않습니다."
+    )
+    assert row_two["수정 권장사항"] == "카테고리를 수정하세요.\n가격 값을 확인하세요."
+
+
+def test_correction_worksheet_keeps_duplicate_product_ids_on_separate_source_rows():
+    results = [
+        make_inspection_result(source_row_number=2, product_id="P001"),
+        make_inspection_result(source_row_number=5, product_id="P001"),
+    ]
+
+    worksheet = result_exporter.build_correction_worksheet_dataframe(results)
+
+    assert worksheet[["원본 행", "상품 ID"]].to_dict(orient="records") == [
+        {"원본 행": 2, "상품 ID": "P001"},
+        {"원본 행": 5, "상품 ID": "P001"},
+    ]
+
+
+def test_correction_worksheet_keeps_blank_product_ids_on_separate_source_rows():
+    results = [
+        make_inspection_result(source_row_number=3, product_group_id="", product_id=""),
+        make_inspection_result(source_row_number=2, product_group_id="", product_id=""),
+    ]
+
+    worksheet = result_exporter.build_correction_worksheet_dataframe(results)
+
+    assert worksheet[["원본 행", "상품 그룹 ID", "상품 ID"]].to_dict(orient="records") == [
+        {"원본 행": 2, "상품 그룹 ID": "", "상품 ID": ""},
+        {"원본 행": 3, "상품 그룹 ID": "", "상품 ID": ""},
+    ]
+
+
+@pytest.mark.parametrize(
+    "results",
+    [
+        [make_inspection_result(source_row_number=None)],
+        [
+            make_inspection_result(source_row_number=2),
+            make_inspection_result(source_row_number=None),
+        ],
+    ],
+)
+def test_correction_worksheet_rejects_legacy_or_partial_source_row_identity(results):
+    with pytest.raises(result_exporter.CorrectionWorksheetUnavailableError):
+        result_exporter.build_correction_worksheet_dataframe(results)
+
+
+def test_correction_worksheet_csv_uses_existing_safety_bom_and_standard_quoting():
+    results = [
+        make_inspection_result(
+            source_row_number=2,
+            product_id="=1+1",
+            reason='+test, "quoted"\n다음 줄',
+            recommendation="@SUM(A1:A2)",
+        )
+    ]
+
+    csv_bytes = result_exporter.build_correction_worksheet_csv(results)
+    worksheet = read_exported_csv(csv_bytes)
+
+    assert csv_bytes.startswith(b"\xef\xbb\xbf")
+    assert worksheet.iloc[0]["상품 ID"] == "'=1+1"
+    assert worksheet.iloc[0]["오류 이유"] == "'+test, \"quoted\"\n다음 줄"
+    assert worksheet.iloc[0]["수정 권장사항"] == "'@SUM(A1:A2)"
+    assert "가격 값을 확인하세요." not in worksheet.iloc[0]["수정 권장사항"]
