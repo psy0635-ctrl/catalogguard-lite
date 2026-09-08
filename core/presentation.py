@@ -152,6 +152,7 @@ RESULT_COLUMNS = [
     "수정 권장사항",
     "위험 수준",
 ]
+SOURCE_ROW_NUMBER_RESULT_FIELD = "source_row_number"
 
 # 빈 사이즈를 화면에 보여줄 때 쓰는 표현입니다. 비교값과 저장값은 그대로 ""를 유지합니다.
 BLANK_VARIANT_SIZE_DISPLAY = "없음"
@@ -439,8 +440,8 @@ def translate_issue_message(issue: ValidationIssue) -> str:
     return message
 
 
-def build_result_dataframe(issues: list[ValidationIssue]) -> pd.DataFrame:
-    """검수 결과를 Streamlit 표시 및 CSV 다운로드용 표로 변환합니다."""
+def build_result_records(issues: list[ValidationIssue]) -> list[dict[str, object]]:
+    """표시 데이터와 내부 source-row metadata를 함께 보존한 결과 record를 만듭니다."""
     # 오류를 주의보다 먼저 보여주고, 같은 심각도 안에서는 원래 발견 순서를 유지합니다.
     sorted_issues = sorted(
         enumerate(issues),
@@ -460,10 +461,23 @@ def build_result_dataframe(issues: list[ValidationIssue]) -> pd.DataFrame:
                     issue.rule, "CSV 내용을 확인하세요."
                 ),
                 "위험 수준": RISK_LEVELS.get(issue.rule, ""),
+                SOURCE_ROW_NUMBER_RESULT_FIELD: issue.source_row_number,
             }
         )
+    return rows
 
+
+def build_result_dataframe_from_records(
+    records: list[dict[str, object]],
+) -> pd.DataFrame:
+    """내부 metadata를 기존 화면·CSV 표시 컬럼에 노출하지 않는 DataFrame으로 만듭니다."""
+    rows = [{column: record.get(column) for column in RESULT_COLUMNS} for record in records]
     return pd.DataFrame(rows, columns=RESULT_COLUMNS)
+
+
+def build_result_dataframe(issues: list[ValidationIssue]) -> pd.DataFrame:
+    """검수 결과를 Streamlit 표시 및 CSV 다운로드용 표로 변환합니다."""
+    return build_result_dataframe_from_records(build_result_records(issues))
 
 
 def _normalize_statistics_text(value: object, empty_value: str) -> str:

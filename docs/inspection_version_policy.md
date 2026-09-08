@@ -2,9 +2,9 @@
 
 ## 목적과 범위
 
-`INSPECTION_VERSION`은 검수 규칙 결과의 의미를 구분하는 단순 증가 문자열입니다. 현재 값은 `"13"`이며, 규칙 결과가 달라지는 다음 변경에서는 `"14"`, `"15"`처럼 올립니다. 이 문서는 version model, semantic versioning, 자동 backfill 또는 cross-version comparison을 추가하지 않습니다.
+`INSPECTION_VERSION`은 검수 결과의 의미를 구분하는 단순 증가 문자열입니다. 현재 값은 `"14"`이며, 규칙 결과가 달라지는 다음 변경에서는 `"15"`, `"16"`처럼 올립니다. 이 문서는 version model, semantic versioning, 자동 backfill 또는 cross-version comparison을 추가하지 않습니다.
 
-판단 기준은 변경의 이름이 아니라 **같은 CSV를 다시 검사했을 때 저장되는 검수 결과의 의미가 달라질 수 있는가**입니다. 여기서 결과는 run의 요약뿐 아니라 저장되는 문제 row의 `status`, `error_field`, `reason`, `recommendation`, `risk_level`, `product_group_id`, `product_id`를 포함합니다. Run Comparison이 이 일곱 필드를 문제 identity로 사용하므로, recommendation만 바뀌어도 비교 결과가 달라집니다.
+판단 기준은 변경의 이름이 아니라 **같은 CSV를 다시 검사했을 때 저장되는 검수 결과의 의미가 달라질 수 있는가**입니다. 여기서 결과는 run의 요약뿐 아니라 저장되는 문제 row의 `status`, `error_field`, `reason`, `recommendation`, `risk_level`, `product_group_id`, `product_id`, `source_row_number`를 포함합니다. `source_row_number`는 CSV header를 1로 보는 논리 record 번호이며, quoted multiline field도 하나의 record로 계산합니다. Run Comparison은 기존 일곱 판정 필드만 문제 identity로 사용하므로, source-row metadata 추가는 비교 identity를 바꾸지 않습니다.
 
 ## 현재 구현 계약
 
@@ -30,6 +30,7 @@
 - 필수값, 허용 카테고리, 카테고리-상품명 일치, 가격 오류·이상치 기준 변경
 - 색상·사이즈 별칭과 표준화, 중복 상품·옵션 조합, 금지어, 개인정보 탐지 규칙 변경
 - 저장되는 `error_field`, `reason`, `recommendation`, `risk_level`, 식별 대상 상품, 문제 수 또는 요약이 달라질 수 있는 변경
+- 저장 결과에 새 의미 있는 문제-row metadata가 추가되어, 같은 bytes의 기존 run이 새 계약을 충족하지 못하게 되는 변경
 
 반대로 주석·README·코드 포맷·변수명·함수 분리, 테스트 추가, 성능·로그·UI 배치 개선, API 내부 또는 Session/transaction refactoring처럼 저장 결과가 동일한 변경은 version을 올리지 않습니다. 이전 Async worker 세션 경계 정리도 이 경우입니다.
 
@@ -50,7 +51,7 @@
 Inspection Version 13
 상품 A.csv -> 오류 3건 -> run 101 저장
 
-검수 결과 의미가 바뀌는 규칙 변경
+검수 결과 의미가 바뀌는 규칙 또는 저장 계약 변경
 13 -> 14
 
 같은 상품 A.csv 재업로드
@@ -59,6 +60,10 @@ Inspection Version 13
 ```
 
 Version을 올리지 않으면 같은 SHA와 version 13의 run 101이 dedup으로 재사용됩니다. 새 규칙을 배포했는데도 재검수가 생략될 수 있으므로, 결과 의미가 바뀌는 변경에서의 증가가 중요합니다.
+
+### Version 14: source row identity
+
+Version 14는 각 `InspectionResult`에 nullable `source_row_number`를 저장하고 Detail API의 각 결과에도 같은 값을 반환합니다. 기존 version 13 run은 migration 뒤에도 `NULL`을 유지합니다. 같은 bytes를 다시 올릴 때 v13 run을 재사용하면 source row identity가 비어 있으므로, `(file_sha256, inspection_version)` dedup key의 version을 14로 올려 새 run을 생성합니다. 이 방식은 과거 결과를 수정하거나 원본 CSV를 보관하지 않으며, legacy detail의 `null`도 정직하게 유지합니다.
 
 ## 과거 run과 backfill
 

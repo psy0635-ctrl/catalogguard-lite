@@ -147,6 +147,10 @@ class InspectionResult(Base):
     # 검수 실행에서 발견된 문제 한 건을 저장합니다.
     __tablename__ = "inspection_results"
     __table_args__ = (
+        CheckConstraint(
+            "source_row_number IS NULL OR source_row_number >= 2",
+            name="ck_inspection_results_source_row_number_minimum",
+        ),
         # 조회가 자주 일어날 수 있는 컬럼에 인덱스를 미리 둡니다.
         Index("ix_inspection_results_inspection_run_id", "inspection_run_id"),
         Index("ix_inspection_results_product_id", "product_id"),
@@ -171,6 +175,8 @@ class InspectionResult(Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     recommendation: Mapped[str] = mapped_column(Text, nullable=False)
     risk_level: Mapped[str] = mapped_column(String(20), nullable=False)
+    # CSV header를 1로 보는 논리 record 번호입니다. 과거 결과에는 값이 없습니다.
+    source_row_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

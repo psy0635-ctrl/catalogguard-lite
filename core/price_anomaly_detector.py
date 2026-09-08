@@ -89,6 +89,7 @@ def find_category_price_anomalies(products: list[Product]) -> list[ValidationIss
                     f"has median {_format_number(median_price)} "
                     f"and ratio {_format_number(ratio)}"
                 ),
+                source_row_number=product.source_row_number,
             )
         )
 

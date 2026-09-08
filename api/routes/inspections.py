@@ -81,11 +81,16 @@ def build_inspection_response(
     # 공통 검수 서비스가 만든 InspectionReport를 FastAPI 응답 모델로 변환합니다.
     result_items = []
 
-    for row in report.result_dataframe.to_dict(orient="records"):
+    result_rows = getattr(report, "result_records", None)
+    if result_rows is None:
+        result_rows = report.result_dataframe.to_dict(orient="records")
+
+    for row in result_rows:
         item_data = {
             api_field: _clean_text_value(row.get(result_column))
             for result_column, api_field in RESULT_FIELD_MAP.items()
         }
+        item_data["source_row_number"] = row.get("source_row_number")
         result_items.append(InspectionResultItem(**item_data))
 
     return InspectionResponse(
@@ -116,6 +121,7 @@ def build_inspection_detail_response(
             reason=_clean_text_value(result.reason),
             recommendation=_clean_text_value(result.recommendation),
             risk_level=_clean_text_value(result.risk_level),
+            source_row_number=getattr(result, "source_row_number", None),
         )
         for result in detail.results
     ]

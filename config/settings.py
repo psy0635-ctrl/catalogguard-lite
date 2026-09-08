@@ -51,8 +51,8 @@ CATALOGGUARD_JWT_ACCESS_TOKEN_TTL_SECONDS_ENV_VAR = (
     "CATALOGGUARD_JWT_ACCESS_TOKEN_TTL_SECONDS"
 )
 DEFAULT_JWT_ACCESS_TOKEN_TTL_SECONDS = 60 * 60
-# 검수 규칙 버전입니다. 규칙이 바뀌어 같은 CSV도 다시 저장해야 하면 이 값을 올립니다.
-INSPECTION_VERSION = "13"
+# 같은 CSV의 저장 결과 계약이 바뀌어 재검수가 필요하면 이 값을 올립니다.
+INSPECTION_VERSION = "14"
 
 DATA_DIR = BASE_DIR / "data"
 DEV_DATA_PATH = DATA_DIR / "dev" / "products_dev.csv"

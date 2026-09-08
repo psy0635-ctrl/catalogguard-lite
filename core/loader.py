@@ -53,7 +53,9 @@ def load_products_from_dataframe(dataframe: pd.DataFrame) -> list[Product]:
 
     products = []
     has_sale_price_column = "sale_price" in df.columns
-    for row in df.to_dict(orient="records"):
+    # DataFrame index는 호출자가 임의로 바꿀 수 있으므로 identity로 쓰지 않습니다.
+    # header를 논리 행 1로 보고, 파서가 만든 상품 record 순서에서 번호를 만듭니다.
+    for record_index, row in enumerate(df.to_dict(orient="records")):
         # stock과 price는 비어 있거나 잘못된 숫자일 수 있으므로 안전하게 파싱합니다.
         stock = parse_optional_int(clean_text(row["stock"]))
         price = parse_optional_int(clean_text(row["price"]))
@@ -74,6 +76,7 @@ def load_products_from_dataframe(dataframe: pd.DataFrame) -> list[Product]:
                 sale_price_provided=has_sale_price_column and bool(sale_price_text),
                 description=clean_optional_text(row, "description"),
                 seller=clean_optional_text(row, "seller"),
+                source_row_number=record_index + 2,
             )
         )
     return products

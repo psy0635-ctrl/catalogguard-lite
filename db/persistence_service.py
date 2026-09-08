@@ -43,6 +43,15 @@ REQUIRED_RESULT_FIELDS = (
 )
 
 
+def _normalize_source_row_number(value: object) -> int | None:
+    """Return a nullable logical CSV row number suitable for persistence."""
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 2:
+        raise ValueError("source_row_number must be an integer greater than or equal to 2")
+    return value
+
+
 @dataclass(frozen=True)
 class InspectionDetail:
     inspection_run_id: int
@@ -247,10 +256,14 @@ def find_existing_inspection_run(
 def build_result_create_items(
     report: InspectionReport,
 ) -> list[InspectionResultCreate]:
-    # InspectionReport의 결과 DataFrame을 Repository가 저장할 입력 객체 목록으로 바꿉니다.
+    # 화면용 DataFrame에는 숨긴 source-row metadata를 내부 record에서 함께 보존합니다.
     result_items = []
+    result_rows = getattr(report, "result_records", None)
+    if result_rows is None:
+        # 기존 테스트/호출부가 만든 과거 report 모양도 읽을 수 있게 유지합니다.
+        result_rows = report.result_dataframe.to_dict(orient="records")
 
-    for row in report.result_dataframe.to_dict(orient="records"):
+    for row in result_rows:
         item_data = {
             api_field: row.get(result_column)
             for result_column, api_field in RESULT_COLUMN_MAP.items()
@@ -263,6 +276,9 @@ def build_result_create_items(
             reason=_clean_text_value(item_data["reason"]),
             recommendation=_clean_text_value(item_data["recommendation"]),
             risk_level=_clean_text_value(item_data["risk_level"]),
+            source_row_number=_normalize_source_row_number(
+                row.get("source_row_number")
+            ),
         )
         _validate_required_result_fields(result_item)
         result_items.append(result_item)
@@ -369,6 +385,7 @@ def get_inspection_detail(
             reason=result.reason,
             recommendation=result.recommendation,
             risk_level=result.risk_level,
+            source_row_number=getattr(result, "source_row_number", None),
         )
         for result in inspection_results
     ]

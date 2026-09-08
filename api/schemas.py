@@ -23,6 +23,8 @@ class InspectionResultItem(BaseModel):
     reason: str
     recommendation: str
     risk_level: str
+    # 원본 CSV header를 1로 보는 논리 record 번호입니다. 과거 결과는 null입니다.
+    source_row_number: int | None = None
 
 
 class InspectionResponse(BaseModel):

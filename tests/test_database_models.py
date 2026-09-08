@@ -135,6 +135,7 @@ def test_inspection_results_columns_and_types():
         "reason",
         "recommendation",
         "risk_level",
+        "source_row_number",
         "created_at",
     }
     assert isinstance(columns.id.type, BigInteger)
@@ -150,6 +151,8 @@ def test_inspection_results_columns_and_types():
     assert isinstance(columns.recommendation.type, Text)
     assert isinstance(columns.risk_level.type, String)
     assert columns.risk_level.type.length == 20
+    assert isinstance(columns.source_row_number.type, Integer)
+    assert columns.source_row_number.nullable is True
     assert isinstance(columns.created_at.type, DateTime)
     assert columns.created_at.type.timezone is True
     assert columns.created_at.server_default is not None

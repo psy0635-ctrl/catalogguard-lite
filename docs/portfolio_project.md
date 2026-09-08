@@ -256,7 +256,7 @@ Streamlit ETL 프로필 운영 관리
 | Reset 기능 commit `0a2a80f` 기준 로컬 테스트 | 로컬 PostgreSQL 통합 환경에서 `python -m pytest tests/` 결과 `2427 passed`, `6 deselected`, `0 failed`, 5 warnings. 관련 5개 파일 묶음은 `603 passed`(service 37 · API 49 · client 325 · Streamlit AppTest 141 · RBAC 51). `6 deselected`는 `pytest.ini`의 기본 `-m "not e2e and not performance"`입니다. **이 commit에 대한 CI run은 아직 없습니다.** CI는 `python -m pytest -q`로 저장소 전체를 수집해 `airflow/tests/`까지 포함하므로 이 로컬 수치와 직접 비교할 수 없습니다 |
 | ETL Profile Activation History 검증 | 성공한 activate·deactivate·reset 명령마다 event 1건, 같은 `PUT`·no-op reset도 기록, 실패 요청은 기록 없음, 상태 변경과 event INSERT의 same-transaction rollback, reset event의 실제 적용 버전이 배포 기본값, 사용자 삭제 후 `actor_user_id` `NULL`·이름 snapshot 유지, 응답에 `actor_user_id` 미노출, `0015` upgrade의 backfill 없음, 화면이 reset을 비활성화로 표시하지 않음, 이력 조회 실패의 화면 격리를 migration·service·API·client·Streamlit AppTest·PostgreSQL 통합 테스트로 확인 |
 | History 기능 commit `b14e16f` 기준 로컬 테스트 | 로컬 PostgreSQL 16 통합 환경에서 `python -m pytest tests/`(e2e·performance 제외) 결과 `2543 passed`, `0 failed`. 핵심 7개 파일 묶음은 `723 passed`(history migration 5 · history service 35 · activation service 37 · API 69 · client 369 · Streamlit AppTest 154 · RBAC 54). **이 commit에 대한 CI run은 아직 없습니다.** CI는 저장소 전체를 수집해 `airflow/tests/`까지 포함하므로 이 로컬 수치와 직접 비교할 수 없습니다 |
-| 최신 Alembic head | `20260826_0018`(ETL profile definition fingerprint·application commit·JSONB definition snapshot lineage까지 적용한 single head) |
+| 최신 Alembic head | `20260908_0019`(ETL profile lineage와 inspection result source row identity까지 적용한 single head) |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
 
 ## 6.6 핵심 구현 구조

@@ -357,7 +357,11 @@ def test_find_duplicate_product_names_keeps_complete_issue_payload_and_order_for
         "product_name '기본 티셔츠' normalized to '기본티셔츠' duplicates rows "
         "2, 3, 4, 5 with product_ids 'P001, P002, P003, P004'"
     )
-    assert [asdict(issue) for issue in issues] == [
+    issue_payloads = [
+        {field: value for field, value in asdict(issue).items() if field != "source_row_number"}
+        for issue in issues
+    ]
+    assert issue_payloads == [
         {
             "rule": "duplicate_product_name",
             "severity": "warning",
@@ -387,6 +391,7 @@ def test_find_duplicate_product_names_keeps_complete_issue_payload_and_order_for
             "message": expected_message,
         },
     ]
+    assert all(issue.source_row_number is None for issue in issues)
 
 
 def test_find_duplicate_product_names_keeps_three_distinct_normal_options_clean():

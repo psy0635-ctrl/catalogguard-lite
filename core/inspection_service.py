@@ -5,7 +5,7 @@ import pandas as pd
 
 from core.loader import load_products_from_dataframe
 from core.models import Product, ValidationIssue
-from core.presentation import build_result_dataframe
+from core.presentation import build_result_dataframe_from_records, build_result_records
 from core.privacy import create_masked_preview
 from core.rules import run_all_rules
 from core.upload_validator import validate_and_read_uploaded_csv
@@ -26,6 +26,7 @@ class InspectionReport:
     products: list[Product]
     issues: list[ValidationIssue]
     result_dataframe: pd.DataFrame
+    result_records: list[dict[str, object]]
     summary: InspectionSummary
 
 
@@ -52,7 +53,8 @@ def inspect_dataframe(dataframe: pd.DataFrame) -> InspectionReport:
     products = load_products_from_dataframe(dataframe)
     issues = run_all_rules(products)
     # 내부 문제 목록을 Streamlit 표와 API 응답에서 쓰기 쉬운 한글 DataFrame으로 바꿉니다.
-    result_dataframe = build_result_dataframe(issues)
+    result_records = build_result_records(issues)
+    result_dataframe = build_result_dataframe_from_records(result_records)
 
     return InspectionReport(
         source_dataframe=dataframe,
@@ -60,6 +62,7 @@ def inspect_dataframe(dataframe: pd.DataFrame) -> InspectionReport:
         products=products,
         issues=issues,
         result_dataframe=result_dataframe,
+        result_records=result_records,
         summary=build_inspection_summary(products, issues),
     )
 

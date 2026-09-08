@@ -949,6 +949,7 @@ def test_get_inspection_api_returns_saved_inspection_detail(
         "reason",
         "recommendation",
         "risk_level",
+        "source_row_number",
     }
     assert data["results"][0] == {
         "status": "오류",
@@ -958,6 +959,7 @@ def test_get_inspection_api_returns_saved_inspection_detail(
         "reason": "동일한 상품 ID가 여러 상품에 사용되었습니다.",
         "recommendation": "각 상품에 고유한 상품 ID를 입력하십시오.",
         "risk_level": "높음",
+        "source_row_number": None,
     }
     assert len(fake_inspection_persistence.detail_calls) == 1
     detail_call = fake_inspection_persistence.detail_calls[0]
@@ -1336,6 +1338,7 @@ def test_inspection_api_returns_existing_presentation_fields_as_snake_case():
         "reason",
         "recommendation",
         "risk_level",
+        "source_row_number",
     }
     assert result["status"] == "오류"
     assert result["error_field"] == "상품 ID 중복"
