@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from config.settings import get_catalogguard_agent_model, is_catalogguard_agent_configured
+from core.privacy import mask_personal_information
 from core.result_exporter import (
     CorrectionWorksheetUnavailableError,
     build_correction_worksheet_dataframe,
@@ -41,7 +42,14 @@ WRITE_OR_OUT_OF_SCOPE_TERMS = (
     "재검수 실행",
     "검수 실행",
     "db에서",
+    "db 수정",
     "sql",
+    "update",
+    "고쳐줘",
+    "반영해",
+    "롤백",
+    "python",
+    "스크립트 실행",
     "날씨",
     "주식",
 )
@@ -87,14 +95,19 @@ class InspectionCopilotContext:
 def _result_mapping(result: Any) -> dict[str, object]:
     return {
         "source_row_number": result.source_row_number,
-        "product_group_id": result.product_group_id or "",
-        "product_id": result.product_id or "",
+        "product_group_id": _mask_tool_text(result.product_group_id),
+        "product_id": _mask_tool_text(result.product_id),
         "status": result.status,
         "error_field": result.error_field,
-        "reason": result.reason,
-        "recommendation": result.recommendation,
+        "reason": _mask_tool_text(result.reason),
+        "recommendation": _mask_tool_text(result.recommendation),
         "risk_level": result.risk_level,
     }
+
+
+def _mask_tool_text(value: object) -> str:
+    """Keep any user-originated strings projected to the model privacy-masked."""
+    return mask_personal_information(str(value or ""))
 
 
 def _get_detail(context: InspectionCopilotContext):
@@ -147,14 +160,14 @@ def get_source_row_issues(
     return {
         "source_row_number": source_row_number,
         "found": True,
-        "product_group_id": first.product_group_id or "",
-        "product_id": first.product_id or "",
+        "product_group_id": _mask_tool_text(first.product_group_id),
+        "product_id": _mask_tool_text(first.product_id),
         "issues": [
             {
                 "rule_code": result.error_field,
                 "severity": result.status,
-                "reason": result.reason,
-                "recommendation": result.recommendation,
+                "reason": _mask_tool_text(result.reason),
+                "recommendation": _mask_tool_text(result.recommendation),
             }
             for result in matching
         ],
@@ -180,7 +193,11 @@ def get_correction_overview(
     rows = []
     worksheet_rows = sorted(
         worksheet.to_dict(orient="records"),
-        key=lambda row: (-int(row["문제 수"]), int(row["원본 행"])),
+        key=lambda row: (
+            {"오류": 0, "주의": 1}.get(str(row["대표 검수 상태"]), 2),
+            -int(row["문제 수"]),
+            int(row["원본 행"]),
+        ),
     )
     for row in worksheet_rows[:bounded_limit]:
         rules = [value for value in str(row["오류 항목"]).split("\n") if value]
@@ -272,6 +289,74 @@ def build_inspection_copilot_run_config() -> RunConfig:
     )
 
 
+def _validate_evidence(
+    context: InspectionCopilotContext,
+    answer: InspectionCopilotAnswer,
+) -> None:
+    """Reject structured citations that are absent from the persisted run data."""
+    allowed_run_ids = {
+        run_id
+        for run_id in (
+            context.current_run_id,
+            context.baseline_run_id,
+            context.target_run_id,
+        )
+        if type(run_id) is int
+    }
+    comparison_run_ids = [
+        context.baseline_run_id,
+        context.target_run_id,
+    ]
+    has_comparison = (
+        type(context.baseline_run_id) is int
+        and type(context.target_run_id) is int
+        and context.baseline_run_id != context.target_run_id
+    )
+
+    for evidence in answer.evidence:
+        if evidence.run_id not in allowed_run_ids:
+            raise ValueError("inspection copilot evidence references an unavailable run")
+        if evidence.comparison_run_ids and (
+            not has_comparison
+            or evidence.comparison_run_ids != comparison_run_ids
+        ):
+            raise ValueError("inspection copilot evidence references an unavailable comparison")
+        if evidence.comparison_run_ids:
+            try:
+                comparison = get_inspection_run_comparison(
+                    context.session,
+                    base_run_id=context.baseline_run_id,
+                    target_run_id=context.target_run_id,
+                )
+            except ValueError as error:
+                raise ValueError(
+                    "inspection copilot evidence references an incompatible comparison"
+                ) from error
+            if comparison is None:
+                raise ValueError(
+                    "inspection copilot evidence references a missing comparison"
+                )
+
+        detail = get_inspection_detail(
+            context.session,
+            inspection_run_id=evidence.run_id,
+        )
+        if detail is None:
+            raise ValueError("inspection copilot evidence references a missing run")
+        results = list(detail.results)
+        if evidence.source_row_number is not None:
+            results = [
+                result
+                for result in results
+                if result.source_row_number == evidence.source_row_number
+            ]
+            if not results:
+                raise ValueError("inspection copilot evidence references a missing source row")
+        known_rule_codes = {result.error_field for result in results}
+        if not set(evidence.rule_codes).issubset(known_rule_codes):
+            raise ValueError("inspection copilot evidence references an unknown rule")
+
+
 def _is_out_of_scope(question: str) -> bool:
     normalized = question.lower()
     return any(term in normalized for term in WRITE_OR_OUT_OF_SCOPE_TERMS)
@@ -324,4 +409,5 @@ def ask_inspection_copilot(
     )
     if not isinstance(result.final_output, InspectionCopilotAnswer):
         raise ValueError("invalid inspection copilot response")
+    _validate_evidence(context, result.final_output)
     return result.final_output
