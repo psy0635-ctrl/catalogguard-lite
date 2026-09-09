@@ -565,6 +565,82 @@ def test_app_offers_correction_worksheet_for_source_identified_results(monkeypat
     ]
 
 
+def test_app_reinspection_requires_manual_corrected_upload_then_uses_existing_comparison(
+    monkeypatch,
+):
+    detail_response = make_detail_response()
+    detail_response["results"] = [
+        {**result, "source_row_number": index + 2}
+        for index, result in enumerate(detail_response["results"])
+    ]
+    api_client = FakeInspectionApiClient(detail_responses=[detail_response])
+    comparison_calls = []
+    api_client.get_inspection_comparison = lambda base, target: (
+        comparison_calls.append((base, target))
+        or {
+            "base_run": {
+                "inspection_run_id": base,
+                "source_filename": "before.csv",
+                "inspection_version": "14",
+            },
+            "target_run": {
+                "inspection_run_id": target,
+                "source_filename": "corrected.csv",
+                "inspection_version": "14",
+            },
+            "summary_delta": {
+                "total_products_delta": 0,
+                "total_issues_delta": 0,
+                "error_count_delta": 0,
+                "warning_count_delta": 0,
+            },
+            "common_issue_count": 1,
+            "base_only_issue_count": 0,
+            "target_only_issue_count": 0,
+            "changed_items": [],
+            "error_field_comparisons": [],
+        }
+    )
+    monkeypatch.setattr(
+        catalogguard_api,
+        "create_catalogguard_api_client",
+        lambda: api_client,
+    )
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = build_authenticated_app_test("app.py")
+    app.session_state["reinspection_base_run_id"] = 101
+    app.run(timeout=10)
+
+    assert len(app.exception) == 0
+    assert [uploader.label for uploader in app.file_uploader] == [
+        "수정한 상품 CSV 파일 업로드"
+    ]
+    assert api_client.create_calls == []
+    assert "Correction Worksheet가 아니라 수정한 원본 상품 CSV를 직접 선택해 다시 검수합니다." in [
+        caption.value for caption in app.caption
+    ]
+
+    app.file_uploader[0].upload(
+        "corrected-products.csv",
+        GROUP_CATEGORY_TEST_CSV,
+        "text/csv",
+    ).run(timeout=10)
+    find_widget(app.button, "검수 실행 및 이력 저장").click().run(timeout=10)
+
+    assert app.session_state["reinspection_base_run_id"] == 101
+    assert app.session_state["reinspection_target_run_id"] == 10
+    assert comparison_calls == []
+
+    find_widget(app.button, "이전 결과와 비교").click().run(timeout=10)
+
+    assert comparison_calls == [(101, 10)]
+    assert len(app.exception) == 0
+
+
 def test_app_blocks_correction_worksheet_without_complete_source_identity(monkeypatch):
     api_client = FakeInspectionApiClient()
     monkeypatch.setattr(

@@ -116,6 +116,63 @@ def test_build_file_hash_returns_different_hash_for_different_bytes(app_module):
     assert first_hash != second_hash
 
 
+def test_start_correction_reinspection_keeps_baseline_and_clears_old_target(
+    app_module,
+):
+    session_state = {
+        "reinspection_target_run_id": 114,
+        "saved_inspection_run_id": 114,
+    }
+
+    app_module.start_correction_reinspection(session_state, baseline_run_id=101)
+
+    assert session_state["reinspection_base_run_id"] == 101
+    assert "reinspection_target_run_id" not in session_state
+    assert "saved_inspection_run_id" not in session_state
+
+
+def test_complete_correction_reinspection_connects_distinct_completed_target(
+    app_module,
+):
+    session_state = {"reinspection_base_run_id": 101}
+
+    outcome = app_module.complete_correction_reinspection(
+        session_state,
+        target_run_id=114,
+    )
+
+    assert outcome == "ready"
+    assert session_state["reinspection_base_run_id"] == 101
+    assert session_state["reinspection_target_run_id"] == 114
+
+
+def test_complete_correction_reinspection_does_not_connect_same_deduplicated_run(
+    app_module,
+):
+    session_state = {"reinspection_base_run_id": 101}
+
+    outcome = app_module.complete_correction_reinspection(
+        session_state,
+        target_run_id=101,
+    )
+
+    assert outcome == "same_run"
+    assert "reinspection_target_run_id" not in session_state
+
+
+def test_clear_correction_reinspection_removes_lineage_for_next_normal_upload(
+    app_module,
+):
+    session_state = {
+        "reinspection_base_run_id": 101,
+        "reinspection_target_run_id": 114,
+    }
+
+    app_module.clear_correction_reinspection(session_state)
+
+    assert session_state == {}
+
+
 def test_apply_inspection_save_response_returns_created_message_and_updates_state(
     app_module,
 ):
