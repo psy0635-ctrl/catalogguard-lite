@@ -11,6 +11,7 @@ from api.routes.auth import router as auth_router
 from api.routes.etl_loads import router as etl_loads_router
 from api.routes.inspections import router as inspections_router
 from api.routes.inspection_jobs import router as inspection_jobs_router
+from api.routes.inspection_copilot import router as inspection_copilot_router
 from config.logging import configure_logging, log_event
 from config.metrics import (
     EXCLUDED_METRIC_PATHS,
@@ -119,6 +120,7 @@ async def log_http_request(request: Request, call_next) -> Response:
 app.include_router(auth_router)
 app.include_router(inspections_router)
 app.include_router(inspection_jobs_router)
+app.include_router(inspection_copilot_router)
 app.include_router(etl_loads_router)
 
 

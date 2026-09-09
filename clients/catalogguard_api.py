@@ -64,6 +64,7 @@ DETAIL_RESPONSE_KEYS = (
     "summary",
     "results",
 )
+INSPECTION_COPILOT_RESPONSE_KEYS = ("answer", "evidence", "limitations")
 JOB_SUBMISSION_RESPONSE_KEYS = ("job_id", "status", "status_url")
 JOB_STATUS_RESPONSE_KEYS = ("job_id", "status")
 VALID_JOB_STATUSES = {"queued", "running", "succeeded", "failed"}
@@ -695,6 +696,28 @@ def _validate_inspection_comparison_response(data: dict[str, Any]) -> None:
             delta[delta_key] != target_summary[summary_key] - base_summary[summary_key]
             for delta_key, summary_key in zip(INSPECTION_COMPARISON_DELTA_KEYS, INSPECTION_COMPARISON_SUMMARY_KEYS, strict=True)
         )
+    ):
+        raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+
+
+def _validate_inspection_copilot_response(data: dict[str, Any]) -> None:
+    evidence = data.get("evidence")
+    limitations = data.get("limitations")
+    if (
+        any(key not in data for key in INSPECTION_COPILOT_RESPONSE_KEYS)
+        or not isinstance(data.get("answer"), str)
+        or not data["answer"].strip()
+        or not isinstance(evidence, list)
+        or not isinstance(limitations, list)
+        or any(
+            not isinstance(item, dict)
+            or type(item.get("run_id")) is not int
+            or item["run_id"] <= 0
+            or not isinstance(item.get("rule_codes"), list)
+            or not isinstance(item.get("comparison_run_ids"), list)
+            for item in evidence
+        )
+        or not all(isinstance(item, str) for item in limitations)
     ):
         raise CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
 
@@ -2256,6 +2279,36 @@ class CatalogGuardApiClient:
             raise_not_found=True,
         )
         self._validate_response_keys(data, DETAIL_RESPONSE_KEYS)
+        return data
+
+    def ask_inspection_copilot(
+        self,
+        *,
+        question: str,
+        current_run_id: int,
+        baseline_run_id: int | None = None,
+        target_run_id: int | None = None,
+    ) -> dict[str, Any]:
+        normalized_question = str(question).strip()
+        if not 1 <= len(normalized_question) <= 1000:
+            raise ValueError("question must be between 1 and 1000 characters")
+        if type(current_run_id) is not int or current_run_id <= 0:
+            raise ValueError("current_run_id must be a positive integer")
+        payload: dict[str, int | str] = {
+            "question": normalized_question,
+            "current_run_id": current_run_id,
+        }
+        for field, value in (
+            ("baseline_run_id", baseline_run_id),
+            ("target_run_id", target_run_id),
+        ):
+            if value is None:
+                continue
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{field} must be a positive integer")
+            payload[field] = value
+        data = self._post_json("/api/v1/inspection-copilot/ask", json_body=payload)
+        _validate_inspection_copilot_response(data)
         return data
 
     def list_etl_loads(

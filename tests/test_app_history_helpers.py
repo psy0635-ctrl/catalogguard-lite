@@ -144,6 +144,9 @@ class FakeAppStreamlit:
     def text_input(self, label, **kwargs):
         return self.text_input_values.get(label, "")
 
+    def text_area(self, label, **kwargs):
+        return self.text_input_values.get(label, "")
+
     def button(self, *args, **kwargs):
         return False
 

@@ -117,6 +117,29 @@ class InspectionComparisonResponse(BaseModel):
     error_field_comparisons: list[InspectionErrorFieldComparisonResponse]
 
 
+class InspectionCopilotAskRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+    current_run_id: int = Field(ge=1)
+    baseline_run_id: int | None = Field(default=None, ge=1)
+    target_run_id: int | None = Field(default=None, ge=1)
+
+
+class InspectionCopilotEvidenceResponse(BaseModel):
+    run_id: int = Field(ge=1)
+    source_row_number: int | None = Field(default=None, ge=2)
+    rule_codes: list[str] = Field(default_factory=list, max_length=10)
+    comparison_run_ids: list[int] = Field(default_factory=list, max_length=2)
+
+
+class InspectionCopilotAskResponse(BaseModel):
+    answer: str = Field(min_length=1, max_length=4000)
+    evidence: list[InspectionCopilotEvidenceResponse] = Field(
+        default_factory=list,
+        max_length=10,
+    )
+    limitations: list[str] = Field(default_factory=list, max_length=10)
+
+
 class ETLLoadListItemResponse(BaseModel):
     etl_load_run_id: int
     source_filename: str

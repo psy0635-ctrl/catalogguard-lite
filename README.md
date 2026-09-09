@@ -184,6 +184,8 @@ CSV 검수 탭
 
 Correction Worksheet 다운로드 영역의 `수정 후 재검수`는 해당 실행을 session 범위의 기준으로 두고, 사용자가 수정한 원본 상품 CSV를 직접 선택해 기존 검수 경로로 실행합니다. Worksheet를 입력으로 업로드하거나 원본 CSV를 복원하지 않습니다. 동일 파일 dedup으로 같은 실행이 재사용되면 비교하지 않으며, 다른 실행이 완료되면 `이전 결과와 비교`로 기존 Comparison을 열 수 있습니다.
 
+`CatalogGuard Inspection Copilot`은 현재 화면의 저장된 검수 결과를 읽어 오류 이유, 수정 권장사항, 수정 전·후 Comparison의 중립적 사실을 한국어로 설명하는 읽기 전용 AI 보조 기능입니다. 실제 오류 판정은 기존 Rule Engine이 계속 담당하며, Copilot은 원본 CSV·상품 설명·개인정보 원문을 전달받지 않고 데이터를 수정·검수·재검수·Promotion·Rollback하지 않습니다. `OPENAI_API_KEY`가 설정되지 않은 환경에서는 Copilot만 사용할 수 없고 나머지 기능은 그대로 동작합니다.
+
 검수 이력의 현재 목록에서는 두 실행을 선택해 `GET /api/v1/inspections/comparison`을 버튼 클릭 시에만 호출할 수 있습니다. 변화량은 항상 `비교 - 기준`이며, 문제 row의 저장 필드 전체를 multiset으로 비교합니다. 같은 `inspection_version`끼리만 비교할 수 있고, `base_only`/`target_only`는 각각 한쪽 실행에만 저장된 문제를 뜻할 뿐 해결됨·신규 오류를 의미하지 않습니다. 정상 상품 전체 row는 저장하지 않으므로 파일에서 빠진 상품을 구분할 수 없고, 파일 규모가 다르면 문제 수 감소만으로 품질 개선을 판단할 수 없습니다. changed issue item은 기존 상세 API처럼 전체를 반환하며 별도 pagination은 아직 없습니다.
 
 검수 결과 저장이나 검수 이력 조회 중 API 오류가 발생하면 Streamlit의 안전한 오류 안내에서 요청 ID를 확인하고, 운영자는 Railway 로그에서 같은 `request_id`를 검색해 해당 요청을 추적할 수 있습니다. 서버 응답이 없는 timeout이나 연결 실패에는 요청 ID를 표시하지 않습니다.

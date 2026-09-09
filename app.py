@@ -1469,6 +1469,63 @@ def render_reinspection_comparison_call_to_action() -> None:
         render_inspection_comparison_result(comparison)
 
 
+def render_inspection_copilot(detail_response: dict) -> None:
+    """Ask the server-side, read-only Copilot about the currently shown run."""
+    inspection_run_id = detail_response.get("inspection_run_id")
+    if type(inspection_run_id) is not int or inspection_run_id <= 0:
+        return
+
+    st.subheader("🤖 CatalogGuard Inspection Copilot")
+    st.caption(
+        "현재 검수 결과의 오류 이유, 수정 권장사항, 수정 전·후 차이를 질문할 수 있습니다. "
+        "Copilot은 데이터를 수정하거나 Catalog에 반영하지 않습니다."
+    )
+    question = st.text_area(
+        "Copilot 질문",
+        placeholder="예: 이번 검수에서 무엇부터 확인하면 돼?",
+        key="inspection_copilot_question",
+    )
+    if not st.button("Copilot에게 질문", key="inspection_copilot_ask"):
+        return
+    if not question.strip():
+        st.warning("질문을 입력해 주세요.")
+        return
+
+    try:
+        api_client = get_authenticated_api_client()
+        response = api_client.ask_inspection_copilot(
+            question=question,
+            current_run_id=inspection_run_id,
+            baseline_run_id=st.session_state.get(REINSPECTION_BASE_RUN_ID_STATE_KEY),
+            target_run_id=st.session_state.get(REINSPECTION_TARGET_RUN_ID_STATE_KEY),
+        )
+    except CatalogGuardApiConfigurationError:
+        st.info("Inspection Copilot이 서버에 설정되지 않았습니다.")
+        return
+    except (CatalogGuardApiConnectionError, CatalogGuardApiTimeoutError):
+        st.error("Inspection Copilot 응답을 지금 가져올 수 없습니다.")
+        return
+    except (CatalogGuardApiResponseError, ValueError):
+        st.info("Inspection Copilot을 사용할 수 없습니다. 서버 설정을 확인해 주세요.")
+        return
+
+    st.write(response["answer"])
+    evidence = response["evidence"]
+    if evidence:
+        st.caption("근거")
+        for item in evidence:
+            source_row = item.get("source_row_number")
+            rule_codes = ", ".join(item.get("rule_codes", []))
+            detail = f"Run #{item['run_id']}"
+            if source_row is not None:
+                detail += f" · 원본 행 {source_row}"
+            if rule_codes:
+                detail += f" · Rule: {rule_codes}"
+            st.write(f"- {detail}")
+    for limitation in response["limitations"]:
+        st.caption(f"제한: {limitation}")
+
+
 def render_csv_inspection_tab() -> None:
     baseline_run_id = st.session_state.get(REINSPECTION_BASE_RUN_ID_STATE_KEY)
     is_reinspection = type(baseline_run_id) is int and baseline_run_id > 0
@@ -1570,6 +1627,7 @@ def render_csv_inspection_tab() -> None:
         st.info("수정된 내용이 없어 기존 검수 결과가 재사용되었습니다.")
     elif reinspection_outcome == "ready":
         render_reinspection_comparison_call_to_action()
+    render_inspection_copilot(detail_response)
 
 
 def render_inspection_history_tab() -> None:
