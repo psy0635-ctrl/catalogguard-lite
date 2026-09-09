@@ -112,6 +112,8 @@ ASYNC_JOB_STATUS_STATE_KEY = "async_job_status"
 ASYNC_JOB_FILE_HASH_STATE_KEY = "async_job_file_hash"
 ASYNC_JOB_RESPONSE_STATE_KEY = "async_job_response"
 ASYNC_JOB_ERROR_STATE_KEY = "async_job_error"
+REINSPECTION_BASE_RUN_ID_STATE_KEY = "reinspection_base_run_id"
+REINSPECTION_TARGET_RUN_ID_STATE_KEY = "reinspection_target_run_id"
 
 
 def build_api_error_display_message(
@@ -151,6 +153,38 @@ def clear_current_inspection_result(session_state) -> None:
         CURRENT_INSPECTION_DETAIL_STATE_KEY,
     ):
         session_state.pop(key, None)
+
+
+def clear_correction_reinspection(session_state) -> None:
+    """Forget the session-only link before returning to a normal upload."""
+    session_state.pop(REINSPECTION_BASE_RUN_ID_STATE_KEY, None)
+    session_state.pop(REINSPECTION_TARGET_RUN_ID_STATE_KEY, None)
+
+
+def start_correction_reinspection(session_state, *, baseline_run_id: int) -> None:
+    """Start a corrected-file upload without retaining the original CSV."""
+    if type(baseline_run_id) is not int or baseline_run_id <= 0:
+        raise ValueError("invalid baseline_run_id")
+
+    clear_correction_reinspection(session_state)
+    clear_current_inspection_result(session_state)
+    clear_async_inspection_job(session_state)
+    session_state[REINSPECTION_BASE_RUN_ID_STATE_KEY] = baseline_run_id
+
+
+def complete_correction_reinspection(session_state, *, target_run_id: int) -> str | None:
+    """Record a completed target only when a reinspection is active."""
+    baseline_run_id = session_state.get(REINSPECTION_BASE_RUN_ID_STATE_KEY)
+    if type(baseline_run_id) is not int or baseline_run_id <= 0:
+        return None
+    if type(target_run_id) is not int or target_run_id <= 0:
+        raise ValueError("invalid target_run_id")
+    if target_run_id == baseline_run_id:
+        session_state.pop(REINSPECTION_TARGET_RUN_ID_STATE_KEY, None)
+        return "same_run"
+
+    session_state[REINSPECTION_TARGET_RUN_ID_STATE_KEY] = target_run_id
+    return "ready"
 
 
 def clear_async_inspection_job(session_state) -> None:
@@ -1370,23 +1404,100 @@ def render_uploaded_inspection_result(
             ),
             mime="text/csv",
         )
+        render_correction_reinspection_start(detail_response)
+
+
+def render_correction_reinspection_start(detail_response: dict) -> None:
+    """Offer one session-scoped corrected-file follow-up from the worksheet area."""
+    inspection_run_id = detail_response.get("inspection_run_id")
+    if type(inspection_run_id) is not int or inspection_run_id <= 0:
+        return
+
+    st.write("수정이 끝났나요?")
+    st.caption(
+        "Correction Worksheet를 참고해 원본 상품 CSV를 수정한 뒤, 수정된 CSV 파일을 "
+        "직접 선택해 다시 검수합니다. Worksheet 파일 자체는 업로드하지 마세요."
+    )
+    if st.button(
+        "수정 후 재검수",
+        key="start_correction_reinspection",
+        type="secondary",
+    ):
+        start_correction_reinspection(
+            st.session_state,
+            baseline_run_id=inspection_run_id,
+        )
+        st.rerun()
+
+
+def render_reinspection_comparison_call_to_action() -> None:
+    baseline_run_id = st.session_state.get(REINSPECTION_BASE_RUN_ID_STATE_KEY)
+    target_run_id = st.session_state.get(REINSPECTION_TARGET_RUN_ID_STATE_KEY)
+    if type(baseline_run_id) is not int or type(target_run_id) is not int:
+        return
+
+    st.success("재검수가 완료되었습니다. 기존 검수와 새 검수 결과를 비교할 수 있습니다.")
+    if not st.button(
+        "이전 결과와 비교",
+        key="compare_correction_reinspection",
+        type="secondary",
+    ):
+        return
+
+    try:
+        api_client = get_authenticated_api_client()
+        comparison = api_client.get_inspection_comparison(
+            baseline_run_id,
+            target_run_id,
+        )
+    except CatalogGuardApiConfigurationError as error:
+        st.error(build_api_error_display_message("검수 이력 API 주소가 설정되지 않았습니다.", error))
+    except InspectionNotFoundError as error:
+        st.error(build_api_error_display_message("검수 실행 결과를 찾을 수 없습니다.", error))
+    except CatalogGuardApiConnectionError as error:
+        st.error(build_api_error_display_message("검수 비교 서버에 연결할 수 없습니다.", error))
+    except CatalogGuardApiTimeoutError as error:
+        st.error(build_api_error_display_message("검수 비교 서버 응답 시간이 초과되었습니다.", error))
+    except (CatalogGuardApiResponseError, ValueError) as error:
+        st.error(
+            build_api_error_display_message(
+                "두 검수 실행을 비교할 수 없습니다. 같은 검수 버전의 실행만 비교할 수 있습니다.",
+                error,
+            )
+        )
+    else:
+        render_inspection_comparison_result(comparison)
 
 
 def render_csv_inspection_tab() -> None:
-    st.subheader("CSV 입력 템플릿")
-    st.write("올바른 컬럼 구조가 필요한 경우 아래 템플릿을 내려받아 작성하세요.")
-    st.caption(
-        "템플릿에는 가짜 예시 상품 1개가 포함되어 있습니다. "
-        "실제 사용 전 예시 행을 삭제하거나 상품 정보로 교체해 주세요."
-    )
-    st.caption(f"필수 컬럼: {', '.join(REQUIRED_COLUMNS)}")
-    st.caption(f"선택 컬럼: {', '.join(OPTIONAL_COLUMNS)}")
-    st.download_button(
-        "CSV 입력 템플릿 다운로드",
-        data=build_product_template_csv(),
-        file_name=get_product_template_filename(),
-        mime="text/csv",
-    )
+    baseline_run_id = st.session_state.get(REINSPECTION_BASE_RUN_ID_STATE_KEY)
+    is_reinspection = type(baseline_run_id) is int and baseline_run_id > 0
+    if is_reinspection:
+        st.subheader("수정 후 재검수")
+        st.write(f"기준 실행 ID: {baseline_run_id}")
+        st.caption(
+            "Correction Worksheet가 아니라 수정한 원본 상품 CSV를 직접 선택해 다시 검수합니다."
+        )
+        if st.button("재검수 취소", key="cancel_correction_reinspection"):
+            clear_correction_reinspection(st.session_state)
+            clear_current_inspection_result(st.session_state)
+            clear_async_inspection_job(st.session_state)
+            st.rerun()
+    else:
+        st.subheader("CSV 입력 템플릿")
+        st.write("올바른 컬럼 구조가 필요한 경우 아래 템플릿을 내려받아 작성하세요.")
+        st.caption(
+            "템플릿에는 가짜 예시 상품 1개가 포함되어 있습니다. "
+            "실제 사용 전 예시 행을 삭제하거나 상품 정보로 교체해 주세요."
+        )
+        st.caption(f"필수 컬럼: {', '.join(REQUIRED_COLUMNS)}")
+        st.caption(f"선택 컬럼: {', '.join(OPTIONAL_COLUMNS)}")
+        st.download_button(
+            "CSV 입력 템플릿 다운로드",
+            data=build_product_template_csv(),
+            file_name=get_product_template_filename(),
+            mime="text/csv",
+        )
 
     inspection_mode = st.radio(
         "검수 방식",
@@ -1397,7 +1508,11 @@ def render_csv_inspection_tab() -> None:
     )
     synchronize_inspection_mode(st.session_state, inspection_mode)
 
-    uploaded_file = st.file_uploader("CSV 파일 업로드", type=["csv"])
+    uploaded_file = st.file_uploader(
+        "수정한 상품 CSV 파일 업로드" if is_reinspection else "CSV 파일 업로드",
+        type=["csv"],
+        key="correction_reinspection_file" if is_reinspection else None,
+    )
 
     # 파일이 없으면 아래 검사 코드를 실행하지 않고 CSV 탭 렌더링만 마칩니다.
     if uploaded_file is None:
@@ -1443,10 +1558,18 @@ def render_csv_inspection_tab() -> None:
         )
     if detail_response is None:
         return
+    reinspection_outcome = complete_correction_reinspection(
+        st.session_state,
+        target_run_id=int(detail_response["inspection_run_id"]),
+    )
     render_uploaded_inspection_result(
         detail_response,
         fallback_source_filename=uploaded_file.name,
     )
+    if reinspection_outcome == "same_run":
+        st.info("수정된 내용이 없어 기존 검수 결과가 재사용되었습니다.")
+    elif reinspection_outcome == "ready":
+        render_reinspection_comparison_call_to_action()
 
 
 def render_inspection_history_tab() -> None:
@@ -1659,6 +1782,12 @@ def render_inspection_run_comparison(api_client, history_items: list[dict]) -> N
     except ValueError:
         st.error("비교할 검수 실행 선택이 올바르지 않습니다.")
         return
+
+    render_inspection_comparison_result(comparison)
+
+
+def render_inspection_comparison_result(comparison: dict) -> None:
+    """Display the existing comparison response for either entry point."""
 
     base_run = comparison["base_run"]
     target_run = comparison["target_run"]
