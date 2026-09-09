@@ -641,6 +641,63 @@ def test_app_reinspection_requires_manual_corrected_upload_then_uses_existing_co
     assert len(app.exception) == 0
 
 
+def test_app_renders_copilot_answer_and_evidence_for_current_run(monkeypatch):
+    detail_response = make_detail_response()
+    detail_response["results"] = [
+        {**result, "source_row_number": index + 2}
+        for index, result in enumerate(detail_response["results"])
+    ]
+    api_client = FakeInspectionApiClient(detail_responses=[detail_response])
+    copilot_calls = []
+    api_client.ask_inspection_copilot = lambda **kwargs: (
+        copilot_calls.append(kwargs)
+        or {
+            "answer": "오류부터 확인하세요.",
+            "evidence": [
+                {
+                    "run_id": 10,
+                    "source_row_number": 2,
+                    "rule_codes": ["필수 값 누락"],
+                    "comparison_run_ids": [],
+                }
+            ],
+            "limitations": ["저장된 검수 결과만 설명합니다."],
+        }
+    )
+    monkeypatch.setattr(
+        catalogguard_api,
+        "create_catalogguard_api_client",
+        lambda: api_client,
+    )
+    monkeypatch.setattr(
+        ui_auth,
+        "get_authenticated_api_client",
+        lambda: api_client,
+    )
+    app = run_authenticated_app_test(timeout=10)
+    app.file_uploader[0].upload(
+        "group_category_consistency_test.csv",
+        GROUP_CATEGORY_TEST_CSV,
+        "text/csv",
+    ).run(timeout=10)
+    find_widget(app.button, "검수 실행 및 이력 저장").click().run(timeout=10)
+
+    find_widget(app.text_area, "Copilot 질문").input("무엇부터 확인하면 돼?").run(
+        timeout=10
+    )
+    find_widget(app.button, "Copilot에게 질문").click().run(timeout=10)
+
+    assert copilot_calls == [
+        {
+            "question": "무엇부터 확인하면 돼?",
+            "current_run_id": 10,
+            "baseline_run_id": None,
+            "target_run_id": None,
+        }
+    ]
+    assert len(app.exception) == 0
+
+
 def test_app_blocks_correction_worksheet_without_complete_source_identity(monkeypatch):
     api_client = FakeInspectionApiClient()
     monkeypatch.setattr(
