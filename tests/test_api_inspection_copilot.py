@@ -95,6 +95,22 @@ def test_ask_copilot_reports_missing_api_key_without_affecting_other_routes(monk
 
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "agent_not_configured"
+    assert client.get("/health").json()["status"] == "ok"
+
+
+@pytest.mark.parametrize("error", [TimeoutError("timeout"), ValueError("invalid")])
+def test_ask_copilot_maps_sdk_failures_to_a_safe_unavailable_response(monkeypatch, error):
+    monkeypatch.setattr(
+        copilot_route,
+        "ask_inspection_copilot",
+        lambda **kwargs: (_ for _ in ()).throw(error),
+    )
+
+    response = client.post(ENDPOINT, json={"question": "요약해줘", "current_run_id": 101})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == copilot_route.AGENT_UNAVAILABLE_DETAIL
+    assert "timeout" not in response.text
 
 
 def test_ask_copilot_bounds_question_length_before_model_execution(monkeypatch):
