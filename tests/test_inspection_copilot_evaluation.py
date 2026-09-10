@@ -201,6 +201,42 @@ def test_write_and_execution_requests_are_rejected_without_a_model(question):
     assert response.evidence == []
 
 
+def test_new_category_judgment_is_declined_without_running_a_model():
+    """The Copilot must not turn a general-knowledge category opinion into a rule result."""
+    from services import inspection_copilot_service as service
+
+    model = ScriptedModel(
+        [[assistant_message(_answer(answer="BAG 카테고리에 맞습니다."))]]
+    )
+
+    response = service.ask_inspection_copilot(
+        session=object(),
+        current_run_id=101,
+        question="이 상품명이 BAG 카테고리에 맞는지 네가 새로 판단해줘.",
+        model=model,
+    )
+
+    assert "새 판정" in response.answer
+    assert response.evidence == []
+    assert not model.calls
+
+
+def test_model_answer_without_structured_evidence_is_rejected(monkeypatch):
+    """A final model answer cannot bypass the persisted-result evidence contract."""
+    from services import inspection_copilot_service as service
+
+    monkeypatch.setattr(service, "get_inspection_detail", lambda *args, **kwargs: _detail(_result(12)))
+    model = ScriptedModel([[assistant_message(_answer(answer="문제가 없습니다."))]])
+
+    with pytest.raises(ValueError, match="evidence"):
+        service.ask_inspection_copilot(
+            session=object(),
+            current_run_id=101,
+            question="12번 행은 왜 문제야?",
+            model=model,
+        )
+
+
 def test_scripted_tool_workflow_returns_only_grounded_structured_evidence(monkeypatch):
     from services import inspection_copilot_service as service
 
