@@ -156,6 +156,24 @@ Quick Demo와 Full Demo가 모두 `sample_marketplace_vendor_v1` 프로필을 �
 
 ## B. 6–8-minute Full Demo
 
+### v0.2.0 inspection follow-up flow (약 2분)
+
+이 구간은 ETL·Promotion 시연과 섞지 않는 검수 중심 흐름이다. 순서는 반드시 `CSV 업로드 -> inspection -> errors -> Correction Worksheet -> 사용자가 원본 CSV 직접 수정 -> reinspection -> Comparison -> Copilot`으로 진행한다. Worksheet를 다시 업로드하거나 자동 수정 파일처럼 설명하지 않는다.
+
+1. `CSV 검수`에서 오류가 있는 CSV를 업로드해 결과와 오류 행을 확인하고 `수정 작업표 CSV 다운로드`를 누른다.
+2. 원본 상품 CSV를 로컬에서 사람이 직접 수정한 뒤 `수정 후 재검수`에서 그 **원본 CSV**를 선택한다. 같은 bytes가 재사용되면 새 비교가 생기지 않는다는 점을 함께 확인한다.
+3. 완료된 새 실행에서 `이전 결과와 비교`를 열어 `common`, `base_only`, `target_only`을 중립적 사실로만 읽는다. 전체 상품 diff나 자동 품질 개선 판정이 아니라 저장된 issue multiset 비교다.
+4. 마지막에 Copilot을 연다. `OPENAI_API_KEY`가 없으면 Copilot만 정상적으로 unavailable이고 나머지 검수·비교 기능은 계속 동작한다. key 값을 화면·문서·발표에 넣지 않는다.
+
+Copilot 질문은 아래 네 개까지만 준비한다.
+
+- "현재 검수에서 어떤 오류가 저장되어 있나요?"
+- "source row 2의 저장된 issue와 권장사항을 설명해 주세요."
+- "Correction Worksheet에서 먼저 확인할 행은 무엇인가요?"
+- "이 비교에서 자동으로 수정해 주세요." → 읽기 전용이라 데이터를 수정·검수·재검수·Promotion·Rollback하지 않는다는 응답을 확인한다.
+
+설명 대사: "오류 판정은 결정론적 Rule Engine이 하고, Copilot은 저장된 결과를 네 개의 read-only Function Tool로 확인해 근거와 한계를 붙여 설명합니다. 새 카테고리나 규칙 판정 요청은 모델을 호출하기 전에 거절하며, 이는 완전한 prompt-injection 방어나 AI 정확도 보장이 아니라 권한과 근거를 좁힌 설계입니다."
+
 ### 1. Inspection으로 문제를 먼저 보인다 (약 1분)
 
 - **실행:** `CSV 검수`에서 `data/dev/category_mismatch_test.csv`를 업로드하고 `즉시 검수`를 선택한다.
