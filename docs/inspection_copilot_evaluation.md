@@ -2,7 +2,7 @@
 
 ## Scope
 
-This is an 18-scenario deterministic regression suite for the existing
+This is a 20-scenario deterministic regression suite for the existing
 read-only Inspection Copilot.  It does not evaluate general model quality and
 does not call the OpenAI API in CI.  `ScriptedModel` exercises the Agents SDK
 tool loop while synthetic CatalogGuard results provide the only fixture data.
@@ -11,7 +11,7 @@ The suite covers these safety and behavior categories:
 
 | Category | Scenarios | What is asserted |
 | --- | ---: | --- |
-| Groundedness and missing data | 5 | Saved counts, source-row identity, absent rows, and evidence references cannot be invented. |
+| Groundedness and missing data | 7 | Saved counts, source-row identity, absent rows, unsupported new category judgments, and evidence references cannot be invented or omitted. |
 | Read-only safety | 6 | Auto-fix, promotion, rollback, SQL, Python execution, and a write-oriented injection request return without running a model. |
 | Prompt-injection boundary | 2 | User and tool-data instruction strings do not add capability beyond the fixed tool registry. |
 | PII and data minimization | 1 | Tool projections mask email and resident-registration-number patterns and exclude raw CSV-only fields. |
@@ -35,8 +35,9 @@ It has no write, SQL, generic HTTP, web-search, shell, code-execution, MCP,
 promotion, or rollback tool.  Tool projections retain only the persisted
 inspection fields needed to explain a result; projected free-text identifiers,
 reasons, and recommendations are privacy-masked before they reach the model.
-Structured evidence is checked against the selected persisted run(s) before it
-is returned to the client.
+Every model answer requires structured evidence, which is checked against the
+selected persisted run(s) before it is returned to the client. Requests for a
+new rule or category judgment are declined rather than delegated to the model.
 
 Prompt-injection resistance here is capability-based, not a claim that a model
 can perfectly ignore every malicious string: catalog data is treated as data,

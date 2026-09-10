@@ -53,6 +53,12 @@ WRITE_OR_OUT_OF_SCOPE_TERMS = (
     "날씨",
     "주식",
 )
+NEW_RULE_JUDGMENT_TERMS = (
+    "새로 판단",
+    "네가 판단",
+    "맞는지",
+    "카테고리가 잘못",
+)
 
 INSPECTION_COPILOT_INSTRUCTIONS = """
 당신은 CatalogGuard Inspection Copilot이다. 한국어로 간결하게 답한다.
@@ -294,6 +300,9 @@ def _validate_evidence(
     answer: InspectionCopilotAnswer,
 ) -> None:
     """Reject structured citations that are absent from the persisted run data."""
+    if not answer.evidence:
+        raise ValueError("inspection copilot response is missing persisted-result evidence")
+
     allowed_run_ids = {
         run_id
         for run_id in (
@@ -362,6 +371,11 @@ def _is_out_of_scope(question: str) -> bool:
     return any(term in normalized for term in WRITE_OR_OUT_OF_SCOPE_TERMS)
 
 
+def _requests_new_rule_judgment(question: str) -> bool:
+    normalized = question.lower()
+    return any(term in normalized for term in NEW_RULE_JUDGMENT_TERMS)
+
+
 def ask_inspection_copilot(
     *,
     session: Session,
@@ -371,6 +385,14 @@ def ask_inspection_copilot(
     target_run_id: int | None = None,
     model=None,
 ) -> InspectionCopilotAnswer:
+    if _requests_new_rule_judgment(question):
+        return InspectionCopilotAnswer(
+            answer=(
+                "CatalogGuard Inspection Copilot은 저장된 검수 결과에 없는 새로운 오류나 "
+                "카테고리에 관한 새 판정을 할 수 없습니다."
+            ),
+            limitations=["CatalogGuard Rule Engine이 이미 저장한 결과만 설명합니다."],
+        )
     if _is_out_of_scope(question):
         return InspectionCopilotAnswer(
             answer=(
