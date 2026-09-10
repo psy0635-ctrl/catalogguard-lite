@@ -63,6 +63,8 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, 
 32. ETL에서 거부된 행을 화면에서만 확인하면 후속 수정 작업으로 옮기기 어려웠습니다. 선택한 적재 batch의 rejection API를 페이지 끝까지 읽어 `source_row_number`, 오류 코드·필드·메시지와 **마스킹된** 원본만 CSV로 내보내고, 중간 페이지 조회가 실패하면 부분 파일을 제공하지 않도록 했습니다. CSV는 UTF-8 BOM과 수식 삽입 방어를 적용하며 raw 업로드 데이터는 다시 읽거나 복원하지 않습니다.
 33. inspection issue가 어느 원본 상품 record에서 나왔는지는 빈 상품 ID나 중복 상품 ID만으로 안정적으로 판단할 수 없었습니다. CSV header를 1로 두고 첫 상품 logical record를 2로 계산한 `source_row_number`를 Product·ValidationIssue·InspectionResult·상세 API까지 전달해 저장했습니다. quoted multiline field도 하나의 logical record로 계산하며, 기존 결과는 임의 backfill하지 않고 `NULL`로 유지했습니다. 이 저장 결과 계약의 경계를 만들기 위해 `INSPECTION_VERSION`을 14로 올렸습니다.
 34. 기존 issue-level CSV는 문제 한 건마다 한 행이어서 한 상품을 수정할 때 여러 행을 오가야 했습니다. 현재 검수 결과에서만 `source_row_number`를 grouping key로 사용해 같은 원본 행의 issue와 수정 권장사항을 한 작업 행으로 정리한 Correction Worksheet CSV를 추가했습니다. 상품 ID와 상품 그룹 ID는 표시 정보일 뿐 identity가 아니며, legacy 또는 일부 `NULL` 결과는 오해를 막기 위해 부분 작업표를 만들지 않습니다. 이 파일은 자동 수정·원본 복구·재업로드용 CSV가 아닙니다.
+35. Correction Worksheet를 내려받은 뒤에는 사용자가 **원본 상품 CSV를 직접 수정**하고 다시 검수할 수 있도록, 기준 실행과 후속 실행을 기존 Comparison으로 연결했습니다. Worksheet 자체를 입력으로 업로드하거나 원본을 자동 복구하지 않으며, 같은 파일 dedup으로 기존 실행이 재사용된 경우에는 비교를 만들지 않습니다. 따라서 Comparison은 개선 판정기가 아니라 같은 검수 버전의 저장된 issue 차이를 보여 주는 중립적 조회입니다.
+36. 저장된 결과를 설명하는 Inspection Copilot은 OpenAI Agents SDK의 Function Tool 네 개만 사용합니다. 현재 검수 요약, source row issue, Correction Worksheet 개요, 기준·비교 실행의 Comparison만 읽고, Rule Engine의 새 오류·카테고리·가격·규칙 판정을 대신하지 않습니다. 쓰기, SQL, 일반 HTTP, 웹, 셸, 코드 실행, MCP, Promotion, Rollback 권한은 주지 않았고 원본 CSV·상품 설명·개인정보 원문도 전달하지 않습니다. `OPENAI_API_KEY`가 없으면 Copilot만 `503`으로 unavailable이며 기존 검수 흐름은 계속 동작합니다.
 
 ### Airflow ETL orchestration: 문제와 해결
 
@@ -223,6 +225,7 @@ Streamlit ETL 프로필 운영 관리
 | 마이그레이션 | Alembic |
 | 현재 검수 버전 | `INSPECTION_VERSION = "14"` |
 | 비동기 처리 | Redis, Celery |
+| 설명 보조 | OpenAI Agents SDK 0.22.1, 기본 모델 `gpt-5.6-terra`, 최대 4 turn, 순차 read-only Function Tool 4개 |
 | 관측성 | prometheus-client 0.25.0 (HTTP·Web ETL metric instrumentation MVP, Prometheus 서버는 미구축) |
 | Kubernetes(CI 검증) | kind v0.32.0, kubectl v1.36.2, node kindest/node:v1.36.1(SHA-256 digest 고정), FastAPI+PostgreSQL만 배포(Redis/Celery/Streamlit 미배포) |
 | IaC(CI 검증) | Terraform 1.15.8, AWS Provider 6.55.0(`.terraform.lock.hcl` 고정), mock provider 기반 `terraform test`(apply 미수행, backend 미구성) |
@@ -402,6 +405,12 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 `GET /api/v1/inspections/comparison?base_run_id=&target_run_id=`는 같은 `inspection_version`의 두 저장 실행만 비교합니다. `InspectionResult`에 독립 rule code가 없으므로 `product_group_id`, `product_id`, `status`, `error_field`, `reason`, `recommendation`, `risk_level` 전체를 signature로 삼아 `Counter` multiset으로 계산합니다. 따라서 같은 signature가 한 실행에 여러 번 있어도 공통/기준 실행에만 있음/비교 실행에만 있음 개수를 보존합니다.
 
 이 기능은 저장된 issue row 비교이지 전체 상품 row diff가 아닙니다. 정상 상품 row와 비교 파일에서 빠진 상품을 보관하지 않으므로 `base_only`를 해결됨으로, `target_only`를 신규 오류로 해석하지 않습니다. 파일 규모와 구성이 다르면 단순 문제 수 변화로 품질 향상·악화를 자동 판정하지 않으며, changed issue item pagination도 아직 제공하지 않습니다.
+
+### v0.2.0 재검수와 읽기 전용 설명 보조
+
+v0.2.0의 시연 흐름은 `CSV 업로드 -> inspection -> errors -> Correction Worksheet -> 사용자가 원본 CSV 수정 -> reinspection -> Comparison -> Copilot`입니다. 후속 재검수는 새로운 검수 엔진이 아니라 같은 기존 경로를 다시 실행하는 연결이며, 결과 비교는 issue multiset의 사실만 보입니다.
+
+Copilot은 네 read-only Function Tool의 반환값을 바탕으로 `answer`, `evidence`, `limitations`을 돌려줍니다. evidence에는 저장된 run ID, 필요하면 source row와 rule code 또는 비교 run ID를 넣고 서비스가 이를 영속 결과와 재검증합니다. 저장되지 않은 행·규칙·비교를 인용하거나 evidence 없이 답하면 거절합니다. 새 카테고리·규칙·가격 판정을 요청하는 문장은 모델 실행 전에 차단합니다. 이는 완전한 프롬프트 주입 방어 또는 일반 AI 정확도 보장이 아니라, 모델 능력을 좁히고 결과 근거를 검증하는 안전 경계입니다.
 
 사용자는 저장된 실행을 검색하고 하나를 선택한 뒤 문제별 오류 이유와 수정 권장사항을 확인하고 상세 결과를 CSV로 내려받습니다. 상세 화면에서는 파일명, 검수 시간, 요약 수치와 문제별 위험 수준도 함께 확인할 수 있습니다.
 
@@ -849,6 +858,14 @@ EC2를 완전히 `stopped` 상태로 만든 뒤 다시 시작해, 사람이 개�
 #### 배운 것
 
 살아 있는 서버의 상태를 곧 재현 가능한 상태로 착각하지 않아야 한다는 점입니다. 배포 산출물(image)과 호스트에 남지 않고 실행 중인 컨테이너에만 존재하는 값이 있으면, 그 값은 다음 배포에서 사라집니다. 이후로는 runtime을 교체하기 전에 컨테이너의 mount와 image 내용을 먼저 대조해, 어디에도 기록되지 않은 상태가 있는지 확인합니다.
+
+### Copilot이 새 규칙 판단을 하면 안 되는 이유
+
+저장된 오류를 설명하는 모델에게 "이 카테고리가 맞는지 새로 판단해 달라"고 맡기면, 동일 입력에 대한 검수 기준이 Rule Engine 밖으로 새고 재현 가능한 rule code도 남지 않습니다. 그래서 새 오류·카테고리·가격·규칙 판정 요청은 모델 호출 전에 거절했습니다. Copilot의 역할은 기존 결과를 더 쉽게 읽게 하는 설명이며, 판정 주체를 대체하는 기능이 아닙니다.
+
+### 근거 없는 설명을 성공으로 처리하지 않은 이유
+
+구조화된 `answer`가 있어도 evidence가 비었거나, 존재하지 않는 run·source row·rule code·비교 실행을 가리키면 저장 결과에 근거한 답이라고 볼 수 없습니다. v0.2.0에서는 이런 응답을 검증 단계에서 거절하도록 했습니다. 따라서 대답의 자연스러움보다 저장된 검수 결과와 대조 가능한 근거를 우선하며, 20개의 결정론적 agent 안전성·행동 시나리오로 이 경계를 회귀 검증합니다.
 
 ### 운영 카탈로그와의 차이를 "삭제 후보"로 읽지 않기로 한 기준
 

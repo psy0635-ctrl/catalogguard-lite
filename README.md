@@ -8,7 +8,7 @@ ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl`의 버전�
 
 ## 1. 현재 상태와 최근 검증
 
-현재 정책은 **Feature Freeze + Continuous Maintenance Development**입니다. 대형 새 기능은 추가하지 않고, 실제 오류·transaction·데이터 무결성·오류 처리·회귀 문제를 유지개발로 계속 다룹니다. 다만 이미 있는 사용자 workflow의 끊어진 지점을 좁은 범위에서 연결하는 변경은 실제 코드·회귀 검증을 거쳐 진행할 수 있습니다.
+현재 공식 릴리스는 [v0.2.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.2.0)이며, 대상 커밋은 `29abc4aff8825074f7cd3feab6d370bd9b3f0e4e`입니다. 이번 릴리스는 기존 규칙 기반 검수 흐름에 **Correction Worksheet 후속 재검수**와 저장된 결과를 설명하는 **읽기 전용 Inspection Copilot**을 더했습니다. 이후에는 새 사용자 기능보다 실제 오류, transaction, 데이터 무결성, 오류 처리와 회귀 문제를 우선해 유지개발합니다.
 
 현재 Alembic 단일 head는 `20260908_0019`이며, `INSPECTION_VERSION`은 `14`입니다. 최근 main은 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 GitHub Actions 검증을 통과했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
 
@@ -65,6 +65,8 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - 문제 0건, 통계 생성 실패, 검수 요약과 상세 건수 불일치 시 안전한 안내
 - 현재 필터 결과 CSV 다운로드
 - 원본 논리 행별 검수 issue와 수정 권장사항을 묶은 수정 작업표 CSV 다운로드
+- Correction Worksheet를 기준 실행으로 두고, 사용자가 직접 수정한 원본 상품 CSV를 다시 검수한 뒤 기존 실행 비교로 연결
+- 저장된 검수 요약, source row issue, Correction Worksheet 개요, 실행 비교만 설명하는 읽기 전용 Inspection Copilot
 - 검수 결과 PostgreSQL 저장
 - 검수 이력 목록 조회와 페이지 이동
 - 파일명 부분 검색
@@ -185,6 +187,10 @@ CSV 검수 탭
 Correction Worksheet 다운로드 영역의 `수정 후 재검수`는 해당 실행을 session 범위의 기준으로 두고, 사용자가 수정한 원본 상품 CSV를 직접 선택해 기존 검수 경로로 실행합니다. Worksheet를 입력으로 업로드하거나 원본 CSV를 복원하지 않습니다. 동일 파일 dedup으로 같은 실행이 재사용되면 비교하지 않으며, 다른 실행이 완료되면 `이전 결과와 비교`로 기존 Comparison을 열 수 있습니다.
 
 `CatalogGuard Inspection Copilot`은 현재 화면의 저장된 검수 결과를 읽어 오류 이유, 수정 권장사항, 수정 전·후 Comparison의 중립적 사실을 한국어로 설명하는 읽기 전용 AI 보조 기능입니다. 실제 오류 판정은 기존 Rule Engine이 계속 담당하며, Copilot은 원본 CSV·상품 설명·개인정보 원문을 전달받지 않고 데이터를 수정·검수·재검수·Promotion·Rollback하지 않습니다. `OPENAI_API_KEY`가 설정되지 않은 환경에서는 Copilot만 사용할 수 없고 나머지 기능은 그대로 동작합니다.
+
+Copilot은 Agents SDK의 `function_tool` 네 개(`get_current_inspection_summary`, `get_source_row_issues`, `get_correction_overview`, `get_baseline_comparison`)만 사용합니다. 도구에는 쓰기, SQL, 일반 HTTP, 웹, 셸, 코드 실행, MCP, Promotion 또는 Rollback 권한이 없습니다. 기본 모델은 `CATALOGGUARD_AGENT_MODEL=gpt-5.6-terra`이며, 최대 4 turn과 순차 도구 호출로 제한됩니다. 응답은 `answer`, `evidence`, `limitations` 구조를 따르고, evidence는 저장된 실행·source row·rule code·비교 실행과 대조해 검증합니다. 근거가 비었거나 존재하지 않는 source row/rule/comparison을 가리키면 응답을 제공하지 않습니다.
+
+질문이 새 오류·카테고리·가격·규칙 판정을 요구하면 모델을 호출하기 전에 거절합니다. tool 결과 안의 텍스트도 명령이 아니라 분석 데이터로 취급합니다. 이 경계와 근거 검증은 프롬프트 주입을 완전히 막거나 AI 정확도를 보장한다는 주장이 아니며, 결정론적 안전성·행동 시나리오 20개로 회귀 검증합니다. API key가 없는 검증 환경에서는 live model smoke를 수행하지 않았습니다.
 
 검수 이력의 현재 목록에서는 두 실행을 선택해 `GET /api/v1/inspections/comparison`을 버튼 클릭 시에만 호출할 수 있습니다. 변화량은 항상 `비교 - 기준`이며, 문제 row의 저장 필드 전체를 multiset으로 비교합니다. 같은 `inspection_version`끼리만 비교할 수 있고, `base_only`/`target_only`는 각각 한쪽 실행에만 저장된 문제를 뜻할 뿐 해결됨·신규 오류를 의미하지 않습니다. 정상 상품 전체 row는 저장하지 않으므로 파일에서 빠진 상품을 구분할 수 없고, 파일 규모가 다르면 문제 수 감소만으로 품질 개선을 판단할 수 없습니다. changed issue item은 기존 상세 API처럼 전체를 반환하며 별도 pagination은 아직 없습니다.
 
