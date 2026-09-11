@@ -8,8 +8,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 CATALOGGUARD_API_BASE_URL_ENV_VAR = "CATALOGGUARD_API_BASE_URL"
 CATALOGGUARD_API_TIMEOUT_SECONDS_ENV_VAR = "CATALOGGUARD_API_TIMEOUT_SECONDS"
 CATALOGGUARD_AGENT_MODEL_ENV_VAR = "CATALOGGUARD_AGENT_MODEL"
+CATALOGGUARD_AGENT_PROVIDER_ENV_VAR = "CATALOGGUARD_AGENT_PROVIDER"
+CATALOGGUARD_OLLAMA_BASE_URL_ENV_VAR = "CATALOGGUARD_OLLAMA_BASE_URL"
 OPENAI_API_KEY_ENV_VAR = "OPENAI_API_KEY"
 DEFAULT_CATALOGGUARD_AGENT_MODEL = "gpt-5.6-terra"
+DEFAULT_CATALOGGUARD_AGENT_PROVIDER = "openai"
+CATALOGGUARD_AGENT_PROVIDERS = frozenset({"openai", "ollama"})
+DEFAULT_CATALOGGUARD_OLLAMA_BASE_URL = "http://localhost:11434/v1/"
 CATALOGGUARD_ETL_S3_BUCKET_ENV_VAR = "CATALOGGUARD_ETL_S3_BUCKET"
 CATALOGGUARD_ETL_S3_PREFIX_ENV_VAR = "CATALOGGUARD_ETL_S3_PREFIX"
 # 서버 운영자가 지정하는 신뢰 공급사 HTTP feed입니다. API 사용자는 URL을 선택할 수 없습니다.
@@ -257,9 +262,28 @@ def get_catalogguard_agent_model() -> str:
     return value or DEFAULT_CATALOGGUARD_AGENT_MODEL
 
 
+def get_catalogguard_agent_provider() -> str:
+    value = os.environ.get(CATALOGGUARD_AGENT_PROVIDER_ENV_VAR, "").strip().lower()
+    return value or DEFAULT_CATALOGGUARD_AGENT_PROVIDER
+
+
+def is_catalogguard_agent_provider_valid() -> bool:
+    return get_catalogguard_agent_provider() in CATALOGGUARD_AGENT_PROVIDERS
+
+
+def get_catalogguard_ollama_base_url() -> str:
+    value = os.environ.get(CATALOGGUARD_OLLAMA_BASE_URL_ENV_VAR, "").strip()
+    return value or DEFAULT_CATALOGGUARD_OLLAMA_BASE_URL
+
+
 def is_catalogguard_agent_configured() -> bool:
-    """Keep the optional Copilot isolated when the server lacks an API key."""
-    return bool(os.environ.get(OPENAI_API_KEY_ENV_VAR, "").strip())
+    """Keep the optional Copilot isolated when its selected provider is unavailable."""
+    provider = get_catalogguard_agent_provider()
+    if provider == "ollama":
+        return True
+    if provider == "openai":
+        return bool(os.environ.get(OPENAI_API_KEY_ENV_VAR, "").strip())
+    return False
 
 
 def _get_non_empty_environment_value(

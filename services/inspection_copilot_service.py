@@ -7,16 +7,25 @@ from typing import Any
 
 from agents import (
     Agent,
+    AsyncOpenAI,
     ModelSettings,
+    OpenAIChatCompletionsModel,
     RunConfig,
     Runner,
     ToolExecutionConfig,
     function_tool,
 )
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from config.settings import get_catalogguard_agent_model, is_catalogguard_agent_configured
+from config.settings import (
+    get_catalogguard_agent_model,
+    get_catalogguard_agent_provider,
+    get_catalogguard_ollama_base_url,
+    is_catalogguard_agent_configured,
+    is_catalogguard_agent_provider_valid,
+)
 from core.privacy import mask_personal_information
 from core.result_exporter import (
     CorrectionWorksheetUnavailableError,
@@ -27,6 +36,8 @@ from db.persistence_service import get_inspection_detail, get_inspection_run_com
 
 MAX_CORRECTION_OVERVIEW_ROWS = 10
 MAX_AGENT_TURNS = 4
+AGENT_MODEL_TIMEOUT_SECONDS = 30
+OLLAMA_COMPATIBILITY_API_KEY = "ollama"
 INSPECTION_COPILOT_TOOL_NAMES = {
     "get_current_inspection_summary",
     "get_source_row_issues",
@@ -74,7 +85,11 @@ rule code를 근거에 넣는다.
 
 
 class InspectionCopilotUnavailableError(RuntimeError):
-    """Raised before an SDK run when the server has no OpenAI API key."""
+    """Raised before an SDK run when the selected Copilot provider is not configured."""
+
+
+class InspectionCopilotProviderUnavailableError(RuntimeError):
+    """Raised when the explicitly selected local provider cannot serve a request."""
 
 
 class InspectionCopilotEvidence(BaseModel):
@@ -295,6 +310,39 @@ def build_inspection_copilot_run_config() -> RunConfig:
     )
 
 
+def build_inspection_copilot_model():
+    """Select a concrete model without changing the SDK-wide OpenAI client."""
+    provider = get_catalogguard_agent_provider()
+    if provider == "openai":
+        return get_catalogguard_agent_model()
+    if provider == "ollama":
+        client = AsyncOpenAI(
+            base_url=get_catalogguard_ollama_base_url(),
+            api_key=OLLAMA_COMPATIBILITY_API_KEY,
+            timeout=AGENT_MODEL_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
+        return OpenAIChatCompletionsModel(
+            model=get_catalogguard_agent_model(),
+            openai_client=client,
+        )
+    raise InspectionCopilotUnavailableError("agent_provider_invalid")
+
+
+def build_inspection_copilot_model_settings() -> ModelSettings:
+    settings = {
+        "timeout": AGENT_MODEL_TIMEOUT_SECONDS,
+        "parallel_tool_calls": False,
+        "verbosity": "low",
+    }
+    if get_catalogguard_agent_provider() == "ollama":
+        # Every accepted question must be grounded in persisted inspection data.
+        # The SDK resets this to automatic after the first tool result, allowing a
+        # final structured answer without creating a tool-call loop.
+        settings["tool_choice"] = "required"
+    return ModelSettings(**settings)
+
+
 def _validate_evidence(
     context: InspectionCopilotContext,
     answer: InspectionCopilotAnswer,
@@ -401,8 +449,11 @@ def ask_inspection_copilot(
             ),
             limitations=["저장된 CatalogGuard 검수 결과 설명 범위에서만 도와드립니다."],
         )
-    if model is None and not is_catalogguard_agent_configured():
-        raise InspectionCopilotUnavailableError("agent_not_configured")
+    if model is None:
+        if not is_catalogguard_agent_provider_valid():
+            raise InspectionCopilotUnavailableError("agent_provider_invalid")
+        if not is_catalogguard_agent_configured():
+            raise InspectionCopilotUnavailableError("agent_not_configured")
 
     context = InspectionCopilotContext(
         session=session,
@@ -413,22 +464,25 @@ def ask_inspection_copilot(
     agent = Agent(
         name="CatalogGuard Inspection Copilot",
         instructions=INSPECTION_COPILOT_INSTRUCTIONS,
-        model=model or get_catalogguard_agent_model(),
-        model_settings=ModelSettings(
-            timeout=30,
-            parallel_tool_calls=False,
-            verbosity="low",
-        ),
+        model=model or build_inspection_copilot_model(),
+        model_settings=build_inspection_copilot_model_settings(),
         tools=build_inspection_copilot_tools(),
         output_type=InspectionCopilotAnswer,
     )
-    result = Runner.run_sync(
-        agent,
-        question,
-        context=context,
-        max_turns=MAX_AGENT_TURNS,
-        run_config=build_inspection_copilot_run_config(),
-    )
+    try:
+        result = Runner.run_sync(
+            agent,
+            question,
+            context=context,
+            max_turns=MAX_AGENT_TURNS,
+            run_config=build_inspection_copilot_run_config(),
+        )
+    except (APIConnectionError, APITimeoutError, APIStatusError) as error:
+        if get_catalogguard_agent_provider() != "ollama":
+            raise
+        if isinstance(error, APIStatusError) and error.status_code == 404:
+            raise InspectionCopilotProviderUnavailableError("ollama_model_not_found") from None
+        raise InspectionCopilotProviderUnavailableError("ollama_unavailable") from None
     if not isinstance(result.final_output, InspectionCopilotAnswer):
         raise ValueError("invalid inspection copilot response")
     _validate_evidence(context, result.final_output)

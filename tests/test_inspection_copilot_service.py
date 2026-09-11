@@ -2,6 +2,7 @@ import json
 
 import pytest
 from agents import RunConfig, Runner
+from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.testing import ScriptedModel, assistant_message, function_call
 
 
@@ -253,3 +254,102 @@ def test_tool_registry_has_only_four_explicit_read_only_tools():
         "get_baseline_comparison",
     }
     assert not {"promotion", "rollback", "update", "delete", "insert", "execute_sql", "write_csv"} & names
+
+
+def test_ollama_factory_uses_an_explicit_local_client_without_openai_key(monkeypatch):
+    from services import inspection_copilot_service as service
+
+    monkeypatch.setenv("CATALOGGUARD_AGENT_PROVIDER", "ollama")
+    monkeypatch.setenv("CATALOGGUARD_AGENT_MODEL", "qwen3:8b")
+    monkeypatch.setenv("CATALOGGUARD_OLLAMA_BASE_URL", "http://localhost:11434/v1/")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-be-used")
+
+    model = service.build_inspection_copilot_model()
+
+    assert isinstance(model, OpenAIChatCompletionsModel)
+    assert model.model == "qwen3:8b"
+    assert str(model._client.base_url) == "http://localhost:11434/v1/"
+    assert model._client.api_key == "ollama"
+
+
+def test_openai_factory_retains_the_existing_string_model_path(monkeypatch):
+    from services import inspection_copilot_service as service
+
+    monkeypatch.delenv("CATALOGGUARD_AGENT_PROVIDER", raising=False)
+    monkeypatch.setenv("CATALOGGUARD_AGENT_MODEL", "gpt-5.6-terra")
+
+    assert service.build_inspection_copilot_model() == "gpt-5.6-terra"
+
+
+def test_invalid_provider_fails_before_constructing_an_agent(monkeypatch):
+    from services import inspection_copilot_service as service
+
+    monkeypatch.setenv("CATALOGGUARD_AGENT_PROVIDER", "unsupported")
+    monkeypatch.setattr(service.Runner, "run_sync", lambda *args, **kwargs: pytest.fail("agent must not run"))
+
+    with pytest.raises(service.InspectionCopilotUnavailableError, match="agent_provider_invalid"):
+        service.ask_inspection_copilot(
+            session=object(),
+            current_run_id=101,
+            question="검수 결과를 요약해줘",
+        )
+
+
+def test_ollama_unavailable_is_mapped_without_openai_fallback(monkeypatch):
+    from services import inspection_copilot_service as service
+    from openai import APIConnectionError
+    import httpx2
+
+    monkeypatch.setenv("CATALOGGUARD_AGENT_PROVIDER", "ollama")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        service.Runner,
+        "run_sync",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            APIConnectionError(message="connection refused", request=httpx2.Request("POST", "http://localhost:11434/v1/chat/completions"))
+        ),
+    )
+
+    with pytest.raises(service.InspectionCopilotProviderUnavailableError, match="ollama_unavailable"):
+        service.ask_inspection_copilot(
+            session=object(),
+            current_run_id=101,
+            question="검수 결과를 요약해줘",
+        )
+
+
+def test_new_judgment_is_rejected_before_ollama_model_construction(monkeypatch):
+    from services import inspection_copilot_service as service
+
+    monkeypatch.setenv("CATALOGGUARD_AGENT_PROVIDER", "ollama")
+    monkeypatch.setattr(service, "build_inspection_copilot_model", lambda: pytest.fail("model must not be built"))
+
+    response = service.ask_inspection_copilot(
+        session=object(),
+        current_run_id=101,
+        question="이 상품 category가 맞는지 네가 새로 판단해줘",
+    )
+
+    assert "새 판정" in response.answer
+
+
+def test_ollama_model_settings_require_a_tool_for_grounded_questions(monkeypatch):
+    from services import inspection_copilot_service as service
+
+    monkeypatch.setenv("CATALOGGUARD_AGENT_PROVIDER", "ollama")
+
+    settings = service.build_inspection_copilot_model_settings()
+
+    assert settings.tool_choice == "required"
+    assert settings.parallel_tool_calls is False
+
+
+def test_openai_model_settings_keep_the_existing_automatic_tool_choice(monkeypatch):
+    from services import inspection_copilot_service as service
+
+    monkeypatch.delenv("CATALOGGUARD_AGENT_PROVIDER", raising=False)
+
+    settings = service.build_inspection_copilot_model_settings()
+
+    assert settings.tool_choice is None
+    assert settings.parallel_tool_calls is False

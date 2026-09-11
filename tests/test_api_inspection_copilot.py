@@ -98,6 +98,22 @@ def test_ask_copilot_reports_missing_api_key_without_affecting_other_routes(monk
     assert client.get("/health").json()["status"] == "ok"
 
 
+def test_ask_copilot_reports_ollama_unavailability_without_stack_trace(monkeypatch):
+    monkeypatch.setattr(
+        copilot_route,
+        "ask_inspection_copilot",
+        lambda **kwargs: (_ for _ in ()).throw(
+            copilot_route.InspectionCopilotProviderUnavailableError("ollama_unavailable")
+        ),
+    )
+
+    response = client.post(ENDPOINT, json={"question": "요약해줘", "current_run_id": 101})
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "ollama_unavailable"
+    assert "traceback" not in response.text.lower()
+
+
 @pytest.mark.parametrize("error", [TimeoutError("timeout"), ValueError("invalid")])
 def test_ask_copilot_maps_sdk_failures_to_a_safe_unavailable_response(monkeypatch, error):
     monkeypatch.setattr(
