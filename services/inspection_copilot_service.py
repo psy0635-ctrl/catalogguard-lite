@@ -456,7 +456,7 @@ def build_ollama_inspection_copilot_model() -> OpenAIChatCompletionsModel:
     client = AsyncOpenAI(
         base_url=get_catalogguard_ollama_base_url(),
         api_key=OLLAMA_COMPATIBILITY_API_KEY,
-        timeout=AGENT_MODEL_TIMEOUT_SECONDS,
+        timeout=LOCAL_AGENT_MODEL_TIMEOUT_SECONDS,
         max_retries=0,
     )
     return OpenAIChatCompletionsModel(

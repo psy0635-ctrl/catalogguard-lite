@@ -299,6 +299,7 @@ def test_ollama_factory_uses_an_explicit_local_client_without_openai_key(monkeyp
     assert model.model == "qwen3.5:9b"
     assert str(model._client.base_url) == "http://localhost:11434/v1/"
     assert model._client.api_key == "ollama"
+    assert model._client.timeout == service.LOCAL_AGENT_MODEL_TIMEOUT_SECONDS
 
 
 def test_ollama_summary_uses_python_evidence_and_passes_no_tools(monkeypatch):
