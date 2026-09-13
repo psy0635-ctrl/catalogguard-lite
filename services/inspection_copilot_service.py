@@ -32,6 +32,7 @@ from config.settings import (
     is_catalogguard_agent_provider_valid,
 )
 from core.privacy import mask_personal_information
+from core.presentation import RULE_LABELS
 from core.result_exporter import (
     CorrectionWorksheetUnavailableError,
     build_correction_worksheet_dataframe,
@@ -137,6 +138,10 @@ class InspectionCopilotUnavailableError(RuntimeError):
 
 class InspectionCopilotProviderUnavailableError(RuntimeError):
     """Raised when the explicitly selected local provider cannot serve a request."""
+
+
+class InspectionCopilotNarrativeGroundingError(ValueError):
+    """Raised when a local explanation cites an identifier absent from its evidence."""
 
 
 class InspectionCopilotEvidence(BaseModel):
@@ -512,6 +517,193 @@ def _local_evidence_unavailable_answer(
     )
 
 
+_REGISTERED_RULE_REFERENCES = frozenset(RULE_LABELS) | frozenset(RULE_LABELS.values())
+_KOREAN_RULE_REFERENCE_PARTICLES = (
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "와",
+    "과",
+    "의",
+    "도",
+    "만",
+    "부터",
+    "에서",
+    "으로",
+    "로",
+)
+_SOURCE_ROW_REFERENCE_PATTERNS = (
+    re.compile(r"(?<!\d)(\d+)\s*번\s*(?:원본\s*)?행"),
+    re.compile(
+        r"(?:source\s+rows?|rows?|원본\s*행|(?<!\w)행)"
+        r"\s*(?:번호\s*)?[:#]?\s*(\d+)",
+        re.IGNORECASE,
+    ),
+)
+_SOURCE_ROW_LIST_PATTERNS = (
+    re.compile(
+        r"((?:\d+\s*(?:번\s*)?(?:,|및|와|과|/)\s*)+\d+\s*번?)"
+        r"\s*(?:원본\s*)?행"
+    ),
+    re.compile(
+        r"(?:source\s+rows?|rows?|원본\s*행)\s*(?:번호\s*)?[:#]?\s*"
+        r"((?:\d+\s*(?:,|및|와|과|/)\s*)+\d+)",
+        re.IGNORECASE,
+    ),
+)
+_RUN_ID_REFERENCE_PATTERNS = (
+    re.compile(
+        r"(?<![A-Za-z0-9_])run\s*(?:id|number|no\.?|#|번호)?"
+        r"\s*[:#-]?\s*(\d+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:검수\s*)?실행\s*(?:ID|아이디|번호)?\s*[:#-]?\s*(\d+)",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _contains_registered_rule_reference(text: str, reference: str) -> bool:
+    if reference.isascii():
+        return bool(
+            re.search(
+                rf"(?<![A-Za-z0-9_]){re.escape(reference)}(?![A-Za-z0-9_])",
+                text,
+                re.IGNORECASE,
+            )
+        )
+
+    particles = "|".join(
+        sorted(map(re.escape, _KOREAN_RULE_REFERENCE_PARTICLES), key=len, reverse=True)
+    )
+    return bool(
+        re.search(
+            rf"(?<!\w){re.escape(reference)}"
+            rf"(?=$|[^\w]|(?:{particles})(?=$|[^\w]))",
+            text,
+        )
+    )
+
+
+def _extract_source_row_references(text: str) -> set[int]:
+    references = {
+        int(match.group(1))
+        for pattern in _SOURCE_ROW_REFERENCE_PATTERNS
+        for match in pattern.finditer(text)
+    }
+    for pattern in _SOURCE_ROW_LIST_PATTERNS:
+        for match in pattern.finditer(text):
+            references.update(int(value) for value in re.findall(r"\d+", match.group(1)))
+    return references
+
+
+def _extract_run_id_references(text: str) -> set[int]:
+    return {
+        int(match.group(1))
+        for pattern in _RUN_ID_REFERENCE_PATTERNS
+        for match in pattern.finditer(text)
+    }
+
+
+def _allowed_local_narrative_rule_references(
+    evidence_pack: LocalInspectionCopilotEvidencePack,
+) -> set[str]:
+    references = {
+        rule_code
+        for evidence in evidence_pack.evidence
+        for rule_code in evidence.rule_codes
+    }
+    references.update(
+        RULE_LABELS[rule_code]
+        for rule_code in tuple(references)
+        if rule_code in RULE_LABELS
+    )
+    if evidence_pack.question_type == LocalInspectionCopilotQuestionType.SUMMARY:
+        summary = evidence_pack.data.get("summary")
+        if isinstance(summary, dict):
+            rule_counts = summary.get("rule_counts")
+            if isinstance(rule_counts, dict):
+                references.update(str(rule_code) for rule_code in rule_counts)
+    elif evidence_pack.question_type == LocalInspectionCopilotQuestionType.COMPARISON:
+        comparison = evidence_pack.data.get("comparison")
+        if isinstance(comparison, dict):
+            error_field_comparisons = comparison.get("error_field_comparisons")
+            if isinstance(error_field_comparisons, list):
+                references.update(
+                    str(item["rule_code"])
+                    for item in error_field_comparisons
+                    if isinstance(item, dict) and "rule_code" in item
+                )
+    return references
+
+
+def _validate_local_narrative_grounding(
+    evidence_pack: LocalInspectionCopilotEvidencePack,
+    response: LocalInspectionCopilotResponse,
+) -> None:
+    allowed_rule_references = _allowed_local_narrative_rule_references(evidence_pack)
+    user_visible_text = (response.answer, *response.limitations)
+    unexpected_rules = {
+        reference
+        for text in user_visible_text
+        for reference in _REGISTERED_RULE_REFERENCES
+        if reference not in allowed_rule_references
+        and _contains_registered_rule_reference(text, reference)
+    }
+    if unexpected_rules:
+        raise InspectionCopilotNarrativeGroundingError(
+            "local copilot narrative references an unavailable rule"
+        )
+
+    allowed_source_rows = {
+        evidence.source_row_number
+        for evidence in evidence_pack.evidence
+        if evidence.source_row_number is not None
+    }
+    unexpected_source_rows = {
+        source_row
+        for text in user_visible_text
+        for source_row in _extract_source_row_references(text)
+        if source_row not in allowed_source_rows
+    }
+    if unexpected_source_rows:
+        raise InspectionCopilotNarrativeGroundingError(
+            "local copilot narrative references an unavailable source row"
+        )
+
+    allowed_run_ids = {
+        run_id
+        for evidence in evidence_pack.evidence
+        for run_id in (evidence.run_id, *evidence.comparison_run_ids)
+    }
+    unexpected_run_ids = {
+        run_id
+        for text in user_visible_text
+        for run_id in _extract_run_id_references(text)
+        if run_id not in allowed_run_ids
+    }
+    if unexpected_run_ids:
+        raise InspectionCopilotNarrativeGroundingError(
+            "local copilot narrative references an unavailable run"
+        )
+
+
+def _local_narrative_grounding_failure_answer(
+    evidence_pack: LocalInspectionCopilotEvidencePack,
+) -> InspectionCopilotAnswer:
+    return InspectionCopilotAnswer(
+        answer="저장된 검수 결과를 안전하게 설명할 수 없습니다.",
+        evidence=evidence_pack.evidence,
+        limitations=[
+            "모델 설명에서 저장된 근거에 없는 참조가 감지되어 답변을 표시하지 않았습니다."
+        ],
+    )
+
+
 def _validate_evidence(
     context: InspectionCopilotContext,
     answer: InspectionCopilotAnswer,
@@ -667,6 +859,12 @@ def _ask_ollama_inspection_copilot(
 
     if not isinstance(result.final_output, LocalInspectionCopilotResponse):
         raise ValueError("invalid local inspection copilot response")
+    try:
+        _validate_local_narrative_grounding(evidence_pack, result.final_output)
+    except InspectionCopilotNarrativeGroundingError:
+        answer = _local_narrative_grounding_failure_answer(evidence_pack)
+        _validate_evidence(context, answer)
+        return answer
     answer = InspectionCopilotAnswer(
         answer=result.final_output.answer,
         evidence=evidence_pack.evidence,

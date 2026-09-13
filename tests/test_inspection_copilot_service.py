@@ -354,6 +354,296 @@ def test_ollama_correction_disables_reasoning_for_local_explanation(monkeypatch)
     assert '"correction_overview"' in model.calls[0].input[-1]["content"]
 
 
+def test_local_correction_hides_registered_rule_label_absent_from_evidence(monkeypatch):
+    from types import SimpleNamespace
+
+    from services import inspection_copilot_service as service
+
+    detail = SimpleNamespace(
+        inspection_run_id=101,
+        inspection_version="14",
+        total_products=1,
+        total_issues=1,
+        error_count=0,
+        warning_count=1,
+        results=[
+            SimpleNamespace(
+                source_row_number=12,
+                product_group_id="G001",
+                product_id="P001",
+                status="주의",
+                error_field="가격 이상치",
+                reason="같은 카테고리의 일반적인 가격 범위를 벗어났습니다.",
+                recommendation="입력 가격을 확인하세요.",
+                risk_level="중간",
+            )
+        ],
+    )
+    monkeypatch.setenv("CATALOGGUARD_AGENT_PROVIDER", "ollama")
+    monkeypatch.setattr(service, "get_inspection_detail", lambda *args, **kwargs: detail)
+    model = ScriptedModel(
+        [[assistant_message(json.dumps({"answer": "가격 오류를 먼저 확인하세요.", "limitations": []}, ensure_ascii=False))]]
+    )
+
+    response = service.ask_inspection_copilot(
+        session=object(),
+        current_run_id=101,
+        question="무엇부터 확인해야 해?",
+        model=model,
+    )
+
+    assert "가격 오류" not in response.answer
+    assert response.evidence == [
+        service.InspectionCopilotEvidence(
+            run_id=101,
+            source_row_number=12,
+            rule_codes=["가격 이상치"],
+        )
+    ]
+    model.assert_complete()
+
+
+def make_local_narrative_evidence_pack(*, rule_codes=None):
+    from services import inspection_copilot_service as service
+
+    return service.LocalInspectionCopilotEvidencePack(
+        question_type=service.LocalInspectionCopilotQuestionType.CORRECTION,
+        data={},
+        evidence=[
+            service.InspectionCopilotEvidence(
+                run_id=101,
+                source_row_number=12,
+                rule_codes=rule_codes or ["가격 이상치"],
+            )
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "가격 이상치를 먼저 확인하세요.",
+        "가격 문제를 먼저 확인하세요.",
+        "가격을 확인하세요.",
+        "상품명이 이상합니다.",
+        "중복 항목을 확인하세요.",
+        "가격 오류율을 확인하세요.",
+    ],
+)
+def test_local_narrative_grounding_allows_grounded_rule_and_ordinary_language(answer):
+    from services import inspection_copilot_service as service
+
+    service._validate_local_narrative_grounding(
+        make_local_narrative_evidence_pack(),
+        service.LocalInspectionCopilotResponse(answer=answer, limitations=[]),
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["price_outlier를 먼저 확인하세요.", "가격 이상치를 먼저 확인하세요."],
+)
+def test_local_narrative_grounding_allows_registered_internal_code_and_its_label(
+    answer,
+):
+    from services import inspection_copilot_service as service
+
+    service._validate_local_narrative_grounding(
+        make_local_narrative_evidence_pack(rule_codes=["price_outlier"]),
+        service.LocalInspectionCopilotResponse(
+            answer=answer,
+            limitations=[],
+        ),
+    )
+
+
+@pytest.mark.parametrize("answer", ["가격 오류가 있습니다.", "invalid_price를 확인하세요."])
+def test_local_narrative_grounding_rejects_registered_rule_absent_from_evidence(answer):
+    from services import inspection_copilot_service as service
+
+    with pytest.raises(
+        service.InspectionCopilotNarrativeGroundingError,
+        match="unavailable rule",
+    ):
+        service._validate_local_narrative_grounding(
+            make_local_narrative_evidence_pack(),
+            service.LocalInspectionCopilotResponse(answer=answer, limitations=[]),
+        )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "12번 행을 확인하세요.",
+        "행 12를 확인하세요.",
+        "row 12를 확인하세요.",
+        "source row 12를 확인하세요.",
+        "원본 행 12를 확인하세요.",
+    ],
+)
+def test_local_narrative_grounding_allows_explicit_source_row_in_evidence(answer):
+    from services import inspection_copilot_service as service
+
+    service._validate_local_narrative_grounding(
+        make_local_narrative_evidence_pack(),
+        service.LocalInspectionCopilotResponse(answer=answer, limitations=[]),
+    )
+
+
+def test_local_narrative_grounding_rejects_explicit_source_row_absent_from_evidence():
+    from services import inspection_copilot_service as service
+
+    with pytest.raises(
+        service.InspectionCopilotNarrativeGroundingError,
+        match="unavailable source row",
+    ):
+        service._validate_local_narrative_grounding(
+            make_local_narrative_evidence_pack(),
+            service.LocalInspectionCopilotResponse(
+                answer="13번 행을 확인하세요.",
+                limitations=[],
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "2가지 항목을 확인하세요.",
+        "10개 항목을 확인하세요.",
+        "1순위부터 확인하세요.",
+        "3개의 오류가 있습니다.",
+    ],
+)
+def test_local_narrative_grounding_does_not_treat_ordinary_numbers_as_rows(answer):
+    from services import inspection_copilot_service as service
+
+    service._validate_local_narrative_grounding(
+        make_local_narrative_evidence_pack(),
+        service.LocalInspectionCopilotResponse(answer=answer, limitations=[]),
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "run 101을 기준으로 확인했습니다.",
+        "실행 101을 기준으로 확인했습니다.",
+        "검수 실행 101을 기준으로 확인했습니다.",
+    ],
+)
+def test_local_narrative_grounding_allows_explicit_run_in_evidence(answer):
+    from services import inspection_copilot_service as service
+
+    service._validate_local_narrative_grounding(
+        make_local_narrative_evidence_pack(),
+        service.LocalInspectionCopilotResponse(answer=answer, limitations=[]),
+    )
+
+
+def test_local_narrative_grounding_rejects_explicit_run_absent_from_evidence():
+    from services import inspection_copilot_service as service
+
+    with pytest.raises(
+        service.InspectionCopilotNarrativeGroundingError,
+        match="unavailable run",
+    ):
+        service._validate_local_narrative_grounding(
+            make_local_narrative_evidence_pack(),
+            service.LocalInspectionCopilotResponse(
+                answer="run 102를 기준으로 확인했습니다.",
+                limitations=[],
+            ),
+        )
+
+
+def test_local_narrative_grounding_checks_user_visible_limitations():
+    from services import inspection_copilot_service as service
+
+    with pytest.raises(service.InspectionCopilotNarrativeGroundingError):
+        service._validate_local_narrative_grounding(
+            make_local_narrative_evidence_pack(),
+            service.LocalInspectionCopilotResponse(
+                answer="저장된 결과만 설명합니다.",
+                limitations=["가격 오류를 추가로 확인하세요."],
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "evidence_pack",
+    [
+        pytest.param(
+            {
+                "question_type": "SUMMARY",
+                "data": {
+                    "summary": {
+                        "run_id": 101,
+                        "rule_counts": {"가격 오류": 1},
+                    }
+                },
+                "evidence": [
+                    {
+                        "run_id": 101,
+                        "source_row_number": None,
+                        "rule_codes": [],
+                        "comparison_run_ids": [],
+                    }
+                ],
+            },
+            id="summary-rule-counts",
+        ),
+        pytest.param(
+            {
+                "question_type": "COMPARISON",
+                "data": {
+                    "comparison": {
+                        "available": True,
+                        "base_run_id": 100,
+                        "target_run_id": 101,
+                        "error_field_comparisons": [
+                            {"rule_code": "가격 오류"}
+                        ],
+                    }
+                },
+                "evidence": [
+                    {
+                        "run_id": 101,
+                        "source_row_number": None,
+                        "rule_codes": [],
+                        "comparison_run_ids": [100, 101],
+                    }
+                ],
+            },
+            id="comparison-rule-codes",
+        ),
+    ],
+)
+def test_local_narrative_grounding_allows_rules_present_in_route_evidence_data(
+    evidence_pack,
+):
+    from services import inspection_copilot_service as service
+
+    pack = service.LocalInspectionCopilotEvidencePack(
+        question_type=service.LocalInspectionCopilotQuestionType(
+            evidence_pack["question_type"]
+        ),
+        data=evidence_pack["data"],
+        evidence=[
+            service.InspectionCopilotEvidence.model_validate(item)
+            for item in evidence_pack["evidence"]
+        ],
+    )
+
+    service._validate_local_narrative_grounding(
+        pack,
+        service.LocalInspectionCopilotResponse(
+            answer="가격 오류를 확인하세요.",
+            limitations=[],
+        ),
+    )
+
+
 def test_local_source_row_evidence_is_assembled_from_persisted_issues(monkeypatch):
     from services import inspection_copilot_service as service
 
