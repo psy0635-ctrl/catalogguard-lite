@@ -20,6 +20,7 @@ from agents import (
     function_tool,
 )
 from openai import APIConnectionError, APIStatusError, APITimeoutError
+from openai.types.shared import Reasoning
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
@@ -646,6 +647,7 @@ def _ask_ollama_inspection_copilot(
         model_settings=ModelSettings(
             timeout=LOCAL_AGENT_MODEL_TIMEOUT_SECONDS,
             parallel_tool_calls=False,
+            reasoning=Reasoning(effort="none"),
             verbosity="low",
         ),
         output_type=LocalInspectionCopilotResponse,

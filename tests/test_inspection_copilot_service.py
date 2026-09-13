@@ -202,6 +202,7 @@ def test_scripted_agent_runs_only_read_tools_and_returns_structured_output(monke
     assert response.answer == "오류 2건부터 확인하세요."
     assert response.evidence[0].source_row_number == 2
     assert len(model.calls) == 2
+    assert all(call.model_settings.reasoning is None for call in model.calls)
     model.assert_complete()
 
 
@@ -327,6 +328,30 @@ def test_ollama_summary_uses_python_evidence_and_passes_no_tools(monkeypatch):
     assert '"total_issues": 3' in model.calls[0].input[-1]["content"]
     assert set(service.LocalInspectionCopilotResponse.model_fields) == {"answer", "limitations"}
     model.assert_complete()
+
+
+def test_ollama_correction_disables_reasoning_for_local_explanation(monkeypatch):
+    from services import inspection_copilot_service as service
+
+    monkeypatch.setenv("CATALOGGUARD_AGENT_PROVIDER", "ollama")
+    monkeypatch.setattr(service, "get_inspection_detail", lambda *args, **kwargs: make_detail())
+    model = ScriptedModel(
+        [[assistant_message('{"answer":"저장된 결과입니다.","limitations":[]}')]]
+    )
+
+    service.ask_inspection_copilot(
+        session=object(),
+        current_run_id=101,
+        question="무엇부터 확인해야 해?",
+        model=model,
+    )
+
+    model_settings = model.calls[0].model_settings
+    assert model_settings.reasoning is not None
+    assert model_settings.reasoning.effort == "none"
+    assert model_settings.timeout == service.LOCAL_AGENT_MODEL_TIMEOUT_SECONDS
+    assert model.calls[0].tools == []
+    assert '"correction_overview"' in model.calls[0].input[-1]["content"]
 
 
 def test_local_source_row_evidence_is_assembled_from_persisted_issues(monkeypatch):
