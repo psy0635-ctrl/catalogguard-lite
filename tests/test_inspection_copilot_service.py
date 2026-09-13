@@ -354,6 +354,34 @@ def test_ollama_correction_disables_reasoning_for_local_explanation(monkeypatch)
     assert '"correction_overview"' in model.calls[0].input[-1]["content"]
 
 
+def make_source_row_duplicate_detail(run_id=101):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        inspection_run_id=run_id,
+        inspection_version="14",
+        total_products=2,
+        total_issues=1,
+        error_count=0,
+        warning_count=1,
+        results=[
+            SimpleNamespace(
+                source_row_number=204,
+                product_group_id="G204",
+                product_id="P204",
+                status="주의",
+                error_field="상품명 중복",
+                reason=(
+                    "상품명 '기본 티셔츠'이 다른 상품과 동일하거나 정리 후 같은 값으로 "
+                    "확인되었습니다. 중복 후보 상품 ID: P003, P204. 중복 행: 3, 204."
+                ),
+                recommendation="모델명, 색상, 옵션, 용량 또는 상품 ID를 확인하십시오.",
+                risk_level="중간",
+            )
+        ],
+    )
+
+
 def test_local_correction_hides_registered_rule_label_absent_from_evidence(monkeypatch):
     from types import SimpleNamespace
 
@@ -661,6 +689,76 @@ def test_local_source_row_evidence_is_assembled_from_persisted_issues(monkeypatc
             rule_codes=["필수 값 누락", "가격 오류"],
         )
     ]
+
+
+def test_local_source_row_projects_related_rows_from_persisted_duplicate_issue(
+    monkeypatch,
+):
+    from services import inspection_copilot_service as service
+
+    monkeypatch.setattr(
+        service,
+        "get_inspection_detail",
+        lambda *args, **kwargs: make_source_row_duplicate_detail(),
+    )
+    context = service.InspectionCopilotContext(session=object(), current_run_id=101)
+    route = service.route_local_inspection_copilot_question("204번 행은 왜 오류야?")
+
+    evidence_pack = service.build_local_inspection_copilot_evidence_pack(context, route)
+
+    assert evidence_pack.data["source_row"]["related_source_rows"] == [3]
+
+
+def test_local_source_row_allows_row_in_persisted_duplicate_relationship(monkeypatch):
+    from services import inspection_copilot_service as service
+
+    monkeypatch.setenv("CATALOGGUARD_AGENT_PROVIDER", "ollama")
+    monkeypatch.setattr(
+        service,
+        "get_inspection_detail",
+        lambda *args, **kwargs: make_source_row_duplicate_detail(),
+    )
+    model = ScriptedModel(
+        [[assistant_message('{"answer":"3번 행과 중복입니다.","limitations":[]}')]]
+    )
+
+    response = service.ask_inspection_copilot(
+        session=object(),
+        current_run_id=101,
+        question="204번 행은 왜 오류야?",
+        model=model,
+    )
+
+    assert response.answer == "3번 행과 중복입니다."
+    assert response.evidence[0].source_row_number == 204
+    model.assert_complete()
+
+
+def test_local_source_row_rejects_row_absent_from_persisted_duplicate_relationship(
+    monkeypatch,
+):
+    from services import inspection_copilot_service as service
+
+    monkeypatch.setenv("CATALOGGUARD_AGENT_PROVIDER", "ollama")
+    monkeypatch.setattr(
+        service,
+        "get_inspection_detail",
+        lambda *args, **kwargs: make_source_row_duplicate_detail(),
+    )
+    model = ScriptedModel(
+        [[assistant_message('{"answer":"2번 행과 중복입니다.","limitations":[]}')]]
+    )
+
+    response = service.ask_inspection_copilot(
+        session=object(),
+        current_run_id=101,
+        question="204번 행은 왜 오류야?",
+        model=model,
+    )
+
+    assert "2번 행" not in response.answer
+    assert response.evidence[0].source_row_number == 204
+    model.assert_complete()
 
 
 def test_local_correction_evidence_is_assembled_from_persisted_overview(monkeypatch):

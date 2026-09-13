@@ -366,6 +366,21 @@ _SOURCE_ROW_QUESTION_PATTERN = re.compile(r"(?<!\d)(\d+)\s*번\s*행")
 _COMPARISON_QUESTION_TERMS = ("수정 전후", "전후 비교", "비교", "차이")
 _CORRECTION_QUESTION_TERMS = ("무엇부터", "수정 우선", "우선순위", "수정 권장")
 _SUMMARY_QUESTION_TERMS = ("요약", "검수 결과", "검수현황")
+_PERSISTED_DUPLICATE_ROW_RULE_REFERENCES = frozenset(
+    {
+        "duplicate_product_id",
+        "duplicate_product_name",
+        RULE_LABELS["duplicate_product_id"],
+        RULE_LABELS["duplicate_product_name"],
+    }
+)
+_PERSISTED_DUPLICATE_ROW_PATTERNS = (
+    re.compile(r"중복 행:\s*(\d+(?:\s*,\s*\d+)*)\.\s*$"),
+    re.compile(r"is duplicated in rows (\d+(?:\s*,\s*\d+)*)\s*$"),
+    re.compile(
+        r"duplicates rows (\d+(?:\s*,\s*\d+)*) with product_ids '[^']*'\s*$"
+    ),
+)
 
 
 def route_local_inspection_copilot_question(
@@ -387,6 +402,39 @@ def route_local_inspection_copilot_question(
     if any(term in normalized for term in _SUMMARY_QUESTION_TERMS):
         return LocalInspectionCopilotRoute(LocalInspectionCopilotQuestionType.SUMMARY)
     return None
+
+
+def _project_persisted_related_source_rows(
+    source_row_issues: dict[str, object],
+) -> list[int]:
+    """Project only explicit duplicate-row relationships from saved issue reasons."""
+    source_row_number = source_row_issues.get("source_row_number")
+    issues = source_row_issues.get("issues")
+    if type(source_row_number) is not int or not isinstance(issues, list):
+        return []
+
+    related_source_rows: set[int] = set()
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        if issue.get("rule_code") not in _PERSISTED_DUPLICATE_ROW_RULE_REFERENCES:
+            continue
+        reason = issue.get("reason")
+        if not isinstance(reason, str):
+            continue
+        for pattern in _PERSISTED_DUPLICATE_ROW_PATTERNS:
+            match = pattern.search(reason)
+            if match is None:
+                continue
+            related_source_rows.update(
+                row_number
+                for value in match.group(1).split(",")
+                if (row_number := int(value.strip())) >= 2
+            )
+            break
+
+    related_source_rows.discard(source_row_number)
+    return sorted(related_source_rows)
 
 
 def build_local_inspection_copilot_evidence_pack(
@@ -418,7 +466,15 @@ def build_local_inspection_copilot_evidence_pack(
             if issues["found"]
             else []
         )
-        return LocalInspectionCopilotEvidencePack(route.question_type, {"source_row": issues}, evidence)
+        source_row_evidence = {
+            **issues,
+            "related_source_rows": _project_persisted_related_source_rows(issues),
+        }
+        return LocalInspectionCopilotEvidencePack(
+            route.question_type,
+            {"source_row": source_row_evidence},
+            evidence,
+        )
 
     if route.question_type == LocalInspectionCopilotQuestionType.CORRECTION:
         overview = get_correction_overview(context)
@@ -641,6 +697,31 @@ def _allowed_local_narrative_rule_references(
     return references
 
 
+def _allowed_local_narrative_source_rows(
+    evidence_pack: LocalInspectionCopilotEvidencePack,
+) -> set[int]:
+    source_rows = {
+        evidence.source_row_number
+        for evidence in evidence_pack.evidence
+        if evidence.source_row_number is not None
+    }
+    if evidence_pack.question_type != LocalInspectionCopilotQuestionType.SOURCE_ROW:
+        return source_rows
+
+    source_row = evidence_pack.data.get("source_row")
+    if not isinstance(source_row, dict):
+        return source_rows
+    related_source_rows = source_row.get("related_source_rows")
+    if not isinstance(related_source_rows, list):
+        return source_rows
+    source_rows.update(
+        row_number
+        for row_number in related_source_rows
+        if type(row_number) is int and row_number >= 2
+    )
+    return source_rows
+
+
 def _validate_local_narrative_grounding(
     evidence_pack: LocalInspectionCopilotEvidencePack,
     response: LocalInspectionCopilotResponse,
@@ -659,11 +740,7 @@ def _validate_local_narrative_grounding(
             "local copilot narrative references an unavailable rule"
         )
 
-    allowed_source_rows = {
-        evidence.source_row_number
-        for evidence in evidence_pack.evidence
-        if evidence.source_row_number is not None
-    }
+    allowed_source_rows = _allowed_local_narrative_source_rows(evidence_pack)
     unexpected_source_rows = {
         source_row
         for text in user_visible_text
