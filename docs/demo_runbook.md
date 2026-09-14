@@ -174,6 +174,39 @@ Copilot 질문은 아래 네 개까지만 준비한다.
 
 설명 대사: "오류 판정은 결정론적 Rule Engine이 하고, Copilot은 저장된 결과를 네 개의 read-only Function Tool로 확인해 근거와 한계를 붙여 설명합니다. 새 카테고리나 규칙 판정 요청은 모델을 호출하기 전에 거절하며, 이는 완전한 prompt-injection 방어나 AI 정확도 보장이 아니라 권한과 근거를 좁힌 설계입니다."
 
+### Optional current-main Local Copilot demo (unreleased)
+
+이 구간은 공식 v0.2.0 재현이 아니라 **v0.2.0 이후 current main에 추가된 미릴리스 선택 시연**이다. 위 v0.2.0 OpenAI follow-up flow를 대체하거나 v0.2.0이 두 provider를 지원했다고 설명하지 않는다.
+
+시연 전에 로컬 Ollama와 사용할 모델을 준비하고, 실제 secret이나 개인 경로를 기록하지 않은 `.env`에 아래 provider 설정을 둔 뒤 애플리케이션을 재시작한다. `CATALOGGUARD_AGENT_MODEL`을 생략하면 Ollama provider의 기본 모델은 `qwen3.5:9b`이고 base URL 기본값은 아래와 같다.
+
+```dotenv
+CATALOGGUARD_AGENT_PROVIDER=ollama
+CATALOGGUARD_AGENT_MODEL=qwen3.5:9b
+CATALOGGUARD_OLLAMA_BASE_URL=http://localhost:11434/v1/
+```
+
+Ollama provider는 `OPENAI_API_KEY`가 없어도 사용할 수 있다. 반대로 기본 `openai` provider에는 `OPENAI_API_KEY`가 필요하다. Ollama가 실행되지 않거나 모델이 없으면 Local Copilot 요청은 unavailable로 끝나며 OpenAI로 자동 fallback하지 않는다.
+
+1. 오류가 저장된 inspection 상세에서 Copilot을 열고 "현재 검수 결과를 요약해 주세요."라고 질문해 SUMMARY route를 확인한다.
+2. "2번 행은 왜 오류인가요?"처럼 실제 저장된 source row를 지정해 SOURCE_ROW route를 확인한다. duplicate fixture를 사용할 때는 persisted reason에 있는 실제 관련 행만 설명할 수 있고 일반 숫자는 관계 행으로 허용되지 않는다고 설명한다.
+3. "수정 우선순위를 설명해 주세요."로 CORRECTION route를, 기준·대상 실행이 연결된 화면에서는 "수정 전후 비교를 설명해 주세요."로 COMPARISON route를 확인한다.
+4. 응답에서 `answer`·`limitations`와 Python이 조립한 `evidence`를 확인한다. 시연 중 모델이 근거에 없는 명시적 row, 등록 rule code/label, run ID를 만들면 그 설명은 노출되지 않고 Python Evidence가 붙은 안전 응답으로 바뀐다. retry, 문자열 자동 치환, OpenAI fallback은 없다.
+
+```text
+Rule Engine 판정
+-> Python Router와 저장 결과 retrieval
+-> Python Evidence Pack
+-> tool-less Local LLM 설명
+-> Narrative Grounding Validator
+-> Python evidence assembly
+-> 기존 Evidence Validator
+```
+
+설명 대사: "로컬 모델을 판정 엔진으로 사용하지 않았습니다. Python이 저장된 검수 결과를 먼저 조회하고, 모델은 그 근거를 설명하는 역할만 합니다. 모델이 다른 행이나 등록된 규칙을 만들어내면 Python validator가 사용자에게 노출되기 전에 차단합니다. Local LLM에는 tool이 없고 OpenAI로 자동 전환하지도 않습니다."
+
+검증 수치를 언급할 때는 "RTX 5070, Ollama 0.34.0, `qwen3.5:9b` Q4_K_M, context 4096, timeout 60초와 동일 fixed-seed Medium fixture에서 CORRECTION 100/100 성공과 Evidence Validator 100/100 PASS를 확인했고, latency는 mean 1.944초·p95 2.736초였다"까지만 사실대로 말한다. 이는 bounded local regression이며 모델 정확도나 production 안정성, 다른 환경의 속도를 보장하지 않는다. Narrative Grounding 30회에서 발생한 2건의 reject도 실패율을 숨기지 않고, Evidence의 `가격 이상치`를 다른 등록 label인 `가격 오류`로 바꾼 true reject였다고 설명한다.
+
 ### 1. Inspection으로 문제를 먼저 보인다 (약 1분)
 
 - **실행:** `CSV 검수`에서 `data/dev/category_mismatch_test.csv`를 업로드하고 `즉시 검수`를 선택한다.
