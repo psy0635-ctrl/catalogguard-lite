@@ -10,6 +10,8 @@ ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl`의 버전�
 
 현재 공식 릴리스는 [v0.2.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.2.0)이며, 대상 커밋은 `29abc4aff8825074f7cd3feab6d370bd9b3f0e4e`입니다. 이번 릴리스는 기존 규칙 기반 검수 흐름에 **Correction Worksheet 후속 재검수**와 저장된 결과를 설명하는 **읽기 전용 Inspection Copilot**을 더했습니다. 이후에는 새 사용자 기능보다 실제 오류, transaction, 데이터 무결성, 오류 처리와 회귀 문제를 우선해 유지개발합니다.
 
+v0.2.0 이후 **current main (unreleased)**에는 기존 OpenAI 경로를 유지하면서 Local Ollama Two-Phase Inspection Copilot을 추가했습니다. 이 Local 경로는 v0.2.0을 포함한 현재 공식 릴리스에는 아직 들어 있지 않습니다.
+
 현재 Alembic 단일 head는 `20260908_0019`이며, `INSPECTION_VERSION`은 `14`입니다. 최근 main은 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 GitHub Actions 검증을 통과했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
 
 공개 Streamlit 앱은 아래 주소에서 확인할 수 있습니다.
@@ -186,11 +188,22 @@ CSV 검수 탭
 
 Correction Worksheet 다운로드 영역의 `수정 후 재검수`는 해당 실행을 session 범위의 기준으로 두고, 사용자가 수정한 원본 상품 CSV를 직접 선택해 기존 검수 경로로 실행합니다. Worksheet를 입력으로 업로드하거나 원본 CSV를 복원하지 않습니다. 동일 파일 dedup으로 같은 실행이 재사용되면 비교하지 않으며, 다른 실행이 완료되면 `이전 결과와 비교`로 기존 Comparison을 열 수 있습니다.
 
-`CatalogGuard Inspection Copilot`은 현재 화면의 저장된 검수 결과를 읽어 오류 이유, 수정 권장사항, 수정 전·후 Comparison의 중립적 사실을 한국어로 설명하는 읽기 전용 AI 보조 기능입니다. 실제 오류 판정은 기존 Rule Engine이 계속 담당하며, Copilot은 원본 CSV·상품 설명·개인정보 원문을 전달받지 않고 데이터를 수정·검수·재검수·Promotion·Rollback하지 않습니다. `OPENAI_API_KEY`가 설정되지 않은 환경에서는 Copilot만 사용할 수 없고 나머지 기능은 그대로 동작합니다.
+`CatalogGuard Inspection Copilot`은 현재 화면의 저장된 검수 결과를 읽어 오류 이유, 수정 권장사항, 수정 전·후 Comparison의 중립적 사실을 한국어로 설명하는 읽기 전용 AI 보조 기능입니다. 실제 상품 오류 판정은 기존 Rule Engine이 계속 담당하며, Copilot은 원본 CSV·상품 설명·개인정보 원문을 전달받지 않고 데이터를 수정·검수·재검수·Promotion·Rollback하지 않습니다. 질문이 새 오류·카테고리·가격·규칙 판정을 요구하면 provider를 호출하기 전에 거절합니다.
 
-Copilot은 Agents SDK의 `function_tool` 네 개(`get_current_inspection_summary`, `get_source_row_issues`, `get_correction_overview`, `get_baseline_comparison`)만 사용합니다. 도구에는 쓰기, SQL, 일반 HTTP, 웹, 셸, 코드 실행, MCP, Promotion 또는 Rollback 권한이 없습니다. 기본 모델은 `CATALOGGUARD_AGENT_MODEL=gpt-5.6-terra`이며, 최대 4 turn과 순차 도구 호출로 제한됩니다. 응답은 `answer`, `evidence`, `limitations` 구조를 따르고, evidence는 저장된 실행·source row·rule code·비교 실행과 대조해 검증합니다. 근거가 비었거나 존재하지 않는 source row/rule/comparison을 가리키면 응답을 제공하지 않습니다.
+공식 릴리스 v0.2.0의 Copilot은 OpenAI Agent가 `get_current_inspection_summary`, `get_source_row_issues`, `get_correction_overview`, `get_baseline_comparison` 네 개의 순차 read-only Function Tool을 호출하는 경로입니다. 당시에는 provider 선택 구조가 없었고, 기본 모델은 `CATALOGGUARD_AGENT_MODEL=gpt-5.6-terra`이며 `OPENAI_API_KEY`가 필요했습니다. 최대 4 turn으로 제한하고 tool 결과의 텍스트는 명령이 아닌 분석 데이터로 취급합니다. Agent의 구조화된 `answer`·`evidence`·`limitations`은 기존 Evidence Validator가 저장된 실행·source row·rule code·비교 실행과 대조합니다. v0.2.0의 경계는 결정론적 안전성·행동 시나리오 20개로 회귀 검증했으며, API key가 없는 당시 검증 환경에서는 live model smoke를 수행하지 않았습니다.
 
-질문이 새 오류·카테고리·가격·규칙 판정을 요구하면 모델을 호출하기 전에 거절합니다. tool 결과 안의 텍스트도 명령이 아니라 분석 데이터로 취급합니다. 이 경계와 근거 검증은 프롬프트 주입을 완전히 막거나 AI 정확도를 보장한다는 주장이 아니며, 결정론적 안전성·행동 시나리오 20개로 회귀 검증합니다. API key가 없는 검증 환경에서는 live model smoke를 수행하지 않았습니다.
+current main (unreleased)에는 기존 설치 호환성을 위해 기본값이 `openai`인 provider 선택 구조가 추가됐습니다. `CATALOGGUARD_AGENT_PROVIDER=ollama`를 선택하면 `OPENAI_API_KEY` 없이 Local 경로를 사용할 수 있습니다. Python이 질문을 분류하고 저장된 결과를 결정론적으로 조회해 Evidence Pack을 만든 뒤, tool-less Local LLM이 그 근거를 자연어로 설명합니다. Python은 모델의 `answer`와 사용자에게 노출되는 `limitations`에서 명시적인 source row, 등록된 rule code/label, run ID를 Narrative Grounding Validator로 검사하고, 직접 evidence를 조립해 기존 Evidence Validator에 다시 전달합니다.
+
+```text
+OpenAI: 질문 -> OpenAI Agent -> read-only Function Tool 4개 -> 구조화 응답 -> Evidence Validator
+Ollama: 질문 -> Python Router/retrieval/Evidence Pack -> tool-less Local LLM -> Narrative Grounding Validator -> Python evidence 조립 -> Evidence Validator
+```
+
+Ollama 경로에서 Local LLM의 tool 수는 0이며 DB write, SQL, 일반 HTTP/웹, 셸, 코드 실행, MCP, Promotion, Rollback 권한이 없습니다. 자동 OpenAI fallback도 없습니다. 모델이 현재 Evidence에 없는 등록 식별자를 만들면 모델 설명을 폐기하고, retry나 문자열 자동 치환 없이 Python Evidence가 붙은 안전 응답을 반환합니다. 전체 registry는 "등록된 식별자인가"를 찾고 현재 Evidence allowlist는 "이번 답변에서 언급 가능한가"를 판단하므로, 근거의 `가격 이상치`를 별개의 등록 label인 `가격 오류`로 바꾸는 설명도 차단합니다.
+
+`Reasoning(effort="none")`은 4096-token context를 내부 reasoning이 소모해 structured JSON 전에 `finish_reason=length`와 `ModelBehaviorError`가 발생하던 문제를 줄이기 위해 **Ollama 경로에만** 적용합니다. SOURCE_ROW Evidence Pack의 `related_source_rows`는 persisted duplicate reason에 이미 있는 관계 행을 누락해 정상 설명이 차단되던 문제를 보완합니다. `duplicate_product_id`/`상품 ID 중복`, `duplicate_product_name`/`상품명 중복`과 기존의 엄격한 reason 형식만 bounded parsing하며, 2 이상의 정수에서 현재 질의 행을 제거한 뒤 중복 제거·정렬합니다. 일반 숫자를 관계 행으로 해석하지 않습니다. 관계 metadata가 DB에 별도 저장되지 않아 reason 문자열에서 제한적으로 복원하는 것은 현재 known limitation이며, 관계형 rule이 늘어나면 명시적 relationship metadata 저장을 검토할 수 있습니다.
+
+[PR #91](https://github.com/psy0635-ctrl/catalogguard-lite/pull/91)의 Home PC bounded regression은 RTX 5070, Ollama 0.34.0, `qwen3.5:9b` Q4_K_M, context 4096, timeout 60초와 동일 fixed-seed Medium fixture 조건에서 수행했습니다. CORRECTION은 100/100 성공, `ModelBehaviorError`·`finish_reason=length`·timeout 0, Evidence Validator 100/100 PASS였고 latency는 mean 1.944초, median 1.805초, p95 2.736초, p99 3.393초였습니다. Narrative Grounding 30회는 28 PASS와 `가격 이상치 -> 가격 오류` 2 true REJECT, false rejection 0, 사용자 노출 fabricated reference 0이었습니다. SOURCE_ROW는 projection 전 20회 중 8 PASS·12 REJECT(2 true hallucination, 10 projection false rejection)였고 보완 후 20/20 PASS, projection false rejection 0, 사용자 노출 fabricated row 0이었습니다. 당시 전체 자동화 검증은 `2450 passed, 382 skipped, 13 deselected, 0 failed`와 기존 Starlette deprecation warning 1건이었습니다. 이는 특정 장비와 fixture의 회귀 결과이며 Local LLM 정확도, production 안정성 또는 모든 환경의 latency를 보장하지 않습니다.
 
 검수 이력의 현재 목록에서는 두 실행을 선택해 `GET /api/v1/inspections/comparison`을 버튼 클릭 시에만 호출할 수 있습니다. 변화량은 항상 `비교 - 기준`이며, 문제 row의 저장 필드 전체를 multiset으로 비교합니다. 같은 `inspection_version`끼리만 비교할 수 있고, `base_only`/`target_only`는 각각 한쪽 실행에만 저장된 문제를 뜻할 뿐 해결됨·신규 오류를 의미하지 않습니다. 정상 상품 전체 row는 저장하지 않으므로 파일에서 빠진 상품을 구분할 수 없고, 파일 규모가 다르면 문제 수 감소만으로 품질 개선을 판단할 수 없습니다. changed issue item은 기존 상세 API처럼 전체를 반환하며 별도 pagination은 아직 없습니다.
 

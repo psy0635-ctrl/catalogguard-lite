@@ -64,7 +64,8 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, 
 33. inspection issue가 어느 원본 상품 record에서 나왔는지는 빈 상품 ID나 중복 상품 ID만으로 안정적으로 판단할 수 없었습니다. CSV header를 1로 두고 첫 상품 logical record를 2로 계산한 `source_row_number`를 Product·ValidationIssue·InspectionResult·상세 API까지 전달해 저장했습니다. quoted multiline field도 하나의 logical record로 계산하며, 기존 결과는 임의 backfill하지 않고 `NULL`로 유지했습니다. 이 저장 결과 계약의 경계를 만들기 위해 `INSPECTION_VERSION`을 14로 올렸습니다.
 34. 기존 issue-level CSV는 문제 한 건마다 한 행이어서 한 상품을 수정할 때 여러 행을 오가야 했습니다. 현재 검수 결과에서만 `source_row_number`를 grouping key로 사용해 같은 원본 행의 issue와 수정 권장사항을 한 작업 행으로 정리한 Correction Worksheet CSV를 추가했습니다. 상품 ID와 상품 그룹 ID는 표시 정보일 뿐 identity가 아니며, legacy 또는 일부 `NULL` 결과는 오해를 막기 위해 부분 작업표를 만들지 않습니다. 이 파일은 자동 수정·원본 복구·재업로드용 CSV가 아닙니다.
 35. Correction Worksheet를 내려받은 뒤에는 사용자가 **원본 상품 CSV를 직접 수정**하고 다시 검수할 수 있도록, 기준 실행과 후속 실행을 기존 Comparison으로 연결했습니다. Worksheet 자체를 입력으로 업로드하거나 원본을 자동 복구하지 않으며, 같은 파일 dedup으로 기존 실행이 재사용된 경우에는 비교를 만들지 않습니다. 따라서 Comparison은 개선 판정기가 아니라 같은 검수 버전의 저장된 issue 차이를 보여 주는 중립적 조회입니다.
-36. 저장된 결과를 설명하는 Inspection Copilot은 OpenAI Agents SDK의 Function Tool 네 개만 사용합니다. 현재 검수 요약, source row issue, Correction Worksheet 개요, 기준·비교 실행의 Comparison만 읽고, Rule Engine의 새 오류·카테고리·가격·규칙 판정을 대신하지 않습니다. 쓰기, SQL, 일반 HTTP, 웹, 셸, 코드 실행, MCP, Promotion, Rollback 권한은 주지 않았고 원본 CSV·상품 설명·개인정보 원문도 전달하지 않습니다. `OPENAI_API_KEY`가 없으면 Copilot만 `503`으로 unavailable이며 기존 검수 흐름은 계속 동작합니다.
+36. v0.2.0에서 저장된 결과를 설명하는 Inspection Copilot을 OpenAI Agents SDK의 Function Tool 네 개로 구현했습니다. 현재 검수 요약, source row issue, Correction Worksheet 개요, 기준·비교 실행의 Comparison만 읽고, Rule Engine의 새 오류·카테고리·가격·규칙 판정을 대신하지 않습니다. 쓰기, SQL, 일반 HTTP, 웹, 셸, 코드 실행, MCP, Promotion, Rollback 권한은 주지 않았고 원본 CSV·상품 설명·개인정보 원문도 전달하지 않습니다. v0.2.0에서는 `OPENAI_API_KEY`가 없으면 Inspection Copilot만 `503`으로 unavailable이며 기존 검수 흐름은 계속 동작했습니다.
+37. v0.2.0 이후 current main에는 기존 OpenAI 경로를 보존한 채 Local Ollama Two-Phase Copilot을 추가했습니다. Python이 질문 분류·저장 결과 조회·Evidence Pack·식별자 검증·최종 evidence를 소유하고, tool-less Local LLM은 제공된 근거를 자연어로 설명만 합니다. 이 기능은 아직 unreleased이며 v0.2.0의 기능으로 소급하지 않습니다.
 
 ### Airflow ETL orchestration: 문제와 해결
 
@@ -225,7 +226,7 @@ Streamlit ETL 프로필 운영 관리
 | 마이그레이션 | Alembic |
 | 현재 검수 버전 | `INSPECTION_VERSION = "14"` |
 | 비동기 처리 | Redis, Celery |
-| 설명 보조 | OpenAI Agents SDK 0.22.1, 기본 모델 `gpt-5.6-terra`, 최대 4 turn, 순차 read-only Function Tool 4개 |
+| 설명 보조 | OpenAI Agents SDK 0.22.1 기반 provider 분기. OpenAI: 기본 모델 `gpt-5.6-terra`, 최대 4 turn, 순차 read-only Function Tool 4개. Ollama(current main, unreleased): 기본 `qwen3.5:9b`, Python Evidence Pack + tool-less Local LLM + Narrative Grounding Validator |
 | 관측성 | prometheus-client 0.25.0 (HTTP·Web ETL metric instrumentation MVP, Prometheus 서버는 미구축) |
 | Kubernetes(CI 검증) | kind v0.32.0, kubectl v1.36.2, node kindest/node:v1.36.1(SHA-256 digest 고정), FastAPI+PostgreSQL만 배포(Redis/Celery/Streamlit 미배포) |
 | IaC(CI 검증) | Terraform 1.15.8, AWS Provider 6.55.0(`.terraform.lock.hcl` 고정), mock provider 기반 `terraform test`(apply 미수행, backend 미구성) |
@@ -411,6 +412,43 @@ FastAPI와 PostgreSQL이 함께 실행되는 로컬 또는 별도 배포 환경�
 v0.2.0의 시연 흐름은 `CSV 업로드 -> inspection -> errors -> Correction Worksheet -> 사용자가 원본 CSV 수정 -> reinspection -> Comparison -> Copilot`입니다. 후속 재검수는 새로운 검수 엔진이 아니라 같은 기존 경로를 다시 실행하는 연결이며, 결과 비교는 issue multiset의 사실만 보입니다.
 
 Copilot은 네 read-only Function Tool의 반환값을 바탕으로 `answer`, `evidence`, `limitations`을 돌려줍니다. evidence에는 저장된 run ID, 필요하면 source row와 rule code 또는 비교 run ID를 넣고 서비스가 이를 영속 결과와 재검증합니다. 저장되지 않은 행·규칙·비교를 인용하거나 evidence 없이 답하면 거절합니다. 새 카테고리·규칙·가격 판정을 요청하는 문장은 모델 실행 전에 차단합니다. 이는 완전한 프롬프트 주입 방어 또는 일반 AI 정확도 보장이 아니라, 모델 능력을 좁히고 결과 근거를 검증하는 안전 경계입니다.
+
+### current main Local Ollama Two-Phase Inspection Copilot (unreleased)
+
+이 절은 v0.2.0 릴리스 설명이 아니라 그 이후 current main에 추가된 미릴리스 개선입니다. `CATALOGGUARD_AGENT_PROVIDER=ollama`를 선택하면 `OPENAI_API_KEY` 없이 동작하지만 OpenAI로 자동 fallback하지 않으며, 기존 OpenAI Agent와 네 read-only Function Tool 경로는 변경하지 않았습니다.
+
+```text
+사용자 질문
+-> Python Router
+-> deterministic retrieval
+-> Python Evidence Pack
+-> tool-less Local LLM
+-> Narrative Grounding Validator
+-> Python evidence assembly
+-> 기존 Evidence Validator
+-> 사용자 응답
+```
+
+설계의 출발점은 Local LLM이 판정 주체가 아니라는 점입니다. 상품 오류는 Rule Engine이 판정하고, Python은 질문 분류·실제 저장 근거 조회·Evidence 생성·식별자 검증을 담당합니다. Local LLM에는 tool을 하나도 주지 않고 Python이 제공한 근거의 자연어 설명만 맡겼습니다. 따라서 DB write, SQL, 일반 HTTP/웹, 셸, 코드 실행, MCP, Promotion, Rollback 권한이 없으며 잘못된 모델 출력을 다른 provider에 넘기지도 않습니다.
+
+**문제 1 — reasoning이 출력 context를 소모했습니다.** Home PC의 `qwen3.5:9b`가 4096-token context에서 내부 reasoning을 길게 사용하면 structured JSON을 만들기 전에 `finish_reason=length`와 `ModelBehaviorError`가 발생했습니다. 해결은 OpenAI 경로를 바꾸는 것이 아니라 Ollama 설명 요청에만 `Reasoning(effort="none")`을 적용하는 것이었습니다.
+
+**문제 2 — 자연스러운 표현이 실제로는 다른 등록 rule일 수 있었습니다.** Evidence의 `가격 이상치`를 모델이 `가격 오류`로 바꾸면 비슷한 말처럼 보이지만, 둘은 registry에 각각 존재하는 다른 rule label입니다. 결정론적 Narrative Grounding Validator는 모델 답변의 명시적 식별자를 추출합니다. rule code/label은 등록 rule registry를 기준으로 탐지하고, source row와 run ID는 명시적인 정규식 패턴으로 추출한 뒤 각 식별자를 현재 Python Evidence가 허용하는 allowlist와 대조합니다. 검사는 `answer`뿐 아니라 사용자에게 보이는 `limitations`에도 적용합니다. 위반 시 LLM answer를 폐기하며 retry나 문자열 자동 치환 없이 Python Evidence 기반 safe response를 반환합니다. 이후 Python이 최종 evidence를 조립하고 기존 Evidence Validator도 그대로 통과시킵니다.
+
+**문제 3 — validator가 맞아도 Evidence projection이 불완전할 수 있었습니다.** SOURCE_ROW 질문에서 persisted duplicate reason에는 실제 관련 행이 있었지만 Evidence allowlist에는 질의 행만 있어 정상 설명도 차단됐습니다. validator를 느슨하게 하는 대신 Evidence Pack에 `related_source_rows`를 추가했습니다. 복원은 `duplicate_product_id`/`상품 ID 중복`, `duplicate_product_name`/`상품명 중복`과 기존의 엄격한 reason 형식에만 한정하고, 2 이상의 정수만 취해 현재 질의 행 제거·중복 제거·정렬을 수행합니다. 일반 숫자는 관계 행으로 해석하지 않습니다.
+
+검증은 RTX 5070, Ollama 0.34.0, `qwen3.5:9b` Q4_K_M, context 4096, timeout 60초인 Home PC와 동일 fixed-seed Medium fixture에서 수행한 bounded regression입니다.
+
+| 검증 범위 | 결과 |
+| --- | --- |
+| CORRECTION 100회 | 100/100 success, `ModelBehaviorError` 0, `finish_reason=length` 0, timeout 0, Evidence Validator 100/100 PASS |
+| CORRECTION latency | mean 1.944초, median 1.805초, p95 2.736초, p99 3.393초 |
+| Narrative Grounding 30회 | 28 PASS, `가격 이상치 -> 가격 오류` 2 true REJECT, false rejection 0, user-visible fabricated reference 0 |
+| SOURCE_ROW 보완 전 20회 | 8 PASS, 12 REJECT(2 true hallucination, 10 projection false rejection) |
+| SOURCE_ROW 보완 후 20회 | 20/20 PASS, projection false rejection 0, user-visible fabricated row 0 |
+| 전체 자동화 테스트 | 2450 passed, 382 skipped, 13 deselected, 0 failed, 기존 Starlette deprecation warning 1건 |
+
+이 결과는 특정 장비와 fixture의 회귀 범위이며 Local LLM 정확도 100%, production 안정성 100%, 모든 환경에서 약 2초라는 뜻이 아닙니다. 또한 duplicate related row는 DB의 명시적 relationship metadata가 아니라 기존 persisted reason 문자열에서 제한적으로 복원합니다. 현재 두 duplicate rule의 엄격한 형식에서는 blocker가 아니지만 관계형 rule이 늘어나면 explicit relationship metadata persistence를 검토할 수 있습니다. 이번 개선에서는 DB schema, migration, `INSPECTION_VERSION`을 변경하지 않았습니다.
 
 사용자는 저장된 실행을 검색하고 하나를 선택한 뒤 문제별 오류 이유와 수정 권장사항을 확인하고 상세 결과를 CSV로 내려받습니다. 상세 화면에서는 파일명, 검수 시간, 요약 수치와 문제별 위험 수준도 함께 확인할 수 있습니다.
 
