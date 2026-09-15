@@ -25,6 +25,7 @@ class InspectionResultCreate:
     recommendation: str
     risk_level: str
     source_row_number: int | None = None
+    related_source_rows: list[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ def create_inspection_results(
             recommendation=item.recommendation,
             risk_level=item.risk_level,
             source_row_number=item.source_row_number,
+            related_source_rows=item.related_source_rows,
         )
         for item in result_items
     ]

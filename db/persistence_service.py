@@ -52,6 +52,19 @@ def _normalize_source_row_number(value: object) -> int | None:
     return value
 
 
+def normalize_related_source_rows(
+    value: object, source_row_number: int | None,
+) -> list[int] | None:
+    """Validate explicit relationships while retaining NULL for legacy rows."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("related_source_rows must be a list of integers greater than or equal to 2")
+    if any(type(row) is not int or row < 2 for row in value):
+        raise ValueError("related_source_rows must contain only integers greater than or equal to 2")
+    return sorted(set(value) - {source_row_number})
+
+
 @dataclass(frozen=True)
 class InspectionDetail:
     inspection_run_id: int
@@ -279,6 +292,10 @@ def build_result_create_items(
             source_row_number=_normalize_source_row_number(
                 row.get("source_row_number")
             ),
+            related_source_rows=normalize_related_source_rows(
+                row.get("related_source_rows"),
+                _normalize_source_row_number(row.get("source_row_number")),
+            ),
         )
         _validate_required_result_fields(result_item)
         result_items.append(result_item)
@@ -386,6 +403,7 @@ def get_inspection_detail(
             recommendation=result.recommendation,
             risk_level=result.risk_level,
             source_row_number=getattr(result, "source_row_number", None),
+            related_source_rows=getattr(result, "related_source_rows", None),
         )
         for result in inspection_results
     ]

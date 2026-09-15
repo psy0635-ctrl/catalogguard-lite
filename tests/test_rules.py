@@ -947,11 +947,12 @@ def test_check_content_safety_preserves_exact_mixed_payload_and_product_order():
     ]
 
     issues = [asdict(issue) for issue in check_prohibited_and_personal_information(products)]
+    assert all(issue["related_source_rows"] == [] for issue in issues)
     issue_payloads = [
         {
             field: value
             for field, value in issue.items()
-            if field != "source_row_number"
+            if field not in {"source_row_number", "related_source_rows"}
         }
         for issue in issues
     ]

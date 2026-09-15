@@ -169,7 +169,7 @@ def find_duplicate_product_ids(products: list[Product]) -> list[ValidationIssue]
 
         row_numbers = [row_number for row_number, _ in duplicate_rows]
         row_text = _format_row_numbers(row_numbers)
-        for _, product in duplicate_rows:
+        for row_number, product in duplicate_rows:
             issues.append(
                 ValidationIssue(
                     rule="duplicate_product_id",
@@ -178,6 +178,12 @@ def find_duplicate_product_ids(products: list[Product]) -> list[ValidationIssue]
                     product_group_id=product.product_group_id,
                     message=f"product_id '{product_id}' is duplicated in rows {row_text}",
                     source_row_number=product.source_row_number,
+                    related_source_rows=sorted({
+                        related_product.source_row_number or related_row
+                        for related_row, related_product in duplicate_rows
+                        if (related_product.source_row_number or related_row)
+                        != (product.source_row_number or row_number)
+                    }),
                 )
             )
 
@@ -229,7 +235,7 @@ def find_duplicate_product_names(products: list[Product]) -> list[ValidationIssu
         row_text = _format_row_numbers(row_numbers)
         product_id_text = _format_product_ids(duplicate_products)
 
-        for _, product in candidate_rows:
+        for row_number, product in candidate_rows:
             issues.append(
                 ValidationIssue(
                     rule="duplicate_product_name",
@@ -242,6 +248,12 @@ def find_duplicate_product_names(products: list[Product]) -> list[ValidationIssu
                         f"with product_ids '{product_id_text}'"
                     ),
                     source_row_number=product.source_row_number,
+                    related_source_rows=sorted({
+                        related_product.source_row_number or related_row
+                        for related_row, related_product in candidate_rows
+                        if (related_product.source_row_number or related_row)
+                        != (product.source_row_number or row_number)
+                    }),
                 )
             )
 

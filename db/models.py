@@ -151,6 +151,10 @@ class InspectionResult(Base):
             "source_row_number IS NULL OR source_row_number >= 2",
             name="ck_inspection_results_source_row_number_minimum",
         ),
+        CheckConstraint(
+            "related_source_rows IS NULL OR jsonb_typeof(related_source_rows) = 'array'",
+            name="ck_inspection_results_related_source_rows_array",
+        ),
         # 조회가 자주 일어날 수 있는 컬럼에 인덱스를 미리 둡니다.
         Index("ix_inspection_results_inspection_run_id", "inspection_run_id"),
         Index("ix_inspection_results_product_id", "product_id"),
@@ -177,6 +181,9 @@ class InspectionResult(Base):
     risk_level: Mapped[str] = mapped_column(String(20), nullable=False)
     # CSV header를 1로 보는 논리 record 번호입니다. 과거 결과에는 값이 없습니다.
     source_row_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    related_source_rows: Mapped[list[int] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

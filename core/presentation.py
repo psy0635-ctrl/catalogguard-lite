@@ -462,6 +462,7 @@ def build_result_records(issues: list[ValidationIssue]) -> list[dict[str, object
                 ),
                 "위험 수준": RISK_LEVELS.get(issue.rule, ""),
                 SOURCE_ROW_NUMBER_RESULT_FIELD: issue.source_row_number,
+                "related_source_rows": list(issue.related_source_rows),
             }
         )
     return rows

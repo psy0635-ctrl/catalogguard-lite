@@ -65,7 +65,7 @@ def test_quoted_multiline_and_blank_physical_line_keep_logical_source_row_sequen
             'G001,P001,상품 A,TOP,BLACK,M,5,10000,image.jpg,"첫째 줄',
             '둘째 줄",',
             "",
-            "G002,P002,상품 B,SHOES,WHITE,260,3,20000,image2.jpg,,",
+            "G002,P001,상품 B,SHOES,WHITE,260,3,20000,image2.jpg,,",
         ]
     )
 
@@ -73,6 +73,8 @@ def test_quoted_multiline_and_blank_physical_line_keep_logical_source_row_sequen
     products = load_products_from_dataframe(dataframe)
 
     assert [product.source_row_number for product in products] == [2, 3]
+    issues = check_duplicate_product_id(products)
+    assert [issue.related_source_rows for issue in issues] == [[3], [2]]
 
 
 def test_missing_business_ids_keep_distinct_source_rows_on_issues():

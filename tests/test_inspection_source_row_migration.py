@@ -13,10 +13,10 @@ COLUMN = "source_row_number"
 CHECK_CONSTRAINT = "ck_inspection_results_source_row_number_minimum"
 
 
-def test_source_row_migration_is_the_single_alembic_head() -> None:
+def test_source_row_migration_remains_in_alembic_chain() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
 
-    assert list(script.get_heads()) == [REVISION]
+    assert script.get_revision("20260915_0020").down_revision == REVISION
     revision = script.get_revision(REVISION)
     assert revision is not None
     assert revision.down_revision == PREVIOUS_REVISION

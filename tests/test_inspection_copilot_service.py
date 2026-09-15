@@ -912,3 +912,35 @@ def test_ollama_sdk_timeout_is_mapped_without_openai_fallback(monkeypatch):
             current_run_id=101,
             question="이번 검수 결과를 요약해줘",
         )
+
+
+@pytest.mark.parametrize("explicit, expected", [([7], [7]), ([], []), (None, [3])])
+def test_local_relationship_metadata_precedence(monkeypatch, explicit, expected):
+    from services import inspection_copilot_service as service
+    detail = make_source_row_duplicate_detail()
+    for result in detail.results:
+        result.related_source_rows = explicit
+    monkeypatch.setattr(service, "get_inspection_detail", lambda *args, **kwargs: detail)
+    context = service.InspectionCopilotContext(session=object(), current_run_id=101)
+    route = service.route_local_inspection_copilot_question("204번 행은 왜 오류야?")
+    pack = service.build_local_inspection_copilot_evidence_pack(context, route)
+    assert pack.data["source_row"]["related_source_rows"] == expected
+    # The OpenAI tool's existing projection stays unchanged.
+    assert all("related_source_rows" not in issue for issue in
+               service.get_source_row_issues(context, source_row_number=204)["issues"])
+
+
+@pytest.mark.parametrize("answer_row, allowed", [(7, True), (3, False), (99, False)])
+def test_explicit_relationship_narrative_grounding(monkeypatch, answer_row, allowed):
+    from services import inspection_copilot_service as service
+    detail = make_source_row_duplicate_detail()
+    for result in detail.results:
+        result.related_source_rows = [7]
+    monkeypatch.setenv("CATALOGGUARD_AGENT_PROVIDER", "ollama")
+    monkeypatch.setattr(service, "get_inspection_detail", lambda *args, **kwargs: detail)
+    answer = f"{answer_row}번 행과 중복입니다."
+    model = ScriptedModel([[assistant_message(json.dumps({"answer": answer, "limitations": []}, ensure_ascii=False))]])
+    response = service.ask_inspection_copilot(session=object(), current_run_id=101,
+                                            question="204번 행은 왜 오류야?", model=model)
+    assert (response.answer == answer) is allowed
+    model.assert_complete()

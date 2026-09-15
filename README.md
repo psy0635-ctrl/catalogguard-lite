@@ -12,7 +12,7 @@ ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl`의 버전�
 
 v0.3.0 기준으로는 기존 OpenAI 경로를 유지하면서 optional OpenAI / Ollama provider 선택과 Local Ollama Two-Phase Inspection Copilot을 추가했습니다. Local Ollama 경로는 v0.2.0의 OpenAI-only Copilot에는 포함되지 않았습니다.
 
-현재 Alembic 단일 head는 `20260908_0019`이며, `INSPECTION_VERSION`은 `14`입니다. 최근 main은 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 GitHub Actions 검증을 통과했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
+v0.3.0 이후 현재 작업 브랜치의 Alembic 단일 head는 `20260915_0020`이며, `INSPECTION_VERSION`은 `15`입니다. 이 명시적 관련 행 저장 변경은 아직 새 Release가 아닙니다. 최근 main은 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 GitHub Actions 검증을 통과했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
 
 공개 Streamlit 앱은 아래 주소에서 확인할 수 있습니다.
 
@@ -201,7 +201,7 @@ Ollama: 질문 -> Python Router/retrieval/Evidence Pack -> tool-less Local LLM -
 
 Ollama 경로에서 Local LLM의 tool 수는 0이며 DB write, SQL, 일반 HTTP/웹, 셸, 코드 실행, MCP, Promotion, Rollback 권한이 없습니다. 자동 OpenAI fallback도 없습니다. 모델이 현재 Evidence에 없는 등록 식별자를 만들면 모델 설명을 폐기하고, retry나 문자열 자동 치환 없이 Python Evidence가 붙은 안전 응답을 반환합니다. 전체 registry는 "등록된 식별자인가"를 찾고 현재 Evidence allowlist는 "이번 답변에서 언급 가능한가"를 판단하므로, 근거의 `가격 이상치`를 별개의 등록 label인 `가격 오류`로 바꾸는 설명도 차단합니다.
 
-`Reasoning(effort="none")`은 4096-token context를 내부 reasoning이 소모해 structured JSON 전에 `finish_reason=length`와 `ModelBehaviorError`가 발생하던 문제를 줄이기 위해 **Ollama 경로에만** 적용합니다. SOURCE_ROW Evidence Pack의 `related_source_rows`는 persisted duplicate reason에 이미 있는 관계 행을 누락해 정상 설명이 차단되던 문제를 보완합니다. `duplicate_product_id`/`상품 ID 중복`, `duplicate_product_name`/`상품명 중복`과 기존의 엄격한 reason 형식만 bounded parsing하며, 2 이상의 정수에서 현재 질의 행을 제거한 뒤 중복 제거·정렬합니다. 일반 숫자를 관계 행으로 해석하지 않습니다. 관계 metadata가 DB에 별도 저장되지 않아 reason 문자열에서 제한적으로 복원하는 것은 현재 known limitation이며, 관계형 rule이 늘어나면 명시적 relationship metadata 저장을 검토할 수 있습니다.
+`Reasoning(effort="none")`은 4096-token context를 내부 reasoning이 소모해 structured JSON 전에 `finish_reason=length`와 `ModelBehaviorError`가 발생하던 문제를 줄이기 위해 **Ollama 경로에만** 적용합니다. SOURCE_ROW Evidence Pack의 `related_source_rows`는 persisted duplicate reason에 이미 있는 관계 행을 누락해 정상 설명이 차단되던 문제를 보완합니다. `duplicate_product_id`/`상품 ID 중복`, `duplicate_product_name`/`상품명 중복`과 기존의 엄격한 reason 형식만 bounded parsing하며, 2 이상의 정수에서 현재 질의 행을 제거한 뒤 중복 제거·정렬합니다. 일반 숫자를 관계 행으로 해석하지 않습니다. v0.3.0 이후 현재 작업 브랜치의 변경에서는 Inspection Version 15로 `inspection_results.related_source_rows` nullable JSONB에 관계를 명시적으로 저장합니다. Local Copilot은 빈 배열을 포함한 명시 metadata를 우선 사용하며, 기존 v14 이하 `NULL` 결과에만 위 reason parsing fallback을 적용합니다. 과거 데이터는 backfill하지 않고 public API 응답과 화면·CSV 표시 컬럼은 유지합니다. 이 변경은 아직 새 Release가 아닙니다.
 
 ### Windows에서 Local Ollama 준비와 확인
 
@@ -726,6 +726,7 @@ catalogguard-lite/
       20260826_0017_add_etl_application_commit_sha.py
       20260826_0018_add_etl_profile_definition_snapshot.py
       20260908_0019_add_inspection_source_row_number.py
+      20260915_0020_add_inspection_related_source_rows.py
   data/
     dev/
       category_mismatch_test.csv
@@ -857,7 +858,7 @@ catalogguard-lite/
 | `alembic/versions/20260813_0013_add_etl_initial_source_lineage.py` | `etl_load_runs`에 최초 입력 경로를 기록하는 `initial_source_type`·`initial_source_ref`를 추가하는 ETL lineage 마이그레이션 |
 | `alembic/versions/20260822_0014_create_etl_profile_activations.py` | 프로필당 runtime activation 상태 한 행을 저장하는 `etl_profile_activations` 테이블 생성 마이그레이션. 빈 표로 시작하므로 적용해도 기존 동작이 바뀌지 않습니다 |
 | `alembic/versions/20260823_0015_create_etl_profile_activation_events.py` | 성공한 activation 운영 명령을 쌓는 append-only `etl_profile_activation_events` 테이블과 조회 index 생성 마이그레이션. **빈 표로 시작하며 기존 current-state row로 과거 이력을 backfill하지 않습니다** |
-| `alembic/versions/20260825_0016_add_etl_profile_definition_sha256.py`·`20260826_0017_add_etl_application_commit_sha.py`·`20260826_0018_add_etl_profile_definition_snapshot.py`·`20260908_0019_add_inspection_source_row_number.py` | ETL profile lineage와 `inspection_results.source_row_number`를 추가하는 순차 마이그레이션. `0019`가 현재 단일 head입니다 |
+| `alembic/versions/20260825_0016_add_etl_profile_definition_sha256.py`·`20260826_0017_add_etl_application_commit_sha.py`·`20260826_0018_add_etl_profile_definition_snapshot.py`·`20260908_0019_add_inspection_source_row_number.py`·`20260915_0020_add_inspection_related_source_rows.py` | ETL profile lineage와 `inspection_results.source_row_number`, `related_source_rows`를 추가하는 순차 마이그레이션. `0020`가 현재 단일 head입니다 |
 | `.github/workflows/test.yml` | 일반 테스트와 분리된 `browser-e2e`·`kubernetes-smoke` job을 포함해 PostgreSQL·Chromium 실제 브라우저 흐름과 kind 실제 Kubernetes 배포까지 실행하는 GitHub Actions workflow |
 | `k8s/dev-postgres.yaml`, `k8s/migration-job.yaml`, `k8s/catalogguard-api.yaml` | kind CI 전용 PostgreSQL, Alembic Migration Job, FastAPI Deployment/Service manifest |
 | `.env.example` | 로컬 PostgreSQL 연결 환경변수 예시 |
@@ -1276,7 +1277,7 @@ python -m alembic upgrade head
 python -m alembic history
 ```
 
-현재 Alembic head는 `20260908_0019`입니다.
+현재 작업 브랜치의 Alembic head는 `20260915_0020`입니다.
 
 `20260703_0001_create_inspection_tables.py`는 다음 테이블을 만듭니다.
 
@@ -1400,7 +1401,7 @@ psql "$env:DATABASE_URL" -c "\d etl_profile_activation_events"
 
 같은 방식으로 로컬 disposable PostgreSQL 18에서 빈 DB의 `upgrade head`, `downgrade 20260803_0007`, `downgrade 20260728_0006`, 재-upgrade와 단일 head도 확인했다. `20260805_0009`도 같은 방식으로 `downgrade 20260803_0008` 뒤 재-upgrade와 단일 head(`20260805_0009`)를 disposable PostgreSQL 18에서 확인했다.
 
-`20260825_0016_add_etl_profile_definition_sha256.py`·`20260826_0017_add_etl_application_commit_sha.py`·`20260826_0018_add_etl_profile_definition_snapshot.py`는 각각 `etl_load_runs`에 프로필 정의 fingerprint, 실행 애플리케이션 commit SHA, 프로필 정의 JSONB snapshot을 추가해 적재 시점 lineage를 보존합니다. `20260908_0019_add_inspection_source_row_number.py`는 `inspection_results.source_row_number` nullable 정수와 2 이상 논리 row 제약을 추가합니다. 현재 단일 head는 `20260908_0019`입니다.
+`20260825_0016_add_etl_profile_definition_sha256.py`·`20260826_0017_add_etl_application_commit_sha.py`·`20260826_0018_add_etl_profile_definition_snapshot.py`는 각각 `etl_load_runs`에 프로필 정의 fingerprint, 실행 애플리케이션 commit SHA, 프로필 정의 JSONB snapshot을 추가해 적재 시점 lineage를 보존합니다. `20260908_0019_add_inspection_source_row_number.py`는 `inspection_results.source_row_number` nullable 정수와 2 이상 논리 row 제약을 추가합니다. `20260915_0020_add_inspection_related_source_rows.py`는 nullable JSONB 관계 metadata와 array 또는 NULL 제약을 추가하며 backfill하지 않습니다. 현재 작업 브랜치의 단일 head는 `20260915_0020`입니다.
 
 `tests/test_inspection_actor_migration.py`·`tests/test_catalog_promotion_migration.py`·`tests/test_etl_profile_activation_history_migration.py`는 역사적 migration 계약을 확인합니다. CI의 `Apply database migrations` step은 고정 revision이 아니라 `upgrade head`를 실행하므로 현재 migration chain 전체를 적용합니다.
 
@@ -2454,7 +2455,7 @@ curl.exe "http://127.0.0.1:8001/api/v1/inspections?limit=10&offset=0&filename=pr
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
 | `file_sha256` | `String(64)`, nullable | CSV bytes의 SHA-256 hex 문자열입니다. migration 이전 기존 이력은 NULL입니다. |
-| `inspection_version` | `String(20)`, nullable 아님 | 검수 결과 저장 계약 버전입니다. 현재 `INSPECTION_VERSION` 값은 `"14"`입니다. DB `server_default`는 없습니다. |
+| `inspection_version` | `String(20)`, nullable 아님 | 검수 결과 저장 계약 버전입니다. 현재 작업 브랜치의 `INSPECTION_VERSION` 값은 `"15"`입니다. DB `server_default`는 없습니다. |
 
 중복 판단 기준은 같은 `file_sha256`과 같은 `inspection_version`입니다.
 

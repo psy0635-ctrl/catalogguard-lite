@@ -1,5 +1,5 @@
 # 역할: 검수 로직에서 사용하는 상품과 검수 문제의 데이터 모양을 정의합니다.
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -34,3 +34,4 @@ class ValidationIssue:
     message: str
     # 원본 상품 record와의 연결용 metadata이며 검수 판정 자체는 바꾸지 않습니다.
     source_row_number: int | None = None
+    related_source_rows: list[int] = field(default_factory=list)

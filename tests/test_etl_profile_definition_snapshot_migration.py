@@ -18,7 +18,7 @@ from db.session import create_database_engine
 
 REVISION = "20260826_0018"
 PREVIOUS_REVISION = "20260826_0017"
-HEAD_REVISION = "20260908_0019"
+HEAD_REVISION = "20260915_0020"
 COLUMN = "profile_definition_snapshot"
 
 
