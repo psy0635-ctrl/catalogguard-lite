@@ -433,9 +433,9 @@ def test_build_result_create_items_maps_group_category_without_schema_changes():
     assert {item.risk_level for item in category_items} == {"중간"}
 
 
-def test_current_inspection_version_is_fourteen_for_source_row_identity():
-    # 같은 CSV가 source row identity 없는 v13 결과를 재사용하지 않도록 고정합니다.
-    assert INSPECTION_VERSION == "14"
+def test_current_inspection_version_is_fifteen_for_explicit_relationships():
+    # 같은 CSV가 explicit relationship 없는 v14 결과를 재사용하지 않도록 고정합니다.
+    assert INSPECTION_VERSION == "15"
 
 
 def test_build_result_create_items_rejects_blank_required_result_fields():
@@ -2436,3 +2436,102 @@ def test_quality_trend_returns_empty_items_for_unmatched_history_filter(database
 
     assert result.inspection_version == INSPECTION_VERSION
     assert result.items == []
+
+
+@pytest.mark.parametrize("value", [1, 0, -1, True, "3", [1], [0], [-1], [True], ["3"], (3,), {}])
+def test_result_relationship_rejects_invalid_values(value):
+    report = make_report([{**BASE_ROW, "price": "0"}])
+    report.result_records[0]["related_source_rows"] = value
+    with pytest.raises(ValueError, match="related_source_rows"):
+        build_result_create_items(report)
+
+
+def test_result_relationship_normalizes_and_preserves_legacy_null():
+    report = make_report([{**BASE_ROW, "price": "0"}])
+    row = report.result_records[0]
+    row["source_row_number"] = 3
+    row["related_source_rows"] = [4, 3, 2, 4]
+    assert build_result_create_items(report)[0].related_source_rows == [2, 4]
+    row["related_source_rows"] = None
+    assert build_result_create_items(report)[0].related_source_rows is None
+    del row["related_source_rows"]
+    assert build_result_create_items(report)[0].related_source_rows is None
+
+
+def test_new_report_relationships_remain_hidden_from_display():
+    report = make_report([BASE_ROW, {**BASE_ROW, "product_group_id": "G002"}])
+    items = build_result_create_items(report)
+    duplicates = [item for item in items if item.error_field in {"상품 ID 중복", "상품명 중복"}]
+    assert [item.related_source_rows for item in duplicates] == [[3], [2], [3], [2]]
+    assert "related_source_rows" not in report.result_dataframe.columns
+    assert all(item.related_source_rows == [] for item in items if item not in duplicates)
+
+
+def test_relationship_database_round_trip_and_v14_v15_dedup(database_session):
+    session, filenames = database_session
+    rows = [{**BASE_ROW, "product_group_id": f"G{i}"} for i in range(3)]
+    rows[0]["price"] = "0"
+    report = make_report(rows)
+    legacy_report = make_report(rows)
+    for row in legacy_report.result_records:
+        row["related_source_rows"] = None
+    file_hash = make_file_hash(uuid4().bytes)
+    run_ids = []
+    for version, current_report in [("14", legacy_report), ("15", report)]:
+        filename = unique_filename("relationships")
+        filenames.append(filename)
+        outcome = save_inspection_report(
+            session, source_filename=filename, report=current_report,
+            file_sha256=file_hash, inspection_version=version,
+        )
+        assert outcome.created
+        run_ids.append(outcome.inspection_run_id)
+        repeated = save_inspection_report(
+            session, source_filename=filename, report=current_report,
+            file_sha256=file_hash, inspection_version=version,
+        )
+        assert not repeated.created
+        assert repeated.inspection_run_id == outcome.inspection_run_id
+    assert run_ids[0] != run_ids[1]
+    detail = persistence_service.get_inspection_detail(session, inspection_run_id=run_ids[1])
+    assert [item.related_source_rows for item in detail.results] == [
+        item.related_source_rows for item in build_result_create_items(report)
+    ]
+    from api.routes.inspections import build_inspection_response, build_inspection_detail_response
+    for response in [
+        build_inspection_response(report, inspection_run_id=run_ids[1]),
+        build_inspection_detail_response(detail),
+    ]:
+        assert all("related_source_rows" not in item for item in response.model_dump()["results"])
+    from core.result_exporter import build_validation_result_csv
+    assert "related_source_rows" not in build_validation_result_csv(report.result_dataframe).decode("utf-8-sig").splitlines()[0]
+    stored = repositories.get_inspection_results_by_run_id(session, inspection_run_id=run_ids[1])
+    for rule in ["상품 ID 중복", "상품명 중복"]:
+        assert {row.source_row_number: row.related_source_rows for row in stored
+                if row.error_field == rule} == {2: [3, 4], 3: [2, 4], 4: [2, 3]}
+    ordinary = [row for row in stored if row.error_field not in {"상품 ID 중복", "상품명 중복"}]
+    assert ordinary
+    assert all(row.related_source_rows == [] for row in ordinary)
+    legacy = persistence_service.get_inspection_detail(session, inspection_run_id=run_ids[0])
+    assert all(item.related_source_rows is None for item in legacy.results)
+
+
+@pytest.mark.parametrize("explicit, expected", [(None, [3]), ([], []), ([4], [4])])
+def test_local_copilot_relationship_from_actual_persisted_detail(database_session, explicit, expected):
+    from services import inspection_copilot_service as copilot
+    session, filenames = database_session
+    report = make_report([{**BASE_ROW, "price": "0"}])
+    row = report.result_records[0]
+    row["오류 항목"] = "상품 ID 중복"
+    row["오류 이유"] = "product_id 'P001' is duplicated in rows 2, 3" if explicit is None else "product_id 'P001' is duplicated in rows 2, 99"
+    row["related_source_rows"] = explicit
+    filename = unique_filename("persisted_copilot")
+    filenames.append(filename)
+    outcome = save_inspection_report(
+        session, source_filename=filename, report=report,
+        inspection_version="14" if explicit is None else "15",
+    )
+    context = copilot.InspectionCopilotContext(session=session, current_run_id=outcome.inspection_run_id)
+    route = copilot.route_local_inspection_copilot_question("2번 행은 왜 오류야?")
+    pack = copilot.build_local_inspection_copilot_evidence_pack(context, route)
+    assert pack.data["source_row"]["related_source_rows"] == expected

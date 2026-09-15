@@ -216,6 +216,7 @@ def get_source_row_issues(
     context: InspectionCopilotContext,
     *,
     source_row_number: int,
+    include_related_source_rows: bool = False,
 ) -> dict[str, object]:
     detail = _get_detail(context)
     if detail is None:
@@ -237,6 +238,8 @@ def get_source_row_issues(
         "product_id": _mask_tool_text(first.product_id),
         "issues": [
             {
+                **({"related_source_rows": getattr(result, "related_source_rows", None)}
+                   if include_related_source_rows else {}),
                 "rule_code": result.error_field,
                 "severity": result.status,
                 "reason": _mask_tool_text(result.reason),
@@ -407,7 +410,7 @@ def route_local_inspection_copilot_question(
 def _project_persisted_related_source_rows(
     source_row_issues: dict[str, object],
 ) -> list[int]:
-    """Project only explicit duplicate-row relationships from saved issue reasons."""
+    """Prefer saved metadata; parse duplicate reasons only for legacy NULL rows."""
     source_row_number = source_row_issues.get("source_row_number")
     issues = source_row_issues.get("issues")
     if type(source_row_number) is not int or not isinstance(issues, list):
@@ -418,6 +421,13 @@ def _project_persisted_related_source_rows(
         if not isinstance(issue, dict):
             continue
         if issue.get("rule_code") not in _PERSISTED_DUPLICATE_ROW_RULE_REFERENCES:
+            continue
+        explicit_rows = issue.get("related_source_rows")
+        if explicit_rows is not None:
+            if isinstance(explicit_rows, list):
+                related_source_rows.update(
+                    row for row in explicit_rows if type(row) is int and row >= 2
+                )
             continue
         reason = issue.get("reason")
         if not isinstance(reason, str):
@@ -454,7 +464,10 @@ def build_local_inspection_copilot_evidence_pack(
     if route.question_type == LocalInspectionCopilotQuestionType.SOURCE_ROW:
         if route.source_row_number is None:
             raise ValueError("source-row route is missing a source row number")
-        issues = get_source_row_issues(context, source_row_number=route.source_row_number)
+        issues = get_source_row_issues(
+            context, source_row_number=route.source_row_number,
+            include_related_source_rows=True,
+        )
         evidence = (
             [
                 InspectionCopilotEvidence(

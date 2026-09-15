@@ -136,6 +136,7 @@ def test_inspection_results_columns_and_types():
         "recommendation",
         "risk_level",
         "source_row_number",
+        "related_source_rows",
         "created_at",
     }
     assert isinstance(columns.id.type, BigInteger)
@@ -248,3 +249,16 @@ def test_existing_apps_and_database_models_import_without_database_url(monkeypat
     assert streamlit_app is not None
     assert api_module.app.title == "CatalogGuard Lite API"
     assert db_models.InspectionRun.__tablename__ == "inspection_runs"
+
+
+def test_inspection_related_source_rows_schema_contract():
+    from sqlalchemy.dialects.postgresql import JSONB
+    from db.models import InspectionResult
+    column = InspectionResult.__table__.columns["related_source_rows"]
+    assert isinstance(column.type, JSONB)
+    assert column.type.none_as_null
+    assert column.nullable
+    assert column.server_default is None
+    constraint = next(c for c in InspectionResult.__table__.constraints
+                      if c.name == "ck_inspection_results_related_source_rows_array")
+    assert str(constraint.sqltext) == "related_source_rows IS NULL OR jsonb_typeof(related_source_rows) = 'array'"

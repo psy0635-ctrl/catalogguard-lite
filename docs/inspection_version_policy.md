@@ -2,9 +2,9 @@
 
 ## 목적과 범위
 
-`INSPECTION_VERSION`은 검수 결과의 의미를 구분하는 단순 증가 문자열입니다. 현재 값은 `"14"`이며, 규칙 결과가 달라지는 다음 변경에서는 `"15"`, `"16"`처럼 올립니다. 이 문서는 version model, semantic versioning, 자동 backfill 또는 cross-version comparison을 추가하지 않습니다.
+`INSPECTION_VERSION`은 검수 결과의 의미를 구분하는 단순 증가 문자열입니다. 현재 값은 `"15"`이며, 저장 결과가 달라지는 다음 변경에서는 `"16"`, `"17"`처럼 올립니다. 이 문서는 version model, semantic versioning, 자동 backfill 또는 cross-version comparison을 추가하지 않습니다.
 
-판단 기준은 변경의 이름이 아니라 **같은 CSV를 다시 검사했을 때 저장되는 검수 결과의 의미가 달라질 수 있는가**입니다. 여기서 결과는 run의 요약뿐 아니라 저장되는 문제 row의 `status`, `error_field`, `reason`, `recommendation`, `risk_level`, `product_group_id`, `product_id`, `source_row_number`를 포함합니다. `source_row_number`는 CSV header를 1로 보는 논리 record 번호이며, quoted multiline field도 하나의 record로 계산합니다. Run Comparison은 기존 일곱 판정 필드만 문제 identity로 사용하므로, source-row metadata 추가는 비교 identity를 바꾸지 않습니다.
+판단 기준은 변경의 이름이 아니라 **같은 CSV를 다시 검사했을 때 저장되는 검수 결과의 의미가 달라질 수 있는가**입니다. 여기서 결과는 run의 요약뿐 아니라 저장되는 문제 row의 `status`, `error_field`, `reason`, `recommendation`, `risk_level`, `product_group_id`, `product_id`, `source_row_number`, `related_source_rows`를 포함합니다. `source_row_number`는 CSV header를 1로 보는 논리 record 번호이며, quoted multiline field도 하나의 record로 계산합니다. Run Comparison은 기존 일곱 판정 필드만 문제 identity로 사용하므로, source-row metadata 추가는 비교 identity를 바꾸지 않습니다.
 
 ## 현재 구현 계약
 
@@ -64,6 +64,12 @@ Version을 올리지 않으면 같은 SHA와 version 13의 run 101이 dedup으�
 ### Version 14: source row identity
 
 Version 14는 각 `InspectionResult`에 nullable `source_row_number`를 저장하고 Detail API의 각 결과에도 같은 값을 반환합니다. 기존 version 13 run은 migration 뒤에도 `NULL`을 유지합니다. 같은 bytes를 다시 올릴 때 v13 run을 재사용하면 source row identity가 비어 있으므로, `(file_sha256, inspection_version)` dedup key의 version을 14로 올려 새 run을 생성합니다. 이 방식은 과거 결과를 수정하거나 원본 CSV를 보관하지 않으며, legacy detail의 `null`도 정직하게 유지합니다.
+
+### Version 15: explicit related source rows
+
+Version 15는 `duplicate_product_id` / `duplicate_product_name`의 관련 원본 행 관계를 `InspectionResult.related_source_rows` nullable JSONB metadata로 저장합니다. 관련 행은 2 이상의 정수만 허용하고 자기 행 제외·중복 제거·오름차순 정렬하며, 신규 일반 issue는 `[]`를 저장합니다. 기존 v14 이하 row는 `NULL` 그대로 유지하고 backfill하지 않습니다. Local Copilot은 명시 metadata가 있으면 빈 배열을 포함해 이를 source of truth로 사용하고, legacy `NULL`인 경우에만 기존 persisted reason parsing fallback을 유지합니다.
+
+같은 SHA의 v14 run은 명시 관계 metadata가 없으므로 version을 15로 올려 별도 run으로 저장합니다. 기존 reason, 판정 기준, Comparison identity, public API 응답과 화면·CSV 표시 컬럼은 유지합니다.
 
 ## 과거 run과 backfill
 

@@ -357,8 +357,11 @@ def test_find_duplicate_product_names_keeps_complete_issue_payload_and_order_for
         "product_name '기본 티셔츠' normalized to '기본티셔츠' duplicates rows "
         "2, 3, 4, 5 with product_ids 'P001, P002, P003, P004'"
     )
+    assert [issue.related_source_rows for issue in issues] == [
+        [3, 4, 5], [2, 4, 5], [2, 3, 5], [2, 3, 4],
+    ]
     issue_payloads = [
-        {field: value for field, value in asdict(issue).items() if field != "source_row_number"}
+        {field: value for field, value in asdict(issue).items() if field not in {"source_row_number", "related_source_rows"}}
         for issue in issues
     ]
     assert issue_payloads == [
@@ -1030,3 +1033,41 @@ def test_find_duplicate_variant_combinations_keeps_unregistered_values_distinct(
     ]
 
     assert find_duplicate_variant_combinations(products) == []
+
+
+@pytest.mark.parametrize("count", [2, 3])
+@pytest.mark.parametrize("detector", [find_duplicate_product_ids, find_duplicate_product_names])
+def test_duplicate_relationship_metadata(count, detector):
+    products = [make_product(product_group_id=f"G{i}", source_row_number=i)
+                for i in range(2, count + 2)]
+    issues = detector(products)
+    assert len(issues) == count
+    assert [issue.related_source_rows for issue in issues] == [
+        [row for row in range(2, count + 2) if row != issue.source_row_number]
+        for issue in issues
+    ]
+
+
+def test_duplicate_relationship_uses_logical_source_rows():
+    products = [make_product(source_row_number=4), make_product(source_row_number=9)]
+    assert [issue.related_source_rows for issue in find_duplicate_product_ids(products)] == [[9], [4]]
+
+
+def test_ordinary_issue_has_independent_empty_relationships():
+    from core.models import ValidationIssue
+    first = ValidationIssue("invalid_price", "error", "P1", "G1", "price")
+    second = ValidationIssue("invalid_price", "error", "P2", "G1", "price")
+    assert first.related_source_rows is not second.related_source_rows
+    first.related_source_rows.append(3)
+    assert second.related_source_rows == []
+
+
+def test_name_relationship_excludes_normal_option_outside_candidates():
+    products = [
+        make_product(product_id="P1", source_row_number=2),
+        make_product(product_id="P2", source_row_number=3),
+        make_product(product_id="P3", source_row_number=4, color="NAVY"),
+    ]
+    issues = find_duplicate_product_names(products)
+    assert [issue.source_row_number for issue in issues] == [2, 3]
+    assert [issue.related_source_rows for issue in issues] == [[3], [2]]

@@ -190,8 +190,9 @@ def test_find_category_mismatches_preserves_exact_issue_payload_and_order():
     ]
 
     issues = [asdict(issue) for issue in find_category_mismatches(products)]
+    assert all(issue["related_source_rows"] == [] for issue in issues)
     assert [
-        {field: value for field, value in issue.items() if field != "source_row_number"}
+        {field: value for field, value in issue.items() if field not in {"source_row_number", "related_source_rows"}}
         for issue in issues
     ] == [
         {
