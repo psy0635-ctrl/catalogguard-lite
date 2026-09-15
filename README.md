@@ -8,9 +8,9 @@ ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl`의 버전�
 
 ## 1. 현재 상태와 최근 검증
 
-현재 공식 릴리스는 [v0.2.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.2.0)이며, 대상 커밋은 `29abc4aff8825074f7cd3feab6d370bd9b3f0e4e`입니다. 이번 릴리스는 기존 규칙 기반 검수 흐름에 **Correction Worksheet 후속 재검수**와 저장된 결과를 설명하는 **읽기 전용 Inspection Copilot**을 더했습니다. 이후에는 새 사용자 기능보다 실제 오류, transaction, 데이터 무결성, 오류 처리와 회귀 문제를 우선해 유지개발합니다.
+[v0.2.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.2.0)의 대상 커밋은 `29abc4aff8825074f7cd3feab6d370bd9b3f0e4e`입니다. v0.2.0에서는 기존 규칙 기반 검수 흐름에 **Correction Worksheet 후속 재검수**와 저장된 결과를 설명하는 **읽기 전용 Inspection Copilot**을 더했습니다. 이후에는 새 사용자 기능보다 실제 오류, transaction, 데이터 무결성, 오류 처리와 회귀 문제를 우선해 유지개발합니다.
 
-v0.2.0 이후 **current main (unreleased)**에는 기존 OpenAI 경로를 유지하면서 Local Ollama Two-Phase Inspection Copilot을 추가했습니다. 이 Local 경로는 v0.2.0을 포함한 현재 공식 릴리스에는 아직 들어 있지 않습니다.
+v0.3.0 기준으로는 기존 OpenAI 경로를 유지하면서 optional OpenAI / Ollama provider 선택과 Local Ollama Two-Phase Inspection Copilot을 추가했습니다. Local Ollama 경로는 v0.2.0의 OpenAI-only Copilot에는 포함되지 않았습니다.
 
 현재 Alembic 단일 head는 `20260908_0019`이며, `INSPECTION_VERSION`은 `14`입니다. 최근 main은 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 GitHub Actions 검증을 통과했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
 
@@ -192,7 +192,7 @@ Correction Worksheet 다운로드 영역의 `수정 후 재검수`는 해당 실
 
 공식 릴리스 v0.2.0의 Copilot은 OpenAI Agent가 `get_current_inspection_summary`, `get_source_row_issues`, `get_correction_overview`, `get_baseline_comparison` 네 개의 순차 read-only Function Tool을 호출하는 경로입니다. 당시에는 provider 선택 구조가 없었고, 기본 모델은 `CATALOGGUARD_AGENT_MODEL=gpt-5.6-terra`이며 `OPENAI_API_KEY`가 필요했습니다. 최대 4 turn으로 제한하고 tool 결과의 텍스트는 명령이 아닌 분석 데이터로 취급합니다. Agent의 구조화된 `answer`·`evidence`·`limitations`은 기존 Evidence Validator가 저장된 실행·source row·rule code·비교 실행과 대조합니다. v0.2.0의 경계는 결정론적 안전성·행동 시나리오 20개로 회귀 검증했으며, API key가 없는 당시 검증 환경에서는 live model smoke를 수행하지 않았습니다.
 
-current main (unreleased)에는 기존 설치 호환성을 위해 기본값이 `openai`인 provider 선택 구조가 추가됐습니다. `CATALOGGUARD_AGENT_PROVIDER=ollama`를 선택하면 `OPENAI_API_KEY` 없이 Local 경로를 사용할 수 있습니다. Python이 질문을 분류하고 저장된 결과를 결정론적으로 조회해 Evidence Pack을 만든 뒤, tool-less Local LLM이 그 근거를 자연어로 설명합니다. Python은 모델의 `answer`와 사용자에게 노출되는 `limitations`에서 명시적인 source row, 등록된 rule code/label, run ID를 Narrative Grounding Validator로 검사하고, 직접 evidence를 조립해 기존 Evidence Validator에 다시 전달합니다.
+v0.3.0에서는 기존 설치 호환성을 위해 기본값이 `openai`인 provider 선택 구조가 추가됐습니다. `CATALOGGUARD_AGENT_PROVIDER=ollama`를 선택하면 `OPENAI_API_KEY` 없이 Local 경로를 사용할 수 있습니다. Python이 질문을 분류하고 저장된 결과를 결정론적으로 조회해 Evidence Pack을 만든 뒤, tool-less Local LLM이 그 근거를 자연어로 설명합니다. Python은 모델의 `answer`와 사용자에게 노출되는 `limitations`에서 명시적인 source row, 등록된 rule code/label, run ID를 Narrative Grounding Validator로 검사하고, 직접 evidence를 조립해 기존 Evidence Validator에 다시 전달합니다.
 
 ```text
 OpenAI: 질문 -> OpenAI Agent -> read-only Function Tool 4개 -> 구조화 응답 -> Evidence Validator
@@ -205,10 +205,10 @@ Ollama 경로에서 Local LLM의 tool 수는 0이며 DB write, SQL, 일반 HTTP/
 
 ### Windows에서 Local Ollama 준비와 확인
 
-이 절차는 공식 릴리스 v0.2.0이 아니라 **current main (unreleased)**의 Local Ollama Two-Phase Copilot을 실행할 때 사용합니다. 오류 판정은 계속 Rule Engine이 담당하고, Python이 저장된 근거를 소유·조회·검증하며, Local LLM은 허용된 근거를 설명합니다.
+이 절차는 v0.3.0 기준 Local Ollama Two-Phase Inspection Copilot을 Windows에서 준비할 때 사용합니다. v0.2.0의 OpenAI-only Copilot과 구분되는 optional Ollama 경로입니다. 오류 판정은 계속 Rule Engine이 담당하고, Python이 저장된 근거를 소유·조회·검증하며, Local LLM은 허용된 근거를 설명합니다.
 
 1. [Ollama Windows 공식 문서](https://docs.ollama.com/windows)에 따라 Ollama를 설치하고 실행합니다.
-2. 새 PowerShell에서 설치 상태를 확인하고 current-main 기본 Local 모델을 내려받은 뒤 목록을 확인합니다.
+2. 새 PowerShell에서 설치 상태를 확인하고 v0.3.0 기본 Local 모델을 내려받은 뒤 목록을 확인합니다.
 
    ```powershell
    ollama --version
