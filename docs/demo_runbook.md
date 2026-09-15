@@ -174,9 +174,9 @@ Copilot 질문은 아래 네 개까지만 준비한다.
 
 설명 대사: "오류 판정은 결정론적 Rule Engine이 하고, Copilot은 저장된 결과를 네 개의 read-only Function Tool로 확인해 근거와 한계를 붙여 설명합니다. 새 카테고리나 규칙 판정 요청은 모델을 호출하기 전에 거절하며, 이는 완전한 prompt-injection 방어나 AI 정확도 보장이 아니라 권한과 근거를 좁힌 설계입니다."
 
-### Optional current-main Local Copilot demo (unreleased)
+### Optional v0.3.0 Local Copilot demo
 
-이 구간은 공식 v0.2.0 재현이 아니라 **v0.2.0 이후 current main에 추가된 미릴리스 선택 시연**이다. 위 v0.2.0 OpenAI follow-up flow를 대체하거나 v0.2.0이 두 provider를 지원했다고 설명하지 않는다.
+이 구간은 **v0.3.0 기준 optional Local Ollama Copilot 시연**이다. 위 v0.2.0 OpenAI follow-up flow를 대체하거나 v0.2.0이 두 provider를 지원했다고 설명하지 않는다.
 
 시연 전에 로컬 Ollama와 사용할 모델을 준비하고, 실제 secret이나 개인 경로를 기록하지 않은 `.env`에 아래 provider 설정을 둔 뒤 애플리케이션을 재시작한다. `CATALOGGUARD_AGENT_MODEL`을 생략하면 Ollama provider의 기본 모델은 `qwen3.5:9b`이고 base URL 기본값은 아래와 같다.
 
