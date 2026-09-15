@@ -203,6 +203,47 @@ Ollama 경로에서 Local LLM의 tool 수는 0이며 DB write, SQL, 일반 HTTP/
 
 `Reasoning(effort="none")`은 4096-token context를 내부 reasoning이 소모해 structured JSON 전에 `finish_reason=length`와 `ModelBehaviorError`가 발생하던 문제를 줄이기 위해 **Ollama 경로에만** 적용합니다. SOURCE_ROW Evidence Pack의 `related_source_rows`는 persisted duplicate reason에 이미 있는 관계 행을 누락해 정상 설명이 차단되던 문제를 보완합니다. `duplicate_product_id`/`상품 ID 중복`, `duplicate_product_name`/`상품명 중복`과 기존의 엄격한 reason 형식만 bounded parsing하며, 2 이상의 정수에서 현재 질의 행을 제거한 뒤 중복 제거·정렬합니다. 일반 숫자를 관계 행으로 해석하지 않습니다. 관계 metadata가 DB에 별도 저장되지 않아 reason 문자열에서 제한적으로 복원하는 것은 현재 known limitation이며, 관계형 rule이 늘어나면 명시적 relationship metadata 저장을 검토할 수 있습니다.
 
+### Windows에서 Local Ollama 준비와 확인
+
+이 절차는 공식 릴리스 v0.2.0이 아니라 **current main (unreleased)**의 Local Ollama Two-Phase Copilot을 실행할 때 사용합니다. 오류 판정은 계속 Rule Engine이 담당하고, Python이 저장된 근거를 소유·조회·검증하며, Local LLM은 허용된 근거를 설명합니다.
+
+1. [Ollama Windows 공식 문서](https://docs.ollama.com/windows)에 따라 Ollama를 설치하고 실행합니다.
+2. 새 PowerShell에서 설치 상태를 확인하고 current-main 기본 Local 모델을 내려받은 뒤 목록을 확인합니다.
+
+   ```powershell
+   ollama --version
+   ollama pull qwen3.5:9b
+   ollama list
+   ```
+
+   `ollama list`에 `qwen3.5:9b`가 있어야 합니다. 모델 다운로드 정보와 최신 tag는 [qwen3.5 공식 Ollama library](https://ollama.com/library/qwen3.5)에서 확인합니다. registry에 표시되는 다운로드 크기는 CatalogGuard가 보장하는 최소 disk/RAM/VRAM 요구량이 아닙니다.
+3. 사용할 provider에 맞는 설정값 한 묶음만 선택합니다. OpenAI 예시의 `YOUR_OPENAI_API_KEY`는 실제 secret이 아닌 placeholder이며 실제 키로 교체해야 합니다.
+
+   OpenAI:
+
+   ```dotenv
+   CATALOGGUARD_AGENT_PROVIDER=openai
+   CATALOGGUARD_AGENT_MODEL=gpt-5.6-terra
+   OPENAI_API_KEY=YOUR_OPENAI_API_KEY
+   ```
+
+   Ollama:
+
+   ```dotenv
+   CATALOGGUARD_AGENT_PROVIDER=ollama
+   CATALOGGUARD_AGENT_MODEL=qwen3.5:9b
+   CATALOGGUARD_OLLAMA_BASE_URL=http://localhost:11434/v1/
+   OPENAI_API_KEY=
+   ```
+
+   Ollama provider는 `OPENAI_API_KEY`를 사용하지 않으며 OpenAI로 자동 fallback하지 않습니다. `CATALOGGUARD_AGENT_MODEL`을 비우거나 설정하지 않으면 `openai`는 `gpt-5.6-terra`, `ollama`는 `qwen3.5:9b`를 provider별 기본값으로 사용합니다. 반대로 non-empty model 값은 provider 기본값보다 우선하므로 provider를 바꿀 때 의도하지 않은 model override가 남지 않았는지 확인합니다. `.env.example`은 이 실수를 막기 위해 model 값을 비워 둡니다.
+
+   위 블록은 `.env` 형식의 설정 예시입니다. 현재 코드는 로컬 `.env` 파일을 자동으로 읽지 않으므로, 일반 PowerShell 실행에서는 14장의 방식대로 각 값을 `$env:변수명="값"`으로 설정한 뒤 프로세스를 시작합니다.
+4. 환경변수를 변경했다면 이미 실행 중인 FastAPI와 Streamlit 프로세스를 종료하고, 각각 16장과 17장의 기존 명령으로 다시 시작합니다. 실행 중인 프로세스가 변경값을 자동으로 다시 읽는다고 가정하지 않습니다.
+5. 저장된 검수 결과가 있는 화면에서 Copilot에 `이번 검수 결과를 요약해줘`처럼 지원되는 질문을 입력해 Local 응답을 확인합니다. 행 설명은 현재 결과에 실제로 존재하는 행 번호를 사용합니다. 더 자세한 시연 순서는 [Local Copilot 데모 runbook](docs/demo_runbook.md)을 참고하세요.
+
+[Ollama OpenAI compatibility 공식 문서](https://docs.ollama.com/api/openai-compatibility)는 사용 중인 `/v1` 호환 endpoint의 기준 문서입니다. 아래 Home PC bounded regression에서 사용한 Ollama 0.34.0은 **검증 당시 버전**일 뿐 최소 지원 버전이나 이후 버전 전체의 호환성 보장이 아닙니다. 다른 버전은 호환성을 전수 검증하지 않았습니다. GPU도 CatalogGuard Local Copilot의 명시적 필수 조건으로 정의하지 않으며 장비에 따라 응답 속도가 달라질 수 있습니다. CPU-only 환경의 latency는 이 프로젝트에서 검증하지 않았습니다.
+
 [PR #91](https://github.com/psy0635-ctrl/catalogguard-lite/pull/91)의 Home PC bounded regression은 RTX 5070, Ollama 0.34.0, `qwen3.5:9b` Q4_K_M, context 4096, timeout 60초와 동일 fixed-seed Medium fixture 조건에서 수행했습니다. CORRECTION은 100/100 성공, `ModelBehaviorError`·`finish_reason=length`·timeout 0, Evidence Validator 100/100 PASS였고 latency는 mean 1.944초, median 1.805초, p95 2.736초, p99 3.393초였습니다. Narrative Grounding 30회는 28 PASS와 `가격 이상치 -> 가격 오류` 2 true REJECT, false rejection 0, 사용자 노출 fabricated reference 0이었습니다. SOURCE_ROW는 projection 전 20회 중 8 PASS·12 REJECT(2 true hallucination, 10 projection false rejection)였고 보완 후 20/20 PASS, projection false rejection 0, 사용자 노출 fabricated row 0이었습니다. 당시 전체 자동화 검증은 `2450 passed, 382 skipped, 13 deselected, 0 failed`와 기존 Starlette deprecation warning 1건이었습니다. 이는 특정 장비와 fixture의 회귀 결과이며 Local LLM 정확도, production 안정성 또는 모든 환경의 latency를 보장하지 않습니다.
 
 검수 이력의 현재 목록에서는 두 실행을 선택해 `GET /api/v1/inspections/comparison`을 버튼 클릭 시에만 호출할 수 있습니다. 변화량은 항상 `비교 - 기준`이며, 문제 row의 저장 필드 전체를 multiset으로 비교합니다. 같은 `inspection_version`끼리만 비교할 수 있고, `base_only`/`target_only`는 각각 한쪽 실행에만 저장된 문제를 뜻할 뿐 해결됨·신규 오류를 의미하지 않습니다. 정상 상품 전체 row는 저장하지 않으므로 파일에서 빠진 상품을 구분할 수 없고, 파일 규모가 다르면 문제 수 감소만으로 품질 개선을 판단할 수 없습니다. changed issue item은 기존 상세 API처럼 전체를 반환하며 별도 pagination은 아직 없습니다.
