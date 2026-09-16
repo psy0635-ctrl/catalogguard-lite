@@ -217,7 +217,7 @@ def test_readiness_failure_logs_database_event_and_completed_503(
 
     monkeypatch.setattr(
         api_main,
-        "check_database_connection",
+        "check_database_readiness",
         database_is_unavailable,
     )
 
@@ -251,6 +251,23 @@ def test_readiness_failure_logs_database_event_and_completed_503(
     assert "secret-password" not in application_log_text(captured_api_logs)
     assert "private-host" not in application_log_text(captured_api_logs)
     assert internal_error not in application_log_text(captured_api_logs)
+
+
+def test_schema_readiness_failure_logs_safe_distinct_event(captured_api_logs, monkeypatch):
+    from db.session import DatabaseSchemaNotReadyError
+
+    def schema_is_unavailable():
+        raise DatabaseSchemaNotReadyError("postgresql://user:secret-password@private-host/db")
+
+    monkeypatch.setattr(api_main, "check_database_readiness", schema_is_unavailable)
+    response = client.get("/ready")
+    request_events = events_for_request(captured_api_logs, response.headers[REQUEST_ID_HEADER])
+    schema_events = [event for event in request_events if event["event"] == "database_schema_readiness_failed"]
+    assert response.status_code == 503
+    assert len(schema_events) == 1
+    assert schema_events[0]["error_type"] == "DatabaseSchemaNotReadyError"
+    log_text = application_log_text(captured_api_logs)
+    assert all(value not in log_text for value in ("secret-password", "private-host", "postgresql://"))
 
 
 def test_post_request_body_is_not_recorded(captured_api_logs) -> None:

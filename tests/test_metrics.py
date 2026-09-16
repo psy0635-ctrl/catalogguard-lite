@@ -189,7 +189,7 @@ def test_unmatched_route_uses_fixed_label(monkeypatch):
 
 def test_health_ready_metrics_paths_excluded_from_http_counter(monkeypatch):
     monkeypatch.setenv(METRICS_ENV_VAR, "true")
-    monkeypatch.setattr(api_main, "check_database_connection", lambda: None)
+    monkeypatch.setattr(api_main, "check_database_readiness", lambda: None)
 
     client.get("/health")
     client.get("/ready")
