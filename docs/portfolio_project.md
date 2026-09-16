@@ -1524,6 +1524,8 @@ GET /ready  = FastAPI 실행 중 + PostgreSQL 연결(SELECT 1) 확인
 
 `/health`를 readiness에 쓰면 DB 장애 때는 애초에 그 사실을 Kubernetes가 알 수 없고, `/ready`를 liveness에 쓰면 DB가 잠깐 끊겼다는 이유만으로 정상적인 FastAPI 프로세스까지 계속 재시작당할 수 있습니다. 두 endpoint의 Python 로직은 이번 작업에서 변경하지 않았습니다. `catalogguard-api` `Service`(ClusterIP `:8000`)로 Pod를 Kubernetes 내부에 노출했습니다.
 
+현재 Maintenance 구현에서는 `/ready`가 PostgreSQL 연결뿐 아니라 DB Alembic revision과 repository single head의 일치 여부도 확인합니다. Migration 미적용·불일치 시에는 기존 안전한 `503` 응답을 반환하며, `/health`의 프로세스 liveness 역할은 유지합니다.
+
 ### 실제 Kubernetes 검증
 
 manifest 작성에서 끝내지 않고 GitHub Actions에 `kubernetes-smoke` job을 추가해 실제 kind cluster에서 검증했습니다.

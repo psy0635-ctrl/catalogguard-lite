@@ -1,10 +1,15 @@
 # 역할: SQLAlchemy 엔진과 세션 팩토리를 관리하고 DB 연결 상태를 확인합니다.
 from collections.abc import Generator
+from functools import lru_cache
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from config.database import get_database_url, normalize_database_url
+from config.settings import BASE_DIR
 
 
 # 앱에서 기본으로 사용할 엔진과 세션 팩토리는 필요해지는 순간에만 만듭니다.
@@ -51,6 +56,42 @@ def check_database_connection() -> None:
     engine = get_engine()
     with engine.connect() as connection:
         connection.execute(text("SELECT 1"))
+
+
+class DatabaseSchemaNotReadyError(RuntimeError):
+    """The database or migration repository is not at a single matching head."""
+
+
+@lru_cache(maxsize=1)
+def get_expected_alembic_head() -> str:
+    # Resolve paths from the application, independent of the process working directory.
+    try:
+        config = Config(str(BASE_DIR / "alembic.ini"))
+        config.set_main_option("script_location", str(BASE_DIR / "alembic"))
+        heads = ScriptDirectory.from_config(config).get_heads()
+    except Exception:
+        raise DatabaseSchemaNotReadyError("Migration repository cannot be read") from None
+    if len(heads) != 1:
+        raise DatabaseSchemaNotReadyError("Migration repository must have a single head")
+    return heads[0]
+
+
+def check_database_schema() -> None:
+    expected_head = get_expected_alembic_head()
+    try:
+        with get_engine().connect() as connection:
+            revisions = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalars().all()
+    except SQLAlchemyError:
+        raise DatabaseSchemaNotReadyError("Database revision cannot be read") from None
+    if revisions != [expected_head]:
+        raise DatabaseSchemaNotReadyError("Database revision does not match repository head")
+
+
+def check_database_readiness() -> None:
+    check_database_connection()
+    check_database_schema()
 
 
 def get_session_factory() -> sessionmaker[Session]:

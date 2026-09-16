@@ -1486,7 +1486,7 @@ docker compose --env-file .env.local -f compose.local.yaml exec api `
 
 #### Health와 readiness 확인
 
-`/health`는 API 프로세스를, `/ready`는 PostgreSQL 연결까지 확인합니다. 두 응답이 HTTP `200`이고 `/ready` 본문의 `database`가 `ok`인지, 두 응답에 `X-Request-ID`가 있는지 확인합니다.
+`/health`는 API 프로세스를, `/ready`는 PostgreSQL 연결과 DB revision의 repository Alembic single head 일치 여부를 확인합니다. 두 응답이 HTTP `200`이고 `/ready` 본문의 `database`가 `ok`인지, 두 응답에 `X-Request-ID`가 있는지 확인합니다.
 
 ```powershell
 $healthResponse = Invoke-WebRequest `
@@ -1598,7 +1598,7 @@ DATABASE_URL: Postgres 서비스의 DATABASE_URL을 Reference Variable로 연결
 
 실제 `DATABASE_URL` 값이나 비밀번호는 저장소에 기록하지 않습니다. Start Command에는 운영 배포용으로 `--reload`, `127.0.0.1`, 고정 포트 `8000`을 넣지 않습니다. `--no-access-log`는 query string을 포함할 수 있는 Uvicorn 기본 요청 접근 로그만 비활성화하며, FastAPI 서버 시작 로그와 애플리케이션이 직접 기록하는 요청별 구조화 로그는 계속 유지합니다. `/health`는 FastAPI 프로세스 상태만 빠르게 확인하며 PostgreSQL 연결까지 확인하지 않습니다.
 
-Railway Healthcheck Path는 계속 `/health`로 유지합니다. `/ready`는 FastAPI와 PostgreSQL 연결 상태를 함께 확인하며, 코드 배포 후 `/ready` 응답을 별도로 확인해야 합니다.
+Railway Healthcheck Path는 계속 `/health`로 유지합니다. `/ready`는 FastAPI와 PostgreSQL 연결 상태 및 현재 Alembic schema head 일치 여부를 함께 확인하며, 코드 배포 후 `/ready` 응답을 별도로 확인해야 합니다.
 
 Railway가 제공하는 driverless `postgresql://` 형식의 `DATABASE_URL`은 애플리케이션에서 `postgresql+psycopg://`로 정규화해 SQLAlchemy가 설치된 `psycopg` 드라이버를 사용하게 합니다.
 
@@ -1656,6 +1656,8 @@ readinessProbe -> GET /ready   (PostgreSQL 연결까지 확인 — DB에 연결�
 ```
 
 두 endpoint의 Python 로직은 이번 작업에서 변경하지 않았습니다. API·Migration Pod 모두 기존 Dockerfile의 UID와 동일한 `runAsUser: 10001`(non-root), `allowPrivilegeEscalation: false`로 실행됩니다. `catalogguard-secrets`는 manifest에 하드코딩된 값 없이 `secretKeyRef`(name+key)만 참조하며, 실제 값은 GitHub Actions 실행마다 `kubectl create secret generic`으로 새로 생성합니다(YAML 자체는 commit하지 않음).
+
+현재 Maintenance 구현의 `/ready`는 연결과 DB revision의 repository Alembic single head 일치 여부를 함께 확인합니다(아래 API 설명 참고).
 
 `.github/workflows/test.yml`의 `kubernetes-smoke` job은 kind와 kubectl을 고정 버전으로 설치한 뒤(`releases/latest`·`stable.txt` 같은 동적 조회 없이 `KIND_VERSION`/`KUBECTL_VERSION`/`KIND_NODE_IMAGE`를 job `env:`에 고정), 실제 cluster에서 위 흐름 전체를 검증합니다.
 
@@ -1793,9 +1795,9 @@ FastAPI 서버 상태를 확인합니다. PostgreSQL 연결을 확인하는 엔�
 
 ### `GET /ready`
 
-FastAPI 프로세스와 PostgreSQL 연결 상태를 함께 확인합니다. 기존 SQLAlchemy 엔진으로 `SELECT 1`을 실행하며, 성공하면 HTTP `200`과 `database: "ok"`를 반환하고 연결 또는 쿼리가 실패하면 내부 오류 내용을 노출하지 않고 HTTP `503`과 `database: "unavailable"`을 반환합니다.
+기존 SQLAlchemy 엔진으로 PostgreSQL 연결(`SELECT 1`)과 `alembic_version`의 revision이 repository Alembic single head와 일치하는지 확인합니다. Expected head는 작업 디렉터리와 무관한 절대 경로로 migration chain에서 읽고 프로세스 내에서 캐시합니다. 두 조건을 만족하면 기존 HTTP `200`과 `database: "ok"`를 유지합니다. 연결 실패, version table 없음, revision 미적용·불일치, repository 또는 DB의 multiple head는 내부 오류 내용을 노출하지 않고 기존 HTTP `503`과 `database: "unavailable"`을 반환합니다.
 
-공개 확인 주소는 https://catalogguard-lite-production.up.railway.app/ready 입니다. 운영 배포에서 `/health`와 `/ready`가 HTTP `200`을 반환하고 `/ready`의 `database`가 `"ok"`인지 확인합니다. Railway Healthcheck Path는 `/health`로 유지합니다. `/health`, `/ready`는 `POST /api/v1/auth/login`과 함께 로그인 없이 접근할 수 있는 유일한 endpoint입니다. Kubernetes에서는 이 endpoint를 `readinessProbe`로 사용해, PostgreSQL에 연결할 수 있을 때만 Service가 해당 Pod로 트래픽을 보내도록 합니다.
+공개 확인 주소는 https://catalogguard-lite-production.up.railway.app/ready 입니다. 운영 배포에서 `/health`와 `/ready`가 HTTP `200`을 반환하고 `/ready`의 `database`가 `"ok"`인지 확인합니다. Railway Healthcheck Path는 `/health`로 유지합니다. `/health`, `/ready`는 `POST /api/v1/auth/login`과 함께 로그인 없이 접근할 수 있는 유일한 endpoint입니다. Kubernetes에서는 이 endpoint를 `readinessProbe`로 사용해, PostgreSQL 연결과 현재 Alembic schema head 일치가 확인될 때만 Service가 해당 Pod로 트래픽을 보내도록 합니다.
 
 ### `GET /metrics`
 

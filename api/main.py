@@ -20,7 +20,7 @@ from config.metrics import (
     is_metrics_enabled,
     record_http_request,
 )
-from db.session import check_database_connection
+from db.session import DatabaseSchemaNotReadyError, check_database_readiness
 
 
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -147,12 +147,16 @@ def health_check() -> dict[str, str]:
 @app.get("/ready")
 def readiness_check(request: Request) -> dict[str, str]:
     try:
-        check_database_connection()
+        check_database_readiness()
     except Exception as error:
         log_event(
             api_logger,
             logging.ERROR,
-            event="database_readiness_failed",
+            event=(
+                "database_schema_readiness_failed"
+                if isinstance(error, DatabaseSchemaNotReadyError)
+                else "database_readiness_failed"
+            ),
             request_id=request.state.request_id,
             error_type=type(error).__name__,
         )
