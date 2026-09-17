@@ -1180,6 +1180,7 @@ async def create_etl_load_run(
             initial_source_type=request_source_type,
             # 업로드는 파일명이 곧 locator입니다. 디렉터리 경로는 넘기지 않습니다.
             initial_source_ref=_upload_source_ref(file.filename),
+            allowed_input_formats=("csv", "xlsx"),
         )
     except ETLProfileNotFoundError:
         record_web_etl_run("failed")

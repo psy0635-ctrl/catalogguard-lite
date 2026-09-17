@@ -9,7 +9,7 @@ from core.upload_validator import validate_csv_file_size, validate_csv_filename
 from db.models import ETLLoadRun
 from db.etl_profile_activation_service import end_activation_read_transaction
 from etl.db_loader import load_standard_csv
-from etl.pipeline import run_pipeline
+from etl.pipeline import ETLPipelineError, run_pipeline
 from etl.profile_loader import get_profile_path
 
 
@@ -51,6 +51,7 @@ def run_web_etl(
     actor_username: str | None = None,
     initial_source_type: str = ETL_INITIAL_SOURCE_TYPE_UNKNOWN,
     initial_source_ref: str | None = None,
+    allowed_input_formats: tuple[str, ...] = ("csv",),
 ) -> ETLWebRunOutcome:
     # run_pipeline/load_standard_csv are the same functions etl.cli/etl.load_cli call;
     # this only bridges an in-memory upload into their existing file-based contract.
@@ -65,7 +66,13 @@ def run_web_etl(
     # 조용히 버리지 않고 먼저 소리를 냅니다.
     end_activation_read_transaction(session)
 
-    validate_csv_filename(source_filename)
+    suffix = Path(_leaf_filename(source_filename)).suffix.casefold().removeprefix(".")
+    if suffix not in allowed_input_formats:
+        if allowed_input_formats == ("csv",):
+            validate_csv_filename(source_filename)
+        raise ETLPipelineError("CSV 또는 XLSX 파일만 업로드할 수 있습니다.")
+    if suffix == "csv":
+        validate_csv_filename(source_filename)
     validate_csv_file_size(input_bytes)
 
     with tempfile.TemporaryDirectory(prefix="catalogguard_web_etl_") as temp_dir:
@@ -76,7 +83,14 @@ def run_web_etl(
         summary_path = temp_path / "summary.json"
         input_path.write_bytes(input_bytes)
 
-        run_pipeline(input_path, profile_path, output_path, rejects_path, summary_path)
+        run_pipeline(
+            input_path,
+            profile_path,
+            output_path,
+            rejects_path,
+            summary_path,
+            allowed_input_formats=allowed_input_formats,
+        )
 
         outcome = load_standard_csv(
             session,

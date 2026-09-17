@@ -2191,6 +2191,17 @@ def test_etl_web_run_profile_dropdown_lists_allowlisted_profiles(monkeypatch):
     # include_inactive=True로 한 번 더 부르는 것과 구분됩니다.
     assert {"include_inactive": False} in api_client.etl_profiles_calls
     assert api_client.etl_profiles_calls.count({"include_inactive": False}) == 1
+    uploader = next(
+        widget
+        for widget in app.file_uploader
+        if widget.key == "etl_web_run_upload_file"
+    )
+    assert uploader.label == "공급사 CSV / XLSX 파일"
+    assert uploader.allowed_type == [".csv", ".xlsx"]
+    assert any(
+        "앞자리 0을 보존" in caption.value
+        for caption in app.caption
+    )
 
 
 def test_etl_web_run_shows_selected_profile_detail_before_upload(monkeypatch):
@@ -2381,6 +2392,44 @@ def test_submit_etl_web_run_success_invalidates_history_cache_but_keeps_promotio
     # Promotion cache must be left untouched by a successful ETL web run.
     assert session_state["catalog_promotion_preview_response"] == {"etl_load_run_id": 1}
     assert session_state["catalog_promotion_history_response"] == {"items": []}
+
+
+def test_submit_etl_web_run_sends_xlsx_bytes_unchanged():
+    from unittest.mock import Mock
+
+    from ui.etl_load_history import _submit_etl_web_run
+
+    api_client = FakeEtlApiClient()
+    xlsx_bytes = b"PK\x03\x04synthetic-xlsx-bytes"
+    uploaded_file = Mock(name="vendor.xlsx")
+    uploaded_file.name = "vendor.xlsx"
+    uploaded_file.getvalue.return_value = xlsx_bytes
+
+    class _Session(dict):
+        def get(self, key, default=None):
+            return dict.get(self, key, default)
+
+    import streamlit as st
+
+    session_state = _Session()
+    original_session_state = st.session_state
+    try:
+        st.session_state = session_state
+        _submit_etl_web_run(
+            api_client,
+            profile_id="sample_fashion_vendor_v1",
+            uploaded_file=uploaded_file,
+        )
+    finally:
+        st.session_state = original_session_state
+
+    assert api_client.etl_run_calls == [
+        {
+            "profile_id": "sample_fashion_vendor_v1",
+            "source_filename": "vendor.xlsx",
+            "file_content": xlsx_bytes,
+        }
+    ]
 
 
 RECONCILIATION_RESPONSE = {

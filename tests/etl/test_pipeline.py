@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from openpyxl import Workbook
 
 from config.settings import BASE_DIR
 from core.inspection_service import inspect_dataframe
@@ -163,6 +164,40 @@ def test_run_pipeline_writes_standard_reject_and_summary_files(tmp_path):
         "price",
         "stock",
     ]
+
+
+def test_run_pipeline_accepts_xlsx_only_with_opt_in_and_preserves_lineage(tmp_path):
+    _csv_path, profile_path = write_profile_and_source(tmp_path)
+    input_path = tmp_path / "supplier.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append(SOURCE_COLUMNS)
+    worksheet.append(SOURCE_ROWS[0])
+    worksheet.append([None] * len(SOURCE_COLUMNS))
+    worksheet.append(SOURCE_ROWS[1])
+    workbook.save(input_path)
+    workbook.close()
+    output_path, rejects_path, summary_path = output_paths(tmp_path)
+
+    with pytest.raises(ETLPipelineError, match="format is not supported"):
+        run_pipeline(input_path, profile_path, output_path, rejects_path, summary_path)
+
+    result = run_pipeline(
+        input_path,
+        profile_path,
+        output_path,
+        rejects_path,
+        summary_path,
+        allowed_input_formats=("csv", "xlsx"),
+    )
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    with rejects_path.open(encoding="utf-8", newline="") as rejects_file:
+        rejected_rows = list(csv.DictReader(rejects_file))
+    assert (result.total_rows, result.loaded_rows, result.rejected_rows) == (2, 1, 1)
+    assert summary["input_filename"] == "supplier.xlsx"
+    assert summary["input_file_sha256"] == hashlib.sha256(input_path.read_bytes()).hexdigest()
+    assert rejected_rows[0]["source_row_number"] == "4"
 
 
 def test_pipeline_records_known_application_commit_sha(tmp_path, monkeypatch):
