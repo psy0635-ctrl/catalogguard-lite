@@ -1,0 +1,227 @@
+{
+  "issues": [
+    {
+      "case": "missing image path",
+      "source_row_number": 7,
+      "rule": "missing_required_field",
+      "field": "image_path",
+      "severity": "error"
+    },
+    {
+      "case": "non-standard color alias",
+      "source_row_number": 8,
+      "rule": "non_standard_color",
+      "field": "color",
+      "severity": "warning"
+    },
+    {
+      "case": "non-standard size alias",
+      "source_row_number": 9,
+      "rule": "non_standard_size",
+      "field": "size",
+      "severity": "warning"
+    },
+    {
+      "case": "invalid category",
+      "source_row_number": 10,
+      "rule": "invalid_category",
+      "field": "category",
+      "severity": "error"
+    },
+    {
+      "case": "non-numeric stock",
+      "source_row_number": 11,
+      "rule": "invalid_stock",
+      "field": "stock",
+      "severity": "error"
+    },
+    {
+      "case": "out of stock",
+      "source_row_number": 12,
+      "rule": "out_of_stock",
+      "field": "stock",
+      "severity": "warning"
+    },
+    {
+      "case": "non-numeric price",
+      "source_row_number": 13,
+      "rule": "invalid_price",
+      "field": "price",
+      "severity": "error"
+    },
+    {
+      "case": "zero price",
+      "source_row_number": 14,
+      "rule": "invalid_non_positive_price",
+      "field": "price",
+      "severity": "error"
+    },
+    {
+      "case": "non-numeric sale price",
+      "source_row_number": 15,
+      "rule": "invalid_sale_price",
+      "field": "sale_price",
+      "severity": "error"
+    },
+    {
+      "case": "zero sale price",
+      "source_row_number": 16,
+      "rule": "invalid_non_positive_sale_price",
+      "field": "sale_price",
+      "severity": "error"
+    },
+    {
+      "case": "sale price greater than price",
+      "source_row_number": 17,
+      "rule": "sale_price_greater_than_price",
+      "field": "sale_price",
+      "severity": "error"
+    },
+    {
+      "case": "product name and category mismatch",
+      "source_row_number": 18,
+      "rule": "product_category_mismatch",
+      "field": "category",
+      "severity": "warning"
+    },
+    {
+      "case": "prohibited term in description",
+      "source_row_number": 19,
+      "rule": "prohibited_term",
+      "field": "description",
+      "severity": "error"
+    },
+    {
+      "case": "synthetic email in description",
+      "source_row_number": 20,
+      "rule": "email_address",
+      "field": "description",
+      "severity": "error"
+    },
+    {
+      "case": "synthetic phone number in description",
+      "source_row_number": 21,
+      "rule": "phone_number",
+      "field": "description",
+      "severity": "error"
+    },
+    {
+      "case": "synthetic resident registration pattern in description",
+      "source_row_number": 22,
+      "rule": "resident_registration_number",
+      "field": "description",
+      "severity": "error"
+    },
+    {
+      "case": "synthetic bank account pattern in description",
+      "source_row_number": 23,
+      "rule": "suspected_bank_account",
+      "field": "description",
+      "severity": "warning"
+    },
+    {
+      "case": "duplicate product ID first row",
+      "source_row_number": 24,
+      "rule": "duplicate_product_id",
+      "field": "product_id",
+      "severity": "error",
+      "related_source_rows": [25]
+    },
+    {
+      "case": "duplicate product ID second row",
+      "source_row_number": 25,
+      "rule": "duplicate_product_id",
+      "field": "product_id",
+      "severity": "error",
+      "related_source_rows": [24]
+    },
+    {
+      "case": "duplicate product name first row",
+      "source_row_number": 26,
+      "rule": "duplicate_product_name",
+      "field": "product_name",
+      "severity": "warning",
+      "related_source_rows": [27]
+    },
+    {
+      "case": "duplicate product name second row",
+      "source_row_number": 27,
+      "rule": "duplicate_product_name",
+      "field": "product_name",
+      "severity": "warning",
+      "related_source_rows": [26]
+    },
+    {
+      "case": "inconsistent group category first row",
+      "source_row_number": 28,
+      "rule": "inconsistent_group_category",
+      "field": "category",
+      "severity": "error"
+    },
+    {
+      "case": "inconsistent group category second row",
+      "source_row_number": 29,
+      "rule": "inconsistent_group_category",
+      "field": "category",
+      "severity": "error"
+    },
+    {
+      "case": "inconsistent group size system first row",
+      "source_row_number": 30,
+      "rule": "inconsistent_group_size_system",
+      "field": "size",
+      "severity": "warning"
+    },
+    {
+      "case": "inconsistent group size system second row",
+      "source_row_number": 31,
+      "rule": "inconsistent_group_size_system",
+      "field": "size",
+      "severity": "warning"
+    },
+    {
+      "case": "duplicate variant combination first row",
+      "source_row_number": 32,
+      "rule": "duplicate_variant_combination",
+      "field": "color,size",
+      "severity": "error"
+    },
+    {
+      "case": "duplicate variant combination second row",
+      "source_row_number": 33,
+      "rule": "duplicate_variant_combination",
+      "field": "color,size",
+      "severity": "error"
+    },
+    {
+      "case": "complete duplicate first row also has duplicate name",
+      "source_row_number": 34,
+      "rule": "duplicate_product_name",
+      "field": "product_name",
+      "severity": "warning",
+      "related_source_rows": [35]
+    },
+    {
+      "case": "complete duplicate second row also has duplicate name",
+      "source_row_number": 35,
+      "rule": "duplicate_product_name",
+      "field": "product_name",
+      "severity": "warning",
+      "related_source_rows": [34]
+    },
+    {
+      "case": "complete duplicate second row",
+      "source_row_number": 35,
+      "rule": "duplicate_product_content",
+      "field": "product",
+      "severity": "error"
+    },
+    {
+      "case": "category price anomaly",
+      "source_row_number": 40,
+      "rule": "category_price_anomaly",
+      "field": "price",
+      "severity": "warning"
+    }
+  ]
+}
