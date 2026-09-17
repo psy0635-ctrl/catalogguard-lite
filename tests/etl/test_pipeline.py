@@ -1,6 +1,8 @@
 import csv
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -100,6 +102,32 @@ SOURCE_ROWS = [
         "https://example.test/three.jpg",
     ],
 ]
+
+
+def test_pipeline_import_does_not_require_optional_xlsx_dependencies() -> None:
+    script = """
+import builtins
+
+real_import = builtins.__import__
+
+def guarded_import(name, *args, **kwargs):
+    if name == "etl.xlsx_reader" or name.startswith(("defusedxml", "openpyxl")):
+        raise ModuleNotFoundError(name)
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = guarded_import
+import etl.pipeline
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=BASE_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def write_profile_and_source(tmp_path):

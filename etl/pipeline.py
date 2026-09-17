@@ -29,7 +29,6 @@ from etl.application_lineage import (
 )
 from etl.profile_loader import ETLProfileValidationError, load_profile
 from etl.transformer import transform_rows
-from etl.xlsx_reader import XlsxUploadValidationError, read_supplier_xlsx
 
 
 class ETLPipelineError(ValueError):
@@ -237,6 +236,9 @@ def run_pipeline(
             profile.required_source_columns,
         )
     elif suffix == "xlsx":
+        # Keep optional XLSX dependencies out of CSV-only runtimes such as Airflow.
+        from etl.xlsx_reader import XlsxUploadValidationError, read_supplier_xlsx
+
         try:
             source_columns, source_rows, source_row_numbers, input_bytes = read_supplier_xlsx(
                 input_path,
