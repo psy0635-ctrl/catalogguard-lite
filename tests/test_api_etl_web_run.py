@@ -1,9 +1,11 @@
 import csv
+import hashlib
 import io
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
 from sqlalchemy import delete, select
 
 from api.dependencies import get_current_user
@@ -54,6 +56,7 @@ def test_success_returns_etl_web_run_contract(monkeypatch):
         actor_username=None,
         initial_source_type=None,
         initial_source_ref=None,
+        allowed_input_formats=None,
     ):
         assert profile_id == "sample_fashion_vendor_v1"
         assert source_filename == "vendor.csv"
@@ -61,6 +64,7 @@ def test_success_returns_etl_web_run_contract(monkeypatch):
         # 업로드 배치는 출처가 upload로, locator는 leaf 파일명으로 기록돼야 합니다.
         assert initial_source_type == "upload"
         assert initial_source_ref == "vendor.csv"
+        assert allowed_input_formats == ("csv", "xlsx")
         return ETLWebRunOutcome(
             etl_load_run_id=42,
             created=True,
@@ -107,6 +111,76 @@ def test_success_returns_etl_web_run_contract(monkeypatch):
         "error_counts": {},
         "actor_username": "operator_user",
     }
+
+
+def test_xlsx_upload_bytes_and_filename_are_forwarded_unchanged(monkeypatch):
+    xlsx_bytes = b"PK\x03\x04synthetic-xlsx-bytes"
+
+    def fake_run_web_etl(session, **kwargs):
+        assert kwargs["source_filename"] == "supplier.xlsx"
+        assert kwargs["input_bytes"] == xlsx_bytes
+        assert kwargs["allowed_input_formats"] == ("csv", "xlsx")
+        return ETLWebRunOutcome(
+            etl_load_run_id=43,
+            created=True,
+            profile_name="sample_fashion_vendor",
+            profile_version="1",
+            source_filename="supplier.xlsx",
+            total_rows=1,
+            loaded_rows=1,
+            rejected_rows=0,
+            error_counts={},
+        )
+
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
+    monkeypatch.setattr(etl_loads_route, "run_web_etl", fake_run_web_etl)
+
+    response = client.post(
+        ENDPOINT,
+        files={
+            "file": (
+                "supplier.xlsx",
+                xlsx_bytes,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+        data={"profile_id": "sample_fashion_vendor_v1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["source_filename"] == "supplier.xlsx"
+
+
+@pytest.mark.parametrize("filename", ["supplier.xls", "supplier.xlsm", "supplier.xlsb", "supplier.ods"])
+def test_unsupported_spreadsheet_extensions_return_safe_400(filename):
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
+
+    response = client.post(
+        ENDPOINT,
+        files=_files(content=b"synthetic", filename=filename),
+        data={"profile_id": "sample_fashion_vendor_v1"},
+    )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["code"] == "invalid_upload"
+    assert "Traceback" not in response.text
+
+
+def test_invalid_xlsx_returns_safe_400_without_parser_internals():
+    app.dependency_overrides[get_session] = fake_session_without_runtime_overrides
+
+    response = client.post(
+        ENDPOINT,
+        files=_files(content=b"not-an-ooxml-zip", filename="supplier.xlsx"),
+        data={"profile_id": "sample_fashion_vendor_v1"},
+    )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["code"] == "invalid_upload"
+    assert "Traceback" not in response.text
+    assert "zipfile" not in response.text.lower()
 
 
 def test_unsupported_profile_returns_safe_400_without_leaking_paths(monkeypatch):
@@ -287,6 +361,18 @@ def build_supplier_csv(rows):
     return output.getvalue().encode("utf-8")
 
 
+def build_supplier_xlsx(rows):
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append(FASHION_PROFILE_COLUMNS)
+    for row in rows:
+        worksheet.append(row)
+    output = io.BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
+
+
 def valid_row(sku):
     return [sku, "테스트 상품", "TOP", "브랜드", "12000", "10000", "BLACK", "M", "3", "설명", "image.jpg"]
 
@@ -307,14 +393,24 @@ def postgres_api():
         engine.dispose()
 
 
-def test_real_endpoint_persists_batch_and_staging_products_in_postgresql(postgres_api):
+@pytest.mark.parametrize(
+    ("extension", "content_builder"),
+    [("csv", build_supplier_csv), ("xlsx", build_supplier_xlsx)],
+)
+def test_real_endpoint_persists_batch_and_staging_products_in_postgresql(
+    postgres_api,
+    extension,
+    content_builder,
+):
     # 실제 users.id를 참조하는 actor_user_id FK가 있으므로, 이 테스트만은 다른 테스트의
     # 고정 id=1 가짜 current_user override 대신 실제 PostgreSQL에 존재하는 operator
     # 계정과 실제 JWT로 로그인해 actor가 정확히 기록되는지 확인합니다.
     session_factory = postgres_api
     marker = uuid4().hex
-    csv_bytes = build_supplier_csv([valid_row(f"SKU-{marker}-1"), valid_row(f"SKU-{marker}-2")])
-    source_filename = f"vendor_{marker}.csv"
+    input_bytes = content_builder(
+        [valid_row(f"SKU-{marker}-1"), valid_row(f"SKU-{marker}-2")]
+    )
+    source_filename = f"vendor_{marker}.{extension}"
     username = f"etl_actor_{marker[:12]}"
 
     with session_factory() as user_session:
@@ -333,7 +429,7 @@ def test_real_endpoint_persists_batch_and_staging_products_in_postgresql(postgre
     try:
         response = client.post(
             ENDPOINT,
-            files=_files(content=csv_bytes, filename=source_filename),
+            files=_files(content=input_bytes, filename=source_filename),
             data={"profile_id": "sample_fashion_vendor_v1"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -355,6 +451,7 @@ def test_real_endpoint_persists_batch_and_staging_products_in_postgresql(postgre
         with session_factory() as verify_session:
             run = verify_session.get(ETLLoadRun, run_id)
             assert run is not None
+            assert run.input_file_sha256 == hashlib.sha256(input_bytes).hexdigest()
             assert run.actor_username == username
             assert run.actor_user_id is not None
             # actor(누가 실행했는가)와 source(어디서 들어왔는가)는 별개로 기록됩니다.

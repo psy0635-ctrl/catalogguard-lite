@@ -29,6 +29,7 @@ from etl.application_lineage import (
 )
 from etl.profile_loader import ETLProfileValidationError, load_profile
 from etl.transformer import transform_rows
+from etl.xlsx_reader import XlsxUploadValidationError, read_supplier_xlsx
 
 
 class ETLPipelineError(ValueError):
@@ -200,6 +201,8 @@ def run_pipeline(
     output_path: Path,
     rejects_path: Path,
     summary_path: Path,
+    *,
+    allowed_input_formats: tuple[str, ...] = ("csv",),
 ) -> ETLPipelineResult:
     input_path = Path(input_path)
     profile_path = Path(profile_path)
@@ -225,10 +228,24 @@ def run_pipeline(
     profile_definition_sha256 = compute_profile_definition_sha256_from_payload(
         profile_definition_snapshot
     )
-    source_columns, source_rows, source_row_numbers, input_bytes = _read_supplier_csv(
-        input_path,
-        profile.required_source_columns,
-    )
+    suffix = input_path.suffix.casefold().removeprefix(".")
+    if suffix not in allowed_input_formats:
+        raise ETLPipelineError("Input file format is not supported")
+    if suffix == "csv":
+        source_columns, source_rows, source_row_numbers, input_bytes = _read_supplier_csv(
+            input_path,
+            profile.required_source_columns,
+        )
+    elif suffix == "xlsx":
+        try:
+            source_columns, source_rows, source_row_numbers, input_bytes = read_supplier_xlsx(
+                input_path,
+                profile.required_source_columns,
+            )
+        except XlsxUploadValidationError as error:
+            raise ETLPipelineError(str(error)) from error
+    else:
+        raise ETLPipelineError("Input file format is not supported")
     transformed = transform_rows(source_rows, profile, source_row_numbers)
     temporary_paths: list[Path] = []
     try:

@@ -1,4 +1,4 @@
-"""Chromium coverage for the Streamlit Web ETL CSV upload flow."""
+"""Chromium coverage for the Streamlit Web ETL CSV/XLSX upload flow."""
 
 import os
 import re
@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from openpyxl import Workbook
 
 
 pytestmark = pytest.mark.e2e
@@ -77,7 +78,11 @@ def _expected_application_commit_sha() -> str | None:
     return resolve_application_commit_sha()
 
 
-def _assert_web_upload_persisted(etl_load_run_id: int) -> tuple[str, dict[str, object], str | None]:
+def _assert_web_upload_persisted(
+    etl_load_run_id: int,
+    *,
+    source_filename: str,
+) -> tuple[str, dict[str, object], str | None]:
     from sqlalchemy import func, select
 
     from db.models import CatalogProductStaging, ETLLoadRun
@@ -87,7 +92,7 @@ def _assert_web_upload_persisted(etl_load_run_id: int) -> tuple[str, dict[str, o
     with session_factory() as session:
         load_run = session.get(ETLLoadRun, etl_load_run_id)
         assert load_run is not None
-        assert load_run.source_filename == SOURCE_FILENAME
+        assert load_run.source_filename == source_filename
         assert load_run.profile_name == "sample_marketplace_vendor"
         assert load_run.profile_version == "2"
         expected_fingerprint = _expected_profile_definition_sha256()
@@ -102,7 +107,7 @@ def _assert_web_upload_persisted(etl_load_run_id: int) -> tuple[str, dict[str, o
         expected_application_commit_sha = _expected_application_commit_sha()
         assert load_run.application_commit_sha == expected_application_commit_sha
         assert load_run.initial_source_type == "upload"
-        assert load_run.initial_source_ref == SOURCE_FILENAME
+        assert load_run.initial_source_ref == source_filename
 
         product_count = session.scalar(
             select(func.count())
@@ -130,10 +135,15 @@ def _api_headers(page) -> dict[str, str]:
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
 
-def _run_web_etl_upload_scenario(page) -> None:
+def _run_web_etl_upload_scenario(
+    page,
+    *,
+    fixture_path: Path = FIXTURE_PATH,
+    source_filename: str = SOURCE_FILENAME,
+) -> None:
     from playwright.sync_api import expect
 
-    assert FIXTURE_PATH.is_file(), f"Browser E2E fixture is missing: {FIXTURE_PATH}"
+    assert fixture_path.is_file(), f"Browser E2E fixture is missing: {fixture_path}"
 
     console_errors: list[str] = []
     page_errors: list[str] = []
@@ -161,10 +171,10 @@ def _run_web_etl_upload_scenario(page) -> None:
     expect(page.locator("body")).to_contain_text("프로필 버전")
     expect(page.locator("body")).to_contain_text(re.compile(r"프로필 버전\s*2"))
 
-    uploader_dropzone = page.get_by_label("공급사 CSV 파일", exact=True)
+    uploader_dropzone = page.get_by_label("공급사 CSV / XLSX 파일", exact=True)
     file_input = uploader_dropzone.locator('input[type="file"]')
     expect(file_input).to_have_count(1)
-    file_input.set_input_files(str(FIXTURE_PATH))
+    file_input.set_input_files(str(fixture_path))
     run_button = page.get_by_role("button", name="ETL 실행", exact=True)
     expect(run_button).to_be_enabled()
     run_button.click()
@@ -178,7 +188,10 @@ def _run_web_etl_upload_scenario(page) -> None:
     match = success_pattern.search(body_text)
     assert match is not None
     etl_load_run_id = int(match.group(1))
-    expected_fingerprint, expected_snapshot, expected_application_commit_sha = _assert_web_upload_persisted(etl_load_run_id)
+    expected_fingerprint, expected_snapshot, expected_application_commit_sha = _assert_web_upload_persisted(
+        etl_load_run_id,
+        source_filename=source_filename,
+    )
     detail_response = page.request.get(
         f"{API_URL}/api/v1/etl-loads/{etl_load_run_id}", headers=_api_headers(page)
     )
@@ -188,21 +201,21 @@ def _run_web_etl_upload_scenario(page) -> None:
     assert detail_response.json()["application_commit_sha"] == expected_application_commit_sha
 
     expect(page.locator("body")).to_contain_text("ETL 적재 이력")
-    page.get_by_label("원본 파일명").fill(SOURCE_FILENAME)
+    page.get_by_label("원본 파일명").fill(source_filename)
     page.get_by_label("공급사 프로필").fill("sample_marketplace_vendor")
     page.get_by_role("button", name="조회", exact=True).click()
-    expect(page.locator("body")).to_contain_text(SOURCE_FILENAME)
+    expect(page.locator("body")).to_contain_text(source_filename)
     expect(page.locator("body")).to_contain_text("sample_marketplace_vendor")
 
     batch_selector = page.get_by_role("combobox", name="적재 배치 선택")
     batch_selector.click()
     page.get_by_role(
-        "option", name=re.compile(rf"{etl_load_run_id} · {re.escape(SOURCE_FILENAME)}")
+        "option", name=re.compile(rf"{etl_load_run_id} · {re.escape(source_filename)}")
     ).click()
     page.get_by_role("button", name="상세 조회", exact=True).click()
 
     expect(page.locator("body")).to_contain_text("적재 배치 상세")
-    expect(page.locator("body")).to_contain_text(f"원본 파일명: {SOURCE_FILENAME}")
+    expect(page.locator("body")).to_contain_text(f"원본 파일명: {source_filename}")
     expect(page.locator("body")).to_contain_text(
         "공급사 프로필: sample_marketplace_vendor"
     )
@@ -226,6 +239,72 @@ def _run_web_etl_upload_scenario(page) -> None:
 def test_web_etl_upload_flow_in_real_browser(page):
     try:
         _run_web_etl_upload_scenario(page)
+    except BaseException:
+        _preserve_browser_failure_artifacts(page)
+        raise
+
+
+def test_xlsx_web_etl_upload_flow_in_real_browser(page, tmp_path):
+    fixture_path = tmp_path / "web_etl_upload_vendor.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append(
+        [
+            "style_id",
+            "sku_code",
+            "title",
+            "category_code",
+            "label",
+            "regular_price",
+            "promo_price",
+            "tone",
+            "fit_size",
+            "available_qty",
+            "details",
+            "photo",
+        ]
+    )
+    worksheet.append(
+        [
+            "CG-E2E-WEB-UPLOAD",
+            PRODUCT_IDS[0],
+            "Synthetic black top",
+            "TOP",
+            "Synthetic Brand",
+            12000,
+            10000,
+            "BLACK",
+            "M",
+            3,
+            "Synthetic browser XLSX row",
+            "black.jpg",
+        ]
+    )
+    worksheet.append(
+        [
+            "CG-E2E-WEB-UPLOAD",
+            PRODUCT_IDS[1],
+            "Synthetic white top",
+            "TOP",
+            "Synthetic Brand",
+            15000,
+            None,
+            "WHITE",
+            "L",
+            2,
+            "Synthetic browser XLSX row",
+            "white.jpg",
+        ]
+    )
+    workbook.save(fixture_path)
+    workbook.close()
+
+    try:
+        _run_web_etl_upload_scenario(
+            page,
+            fixture_path=fixture_path,
+            source_filename=fixture_path.name,
+        )
     except BaseException:
         _preserve_browser_failure_artifacts(page)
         raise

@@ -69,6 +69,14 @@ TEST_DATA_PATH = DATA_DIR / "test"
 
 MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024
 MAX_CSV_ROWS = 10_000
+# XLSX는 압축된 업로드 크기만으로 메모리 사용량을 제한할 수 없으므로 OOXML을
+# 열기 전에 ZIP metadata에도 별도 상한을 적용합니다. 현재 가장 넓은 ETL source
+# profile은 12개 열이며, 64개는 공급사별 여분 열을 허용하면서 비정상 sheet를 막습니다.
+MAX_XLSX_COLUMNS = 64
+MAX_XLSX_ZIP_ENTRIES = 1_000
+MAX_XLSX_ZIP_MEMBER_BYTES = 20 * 1024 * 1024
+MAX_XLSX_ZIP_TOTAL_BYTES = 50 * 1024 * 1024
+MAX_XLSX_COMPRESSION_RATIO = 100
 SUPPORTED_CSV_ENCODINGS = ("utf-8-sig", "utf-8", "cp949")
 
 # CSV에 반드시 있어야 하는 컬럼 목록입니다.

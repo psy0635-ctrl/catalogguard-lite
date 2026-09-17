@@ -3501,7 +3501,11 @@ def _submit_etl_web_run(api_client, *, profile_id, uploaded_file) -> None:
 
 def _render_etl_web_run(api_client) -> None:
     st.subheader("ETL 실행")
-    st.write("공급사 CSV를 업로드하고 프로필을 선택해 ETL을 실행합니다.")
+    st.write("공급사 CSV 또는 XLSX를 업로드하고 프로필을 선택해 ETL을 실행합니다.")
+    st.caption(
+        "XLSX는 단일 visible worksheet만 지원합니다. 상품 ID 등의 앞자리 0을 "
+        "보존하려면 Excel에서 해당 열을 텍스트로 저장해 주세요."
+    )
 
     profiles = _fetch_etl_profiles(api_client, st.session_state)
     if profiles is None:
@@ -3534,8 +3538,8 @@ def _render_etl_web_run(api_client) -> None:
         st.session_state.get("etl_web_run_selected_profile_id"),
     )
     uploaded_file = st.file_uploader(
-        "공급사 CSV 파일",
-        type=["csv"],
+        "공급사 CSV / XLSX 파일",
+        type=["csv", "xlsx"],
         key="etl_web_run_upload_file",
     )
 

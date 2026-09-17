@@ -1,16 +1,18 @@
 import csv
+import hashlib
 import io
 import os
 import tempfile
 from uuid import uuid4
 
 import pytest
+from openpyxl import Workbook
 from sqlalchemy import delete, select
 
 from config.database import get_optional_database_url
 from config.settings import MAX_UPLOAD_SIZE_BYTES
 from core.upload_validator import CsvUploadValidationError
-from db.models import CatalogProductStaging, ETLLoadRun
+from db.models import CatalogProductStaging, ETLLoadRun, ETLRejectedRow
 from db.session import create_database_engine, create_session_factory
 from etl.db_loader import ETLLoadError
 from etl.pipeline import ETLPipelineError
@@ -41,6 +43,18 @@ def build_supplier_csv(rows: list[list[str]], *, unique_marker: str) -> bytes:
     for row in rows:
         writer.writerow(row)
     return output.getvalue().encode("utf-8")
+
+
+def build_supplier_xlsx(rows: list[list[str]]) -> bytes:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append(FASHION_PROFILE_COLUMNS)
+    for row in rows:
+        worksheet.append(row)
+    output = io.BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
 
 
 def valid_row(sku: str) -> list[str]:
@@ -118,6 +132,65 @@ def test_run_web_etl_persists_batch_and_staging_products(postgres_session):
         assert after_dirs - before_dirs == set()
     finally:
         _cleanup_runs(session_factory, [result.etl_load_run_id])
+
+
+def test_run_web_etl_xlsx_requires_opt_in_and_preserves_identity_and_dedup(postgres_session):
+    session, session_factory = postgres_session
+    marker = uuid4().hex
+    xlsx_bytes = build_supplier_xlsx(
+        [
+            valid_row(f"SKU-{marker}-1"),
+            [None] * len(FASHION_PROFILE_COLUMNS),
+            invalid_row(f"SKU-{marker}-2"),
+        ]
+    )
+
+    with pytest.raises(CsvUploadValidationError, match="CSV"):
+        run_web_etl(
+            session,
+            profile_id="sample_fashion_vendor_v1",
+            source_filename="vendor_products.xlsx",
+            input_bytes=xlsx_bytes,
+        )
+
+    first = run_web_etl(
+        session,
+        profile_id="sample_fashion_vendor_v1",
+        source_filename="vendor_products.xlsx",
+        input_bytes=xlsx_bytes,
+        allowed_input_formats=("csv", "xlsx"),
+    )
+    try:
+        with session_factory() as second_session:
+            second = run_web_etl(
+                second_session,
+                profile_id="sample_fashion_vendor_v1",
+                source_filename="renamed.xlsx",
+                input_bytes=xlsx_bytes,
+                allowed_input_formats=("csv", "xlsx"),
+            )
+        assert first.created is True
+        assert second.created is False
+        assert second.etl_load_run_id == first.etl_load_run_id
+        assert first.source_filename == "vendor_products.xlsx"
+        run = session.get(ETLLoadRun, first.etl_load_run_id)
+        assert run.input_file_sha256 == hashlib.sha256(xlsx_bytes).hexdigest()
+        assert run.source_filename == "vendor_products.xlsx"
+        products = session.scalars(
+            select(CatalogProductStaging).where(
+                CatalogProductStaging.etl_load_run_id == first.etl_load_run_id
+            )
+        ).all()
+        assert len(products) == 1
+        rejects = session.scalars(
+            select(ETLRejectedRow).where(
+                ETLRejectedRow.etl_load_run_id == first.etl_load_run_id
+            )
+        ).all()
+        assert len(rejects) == 1
+        assert rejects[0].source_row_number == 4
+    finally:
+        _cleanup_runs(session_factory, [first.etl_load_run_id])
 
 
 def test_run_web_etl_with_partial_rejects_loads_normal_rows_only(postgres_session):

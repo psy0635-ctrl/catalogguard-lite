@@ -1,8 +1,8 @@
-# 공급사 상품 CSV ETL MVP
+# 공급사 상품 CSV ETL 및 XLSX Web Adapter MVP
 
 ## 목적
 
-샘플 패션 공급사의 CSV를 CatalogGuard Lite 검수기가 읽을 수 있는 표준 CSV로 변환하고, 변환 결과와 요약 JSON을 PostgreSQL staging에 배치 적재한다. 파일 변환과 DB 적재는 CLI로 실행할 수 있고, 같은 로직을 Streamlit 업로드 화면과 FastAPI를 통해 웹에서도 실행할 수 있다.
+샘플 패션 공급사의 CSV를 CatalogGuard Lite 검수기가 읽을 수 있는 표준 CSV로 변환하고, 변환 결과와 요약 JSON을 PostgreSQL staging에 배치 적재한다. 파일 변환과 DB 적재는 CLI로 실행할 수 있고, Web multipart 업로드는 CSV와 XLSX를 같은 변환·적재 로직에 연결한다. CLI·S3·HTTP feed·Airflow 입력은 계속 CSV 전용이다.
 
 기존 구조에서는 공급사 CSV를 CLI로 변환·적재한 뒤에야 ETL 적재 이력·promotion을 웹에서 확인할 수 있었다. 즉 ETL 실행은 CLI, ETL 이후의 조회·운영 반영은 웹으로 사용자 흐름이 나뉘어 있었다. Web ETL은 이 CLI 전용 구간을 없애기 위한 새 ETL 엔진이 아니라, 기존 `run_pipeline()`·`load_standard_csv()`를 FastAPI/Streamlit에 연결해 CSV 선택부터 staging 적재까지 웹 화면에서 끝낼 수 있게 만든 얇은 실행 경로다.
 
@@ -125,7 +125,8 @@ CLI:
 Web:
   Streamlit -> CatalogGuardApiClient -> FastAPI
   -> etl/web_service.py: run_web_etl()
-  -> run_pipeline()
+  -> CSV reader 또는 XLSX reader -> 공통 rows
+  -> run_pipeline() / transform_rows()
   -> load_standard_csv()
 ```
 
@@ -137,11 +138,11 @@ Web:
 
 ```text
 upload bytes
--> validate_csv_filename() / validate_csv_file_size()로 선검증
+-> CSV/XLSX leaf filename과 5MB compressed upload 상한 선검증
 -> profile_id를 서버 allowlist로 해석 (get_profile_path())
 -> TemporaryDirectory 생성
--> 업로드 CSV를 임시 입력 파일로 저장
--> run_pipeline(input_path, profile_path, output_path, rejects_path, summary_path)
+-> 원본 upload bytes를 임시 입력 파일로 저장
+-> Web endpoint만 allowed_input_formats=("csv", "xlsx")로 run_pipeline() 호출
 -> output/rejects/summary 파일을 bytes로 다시 읽음
 -> load_standard_csv(session, output_bytes, summary_bytes, ...)
 -> TemporaryDirectory 종료 시 임시 파일 자동 삭제
@@ -414,14 +415,20 @@ GET /api/v1/etl-profiles
 
 Streamlit이 허용된 프로필 목록을 서버에서 가져오는 용도다. `etl.profile_loader.list_etl_profiles()`가 registry를 순회해 `id`·`display_name`만 반환하며, 내부 filesystem 경로(`filename`)는 API 응답에 포함하지 않는다.
 
-### CSV Upload 보안
+### CSV/XLSX Upload 보안
 
-웹 ETL 업로드는 새 검증 코드를 추가하지 않고 기존 검증을 재사용한다.
+CSV는 기존 검증을 그대로 재사용한다. XLSX는 `etl/xlsx_reader.py`가 openpyxl로 workbook을 열기 전에 ZIP/OOXML을 검증하고, 변환기가 기대하는 `dict[str, str]` 행과 실제 Excel source row 번호를 만든다.
 
 - 파일 크기: `config/settings.py`의 `MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024`(5MB)를 `core.upload_validator.validate_csv_file_size()`로 그대로 확인한다.
 - 파일명: `validate_csv_filename()`이 `.csv` 확장자와 빈 파일명을 확인한다. 원본 파일명은 `_leaf_filename()`이 디렉터리 구분자를 제거해 실제 filesystem 경로 구성에는 쓰지 않고, `TemporaryDirectory` 안의 파일 이름 한 조각으로만 사용한다.
 - 내용 검증: `run_pipeline()`이 호출하는 기존 CSV 파서가 인코딩, 헤더, 필수 컬럼, 행 수, 행 형식을 그대로 검사한다.
 - Content-Type이나 확장자 문자열만으로 CSV 여부를 판단하지 않고, 실제 파일 내용을 pandas로 읽어 검증한다.
+
+XLSX는 정확히 하나의 visible worksheet와 최대 10,000개 상품 행만 지원한다. formula, macro payload, external workbook link, merged cell, 날짜·시간·Excel error cell은 workbook 전체 오류로 거부한다. ZIP entry 수·압축 방식·경로 traversal·중복 member·암호화·단일/전체 압축 해제 크기·압축률과 worksheet 열/셀 예산도 workbook open 전에 제한한다. 문자열은 그대로 전달하고, `None`은 빈 문자열, boolean은 `TRUE`/`FALSE`, finite 숫자는 locale 없는 10진 문자열로 변환한다.
+
+숫자로 저장된 Excel 상품 ID에서 이미 사라진 앞자리 0은 복구하지 않는다. 앞자리 0을 보존해야 하는 ID 열은 Excel에서 텍스트로 저장해야 한다. XLSX 입력이어도 출력은 계속 `catalogguard_ready.csv`, `rejected_rows.csv`, summary JSON이며, 원본 XLSX bytes의 SHA-256·원본 leaf filename·실제 worksheet row 번호를 lineage로 사용한다.
+
+`run_pipeline()`과 `run_web_etl()`의 기본 허용 형식은 CSV뿐이다. multipart `POST /api/v1/etl-loads`만 XLSX를 명시적으로 opt-in하므로 CLI·S3·HTTP feed·Airflow가 XLSX 지원으로 확장되지 않는다.
 
 ### 임시 파일 처리
 
@@ -460,7 +467,7 @@ Web ETL을 위한 새 DB 테이블이나 Alembic migration은 없다. 기존 `et
 ```text
 _fetch_etl_profiles()로 GET /api/v1/etl-profiles 조회
 -> "ETL 실행 프로필" selectbox
--> "공급사 CSV 파일" file_uploader
+-> "공급사 CSV / XLSX 파일" file_uploader
 -> "ETL 실행" 버튼 (파일 미선택 시 disabled)
 -> 버튼 클릭 시에만 _submit_etl_web_run() 호출
 -> POST /api/v1/etl-loads
@@ -958,14 +965,15 @@ fix commit(`cb5ed81`) push 후 GitHub Actions run `30969273954`에서 `test`·`b
 - 자동 공급사 감지는 지원하지 않으며, 공급사별 프로필은 수동 선택한다.
 - 사용자가 임의 URL이나 일반 외부 API를 입력해 수집하는 기능은 지원하지 않는다. 신뢰 configured HTTP feed는 서버 환경설정으로만 읽고 Airflow manual DAG와 기존 HTTP API source adapter가 재사용한다.
 - 웹 ETL(`POST /api/v1/etl-loads`)은 업로드부터 staging 적재까지 하나의 동기 HTTP 요청으로 처리한다. 별도 Airflow DAG는 configured HTTP feed를 manual trigger로 orchestration하지만, 웹 ETL을 Celery job으로 바꾸거나 자동 schedule을 제공하지는 않는다.
-- 웹 ETL은 한 번에 CSV 파일 1개만 받으며, 여러 파일 동시 업로드나 ZIP 업로드는 지원하지 않는다.
-- 웹 ETL은 CSV만 지원하며 XLSX 등 다른 형식은 지원하지 않는다.
+- 웹 ETL은 한 번에 CSV 또는 XLSX 파일 1개만 받으며, 여러 파일 동시 업로드나 일반 ZIP 업로드는 지원하지 않는다.
+- XLSX는 단일 visible worksheet만 지원하고 formula·macro·external workbook link·merged cell·날짜/시간 cell은 지원하지 않는다. `.xls`, `.xlsm`, `.xlsb`, ODS도 지원하지 않는다.
+- CLI·S3·HTTP feed·Airflow source는 CSV 전용이다. XLSX는 Web multipart upload에만 허용한다.
 - 웹 ETL의 `profile_id`는 서버 allowlist(`etl.profile_loader._ETL_PROFILE_REGISTRY`)로 고정되어 있으며, 사용자가 새 프로필을 업로드하거나 등록하는 Profile CRUD는 지원하지 않는다.
-- 웹 ETL CSV 업로드 화면 자체를 다루는 전용 Chromium Browser E2E는 아직 없다. 기존 Browser E2E는 ETL 적재 이력 검색과 promotion 화면만 검증하며, 웹 ETL 핵심 실행 로직은 `tests/etl/test_web_service.py`, `tests/test_api_etl_web_run.py`, `tests/test_catalogguard_api_client.py`, `tests/test_etl_load_history_ui.py`의 API·client·PostgreSQL 통합·Streamlit AppTest로 검증한다.
+- 전용 Chromium Browser E2E가 합성 CSV와 런타임 생성 XLSX의 Web upload 성공 경로를 검증한다.
 - staging 상품 수정·삭제와 상품 변경 이력 조회 API는 지원하지 않는다.
 - promotion은 외부 공급사 운영 데이터나 production catalog가 아닌 합성 fixture·테스트 PostgreSQL 환경에서만 검증했다. reject 행은 별도 `etl_rejected_rows`에 오류 배열과 마스킹된 동적 원본 컬럼으로 저장한다.
 - 배치 출처는 최초 입력 경로 하나만 기록한다. dedup으로 재사용된 배치에 대해 이후 어떤 경로로 다시 들어왔는지는 기록하지 않으며, 수집 사건 단위 이력(ingestion event)은 지원하지 않는다.
-- 원본 공급사 CSV bytes는 보존하지 않는다. `input_file_sha256`으로 동일성 검증만 가능하고 원본 복원이나 과거 배치 재처리는 지원하지 않는다.
+- 원본 공급사 CSV/XLSX bytes는 보존하지 않는다. 원본 bytes의 `input_file_sha256`으로 동일성 검증만 가능하고 원본 복원이나 과거 배치 재처리는 지원하지 않는다.
 - migration 이전 기존 배치의 출처는 실제 정보가 없어 `unknown`으로 남으며, 소급 복원할 수 없다.
 - 증분 ETL과 streaming은 지원하지 않는다.
 - 운영(production) DB 적재는 검증하지 않았다. PostgreSQL staging 적재는 임시 테스트 PostgreSQL 환경에서 검증했고, S3 source 경로에 한해 2026-08-12에 AWS RDS staging에서 합성 fixture 1건으로 추가 검증했다.

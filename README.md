@@ -259,10 +259,10 @@ API 오류 발생
 
 같은 CSV를 이미 저장한 경우에는 PostgreSQL에 저장된 파일 해시와 검수 규칙 버전을 기준으로 기존 실행 ID를 안내합니다. 같은 Streamlit 세션 안에서는 `saved_file_hash`, `saved_inspection_run_id` 상태값으로 저장 API 재호출을 줄이고, 브라우저나 Streamlit 서버를 재시작한 뒤에는 DB의 중복 제약조건으로 새 이력이 중복 생성되지 않도록 막습니다.
 
-공급사 CSV의 변환·적재·조회·운영 반영 흐름은 다음과 같습니다. ETL 변환과 staging 적재는 CLI 또는 Streamlit 기반 웹 ETL로 실행할 수 있으며, 두 경로 모두 같은 `run_pipeline()`·`load_standard_csv()`를 재사용합니다. FastAPI는 웹 ETL 실행, 저장된 배치 조회와 별도의 promotion API를 제공합니다.
+공급사 CSV의 변환·적재·조회·운영 반영 흐름은 다음과 같습니다. ETL 변환과 staging 적재는 CLI 또는 Streamlit 기반 웹 ETL로 실행할 수 있으며, Web multipart upload는 CSV와 XLSX를 지원합니다. 두 경로 모두 같은 `run_pipeline()`·`load_standard_csv()`를 재사용하고, CLI·S3·HTTP feed·Airflow 입력은 계속 CSV 전용입니다. FastAPI는 웹 ETL 실행, 저장된 배치 조회와 별도의 promotion API를 제공합니다.
 
 ```text
-공급사 원본 CSV
+공급사 원본 CSV (Web upload는 CSV/XLSX)
 -> JSON 프로필 선택 (CLI) 또는 Streamlit에서 허용된 ETL 프로필 선택 (웹)
 -> 표준 컬럼 변환
 -> 정상 행과 reject 행 분리
@@ -299,7 +299,7 @@ API 오류 발생
 Streamlit ETL 실행 영역
 -> GET /api/v1/etl-profiles로 허용된 프로필 목록 조회
 -> "ETL 실행 프로필" 선택
--> 공급사 CSV 업로드
+-> 공급사 CSV / XLSX 업로드
 -> ETL 실행 버튼 클릭 (파일 선택·프로필 변경만으로는 API 호출 안 함)
 -> POST /api/v1/etl-loads
 -> 기존 run_pipeline()·load_standard_csv() 실행
@@ -2223,7 +2223,7 @@ reset 뒤 응답은 `runtime_override_exists: false`, `runtime_active_version: n
 
 ### `POST /api/v1/etl-loads`
 
-공급사 CSV와 `profile_id`를 받아 웹에서 바로 ETL을 실행하고 PostgreSQL staging에 적재합니다. `profile_id`는 위 목록 API가 반환하는 값 중 하나만 허용하며, 임의 파일 경로는 받지 않습니다.
+공급사 CSV 또는 XLSX와 `profile_id`를 받아 웹에서 바로 ETL을 실행하고 PostgreSQL staging에 적재합니다. `profile_id`는 위 목록 API가 반환하는 값 중 하나만 허용하며, 임의 파일 경로는 받지 않습니다. XLSX는 정확히 하나의 visible worksheet와 최대 10,000개 상품 행만 지원하며 formula·macro·external workbook link·merged cell·날짜/시간 cell을 거부합니다. 상품 ID의 앞자리 0을 보존하려면 Excel에서 해당 열을 텍스트로 저장해야 합니다. 출력은 입력 형식과 관계없이 표준 CSV·reject CSV·summary JSON입니다.
 
 - 요청 형식: `multipart/form-data`
 - 파일 필드명: `file`, 프로필 필드명: `profile_id`
@@ -2233,6 +2233,8 @@ reset 뒤 응답은 `runtime_override_exists: false`, `runtime_active_version: n
 - 빈 파일, 크기 초과, ETL 변환 실패 등 잘못된 업로드: HTTP `400` (`invalid_upload`)
 
 동일한 `input_file_sha256`·`profile_name`·`profile_version` 조합으로 다시 요청하면 새 배치를 만들지 않고 기존 배치를 `created: false`로 반환합니다. 내부적으로는 CLI의 `etl.cli`·`etl.load_cli`가 호출하는 `run_pipeline()`·`load_standard_csv()`를 그대로 실행합니다.
+
+XLSX 허용은 이 multipart endpoint에만 명시적으로 적용됩니다. CLI·S3·HTTP feed·Airflow는 CSV-only이며 `.xls`, `.xlsm`, `.xlsb`, ODS, multi-sheet 선택, XLSX 출력은 지원하지 않습니다.
 
 ### `POST /api/v1/etl-loads/s3`
 
