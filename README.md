@@ -2,7 +2,7 @@
 
 # CatalogGuard Lite
 
-상품 카탈로그 CSV를 업로드해 누락, 형식 오류, 중복, 가격 이상치, 카테고리 불일치, 금지어와 개인정보 의심 정보를 검사하고, 검수 결과를 저장·검색·조회·다운로드하는 Python·FastAPI + PostgreSQL 기반 MVP입니다. Streamlit은 CSV 업로드 검증·검수 결과 화면, 공급사 CSV와 허용된 ETL 프로필을 선택해 웹에서 바로 ETL을 실행하는 화면, ETL 적재 이력과 선택한 batch의 운영 상품 반영 흐름을 담당합니다. JSON 프로필 기반 공급사 CSV ETL과 PostgreSQL staging 적재는 기존 CLI로도 계속 실행할 수 있으며, Streamlit에서 시작한 웹 ETL도 FastAPI를 거쳐 같은 ETL Pipeline과 staging 적재 함수를 재사용합니다. FastAPI는 웹 ETL 실행·ETL 조회·promotion preview·승인된 promotion API를 제공합니다. promotion은 미리보기, 변경 전후 확인, 사용자 승인, preview hash 재검증을 거쳐 운영 상품을 insert/update하고 run과 append-only audit을 저장합니다.
+상품 카탈로그 CSV를 업로드해 누락, 형식 오류, 중복, 가격 이상치, 카테고리 불일치, 금지어와 개인정보 의심 정보를 검사하고, 검수 결과를 저장·검색·조회·다운로드하는 Python·FastAPI + PostgreSQL 기반 MVP입니다. Streamlit은 CSV 업로드 검증·검수 결과 화면, 공급사 CSV 또는 XLSX와 허용된 ETL 프로필을 선택해 웹에서 바로 ETL을 실행하는 화면, ETL 적재 이력과 선택한 batch의 운영 상품 반영 흐름을 담당합니다. JSON 프로필 기반 공급사 CSV ETL과 PostgreSQL staging 적재는 기존 CLI로도 계속 실행할 수 있으며, Streamlit에서 시작한 웹 ETL도 FastAPI를 거쳐 같은 ETL Pipeline과 staging 적재 함수를 재사용합니다. FastAPI는 웹 ETL 실행·ETL 조회·promotion preview·승인된 promotion API를 제공합니다. promotion은 미리보기, 변경 전후 확인, 사용자 승인, preview hash 재검증을 거쳐 운영 상품을 insert/update하고 run과 append-only audit을 저장합니다.
 
 ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl`의 버전별 JSON archive와 코드 registry가 source of truth입니다. PostgreSQL에 두는 것은 두 가지뿐입니다. 신규 ETL 실행에 실제로 적용할 **runtime current-state**(`etl_profile_activations`, 프로필당 row 0 또는 1)와, **성공한 운영 명령의 append-only 이력**(`etl_profile_activation_events`)입니다. 덕분에 재배포 없이 보존된 버전 중 하나를 활성화하거나 신규 실행을 비활성화할 수 있고, 그 뒤에 "누가 어떤 명령을 실행했는가"도 따로 남습니다. viewer는 상태와 이력을 조회하고, operator는 `PUT /api/v1/etl-profiles/{profile_id}/activation`과 Streamlit `ETL 프로필 운영 관리` 화면에서 변경하거나 `DELETE`로 runtime override를 지워 배포 기본값으로 되돌립니다. 프로필 JSON 자체를 편집하거나 새 프로필을 등록하는 기능은 아닙니다.
 
@@ -12,7 +12,7 @@ ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl`의 버전�
 
 v0.3.0 기준으로는 기존 OpenAI 경로를 유지하면서 optional OpenAI / Ollama provider 선택과 Local Ollama Two-Phase Inspection Copilot을 추가했습니다. Local Ollama 경로는 v0.2.0의 OpenAI-only Copilot에는 포함되지 않았습니다.
 
-공식 Release는 v0.3.0이며, PR #95가 병합된 현재 main의 Alembic 단일 head는 `20260915_0020`, `INSPECTION_VERSION`은 `15`입니다. 이 명시적 관련 행 저장 변경은 현재 main에는 포함되어 있지만 아직 별도의 새 GitHub Release로 배포되지는 않았습니다. 최근 main은 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 GitHub Actions 검증을 통과했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
+공식 배포 기준은 **v0.3.0**입니다. 현재 `main`에는 v0.3.0 이후의 미출시 변경으로 inspection 관계 행 명시 저장, DB 연결과 repository Alembic single head·DB current revision 일치까지 확인하는 schema-aware `/ready`, CSV/XLSX Web ETL 업로드, 전체 Rule Engine의 Golden Rule Quality Regression이 추가되어 있습니다. 현재 `main`의 Alembic 단일 head는 `20260915_0020`, `INSPECTION_VERSION`은 `15`, FastAPI 애플리케이션 버전은 `0.1.0`이며, 이 변경들을 v0.3.0에 포함된 기능으로 소급하지 않습니다. 최근 `main`은 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 GitHub Actions 검증을 통과했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
 
 공개 Streamlit 앱은 아래 주소에서 확인할 수 있습니다.
 
@@ -39,7 +39,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - 검수 결과를 화면, CSV 다운로드, PostgreSQL 이력으로 확인할 수 있게 합니다.
 - 공급사별 JSON 매핑 프로필로 원본 CSV를 CatalogGuard 표준 CSV로 변환하고 오류 행을 별도 reject CSV로 분리합니다.
 - 표준 CSV와 summary JSON을 CLI 또는 Streamlit 업로드 기반 웹 ETL로 PostgreSQL staging에 배치 적재하고, 같은 원본·프로필 버전의 중복 적재를 막습니다.
-- Streamlit에서 공급사 CSV를 업로드하고 서버가 허용하는 ETL 프로필을 선택해 FastAPI를 통해 같은 ETL Pipeline과 staging 적재 함수로 웹에서 바로 ETL을 실행합니다.
+- Streamlit에서 공급사 CSV 또는 XLSX를 업로드하고 서버가 허용하는 ETL 프로필을 선택해 FastAPI를 통해 같은 ETL Pipeline과 staging 적재 함수로 웹에서 바로 ETL을 실행합니다. CLI·S3·HTTP feed·Airflow 입력은 CSV-only입니다.
 - ETL 적재 배치 목록과 배치별 staging 상품을 FastAPI로 조회합니다.
 - 운영 상품 persistence 모델, promotion 실행 이력, append-only 상품 변경 이력을 PostgreSQL 제약조건과 함께 관리합니다.
 
@@ -2471,7 +2471,11 @@ curl.exe "http://127.0.0.1:8001/api/v1/inspections?limit=10&offset=0&filename=pr
 
 상품 그룹 내 중복 색상·사이즈 옵션 규칙을 추가할 때 검수 버전을 `"3"`으로 올렸고, 상품 그룹 카테고리 일관성 규칙을 추가하면서 `"4"`로 올렸습니다. 선택적 `sale_price`와 정상가·할인가 관계 규칙을 추가하면서 `"5"`로 올렸습니다. 상품 그룹 사이즈 체계 일관성 규칙을 추가하면서 `"6"`으로 올렸습니다. `SHOES`와 `BAG`를 공식 허용 카테고리로 확장하면서 `"7"`로 올렸습니다. 카테고리별 가격 이상치 비교가 기존 카테고리 별칭 정규화를 재사용하도록 통일하면서 `"8"`로 올렸습니다. 같은 CSV라도 카테고리 표기가 섞여 있으면 가격 그룹이 합쳐져 `가격 이상치` 결과가 달라질 수 있으므로, 기존 검수 결과를 그대로 재사용하지 않기 위한 것입니다. 카테고리별 필수 패션 속성 정책을 추가해 `BAG`의 `size`를 선택 값으로 바꾸면서 `"9"`로 올렸습니다. 버전 8까지 `필수 값 누락` 오류가 발생하던 빈 `size`의 `BAG` 상품이 버전 9에서는 정상 처리되므로, 같은 CSV를 다시 올렸을 때 버전 8 결과를 재사용해 새 정책이 적용되지 않는 일을 막기 위한 것입니다. `size`가 선택 값인 카테고리의 빈 `size`도 완전 중복 비교에 포함하면서 `"10"`으로 올렸습니다. 버전 9까지 완전 중복 검사에서 빠지던 빈 `size`의 `BAG` 상품이 버전 10에서는 `완전 중복 상품` 오류로 표시되므로, 같은 CSV가 버전 9 결과를 재사용해 새 검사 범위가 적용되지 않는 일을 막기 위한 것입니다. `BAG`처럼 `size`가 선택 값인 canonical 카테고리의 빈 `size`를 `상품 옵션 조합 중복` 비교에도 포함하면서 `"11"`로 올렸습니다. 버전 10까지 아무 오류도 만들지 않던 "같은 그룹·같은 색상·빈 `size`이면서 완전 중복은 아닌" 상품이 버전 11에서는 `상품 옵션 조합 중복` 오류로 표시되므로, 같은 CSV가 버전 10 결과를 재사용하지 않도록 한 것입니다. 사이즈·색상 별칭 비교에서 값 안쪽의 연속 공백을 정리하도록 보강하면서 `"12"`로 올렸습니다. 버전 11까지 `free  size`처럼 별칭에 공백이 더 들어간 값은 표준값을 찾지 못해 `상품 옵션 조합 중복`과 `사이즈 표기 비표준` 검사에서 모두 빠졌지만 버전 12에서는 `free size`와 같은 값으로 비교되므로, 같은 CSV가 버전 11 결과를 재사용하지 않도록 한 것입니다. 이번에 별칭 조회에서 공백뿐 아니라 하이픈(`-`)과 언더스코어(`_`) 차이도 무시하도록 확장하면서 현재 `INSPECTION_VERSION`을 `"13"`으로 올렸습니다. 버전 12까지 `free-size`·`free_size`·`extra_large`처럼 등록된 별칭의 구분자만 다른 값은 표준값을 찾지 못해 아무 오류도 만들지 않았지만 버전 13에서는 기존 별칭과 같은 값으로 비교되므로, 같은 CSV가 버전 12 결과를 재사용하지 않도록 한 것입니다. 별칭 사전 자체는 바뀌지 않았고 `/`와 `.`는 계속 구분자로 취급하지 않습니다. 같은 CSV라도 새 검수 기준으로 다시 검사할 수 있도록 inspection identity에 사용하는 규칙 버전을 올린 것이며, 동일 CSV라도 버전 6, 버전 7, 버전 8은 별도 검수 결과로 저장할 수 있습니다. 버전 6에서 `카테고리 오류`가 발생하던 canonical `SHOES`·`BAG` 상품이 버전 7에서는 정상 카테고리로 처리되고, 같은 이유로 완전 중복 검사 대상에도 포함되므로 같은 CSV의 결과가 달라질 수 있습니다. 파일 해시와 검수 버전을 함께 사용하는 기존 중복 저장 방지 기준은 그대로 유지됩니다. DB 스키마 변경은 없어 이 기능을 위한 Alembic migration은 추가하지 않았으며, 과거 이력과 기존 migration의 `"1"` backfill 값은 그대로 유지합니다.
 
+위 문단의 `현재 INSPECTION_VERSION = "13"`은 별칭 정규화 변경 당시의 역사적 설명이며 현재 `main` 값이 아닙니다.
+
 Version 14는 `inspection_results.source_row_number`를 nullable 정수로 추가합니다. CSV header를 1로 보고 첫 상품 logical record는 2이며, quoted multiline field도 하나의 record입니다. 기존 v13 결과는 `NULL`로 보존하고 backfill하지 않습니다. 같은 bytes라도 v13 결과를 재사용하지 않도록 inspection version을 14로 올렸으며, 화면·CSV 다운로드의 기존 7개 표시 열은 바꾸지 않습니다.
+
+Version 15는 관계형 issue의 상대 행을 reason 문자열에서 다시 추론하지 않도록 `inspection_results.related_source_rows`를 nullable JSONB로 명시 저장합니다. 기존 결과는 `NULL`로 유지하고 backfill하지 않으며, 같은 bytes의 v14 저장 결과를 재사용하지 않도록 inspection version을 15로 올렸습니다.
 
 PostgreSQL에는 다음 partial unique index가 있습니다.
 
@@ -2722,7 +2726,7 @@ Catalog Reconciliation·ETL 품질 요약·추이·품질 관찰과 관찰 가�
 
 ### ETL Profile Runtime Activation 검증 결과
 
-ETL 프로필 runtime activation과 Airflow inactive 분류까지 반영한 **현재 최신** 수치는 commit `06215ec`를 대상으로 한 GitHub Actions run `32571400595` 기준입니다. `test`·`browser-e2e`·`kubernetes-smoke`·`airflow-smoke`·`terraform-validate` 5개 job이 모두 success였고, `Run tests` 단계 결과는 다음과 같습니다.
+ETL 프로필 runtime activation과 Airflow inactive 분류를 검증한 당시 수치는 commit `06215ec`를 대상으로 한 GitHub Actions run `32571400595` 기준입니다. 현재 전체 suite 기준선이 아니라 해당 기능 시점의 역사적 기록이며, `test`·`browser-e2e`·`kubernetes-smoke`·`airflow-smoke`·`terraform-validate` 5개 job이 모두 success였습니다. 당시 `Run tests` 단계 결과는 다음과 같습니다.
 
 ```text
 2369 passed
@@ -2733,6 +2737,12 @@ ETL 프로필 runtime activation과 Airflow inactive 분류까지 반영한 **�
 ```
 
 `2 skipped`는 Airflow가 설치된 전용 image에서만 실행되는 격리 DAG 테스트 module 2개이며 **통과가 아닙니다**. 같은 commit을 `TEST_DATABASE_URL` 없이 실행하면 PostgreSQL 통합 테스트가 함께 건너뛰어져 `2090 passed`, `281 skipped`, `6 deselected`가 됩니다.
+
+### Golden Rule Quality Regression
+
+현재 미출시 `main`은 개별 Rule의 조건을 확인하는 unit test와 별도로, 여러 Rule을 한 번에 실행했을 때 예상하지 못한 오탐·누락이 생기는지 확인하는 전체 Rule Engine 회귀 테스트를 둡니다. 고정 synthetic fixture는 상품 39행, expected issue 31건, 현재 활성 issue code 24/24와 정상 control 5행을 포함합니다. Golden 회귀 도입 시점의 비교 결과는 matched 31, false positive 0, false negative 0, relationship mismatch 0이며, 이는 이 fixture에 한정된 회귀 결과이지 CatalogGuard의 실서비스 정확도·precision·recall을 뜻하지 않습니다.
+
+기준 데이터와 비교 로직은 `tests/quality/golden_catalog.csv`, `tests/quality/golden_expected_issues.json`, `tests/quality/test_rule_quality_golden.py`에 있습니다. 새 Rule이나 정규화 변경 뒤 정상 control에 새 문제가 생기거나 기존 expected issue가 빠지면 테스트가 실패합니다. 이 기능을 추가한 PR #99 시점의 로컬 전체 suite 기록은 `2540 passed`, `391 skipped`, `14 deselected`, `0 failed`, `14 warnings`이며, skip 조건이 다른 CI 결과와 동일하다고 해석하지 않습니다.
 
 Activation 관련 파일별 수집 규모는 다음과 같습니다.
 
@@ -2980,8 +2990,8 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 전체 요약 CSV는 목록 API를 반복 조회하므로 다운로드 중 DB 내용이 바뀌는 상황의 완전한 스냅샷 보장은 별도 트랜잭션/내보내기 API가 필요합니다.
 - 실제 외부 공급사 운영 데이터와 연동하지 않았습니다.
 - 웹 ETL은 업로드부터 staging 적재까지 하나의 동기 HTTP 요청으로 처리하며, 비동기(Celery) 처리는 아직 없습니다.
-- 웹 ETL은 한 번에 CSV 파일 1개만 업로드할 수 있으며, 여러 파일 동시 업로드는 지원하지 않습니다.
-- 웹 ETL은 CSV만 지원하며 Excel/XLSX 업로드는 지원하지 않습니다.
+- 웹 ETL은 한 번에 CSV 또는 XLSX 파일 1개만 업로드할 수 있으며, 여러 파일 동시 업로드는 지원하지 않습니다.
+- XLSX는 Web multipart 업로드에서만 지원합니다. 단일 visible worksheet만 허용하고 formula·macro·external workbook link·merged cell을 제한하며 resource limit을 적용합니다. CLI·S3·HTTP feed·Airflow는 계속 CSV-only입니다. 상세 계약은 [ETL MVP 문서](docs/etl_mvp.md#csvxlsx-upload-보안)를 참고하세요.
 - 웹 ETL의 ETL 프로필은 서버 allowlist로 고정되어 있으며, 사용자가 새 프로필을 업로드하거나 만드는 기능은 없습니다. 프로필 상세는 조회만 가능합니다. 프로필은 `config/etl/<profile_name>/v<번호>.json` 버전별 archive로 보존하고, 신규 실행에 쓸 버전은 registry의 명시적 배포 기본값 또는 runtime override로만 정합니다(가장 큰 번호를 자동 선택하지 않습니다). `profile_id`는 기존 그대로이며 두 프로필의 배포 기본 버전은 모두 `"2"`입니다. 과거 `v1.json` 정의도 archive에 남아 있으며, 실행 시점에 개별 요청이 버전을 고르는 기능은 없습니다. 보존된 버전 중 무엇을 신규 실행에 쓸지는 activation API·운영 관리 화면에서 프로필 단위로만 정합니다.
 - 이미 공개된 `profile_version`의 매핑이 같은 버전 번호를 유지한 채 바뀌면 pytest가 실패시킵니다(`tests/etl/test_profile_version_guardrail.py`). 현재 active 버전뿐 아니라 archive의 과거 버전까지 검사합니다. 다만 프로필 JSON과 기록된 fingerprint를 함께 고치는 경우와 `etl/transformer.py` 같은 코드 쪽 의미 변경은 자동으로 감지하지 못하며, 실행 중인 서버를 막는 런타임 가드도 아닙니다.
 - 과거 프로필 JSON 정의는 archive에서 읽을 수 있지만, 현재 코드로 과거 배치 결과를 그대로 재현하는 것은 보장하지 않습니다. `v1` → `v2` 전환에는 JSON 밖의 코드 변경도 있었습니다. 새 `etl_load_runs`에는 semantic profile snapshot·definition fingerprint·application commit SHA를 저장하지만, Docker image·의존성·OS/environment·당시 DB 상태·원본 CSV bytes·외부 응답·미커밋 코드는 저장하지 않습니다.
@@ -3231,4 +3241,4 @@ DB 적재 완료
 
 적재 후에는 `GET /api/v1/etl-loads`로 배치 목록을, `GET /api/v1/etl-loads/{etl_load_run_id}`로 파일 해시와 해당 배치의 staging 상품을, `GET /api/v1/etl-loads/{etl_load_run_id}/rejections`로 구조화된 오류와 마스킹된 원본을 페이지 단위로 조회할 수 있습니다. 프로필 구조, 변환·오류 기준, 조회 규칙과 제한사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.
 
-위 두 CLI 명령과 같은 변환·적재 로직을 Streamlit에서도 실행할 수 있습니다. `ETL 실행` 영역에서 공급사 CSV를 업로드하고 `ETL 실행 프로필`을 선택한 뒤 버튼을 클릭하면 `POST /api/v1/etl-loads`가 같은 `run_pipeline()`·`load_standard_csv()`를 호출해 staging까지 적재합니다. 웹 ETL의 profile allowlist, 업로드 검증, 중복 재사용과 임시 파일 정리 같은 구현 세부사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.
+위 두 CLI 명령과 같은 변환·적재 로직을 Streamlit에서도 실행할 수 있습니다. `ETL 실행` 영역에서 공급사 CSV 또는 XLSX를 업로드하고 `ETL 실행 프로필`을 선택한 뒤 버튼을 클릭하면 `POST /api/v1/etl-loads`가 같은 `run_pipeline()`·`load_standard_csv()`를 호출해 staging까지 적재합니다. XLSX 지원은 이 Web multipart 경로에만 적용되며 CLI·S3·HTTP feed·Airflow는 CSV-only입니다. 웹 ETL의 profile allowlist, 업로드 검증, 중복 재사용과 임시 파일 정리 같은 구현 세부사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.
