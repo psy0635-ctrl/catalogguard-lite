@@ -4,7 +4,7 @@
 
 ## 6.1 프로젝트 한 줄 소개
 
-CatalogGuard Lite는 Python·FastAPI 백엔드와 PostgreSQL 저장 계층을 중심으로 상품 CSV의 데이터 품질을 검수하고, 적재된 결과를 운영 카탈로그와 비교하며, 공급사별 ETL 품질 변화와 주요 오류 원인을 관찰한 뒤 검증된 변경만 승인 기반으로 운영 상품에 반영하는 데이터 품질 서비스입니다. 공급사 CSV의 Profile 기반 표준화·적재는 CLI·Streamlit 웹 업로드·configured HTTP feed Airflow manual DAG가 같은 ETL Pipeline·loader를 공유하며, Streamlit은 저장된 batch를 선택해 preview·승인·promotion을 요청하고 FastAPI와 PostgreSQL이 반영·audit·conflict-safe rollback을 처리합니다.
+CatalogGuard Lite는 Python·FastAPI 백엔드와 PostgreSQL 저장 계층을 중심으로 상품 CSV의 데이터 품질을 검수하고, 적재된 결과를 운영 카탈로그와 비교하며, 공급사별 ETL 품질 변화와 주요 오류 원인을 관찰한 뒤 검증된 변경만 승인 기반으로 운영 상품에 반영하는 데이터 품질 서비스입니다. 공급사 입력의 Profile 기반 표준화·적재는 CLI·Streamlit 웹 업로드·configured HTTP feed Airflow manual DAG가 같은 ETL Pipeline·loader를 공유합니다. Web multipart 업로드는 CSV와 XLSX를 지원하고 CLI·S3·HTTP feed·Airflow는 CSV-only이며, Streamlit은 저장된 batch를 선택해 preview·승인·promotion을 요청하고 FastAPI와 PostgreSQL이 반영·audit·conflict-safe rollback을 처리합니다.
 
 - 배포 URL: https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
 - 개발 언어: Python
@@ -45,7 +45,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, 
 14. Authentication 도입 과정에서 인증 dependency가 route와 같은 SQLAlchemy Session을 공유하며 SELECT가 트랜잭션을 암묵적으로 시작(autobegin)시켜 이후 쓰기 트랜잭션과 충돌하는 문제를 실제 Browser E2E로 발견하고, 관련 없는 사전 조회에는 독립된 Session을 쓰도록 최소 범위로 수정했습니다. 같은 원인으로 이미 존재하던 sync inspection API의 PostgreSQL transaction 충돌도 실제 PostgreSQL regression test로 재현·수정하고, 기존 monkeypatch 기반 테스트가 놓친 Session 상호작용 검증 공백을 보완했습니다.
 15. RBAC가 "누가 실행할 수 있는지"만 통제하고 "누가 실행했는지"는 남기지 않는다는 한계를 확인한 뒤, 새 범용 Audit 테이블 대신 기존 `ETLLoadRun`·`CatalogPromotionRun`·`CatalogPromotionRollback` 실행 이력에 `actor_user_id`(`users.id` FK, `ON DELETE SET NULL`)·`actor_username`(snapshot) 컬럼을 추가하는 Actor Audit MVP를 구현했습니다. actor는 request body가 아니라 인증된 JWT `current_user`에서만 가져오도록 해 위조를 원천적으로 차단했고, 실제 PostgreSQL로 JWT actor 기록·401/403·actor 위조 방지·Promotion 실패 시 기록·legacy row 호환을 검증하는 regression test 10개를 추가했습니다.
 16. 로그와 `/health`·`/ready`만으로는 요청 수·응답 시간·오류율·ETL 처리량을 숫자로 비교할 수 없다는 한계를 확인한 뒤, 기존 요청 middleware가 계산하던 duration을 재사용해 Prometheus HTTP metric(요청 수·응답 시간·상태 계열)과 Web ETL metric(신규/중복/실패, 처리 행 수)을 `GET /metrics`로 노출했습니다. 동적 ID 대신 FastAPI route template을 label로 써서 cardinality 폭증을 막고, 동일 배치 재사용 시 행 수를 다시 집계하지 않도록 설계했으며, `CATALOGGUARD_METRICS_ENABLED` 미설정 시 endpoint와 instrumentation 모두 no-op임을 실제 PostgreSQL 포함 32개 테스트로 검증했습니다.
-17. 기존 Dockerfile CMD가 컨테이너 시작마다 Alembic migration과 Uvicorn 실행을 함께 담당해, Kubernetes에서 API Pod가 여러 개면 migration이 중복 실행될 수 있다는 문제를 확인했습니다. 새 Kubernetes 전용 Dockerfile을 만들지 않고 기존 `Dockerfile.aws` image를 재사용하면서, `command` override로 migration 전용 Kubernetes Job과 Uvicorn 전용 Deployment로 책임을 분리했습니다. DB 연결을 확인하지 않는 `/health`는 liveness, PostgreSQL 연결까지 확인하는 `/ready`는 readiness로 연결했고, GitHub Actions에 kind 기반 실제 Kubernetes cluster를 만들어 PostgreSQL rollout·Migration Job 완료·FastAPI rollout·`/health`·`/ready` HTTP 200까지 자동 검증했습니다. kind·kubectl·node image는 최신 버전을 자동 조회하지 않고 SHA-256 digest까지 고정해, 같은 commit이 항상 같은 Kubernetes toolchain으로 재현되도록 했습니다.
+17. 기존 Dockerfile CMD가 컨테이너 시작마다 Alembic migration과 Uvicorn 실행을 함께 담당해, Kubernetes에서 API Pod가 여러 개면 migration이 중복 실행될 수 있다는 문제를 확인했습니다. 새 Kubernetes 전용 Dockerfile을 만들지 않고 기존 `Dockerfile.aws` image를 재사용하면서, `command` override로 migration 전용 Kubernetes Job과 Uvicorn 전용 Deployment로 책임을 분리했습니다. DB 연결을 확인하지 않는 `/health`는 liveness로 유지하고, 현재 `/ready`는 PostgreSQL 연결과 repository Alembic single head·DB current revision 일치까지 확인하는 readiness로 연결했습니다. GitHub Actions에는 kind 기반 실제 Kubernetes cluster를 만들어 PostgreSQL rollout·Migration Job 완료·FastAPI rollout·`/health`·`/ready` HTTP 200까지 자동 검증했습니다. kind·kubectl·node image는 최신 버전을 자동 조회하지 않고 SHA-256 digest까지 고정해, 같은 commit이 항상 같은 Kubernetes toolchain으로 재현되도록 했습니다.
 18. 콘솔에서 수동으로 구성했던 AWS staging(EC2·RDS·Security Group·SSM 접근)을 Terraform 코드로 옮겨, 같은 구조를 다시 만들 때 필요한 수동 작업과 설정 누락 위험을 줄였습니다. 새 대규모 인프라를 만드는 대신 이미 검증한 구성의 코드화로 범위를 제한했고, EC2 inbound 규칙 0개·RDS `5432`의 Security Group 참조 전용 허용·`publicly_accessible=false` 고정·저장 암호화·SSM 전용 접근 같은 보안 조건을 mock provider 기반 `terraform test` 12개 assertion으로 고정했습니다. 실제 AWS 자격 증명 없이 동작하는 이 검증을 GitHub Actions `terraform-validate` job으로 자동화해, 누군가 `0.0.0.0/0` inbound를 추가하는 보안 회귀가 생기면 CI가 실패하도록 했습니다. 이번 범위는 코드화와 정적·mock 검증까지이며 실제 `terraform apply`는 수행하지 않았습니다.
 19. 기존 Actor Audit을 Sync·Async Inspection까지 확장했습니다. `inspection_runs`에 nullable `actor_user_id`(`users.id`, `ON DELETE SET NULL`)와 `actor_username` snapshot을 추가하고, actor는 request form이 아니라 인증된 JWT `current_user`에서만 가져오도록 했습니다. 비동기 경로는 ORM 객체나 JWT 대신 두 scalar만 Redis job state와 Celery Worker로 전달했습니다. 동일 CSV·검수 버전의 기존 run을 재사용할 때는 최초 actor를 보존하며, 사용자 삭제 후 FK만 `NULL`이 되고 username snapshot은 남는 동작을 PostgreSQL 18 migration 왕복·Sync 통합 테스트·Redis/Celery/FastAPI E2E로 검증했습니다.
 20. AWS S3의 합성 공급사 CSV를 EC2 Instance Role의 최소권한 IAM으로 읽고, FastAPI의 기존 ETL Pipeline을 통해 RDS PostgreSQL staging에 적재하는 전체 흐름을 실제 AWS staging 환경에서 검증했습니다. S3 연동을 위해 두 번째 ETL pipeline을 만들지 않고 `run_web_etl()` 앞에 붙는 source adapter로 설계해 변환·중복 판단·Actor Audit 로직을 그대로 재사용했으며, EC2 Role에는 `s3:GetObject` 하나만 그것도 정확한 prefix로 제한해 부여하고 컨테이너에 AWS access key를 주입하지 않아 실제 principal이 `assumed-role/CatalogGuardEC2SSMRole/<instance-id>`로 동작하는 것을 확인했습니다. 동일 S3 객체 재처리 시 SHA-256 기반 idempotency와 Actor Audit이 유지되는 것을 실제 staging DB에서 검증했고, anonymous 401·viewer 403·허용 prefix 밖 400 차단과 함께 `s3:ListBucket`을 주지 않은 최소권한 때문에 없는 key가 404가 아니라 안전한 502로 응답한다는 실제 AWS 동작 차이까지 기록했습니다.
@@ -66,6 +66,14 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, 
 35. Correction Worksheet를 내려받은 뒤에는 사용자가 **원본 상품 CSV를 직접 수정**하고 다시 검수할 수 있도록, 기준 실행과 후속 실행을 기존 Comparison으로 연결했습니다. Worksheet 자체를 입력으로 업로드하거나 원본을 자동 복구하지 않으며, 같은 파일 dedup으로 기존 실행이 재사용된 경우에는 비교를 만들지 않습니다. 따라서 Comparison은 개선 판정기가 아니라 같은 검수 버전의 저장된 issue 차이를 보여 주는 중립적 조회입니다.
 36. v0.2.0에서 저장된 결과를 설명하는 Inspection Copilot을 OpenAI Agents SDK의 Function Tool 네 개로 구현했습니다. 현재 검수 요약, source row issue, Correction Worksheet 개요, 기준·비교 실행의 Comparison만 읽고, Rule Engine의 새 오류·카테고리·가격·규칙 판정을 대신하지 않습니다. 쓰기, SQL, 일반 HTTP, 웹, 셸, 코드 실행, MCP, Promotion, Rollback 권한은 주지 않았고 원본 CSV·상품 설명·개인정보 원문도 전달하지 않습니다. v0.2.0에서는 `OPENAI_API_KEY`가 없으면 Inspection Copilot만 `503`으로 unavailable이며 기존 검수 흐름은 계속 동작했습니다.
 37. v0.3.0에서는 기존 OpenAI 경로를 보존한 채 Local Ollama Two-Phase Copilot을 추가했습니다. Python이 질문 분류·저장 결과 조회·Evidence Pack·식별자 검증·최종 evidence를 소유하고, tool-less Local LLM은 제공된 근거를 자연어로 설명만 합니다. Local Ollama 경로는 v0.2.0의 기능으로 소급하지 않습니다.
+
+### 현재 unreleased main과 v0.3.0 이후 변경
+
+공식 Release는 v0.3.0입니다. 현재 `main`에는 그 이후의 미출시 변경으로 inspection issue의 관계 행 명시 저장, schema-aware `/ready`, CSV/XLSX Web ETL 업로드와 Golden Rule Quality Regression이 추가됐습니다. 현재 기준은 `INSPECTION_VERSION = "15"`, Alembic single head `20260915_0020`, FastAPI 애플리케이션 버전 `0.1.0`이며, 이 변경들을 v0.3.0 기능으로 소급하지 않습니다.
+
+XLSX는 Web multipart에서만 지원합니다. 정확히 하나의 visible worksheet를 요구하고 formula·macro·external link·merged cell과 과도한 resource 사용을 제한하며, CLI·S3·HTTP feed·Airflow는 계속 CSV-only입니다. 처음에는 XLSX 의존성이 최상위 import로 Airflow runtime까지 전파되는 compatibility regression을 격리 Airflow CI smoke에서 발견했지만, XLSX 경로에서만 불러오는 lazy import로 수정해 CSV-only Airflow 경계와 기존 runtime을 보존했습니다.
+
+개별 Rule unit test는 특정 규칙의 조건과 경계를 확인합니다. Golden Dataset 회귀 테스트는 39개 synthetic 상품 행에서 24/24 활성 issue code, expected issue 31건과 정상 control 5행을 한 번에 실행해 새 Rule·정규화 변경 후 오탐, 누락, 관계 행 불일치를 탐지합니다. 현재 고정 fixture 결과는 matched 31, false positive 0, false negative 0, relationship mismatch 0입니다. 이 수치는 synthetic fixture의 회귀 기준일 뿐 실제 사용자·운영 catalog에 사람이 정답 label을 붙인 benchmark나 실서비스 정확도 주장이 아닙니다.
 
 ### Airflow ETL orchestration: 문제와 해결
 
@@ -164,7 +172,7 @@ staging load·idempotency·lineage를 함께 검증했다.
 ```text
 Streamlit ETL 실행 영역
 -> GET /api/v1/etl-profiles (서버 allowlist 프로필 목록)
--> 공급사 CSV 업로드 + "ETL 실행 프로필" 선택
+-> 공급사 CSV 또는 XLSX 업로드 + "ETL 실행 프로필" 선택
 -> ETL 실행 버튼 클릭
 -> POST /api/v1/etl-loads
 -> etl.web_service.run_web_etl() -> run_pipeline() -> load_standard_csv()
@@ -224,7 +232,7 @@ Streamlit ETL 프로필 운영 관리
 | pandas | 3.0.3 |
 | 데이터베이스 | PostgreSQL, SQLAlchemy, psycopg |
 | 마이그레이션 | Alembic |
-| 현재 검수 버전 | `INSPECTION_VERSION = "14"` |
+| 현재 검수 버전 | `INSPECTION_VERSION = "15"` |
 | 비동기 처리 | Redis, Celery |
 | 설명 보조 | OpenAI Agents SDK 0.22.1 기반 provider 분기. OpenAI: 기본 모델 `gpt-5.6-terra`, 최대 4 turn, 순차 read-only Function Tool 4개. Ollama(v0.3.0): 기본 `qwen3.5:9b`, Python Evidence Pack + tool-less Local LLM + Narrative Grounding Validator |
 | 관측성 | prometheus-client 0.25.0 (HTTP·Web ETL metric instrumentation MVP, Prometheus 서버는 미구축) |
@@ -267,7 +275,7 @@ Streamlit ETL 프로필 운영 관리
 | Reset 기능 commit `0a2a80f` 기준 로컬 테스트 | 로컬 PostgreSQL 통합 환경에서 `python -m pytest tests/` 결과 `2427 passed`, `6 deselected`, `0 failed`, 5 warnings. 관련 5개 파일 묶음은 `603 passed`(service 37 · API 49 · client 325 · Streamlit AppTest 141 · RBAC 51). `6 deselected`는 `pytest.ini`의 기본 `-m "not e2e and not performance"`입니다. **이 commit에 대한 CI run은 아직 없습니다.** CI는 `python -m pytest -q`로 저장소 전체를 수집해 `airflow/tests/`까지 포함하므로 이 로컬 수치와 직접 비교할 수 없습니다 |
 | ETL Profile Activation History 검증 | 성공한 activate·deactivate·reset 명령마다 event 1건, 같은 `PUT`·no-op reset도 기록, 실패 요청은 기록 없음, 상태 변경과 event INSERT의 same-transaction rollback, reset event의 실제 적용 버전이 배포 기본값, 사용자 삭제 후 `actor_user_id` `NULL`·이름 snapshot 유지, 응답에 `actor_user_id` 미노출, `0015` upgrade의 backfill 없음, 화면이 reset을 비활성화로 표시하지 않음, 이력 조회 실패의 화면 격리를 migration·service·API·client·Streamlit AppTest·PostgreSQL 통합 테스트로 확인 |
 | History 기능 commit `b14e16f` 기준 로컬 테스트 | 로컬 PostgreSQL 16 통합 환경에서 `python -m pytest tests/`(e2e·performance 제외) 결과 `2543 passed`, `0 failed`. 핵심 7개 파일 묶음은 `723 passed`(history migration 5 · history service 35 · activation service 37 · API 69 · client 369 · Streamlit AppTest 154 · RBAC 54). **이 commit에 대한 CI run은 아직 없습니다.** CI는 저장소 전체를 수집해 `airflow/tests/`까지 포함하므로 이 로컬 수치와 직접 비교할 수 없습니다 |
-| 최신 Alembic head | `20260908_0019`(ETL profile lineage와 inspection result source row identity까지 적용한 single head) |
+| 최신 Alembic head | `20260915_0020`(inspection issue의 명시적 `related_source_rows` 저장까지 적용한 single head) |
 | 최신 CI Streamlit 시작 검사 | Health HTTP 200, body `ok` |
 
 ## 6.6 핵심 구현 구조
@@ -1210,11 +1218,11 @@ PostgreSQL 테스트 클러스터에서 정렬, 파일명·프로필명 검색�
 
 ### Streamlit ETL 적재 이력 화면
 
-Streamlit은 `CatalogGuardApiClient`를 통해 웹 ETL 실행, 목록·상세 조회, promotion·rollback POST API를 호출합니다. staging 상품 직접 수정·삭제는 수행하지 않지만, 공급사 CSV 업로드부터 batch preview·승인·운영 상품 반영·필요 시 rollback까지 이 화면들에서 요청할 수 있습니다.
+Streamlit은 `CatalogGuardApiClient`를 통해 웹 ETL 실행, 목록·상세 조회, promotion·rollback POST API를 호출합니다. staging 상품 직접 수정·삭제는 수행하지 않지만, 공급사 CSV 또는 XLSX 업로드부터 batch preview·승인·운영 상품 반영·필요 시 rollback까지 이 화면들에서 요청할 수 있습니다.
 
 | 기능 | 구현 범위 |
 |---|---|
-| ETL 실행 | 공급사 CSV 업로드와 "ETL 실행 프로필" 선택, 버튼 클릭으로 `POST /api/v1/etl-loads` 실행, 정상/거부 행 수와 배치 ID 표시 |
+| ETL 실행 | 공급사 CSV 또는 XLSX 업로드와 "ETL 실행 프로필" 선택, 버튼 클릭으로 `POST /api/v1/etl-loads` 실행, 정상/거부 행 수와 배치 ID 표시 |
 | 목록 | 10건 단위 페이지네이션, 전체 건수, 빈 목록 안내 |
 | 검색 | filename·profile_name 부분 검색과 두 조건 AND |
 | 상세 | 배치 메타데이터, 전체·정상·거부 행, 정상 처리율, 오류 코드 통계, input/output SHA-256 전체 값, 적재 시각, reject 상세와 마스킹된 원본 |
@@ -1518,7 +1526,7 @@ k8s/catalogguard-api.yaml (Deployment)
 GET /health = FastAPI 프로세스 생존 여부만 확인(PostgreSQL 미확인)
            -> livenessProbe
 
-GET /ready  = FastAPI 실행 중 + PostgreSQL 연결(SELECT 1) 확인
+GET /ready  = PostgreSQL 연결 + repository Alembic single head와 DB current revision 일치 확인
            -> readinessProbe
 ```
 
@@ -2097,7 +2105,7 @@ migration은 **빈 표를 만듭니다.** 기존 current-state row를 보고 과
 
 ### PostgreSQL 18.4에서 확인한 ETL transaction 계약
 
-Alembic `upgrade head`로 당시 head였던 `20260826_0018`까지 적용한 disposable PostgreSQL 18.4 환경에서 다음 파일을 실제로 실행했습니다. 이 숫자는 저장소 전체 테스트 수가 아니라 해당 PostgreSQL 검증 범위입니다. 현재 head는 inspection result의 nullable `source_row_number`를 추가한 `20260908_0019`이며, 과거 검증 수치를 최신 전체 검증 수치처럼 읽지 않습니다.
+Alembic `upgrade head`로 당시 head였던 `20260826_0018`까지 적용한 disposable PostgreSQL 18.4 환경에서 다음 파일을 실제로 실행했습니다. 이 숫자는 저장소 전체 테스트 수가 아니라 해당 PostgreSQL 검증 범위입니다. 현재 head는 inspection issue의 nullable `related_source_rows`를 추가한 `20260915_0020`이며, 과거 검증 수치를 최신 전체 검증 수치처럼 읽지 않습니다.
 
 | 범위 | 결과 | 의미 |
 |---|---:|---|
@@ -2112,4 +2120,4 @@ concentrated duplicate-product-name 입력에서 pair 비교 호출 수를 **4,9
 
 ### 다음 판단 기준
 
-향후 개선은 실제 사용자 데이터로 Rule 품질을 검증하고, 운영 관찰성을 보완하며, 성능 baseline을 계속 관찰하는 방향을 우선합니다. 추천 시스템·대규모 cloud 확장·무제한 Rule 추가는 현재 핵심 계획이 아니며, production 요구가 생겼을 때만 별도 근거로 판단합니다. 기존 `codex/content-safety-subprofile` profiling/backlog 맥락은 보존합니다.
+현재는 synthetic Golden Dataset으로 전체 Rule Engine의 오탐·누락·관계 metadata 회귀를 막습니다. 향후 실제 사용자·운영 데이터가 확보되면 개인정보 보호와 별도 정답 labeling 근거 아래 Rule 품질을 검증하고, 운영 관찰성과 성능 baseline을 계속 보완하는 방향을 우선합니다. Golden Dataset이 이 실데이터 검증을 대체하지는 않습니다. 추천 시스템·대규모 cloud 확장·무제한 Rule 추가는 현재 핵심 계획이 아니며, production 요구가 생겼을 때만 별도 근거로 판단합니다. 기존 `codex/content-safety-subprofile` profiling/backlog 맥락은 보존합니다.
