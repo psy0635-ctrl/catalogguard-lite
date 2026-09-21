@@ -1319,7 +1319,15 @@ Promotion Preview·Rollback Preview는 DB를 변경하지 않고 "무엇이 바�
 
 ### 현재 한계
 
-Refresh Token 없음(만료 시 재로그인), 회원가입/password reset/OAuth/MFA/SSO 없음, 로그인 rate limit 없음. 이번 기능은 "누가 실행할 수 있는지"만 통제하며, "누가 실행했는지"를 기록하는 Actor Audit은 6.19절에서 별도로 다룹니다. 모두 이번 MVP에서 의도적으로 제외한 범위입니다.
+Refresh Token 없음(만료 시 재로그인), 회원가입/password reset/OAuth/MFA/SSO 없음. 로그인 rate limit은 아래의 별도 MVP로 추가했습니다. 인증은 "누가 실행할 수 있는지"를 통제하며, "누가 실행했는지"를 기록하는 Actor Audit은 6.19절에서 별도로 다룹니다.
+
+### Login Rate Limit MVP
+
+로컬 Compose API는 기존 `REDIS_JOB_URL`을 재사용하는 로그인 요청 제한을 활성화합니다. username과 서버가 확인한 peer IP 각각에 독립적인 Fixed Window bucket을 적용하며, 기본값은 300초 동안 username 10회·IP 100회입니다. 첫 허용 요청의 TTL은 연장하지 않고, 성공 로그인도 카운트하며 성공 후 counter를 초기화하지 않습니다. 두 bucket의 확인·증가는 Redis Lua 한 번으로 원자적으로 처리합니다. 이미 차단된 bucket이 있으면 다른 bucket도 증가시키지 않습니다.
+
+Redis key에는 username·IP 원문 대신 SHA-256 digest만 넣습니다. 이는 완전한 익명화가 아닙니다. `CATALOGGUARD_LOGIN_RATE_LIMIT_ENABLED` 기본값은 `false`이고 비활성 시 Redis client를 만들지 않습니다. 활성 상태에서 Redis `ConnectionError`·`TimeoutError`가 발생하면 안전한 고정 warning을 남기고 기존 로그인으로 진행합니다(fail-open). 다른 Redis/Lua 오류는 숨기지 않습니다. 한도 초과 시 bucket 종류를 노출하지 않는 `429 login_rate_limited`를 반환하고, 기존 credential 실패는 `401 invalid_credentials`를 유지합니다.
+
+브라우저 → Streamlit server → FastAPI 경로에서 IP bucket은 실제 브라우저 사용자별이 아니라 Streamlit server 또는 NAT 주소를 공유할 수 있습니다. AWS staging과 Kubernetes에는 검증된 Redis 연결이 없어 이번 단계에서 limiter를 활성화하지 않았습니다. 이 기능은 자동화된 반복 로그인 추측을 완화하는 defense-in-depth 기능이며 credential stuffing을 완전히 차단하지 않습니다.
 
 ## 6.19 Actor Audit
 

@@ -401,6 +401,7 @@ AUTHENTICATION_REQUIRED_MESSAGE = "로그인이 필요합니다."
 INVALID_TOKEN_MESSAGE = "인증 토큰이 유효하지 않습니다. 다시 로그인해 주세요."
 INACTIVE_USER_MESSAGE = "비활성화된 계정입니다."
 INVALID_CREDENTIALS_MESSAGE = "아이디 또는 비밀번호가 올바르지 않습니다."
+LOGIN_RATE_LIMITED_MESSAGE = "로그인 시도가 너무 많습니다. 잠시 후 다시 시도해 주세요."
 INSUFFICIENT_ROLE_MESSAGE = "이 작업을 수행할 권한이 없습니다."
 
 
@@ -1863,6 +1864,10 @@ class InvalidCredentialsError(CatalogGuardApiAuthenticationError):
     """로그인 시 아이디/비밀번호가 올바르지 않거나 계정이 비활성 상태입니다."""
 
 
+class LoginRateLimitedError(CatalogGuardApiResponseError):
+    """The login endpoint rejected an attempt with login_rate_limited."""
+
+
 class CatalogGuardApiAuthorizationError(CatalogGuardApiResponseError):
     """HTTP 403: 로그인은 됐지만 현재 역할로는 허용되지 않는 작업입니다."""
 
@@ -3041,6 +3046,13 @@ class CatalogGuardApiClient:
             error_response = getattr(error, "response", None)
             request_id = _get_response_request_id(error_response)
             status_code = getattr(error_response, "status_code", None)
+            if path == "/api/v1/auth/login" and status_code == 429:
+                detail = _error_detail_payload(error_response)
+                if detail is not None and detail.get("code") == "login_rate_limited":
+                    raise LoginRateLimitedError(
+                        LOGIN_RATE_LIMITED_MESSAGE,
+                        request_id=request_id,
+                    ) from error
             if status_code == 404 and raise_not_found:
                 raise not_found_error(
                     not_found_message,

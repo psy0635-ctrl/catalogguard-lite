@@ -8,6 +8,7 @@ from clients.catalogguard_api import (
     CatalogGuardApiResponseError,
     CatalogGuardApiTimeoutError,
     InvalidCredentialsError,
+    LoginRateLimitedError,
     create_catalogguard_api_client,
 )
 
@@ -73,6 +74,11 @@ def _submit_login(username: str, password: str) -> None:
     except InvalidCredentialsError:
         st.session_state[LOGIN_ERROR_STATE_KEY] = (
             "아이디 또는 비밀번호가 올바르지 않습니다."
+        )
+        return
+    except LoginRateLimitedError:
+        st.session_state[LOGIN_ERROR_STATE_KEY] = (
+            "로그인 시도가 너무 많습니다.\n잠시 후 다시 시도해 주세요."
         )
         return
     except (

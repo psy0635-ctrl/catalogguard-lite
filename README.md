@@ -1829,6 +1829,12 @@ FastAPI 서버 상태를 확인합니다. PostgreSQL 연결을 확인하는 엔�
 
 예를 들어 viewer 계정으로 로그인한 뒤 Promotion 실행 API를 호출하면, 로그인 자체는 성공했으므로 401이 아니라 403(`insufficient_role`)이 반환됩니다.
 
+로그인 요청 제한 MVP는 `CATALOGGUARD_LOGIN_RATE_LIMIT_ENABLED=true`일 때만 동작하며 로컬 Compose API에서는 활성화되어 있습니다. 기본값은 300초 동안 username별 10회, 서버가 확인한 peer IP별 100회입니다. `CATALOGGUARD_LOGIN_RATE_LIMIT_USER_ATTEMPTS`, `CATALOGGUARD_LOGIN_RATE_LIMIT_IP_ATTEMPTS`, `CATALOGGUARD_LOGIN_RATE_LIMIT_WINDOW_SECONDS`로 양의 정수 한도를 조정할 수 있습니다. 빈 값·잘못된 값·0·음수는 기본값을 사용합니다.
+
+두 bucket은 기존 `REDIS_JOB_URL`을 재사용하며 서로 다른 SHA-256 digest key에 저장합니다. 원문 노출을 줄이는 방식이지 완전한 익명화는 아닙니다. Redis Lua 한 번으로 두 bucket을 원자적으로 확인·증가시키는 Fixed Window이며, 첫 허용 요청에 설정한 TTL은 연장하지 않습니다. 성공 로그인도 카운트하고 reset하지 않습니다. 한도 초과 시 `429 login_rate_limited`만 반환하며, 없는 username·틀린 비밀번호·비활성 계정의 기존 `401 invalid_credentials` 계약은 유지됩니다. Redis 연결·timeout 장애 때는 고정 warning을 남기고 인증을 계속하는 fail-open 정책입니다.
+
+Streamlit 서버가 FastAPI에 요청을 보내므로 IP bucket은 브라우저 이용자 한 명의 IP가 아닌 공유 서버·NAT 주소일 수 있습니다. AWS staging과 Kubernetes에는 현재 검증된 Redis 연결이 없어 rate limiter를 활성화하지 않았습니다. 이 기능은 자동화된 반복 로그인 추측을 완화하는 defense-in-depth 수단입니다.
+
 `get_current_user()`는 토큰의 `role`을 그대로 신뢰하지 않고 매 요청마다 PostgreSQL의 `users` 테이블에서 현재 `role`·`is_active`를 다시 확인합니다. 따라서 이미 발급된 토큰이 있어도 관리자가 계정을 비활성화하면 다음 요청부터 즉시 차단됩니다.
 
 역할은 `viewer`(조회)와 `operator`(운영 데이터 변경) 2개만 있습니다. 현재 admin 전용 기능이 없어 admin 역할은 만들지 않았습니다.
@@ -2963,7 +2969,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - Refresh Token은 없으며 Access Token이 만료되면 다시 로그인해야 합니다.
 - 회원가입 API, 비밀번호 찾기/재설정 기능은 없습니다. 계정은 `scripts/create_user.py` bootstrap CLI로만 만듭니다.
 - OAuth, MFA, SSO 연동은 없습니다.
-- 로그인 시도 rate limit이나 brute-force 방어는 구현되어 있지 않습니다.
+- Redis 기반 Login Rate Limit MVP는 로컬 Compose API에서 활성화됩니다. AWS staging·Kubernetes에는 검증된 Redis 연결이 없어 아직 비활성입니다. 이 기능은 자동화된 반복 로그인 추측을 완화하는 defense-in-depth 수단이며 credential stuffing을 완전히 차단하지는 않습니다.
 - 역할은 `viewer`·`operator` 2개만 있으며, 세밀한 permission 단위 ACL이나 관리자 전용 화면은 없습니다.
 - Inspection Actor Audit은 `inspection_runs` row를 최초 생성한 사용자만 기록합니다. 동일 CSV·검수 버전의 dedup 요청자를 별도 event로 모두 저장하지는 않습니다.
 - Async job status 응답에는 actor를 노출하지 않습니다. 완료 후 `inspection_run_id`로 검수 상세를 조회하면 `actor_username`을 확인할 수 있습니다.
@@ -3049,7 +3055,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - Terraform S3 remote state와 state locking 구성
 - 기존 수동 생성 AWS staging 리소스의 Terraform import와 실제 `apply` 기반 재현
 - custom VPC·private subnet 기반 네트워크 구성의 Terraform 코드화
-- Refresh Token, 회원가입, password reset, OAuth/MFA/SSO, 로그인 rate limit
+- Refresh Token, 회원가입, password reset, OAuth/MFA/SSO, AWS staging·Kubernetes의 로그인 rate limit 활성화
 - 중복 저장 이벤트 로그 또는 감사 기록 검토
 - 카테고리와 가격 이상치 기준을 설정 파일이나 관리 화면에서 조정
 - 상품 그룹 내 상품명 일관성 검수
