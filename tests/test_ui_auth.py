@@ -1,7 +1,7 @@
 # 역할: Streamlit 로그인/로그아웃 UI와 role 기반 버튼 제한을 AppTest로 검증합니다.
 from streamlit.testing.v1 import AppTest
 
-from clients.catalogguard_api import InvalidCredentialsError
+from clients.catalogguard_api import InvalidCredentialsError, LoginRateLimitedError
 from conftest import build_authenticated_app_test
 from tests.test_etl_load_history_ui import FakeEtlApiClient
 from ui import auth as ui_auth
@@ -92,6 +92,21 @@ def test_login_failure_shows_generic_invalid_credentials_message(monkeypatch):
         "아이디 또는 비밀번호가 올바르지 않습니다" in error.value for error in app.error
     )
     # 로그인 폼이 여전히 보여야 하며 다음 시도를 위해 새 위젯 key를 사용합니다.
+    assert any(widget.label == "아이디" for widget in app.text_input)
+
+
+def test_rate_limited_login_keeps_form_and_shows_retry_message(monkeypatch):
+    auth_client = FakeAuthApiClient(login_error=LoginRateLimitedError("server message"))
+    _patch_auth_api_client(monkeypatch, auth_client)
+
+    app = AppTest.from_file("app.py").run(timeout=10)
+    app.text_input(key="auth_username_input_0").set_value("operator_user")
+    app.text_input(key="auth_password_input_0").set_value("wrong-password")
+    app.button(key="auth_login_submit").click().run(timeout=10)
+
+    assert len(app.exception) == 0
+    assert "auth_access_token" not in app.session_state
+    assert any("로그인 시도가 너무 많습니다" in error.value for error in app.error)
     assert any(widget.label == "아이디" for widget in app.text_input)
 
 

@@ -3760,6 +3760,33 @@ def test_login_maps_invalid_credentials_to_typed_error():
     assert error.value.code == "invalid_credentials"
 
 
+def test_login_maps_only_its_rate_limit_code_to_typed_error():
+    client_module = import_client_module()
+    client, _ = make_client(
+        response=FakeResponse(
+            status_code=429,
+            payload={"detail": {"code": "login_rate_limited", "message": "untrusted server text"}},
+            headers={"X-Request-ID": VALID_REQUEST_ID},
+        )
+    )
+    with pytest.raises(client_module.LoginRateLimitedError) as error:
+        client.login(username="someone", password="pw")
+    assert str(error.value) == client_module.LOGIN_RATE_LIMITED_MESSAGE
+    assert error.value.request_id == VALID_REQUEST_ID
+
+    other_client, _ = make_client(
+        response=FakeResponse(
+            status_code=429,
+            payload={"detail": {"code": "other_limit", "message": "untrusted"}},
+            headers={"X-Request-ID": VALID_REQUEST_ID},
+        )
+    )
+    with pytest.raises(client_module.CatalogGuardApiResponseError) as other_error:
+        other_client.login(username="someone", password="pw")
+    assert type(other_error.value) is client_module.CatalogGuardApiResponseError
+    assert other_error.value.request_id == VALID_REQUEST_ID
+
+
 def test_get_current_user_returns_username_and_role():
     client, session = make_client(response=FakeResponse(payload=CURRENT_USER_RESPONSE))
 

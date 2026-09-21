@@ -30,6 +30,13 @@ DEFAULT_CELERY_BROKER_URL = "redis://localhost:6379/0"
 DEFAULT_REDIS_JOB_URL = "redis://localhost:6379/1"
 DEFAULT_INSPECTION_JOB_DIR = BASE_DIR / "var" / "inspection_jobs"
 DEFAULT_INSPECTION_JOB_TTL_SECONDS = 24 * 60 * 60
+CATALOGGUARD_LOGIN_RATE_LIMIT_ENABLED_ENV_VAR = "CATALOGGUARD_LOGIN_RATE_LIMIT_ENABLED"
+CATALOGGUARD_LOGIN_RATE_LIMIT_USER_ATTEMPTS_ENV_VAR = "CATALOGGUARD_LOGIN_RATE_LIMIT_USER_ATTEMPTS"
+CATALOGGUARD_LOGIN_RATE_LIMIT_IP_ATTEMPTS_ENV_VAR = "CATALOGGUARD_LOGIN_RATE_LIMIT_IP_ATTEMPTS"
+CATALOGGUARD_LOGIN_RATE_LIMIT_WINDOW_SECONDS_ENV_VAR = "CATALOGGUARD_LOGIN_RATE_LIMIT_WINDOW_SECONDS"
+DEFAULT_LOGIN_RATE_LIMIT_USER_ATTEMPTS = 10
+DEFAULT_LOGIN_RATE_LIMIT_IP_ATTEMPTS = 100
+DEFAULT_LOGIN_RATE_LIMIT_WINDOW_SECONDS = 300
 # HTTP feed에서 받은 CSV를 기존 ETL에 넘길 때 사용할 안전한 기본 파일명입니다.
 DEFAULT_ETL_HTTP_FEED_FILENAME = "supplier_feed.csv"
 
@@ -325,6 +332,41 @@ def get_redis_job_url() -> str:
     return _get_non_empty_environment_value(
         REDIS_JOB_URL_ENV_VAR,
         DEFAULT_REDIS_JOB_URL,
+    )
+
+
+def is_login_rate_limit_enabled() -> bool:
+    return os.environ.get(CATALOGGUARD_LOGIN_RATE_LIMIT_ENABLED_ENV_VAR, "").strip().lower() in {
+        "true", "1", "yes"
+    }
+
+
+def _get_positive_int_environment_value(environment_name: str, default_value: int) -> int:
+    try:
+        value = int(os.environ.get(environment_name, "").strip())
+    except ValueError:
+        return default_value
+    return value if value > 0 else default_value
+
+
+def get_login_rate_limit_user_attempts() -> int:
+    return _get_positive_int_environment_value(
+        CATALOGGUARD_LOGIN_RATE_LIMIT_USER_ATTEMPTS_ENV_VAR,
+        DEFAULT_LOGIN_RATE_LIMIT_USER_ATTEMPTS,
+    )
+
+
+def get_login_rate_limit_ip_attempts() -> int:
+    return _get_positive_int_environment_value(
+        CATALOGGUARD_LOGIN_RATE_LIMIT_IP_ATTEMPTS_ENV_VAR,
+        DEFAULT_LOGIN_RATE_LIMIT_IP_ATTEMPTS,
+    )
+
+
+def get_login_rate_limit_window_seconds() -> int:
+    return _get_positive_int_environment_value(
+        CATALOGGUARD_LOGIN_RATE_LIMIT_WINDOW_SECONDS_ENV_VAR,
+        DEFAULT_LOGIN_RATE_LIMIT_WINDOW_SECONDS,
     )
 
 

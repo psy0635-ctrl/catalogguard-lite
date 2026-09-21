@@ -122,6 +122,85 @@ def test_login_rejects_missing_password_field():
     assert response.status_code == 422
 
 
+def test_disabled_limiter_does_not_create_redis_client_or_warn(monkeypatch, caplog):
+    monkeypatch.setenv("CATALOGGUARD_LOGIN_RATE_LIMIT_ENABLED", "false")
+    monkeypatch.setattr(
+        auth_route,
+        "get_login_rate_limiter",
+        lambda: pytest.fail("disabled login limiter created a Redis client"),
+    )
+    monkeypatch.setattr(auth_route, "authenticate_user", lambda *args, **kwargs: _fake_user())
+    assert client.post(LOGIN_ENDPOINT, json={"username": "operator_user", "password": "pw"}).status_code == 200
+    assert not caplog.records
+
+
+def test_limiter_counts_successful_login_before_authentication(monkeypatch):
+    monkeypatch.setenv("CATALOGGUARD_LOGIN_RATE_LIMIT_ENABLED", "true")
+    events = []
+
+    class AllowLimiter:
+        def allow_attempt(self, *, username, client_ip):
+            events.append(("limit", username, client_ip))
+            return True
+
+    def authenticate(session, *, username, password):
+        events.append(("authenticate", username, password))
+        return _fake_user()
+
+    monkeypatch.setattr(auth_route, "get_login_rate_limiter", lambda: AllowLimiter())
+    monkeypatch.setattr(auth_route, "authenticate_user", authenticate)
+    response = client.post(LOGIN_ENDPOINT, json={"username": " User1 ", "password": "pw"})
+    assert response.status_code == 200
+    assert response.json()["access_token"]
+    assert [event[0] for event in events] == ["limit", "authenticate"]
+    assert events[0][1] == " User1 "
+
+
+def test_limiter_blocks_before_authentication_with_generic_429(monkeypatch):
+    monkeypatch.setenv("CATALOGGUARD_LOGIN_RATE_LIMIT_ENABLED", "true")
+
+    class BlockLimiter:
+        def allow_attempt(self, *, username, client_ip):
+            return False
+
+    monkeypatch.setattr(auth_route, "get_login_rate_limiter", lambda: BlockLimiter())
+    monkeypatch.setattr(
+        auth_route,
+        "authenticate_user",
+        lambda *args, **kwargs: pytest.fail("blocked request reached authentication"),
+    )
+    response = client.post(LOGIN_ENDPOINT, json={"username": "someone", "password": "pw"})
+    assert response.status_code == 429
+    assert response.json() == {"detail": auth_route.LOGIN_RATE_LIMITED_DETAIL}
+    assert "Retry-After" not in response.headers
+
+
+@pytest.mark.parametrize("username", ["operator_user", "no-such-user", "inactive_user"])
+def test_limiter_allows_generic_credential_failure_for_any_username(monkeypatch, username):
+    monkeypatch.setenv("CATALOGGUARD_LOGIN_RATE_LIMIT_ENABLED", "true")
+
+    class AllowLimiter:
+        def allow_attempt(self, *, username, client_ip):
+            return True
+
+    monkeypatch.setattr(auth_route, "get_login_rate_limiter", lambda: AllowLimiter())
+    monkeypatch.setattr(auth_route, "authenticate_user", lambda *args, **kwargs: None)
+    response = client.post(LOGIN_ENDPOINT, json={"username": username, "password": "pw"})
+    assert response.status_code == 401
+    assert response.json() == {"detail": auth_route.INVALID_CREDENTIALS_DETAIL}
+
+
+def test_invalid_body_never_calls_limiter(monkeypatch):
+    monkeypatch.setenv("CATALOGGUARD_LOGIN_RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setattr(
+        auth_route,
+        "get_login_rate_limiter",
+        lambda: pytest.fail("invalid body reached limiter"),
+    )
+    response = client.post(LOGIN_ENDPOINT, json={"username": "someone"})
+    assert response.status_code == 422
+
+
 def test_get_me_requires_authentication():
     response = client.get(ME_ENDPOINT)
 
