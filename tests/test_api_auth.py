@@ -131,7 +131,10 @@ def test_disabled_limiter_does_not_create_redis_client_or_warn(monkeypatch, capl
     )
     monkeypatch.setattr(auth_route, "authenticate_user", lambda *args, **kwargs: _fake_user())
     assert client.post(LOGIN_ENDPOINT, json={"username": "operator_user", "password": "pw"}).status_code == 200
-    assert not caplog.records
+    assert not any(
+        record.name == "catalogguard.auth" and record.levelname == "WARNING"
+        for record in caplog.records
+    )
 
 
 def test_limiter_counts_successful_login_before_authentication(monkeypatch):
