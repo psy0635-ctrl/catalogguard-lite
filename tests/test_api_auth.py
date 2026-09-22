@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from api.dependencies import get_current_user
 from api.main import app
 from api.routes import auth as auth_route
+from config import metrics as metrics_config
 from db.session import get_session
 
 
@@ -29,6 +30,14 @@ def fake_session():
 
 def _fake_user(*, username="operator_user", role="operator"):
     return SimpleNamespace(id=1, username=username, role=role, is_active=True)
+
+
+def _metric(name):
+    return metrics_config.REGISTRY.get_sample_value(name) or 0.0
+
+
+BLOCKED_METRIC = "catalogguard_login_rate_limited_total"
+FAIL_OPEN_METRIC = "catalogguard_login_rate_limiter_fail_open_total"
 
 
 def test_login_success_returns_access_token(monkeypatch):
@@ -123,6 +132,8 @@ def test_login_rejects_missing_password_field():
 
 
 def test_disabled_limiter_does_not_create_redis_client_or_warn(monkeypatch, caplog):
+    monkeypatch.setenv(metrics_config.CATALOGGUARD_METRICS_ENABLED_ENV_VAR, "true")
+    before = (_metric(BLOCKED_METRIC), _metric(FAIL_OPEN_METRIC))
     monkeypatch.setenv("CATALOGGUARD_LOGIN_RATE_LIMIT_ENABLED", "false")
     monkeypatch.setattr(
         auth_route,
@@ -135,9 +146,12 @@ def test_disabled_limiter_does_not_create_redis_client_or_warn(monkeypatch, capl
         record.name == "catalogguard.auth" and record.levelname == "WARNING"
         for record in caplog.records
     )
+    assert (_metric(BLOCKED_METRIC), _metric(FAIL_OPEN_METRIC)) == before
 
 
 def test_limiter_counts_successful_login_before_authentication(monkeypatch):
+    monkeypatch.setenv(metrics_config.CATALOGGUARD_METRICS_ENABLED_ENV_VAR, "true")
+    before = _metric(BLOCKED_METRIC)
     monkeypatch.setenv("CATALOGGUARD_LOGIN_RATE_LIMIT_ENABLED", "true")
     events = []
 
@@ -157,9 +171,12 @@ def test_limiter_counts_successful_login_before_authentication(monkeypatch):
     assert response.json()["access_token"]
     assert [event[0] for event in events] == ["limit", "authenticate"]
     assert events[0][1] == " User1 "
+    assert _metric(BLOCKED_METRIC) - before == 0
 
 
 def test_limiter_blocks_before_authentication_with_generic_429(monkeypatch):
+    monkeypatch.setenv(metrics_config.CATALOGGUARD_METRICS_ENABLED_ENV_VAR, "true")
+    before = _metric(BLOCKED_METRIC)
     monkeypatch.setenv("CATALOGGUARD_LOGIN_RATE_LIMIT_ENABLED", "true")
 
     class BlockLimiter:
@@ -176,6 +193,32 @@ def test_limiter_blocks_before_authentication_with_generic_429(monkeypatch):
     assert response.status_code == 429
     assert response.json() == {"detail": auth_route.LOGIN_RATE_LIMITED_DETAIL}
     assert "Retry-After" not in response.headers
+    assert _metric(BLOCKED_METRIC) - before == 1
+    second = client.post(LOGIN_ENDPOINT, json={"username": "someone", "password": "pw"})
+    assert second.status_code == 429
+    assert _metric(BLOCKED_METRIC) - before == 2
+
+
+def test_login_observability_metrics_expose_no_request_secrets(monkeypatch):
+    monkeypatch.setenv(metrics_config.CATALOGGUARD_METRICS_ENABLED_ENV_VAR, "true")
+    monkeypatch.setenv("CATALOGGUARD_LOGIN_RATE_LIMIT_ENABLED", "true")
+
+    class BlockLimiter:
+        def allow_attempt(self, *, username, client_ip):
+            return False
+
+    monkeypatch.setattr(auth_route, "get_login_rate_limiter", lambda: BlockLimiter())
+    response = client.post(
+        LOGIN_ENDPOINT,
+        json={"username": "synthetic_login_secret", "password": "synthetic_password_secret"},
+        headers={"X-Request-ID": "synthetic_request_secret"},
+    )
+    assert response.status_code == 429
+    body = client.get("/metrics").text
+    assert "catalogguard_login_rate_limited_total" in body
+    assert "catalogguard_login_rate_limiter_fail_open_total" in body
+    for secret in ("synthetic_login_secret", "synthetic_password_secret", "synthetic_request_secret"):
+        assert secret not in body
 
 
 @pytest.mark.parametrize("username", ["operator_user", "no-such-user", "inactive_user"])

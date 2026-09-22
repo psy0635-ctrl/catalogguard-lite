@@ -1942,7 +1942,7 @@ HTTP Request
 -> request count / duration histogram / status class
 ```
 
-새 timing middleware를 추가하지 않고, 기존 `log_http_request` middleware가 이미 계산하던 duration을 그대로 재사용해 로그와 metric 양쪽에 씁니다. 현재 정의된 custom metric은 4개입니다.
+새 timing middleware를 추가하지 않고, 기존 `log_http_request` middleware가 이미 계산하던 duration을 그대로 재사용해 로그와 metric 양쪽에 씁니다. 현재 정의된 custom metric은 6개입니다.
 
 | metric | type | labels | 설명 |
 |---|---|---|---|
@@ -1950,6 +1950,10 @@ HTTP Request
 | `catalogguard_http_request_duration_seconds` | Histogram | `method`, `route` | 위와 같은 범위의 요청 처리 시간(초) |
 | `catalogguard_web_etl_runs_total` | Counter | `outcome`(`created`/`duplicate`/`failed`) | `POST /api/v1/etl-loads` 요청 결과 |
 | `catalogguard_web_etl_rows_total` | Counter | `result`(`loaded`/`rejected`) | 새로 생성된 배치의 처리 행 수 |
+| `catalogguard_login_rate_limited_total` | Counter | 없음 | Login Rate Limiter가 실제로 차단해 `429 login_rate_limited`가 발생한 횟수 |
+| `catalogguard_login_rate_limiter_fail_open_total` | Counter | 없음 | Redis `ConnectionError`/`TimeoutError`로 제한을 적용하지 못하고 인증을 계속한 횟수 |
+
+로그인 지표는 기존 `CATALOGGUARD_METRICS_ENABLED` 설정과 전용 registry를 그대로 사용합니다. HTTP 지표의 상태 계열만으로는 Redis fail-open을 알 수 없어 내부 이벤트 두 개만 별도로 셉니다. 두 Counter 모두 label이 없어 cardinality가 고정되며, username·IP·digest·password·JWT·request ID·Redis URL/key를 기록하지 않습니다. 지표는 상태 관찰용이며 차단 동작을 추가하지 않습니다.
 
 `route` label은 실제 요청 경로가 아니라 FastAPI route template을 사용합니다. 예를 들어 `/api/v1/catalog-promotions/1`과 `/api/v1/catalog-promotions/999`는 각각 별도 label이 아니라 둘 다 `/api/v1/catalog-promotions/{promotion_run_id}`로 집계됩니다. 매칭되는 route가 없는 404(예: 존재하지 않는 임의 경로)는 고정 label `unmatched`를 사용합니다. 동적 ID를 label로 그대로 쓰면 값마다 새로운 Prometheus time series가 생겨 메모리와 조회 비용이 계속 늘어나는 high-cardinality 문제가 생기므로, 이 프로젝트는 route template과 소수의 고정값(`status_class`, `outcome`, `result`)만 label로 사용합니다. `username`, `actor_username`, `request_id`, JWT, 실제 run ID, 파일명, 상품 ID 같은 값은 label에도 metric 출력에도 넣지 않습니다.
 

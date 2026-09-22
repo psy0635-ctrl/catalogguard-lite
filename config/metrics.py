@@ -47,6 +47,18 @@ WEB_ETL_ROWS_TOTAL = Counter(
     registry=REGISTRY,
 )
 
+LOGIN_RATE_LIMITED_TOTAL = Counter(
+    "catalogguard_login_rate_limited",
+    "Login requests blocked by the login rate limiter.",
+    registry=REGISTRY,
+)
+
+LOGIN_RATE_LIMITER_FAIL_OPEN_TOTAL = Counter(
+    "catalogguard_login_rate_limiter_fail_open",
+    "Login rate limiter Redis connection failures that allowed authentication to continue.",
+    registry=REGISTRY,
+)
+
 
 def is_metrics_enabled() -> bool:
     """CATALOGGUARD_METRICS_ENABLED가 true/1/yes(대소문자 무관)일 때만 True입니다."""
@@ -87,3 +99,13 @@ def record_web_etl_rows(*, loaded_rows: int | None, rejected_rows: int | None) -
         WEB_ETL_ROWS_TOTAL.labels(result="loaded").inc(loaded_rows)
     if rejected_rows:
         WEB_ETL_ROWS_TOTAL.labels(result="rejected").inc(rejected_rows)
+
+
+def record_login_rate_limited() -> None:
+    if is_metrics_enabled():
+        LOGIN_RATE_LIMITED_TOTAL.inc()
+
+
+def record_login_rate_limiter_fail_open() -> None:
+    if is_metrics_enabled():
+        LOGIN_RATE_LIMITER_FAIL_OPEN_TOTAL.inc()

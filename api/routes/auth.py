@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from api.dependencies import get_current_user
 from api.schemas import CurrentUserResponse, LoginRequest, LoginResponse
 from core.security import create_access_token
+from config.metrics import record_login_rate_limited
 from config.settings import is_login_rate_limit_enabled
 from db.auth_service import authenticate_user
 from db.models import User
@@ -34,6 +35,7 @@ def login(
         username=request.username,
         client_ip=http_request.client.host if http_request.client is not None else None,
     ):
+        record_login_rate_limited()
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=LOGIN_RATE_LIMITED_DETAIL,
