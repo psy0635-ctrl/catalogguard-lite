@@ -1391,6 +1391,8 @@ Actor Audit을 위해 새 transaction 구조를 만들지 않았습니다. `acto
 
 ## 6.20 Prometheus Observability
 
+Authentication Observability MVP는 기존 전용 Prometheus registry와 `CATALOGGUARD_METRICS_ENABLED` 설정을 재사용합니다. `catalogguard_login_rate_limited_total`은 Login Rate Limiter가 실제로 `429 login_rate_limited`를 반환할 때만 증가하고, `catalogguard_login_rate_limiter_fail_open_total`은 Redis `ConnectionError` 또는 `TimeoutError`로 인증을 계속할 때만 증가합니다. 두 지표에는 label을 두지 않아 cardinality가 고정되며 username, IP, digest, password, JWT, request ID, Redis URL/key를 포함하지 않습니다. 기존 HTTP 지표가 이미 요청 수와 상태 계열을 제공하므로 일반 로그인 시도·성공·실패 지표는 추가하지 않았습니다.
+
 ### 기존 상태
 
 Actor Audit까지 구현한 시점에 이미 다음이 있었습니다.

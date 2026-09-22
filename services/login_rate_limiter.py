@@ -6,6 +6,7 @@ from typing import Any
 
 from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 
+from config.metrics import record_login_rate_limiter_fail_open
 from config.settings import (
     get_login_rate_limit_ip_attempts,
     get_login_rate_limit_user_attempts,
@@ -71,6 +72,7 @@ class LoginRateLimiter:
                 self._window_seconds,
             )
         except (RedisConnectionError, RedisTimeoutError):
+            record_login_rate_limiter_fail_open()
             _logger.warning("Login rate limiter Redis connection unavailable; authentication continues.")
             return True
         if type(result) is not int or result not in (0, 1):

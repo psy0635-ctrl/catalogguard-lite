@@ -5,6 +5,7 @@ import pytest
 import redis
 
 from config.settings import get_redis_job_url
+from config import metrics as metrics_config
 from services.login_rate_limiter import LoginRateLimiter, _key
 
 
@@ -40,6 +41,14 @@ def make_limiter(fake, *, user_attempts=2, ip_attempts=3, window_seconds=30):
         ip_attempts=ip_attempts,
         window_seconds=window_seconds,
     )
+
+
+def _metric(name):
+    return metrics_config.REGISTRY.get_sample_value(name) or 0.0
+
+
+BLOCKED_METRIC = "catalogguard_login_rate_limited_total"
+FAIL_OPEN_METRIC = "catalogguard_login_rate_limiter_fail_open_total"
 
 
 def test_keys_are_hashed_and_username_uses_strip_only():
@@ -86,7 +95,10 @@ def test_ttl_is_set_once_and_expires():
 
 
 @pytest.mark.parametrize("exception", [redis.exceptions.ConnectionError, redis.exceptions.TimeoutError])
-def test_connection_failures_fail_open_with_safe_warning(caplog, exception):
+def test_connection_failures_fail_open_with_safe_warning(caplog, exception, monkeypatch):
+    monkeypatch.setenv(metrics_config.CATALOGGUARD_METRICS_ENABLED_ENV_VAR, "true")
+    before_fail_open = _metric(FAIL_OPEN_METRIC)
+    before_blocked = _metric(BLOCKED_METRIC)
     class BrokenRedis:
         def eval(self, *args):
             raise exception("redis://secret@example.invalid username=alice ip=198.51.100.7")
@@ -101,10 +113,14 @@ def test_connection_failures_fail_open_with_safe_warning(caplog, exception):
     assert "alice" not in caplog.text
     assert "198.51.100.7" not in caplog.text
     assert "redis://" not in caplog.text
+    assert _metric(FAIL_OPEN_METRIC) - before_fail_open == 1
+    assert _metric(BLOCKED_METRIC) - before_blocked == 0
 
 
 @pytest.mark.parametrize("failure", [redis.exceptions.ResponseError("bad lua"), "bad", 2, True])
-def test_response_errors_and_invalid_results_do_not_fail_open(failure):
+def test_response_errors_and_invalid_results_do_not_fail_open(failure, monkeypatch):
+    monkeypatch.setenv(metrics_config.CATALOGGUARD_METRICS_ENABLED_ENV_VAR, "true")
+    before = _metric(FAIL_OPEN_METRIC)
     class BrokenRedis:
         def eval(self, *args):
             if isinstance(failure, Exception):
@@ -113,6 +129,7 @@ def test_response_errors_and_invalid_results_do_not_fail_open(failure):
 
     with pytest.raises((redis.exceptions.ResponseError, ValueError)):
         make_limiter(BrokenRedis()).allow_attempt(username="alice", client_ip="ip")
+    assert _metric(FAIL_OPEN_METRIC) - before == 0
 
 
 def test_real_redis_lua_concurrency_and_ttl():
