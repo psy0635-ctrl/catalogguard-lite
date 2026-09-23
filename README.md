@@ -3067,7 +3067,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 브랜드 표준화
 - `gender` 선택 컬럼과 표준화
 - 웹 ETL 처리 시간이 길어질 경우의 비동기(Celery) 실행
-- 웹 ETL 다중 파일 업로드와 XLSX 등 추가 입력 형식 지원
+- 웹 ETL 다중 파일 업로드 및 XLSX 이외 추가 입력 형식 지원
 - Airflow pre-check 뒤 deactivate되는 race에서 HTTP fetch 0회까지 보장하는 lock 구조
 - activation 조회 실패와 외부 source 실패가 겹칠 때의 failure precedence 정책
 - 사용자 정의 ETL 프로필 등록·관리(Profile CRUD)
