@@ -1727,7 +1727,7 @@ warnings 0
 
 Inspection dedup은 최초 실행자만 보존하므로 같은 결과를 나중에 요청한 사용자의 시도까지 감사 이벤트로 남기지는 않습니다. 또한 Async job status 응답에는 actor가 없고 완료된 Inspection 상세에서만 확인할 수 있습니다.
 
-`TEST_DATABASE_URL` 등 DB 설정이 없는 상태에서 anonymous Sync Inspection 요청은 기대한 `401`보다 먼저 DB 의존성 초기화가 실패해 `500 DatabaseConfigurationError`가 됩니다. DB가 구성된 환경에서는 같은 요청이 `401`을 반환합니다. 이는 기존 의존성 평가 순서에서 발생하던 결함이며 Inspection Actor Audit의 저장·전파 계약을 막는 blocker는 아니어서 이번 문서 단계에서 수정하지 않았습니다.
+과거에는 DB 설정이 없는 상태에서 Inspection 인증보다 DB dependency가 먼저 평가되어 anonymous 요청이 `401` 대신 `500 DatabaseConfigurationError`가 될 가능성을 별도 결함으로 기록했습니다. 현재 `main`을 재검증한 결과, Inspection 목록·상세·생성의 anonymous 요청은 `401 authentication_required`, 잘못된 JWT는 `401 invalid_token`으로 route의 DB dependency 실행 및 DB engine 생성 전에 종료되어 이 현상은 재현되지 않습니다. 다만 유효한 JWT는 사용자 role·활성 상태를 DB에서 다시 확인해야 하므로 DB가 설정되지 않았거나 사용할 수 없으면 서버 오류가 발생할 수 있습니다. 이번 작업은 코드 결함 수정이 아니라 과거 기록을 현재 동작에 맞게 정정한 것입니다.
 
 이번 단계에서는 AWS API를 호출하거나 SSM을 추가 조사하지 않았습니다. 따라서 별도로 기록된 SSM root cause는 계속 **K. INCONCLUSIVE**이며 해결되었다고 판단하지 않습니다.
 
