@@ -2977,7 +2977,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 역할은 `viewer`·`operator` 2개만 있으며, 세밀한 permission 단위 ACL이나 관리자 전용 화면은 없습니다.
 - Inspection Actor Audit은 `inspection_runs` row를 최초 생성한 사용자만 기록합니다. 동일 CSV·검수 버전의 dedup 요청자를 별도 event로 모두 저장하지는 않습니다.
 - Async job status 응답에는 actor를 노출하지 않습니다. 완료 후 `inspection_run_id`로 검수 상세를 조회하면 `actor_username`을 확인할 수 있습니다.
-- `TEST_DATABASE_URL`과 `DATABASE_URL`이 모두 없는 환경에서 anonymous Sync Inspection 요청은 auth보다 DB dependency가 먼저 평가되어 401 대신 500이 될 수 있습니다. 테스트 DB가 정상 설정된 환경에서는 401을 반환하며, 이 기존 dependency-order 결함은 Inspection Actor Audit의 blocker가 아닙니다.
+- 과거에는 DB 설정이 없는 환경에서 Inspection 인증보다 DB dependency가 먼저 평가될 가능성을 결함으로 기록했습니다. 현재 `main`을 재검증한 결과, 인증이 필요한 Inspection 목록·상세·생성 요청은 route의 DB dependency가 실행되기 전에 anonymous 요청을 `401 authentication_required`, 잘못된 JWT를 `401 invalid_token`으로 종료하며 두 경우 모두 DB engine을 생성하지 않아 과거의 `401`→`500` 현상은 재현되지 않습니다. 단, 유효한 JWT는 사용자 role·활성 상태를 DB에서 다시 확인하므로 DB가 설정되지 않았거나 사용할 수 없으면 서버 오류가 발생할 수 있습니다.
 - Rollback 실행의 `actor_username`은 실행 직후 POST 응답과 `GET /api/v1/catalog-promotion-rollbacks` 이력 조회에서 확인할 수 있습니다. 실행자 기준으로 검색·필터하는 기능은 없습니다.
 - Prometheus metric은 애플리케이션이 값을 노출하는 instrumentation 단계이며, 이를 주기적으로 수집하는 Prometheus 서버나 Grafana 대시보드는 아직 구축하지 않았습니다.
 - metric은 process-global 메모리 상태이므로 프로세스가 재시작되면 초기화됩니다. DB 실행 이력(영구)·Actor Audit(DB 이력의 실행자 기록)과는 별개 개념입니다.
