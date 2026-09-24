@@ -1,0 +1,5 @@
+Command: .venv\Scripts\python.exe -B -m pytest tests/quality/test_rule_quality_golden.py -q -p no:cacheprovider
+Repository HEAD: 2fb0594243a5ced1f5c7e583ebb4369e9c7efed8
+
+..                                                                       [100%]
+2 passed in 0.30s
