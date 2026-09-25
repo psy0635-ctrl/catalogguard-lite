@@ -5,6 +5,7 @@ import pandas as pd
 
 from core.duplicate_detector import parse_duplicate_variant_message
 from core.group_category_consistency_detector import parse_group_category_message
+from core.group_product_name_consistency_detector import parse_group_product_name_message
 from core.group_size_consistency_detector import GROUP_SIZE_SYSTEM_MESSAGE
 from core.models import ValidationIssue
 
@@ -13,6 +14,7 @@ from core.models import ValidationIssue
 RULE_LABELS = {
     "duplicate_product_id": "상품 ID 중복",
     "inconsistent_group_category": "상품 그룹 카테고리 불일치",
+    "inconsistent_group_product_name": "상품 그룹 상품명 불일치",
     "inconsistent_group_size_system": "상품 그룹 사이즈 체계 불일치",
     "duplicate_variant_combination": "상품 옵션 조합 중복",
     "duplicate_product_name": "상품명 중복",
@@ -47,6 +49,11 @@ RECOMMENDATIONS = {
     "inconsistent_group_category": (
         "같은 상품 그룹의 상품이 동일한 카테고리를 사용하도록 "
         "product_group_id 또는 category 값을 확인하세요."
+    ),
+    "inconsistent_group_product_name": (
+        "같은 상품 그룹의 상품명이 동일한 상품 기준을 나타내는지 확인하십시오. "
+        "색상·사이즈·에디션 등 변형 정보를 상품명에 포함하는 운영 정책이라면 "
+        "그 정책에 맞는 값인지 확인하십시오."
     ),
     "inconsistent_group_size_system": (
         "같은 상품의 사이즈 옵션이 동일한 사이즈 체계를 사용하는지 확인하세요."
@@ -99,6 +106,7 @@ RECOMMENDATIONS = {
 RISK_LEVELS = {
     "duplicate_product_id": "높음",
     "inconsistent_group_category": "중간",
+    "inconsistent_group_product_name": "중간",
     "inconsistent_group_size_system": "중간",
     "duplicate_variant_combination": "중간",
     "duplicate_product_name": "중간",
@@ -256,6 +264,17 @@ def translate_issue_message(issue: ValidationIssue) -> str:
             f"상품 그룹 '{product_group_id}'에 서로 다른 카테고리 "
             f"{categories}가 함께 등록되어 있습니다."
         )
+
+    if issue.rule == "inconsistent_group_product_name":
+        parsed_message = parse_group_product_name_message(message)
+        if parsed_message is None:
+            return "상품 그룹에 서로 다른 상품명이 사용되었습니다."
+        product_group_id, name_groups = parsed_message
+        names = ", ".join(
+            f"'{name_group['display_value']}' ({', '.join(name_group['product_ids'])})"
+            for name_group in name_groups
+        )
+        return f"같은 상품 그룹 '{product_group_id}'에 서로 다른 상품명이 사용되었습니다: {names}"
 
     if (
         issue.rule == "inconsistent_group_size_system"

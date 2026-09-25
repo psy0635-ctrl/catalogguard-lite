@@ -69,11 +69,11 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, 
 
 ### 현재 unreleased main과 v0.3.0 이후 변경
 
-공식 Release는 v0.3.0입니다. 현재 `main`에는 그 이후의 미출시 변경으로 inspection issue의 관계 행 명시 저장, schema-aware `/ready`, CSV/XLSX Web ETL 업로드와 Golden Rule Quality Regression이 추가됐습니다. 현재 기준은 `INSPECTION_VERSION = "15"`, Alembic single head `20260915_0020`, FastAPI 애플리케이션 버전 `0.1.0`이며, 이 변경들을 v0.3.0 기능으로 소급하지 않습니다.
+공식 Release는 v0.3.0입니다. 현재 `main`에는 그 이후의 미출시 변경으로 inspection issue의 관계 행 명시 저장, schema-aware `/ready`, CSV/XLSX Web ETL 업로드와 Golden Rule Quality Regression이 추가됐습니다. 현재 작업 기준은 `INSPECTION_VERSION = "16"`, Alembic single head `20260915_0020`, FastAPI 애플리케이션 버전 `0.1.0`이며, 이 변경들을 v0.3.0 기능으로 소급하지 않습니다.
 
 XLSX는 Web multipart에서만 지원합니다. 정확히 하나의 visible worksheet를 요구하고 formula·macro·external link·merged cell과 과도한 resource 사용을 제한하며, CLI·S3·HTTP feed·Airflow는 계속 CSV-only입니다. 처음에는 XLSX 의존성이 최상위 import로 Airflow runtime까지 전파되는 compatibility regression을 격리 Airflow CI smoke에서 발견했지만, XLSX 경로에서만 불러오는 lazy import로 수정해 CSV-only Airflow 경계와 기존 runtime을 보존했습니다.
 
-개별 Rule unit test는 특정 규칙의 조건과 경계를 확인합니다. Golden Dataset 회귀 테스트는 39개 synthetic 상품 행에서 24/24 활성 issue code, expected issue 31건과 정상 control 5행을 한 번에 실행해 새 Rule·정규화 변경 후 오탐, 누락, 관계 행 불일치를 탐지합니다. 현재 고정 fixture 결과는 matched 31, false positive 0, false negative 0, relationship mismatch 0입니다. 이 수치는 synthetic fixture의 회귀 기준일 뿐 실제 사용자·운영 catalog에 사람이 정답 label을 붙인 benchmark나 실서비스 정확도 주장이 아닙니다.
+개별 Rule unit test는 특정 규칙의 조건과 경계를 확인합니다. Golden Dataset 회귀 테스트는 41개 synthetic 상품 행에서 25/25 활성 issue code, expected issue 39건과 정상 control 5행을 한 번에 실행해 새 Rule·정규화 변경 후 오탐, 누락, 관계 행 불일치를 탐지합니다. 현재 고정 fixture 결과는 matched 39, false positive 0, false negative 0, relationship mismatch 0입니다. 이 수치는 synthetic fixture의 회귀 기준일 뿐 실제 사용자·운영 catalog에 사람이 정답 label을 붙인 benchmark나 실서비스 정확도 주장이 아닙니다.
 
 ### Airflow ETL orchestration: 문제와 해결
 
@@ -232,7 +232,7 @@ Streamlit ETL 프로필 운영 관리
 | pandas | 3.0.3 |
 | 데이터베이스 | PostgreSQL, SQLAlchemy, psycopg |
 | 마이그레이션 | Alembic |
-| 현재 검수 버전 | `INSPECTION_VERSION = "15"` |
+| 현재 검수 버전 | `INSPECTION_VERSION = "16"` |
 | 비동기 처리 | Redis, Celery |
 | 설명 보조 | OpenAI Agents SDK 0.22.1 기반 provider 분기. OpenAI: 기본 모델 `gpt-5.6-terra`, 최대 4 turn, 순차 read-only Function Tool 4개. Ollama(v0.3.0): 기본 `qwen3.5:9b`, Python Evidence Pack + tool-less Local LLM + Narrative Grounding Validator |
 | 관측성 | prometheus-client 0.25.0 (HTTP·Web ETL metric instrumentation MVP, Prometheus 서버는 미구축) |
@@ -341,6 +341,7 @@ sample@test.com -> sa****@test.com
 
 - 상품 ID 중복
 - 상품 그룹 카테고리 불일치
+- 상품 그룹 상품명 불일치 경고
 - 상품 그룹 사이즈 체계 불일치
 - 상품 옵션 조합 중복
 - 상품명 중복 후보
@@ -353,6 +354,8 @@ sample@test.com -> sa****@test.com
 - 카테고리별 가격 이상치
 - 상품명과 카테고리 불일치
 - 금지어와 개인정보 형태
+
+상품 그룹 상품명 일관성 규칙은 같은 그룹의 비어 있지 않은 이름을 앞뒤·연속 공백과 영문 대소문자만 정리해 비교합니다. 빈 그룹 ID는 가짜 그룹을 만들지 않도록 제외하고, 빈 상품명은 필수값 누락 규칙이 담당합니다. 색상·사이즈·에디션 표현은 운영 정책에 따라 상품명에 포함될 수 있으므로 warning으로 표시하고 정답 이름을 자동 선택하거나 수정하지 않습니다.
 
 규칙 실행 결과는 `ValidationIssue` 객체로 통일했습니다. 이 덕분에 어떤 규칙에서 발견된 문제든 `severity`, `product_id`, `product_group_id`, `message`라는 같은 형태로 화면과 CSV 다운로드에 전달할 수 있습니다.
 

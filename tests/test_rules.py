@@ -17,6 +17,7 @@ from core.rules import (
     check_duplicate_product_content,
     check_duplicate_product_id,
     check_inconsistent_group_category,
+    check_inconsistent_group_product_name,
     check_inconsistent_group_size_system,
     check_invalid_category,
     check_missing_required_fields,
@@ -1227,6 +1228,14 @@ def test_group_size_system_rule_is_registered_once_after_group_category_rule():
     assert RULES.count(check_inconsistent_group_size_system) == 1
     assert (
         RULES.index(check_inconsistent_group_size_system)
+        == RULES.index(check_inconsistent_group_product_name) + 1
+    )
+
+
+def test_group_product_name_rule_is_registered_once_after_category_rule():
+    assert RULES.count(check_inconsistent_group_product_name) == 1
+    assert (
+        RULES.index(check_inconsistent_group_product_name)
         == RULES.index(check_inconsistent_group_category) + 1
     )
 

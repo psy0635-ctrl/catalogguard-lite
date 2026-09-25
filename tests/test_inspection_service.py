@@ -161,8 +161,8 @@ def test_inspect_dataframe_reports_duplicate_variants_and_preserves_original_val
 
     assert report.summary.total_products == 2
     assert report.summary.error_count == 2
-    assert report.summary.warning_count == 2
-    assert report.summary.total_issues == 4
+    assert report.summary.warning_count == 4
+    assert report.summary.total_issues == 6
     duplicate_issues = [
         issue
         for issue in report.issues
@@ -252,8 +252,11 @@ def test_inspect_dataframe_translates_duplicate_variant_values_losslessly():
         "상품 그룹 'G'001'에서 색상 'women's blue', 사이즈 '95' 조합이 "
         "상품 ID 'P, 001', 'P'002'에 중복되어 있습니다."
     )
-    assert report.result_dataframe["상품 ID"].tolist() == ["P, 001", "P'002"]
-    assert report.result_dataframe["오류 이유"].tolist() == [
+    variant_rows = report.result_dataframe[
+        report.result_dataframe["오류 항목"] == "상품 옵션 조합 중복"
+    ]
+    assert variant_rows["상품 ID"].tolist() == ["P, 001", "P'002"]
+    assert variant_rows["오류 이유"].tolist() == [
         expected_reason,
         expected_reason,
     ]
@@ -302,12 +305,29 @@ def test_inspect_dataframe_reports_group_category_issues_and_preserves_source_va
     assert [issue.product_id for issue in group_issues] == ["P001", "P002"]
     assert report.summary.total_products == 2
     assert report.summary.error_count == 2
-    assert report.summary.warning_count == 0
-    assert report.summary.total_issues == 2
+    assert report.summary.warning_count == 2
+    assert report.summary.total_issues == 4
     pd.testing.assert_frame_equal(dataframe, original_dataframe)
     pd.testing.assert_frame_equal(report.source_dataframe, original_dataframe)
     assert report.source_dataframe.loc[0, "category"] == " TOP "
     assert [product.category for product in report.products] == ["TOP", "BOTTOM"]
+
+
+def test_inspect_dataframe_reports_group_product_name_warning():
+    dataframe = pd.DataFrame([
+        {"product_group_id": "G-NAME", "product_id": "P-NAME-1", "product_name": "코튼 라운드 티셔츠",
+         "category": "TOP", "color": "BLACK", "size": "M", "stock": "10", "price": "20000", "image_path": "a.jpg"},
+        {"product_group_id": "G-NAME", "product_id": "P-NAME-2", "product_name": "베이직 코튼 티셔츠",
+         "category": "TOP", "color": "WHITE", "size": "L", "stock": "10", "price": "21000", "image_path": "b.jpg"},
+    ])
+    original = dataframe.copy(deep=True)
+    report = inspect_dataframe(dataframe)
+    name_issues = [issue for issue in report.issues if issue.rule == "inconsistent_group_product_name"]
+    assert [issue.product_id for issue in name_issues] == ["P-NAME-1", "P-NAME-2"]
+    assert [issue.source_row_number for issue in name_issues] == [2, 3]
+    assert all(issue.severity == "warning" for issue in name_issues)
+    assert (report.result_dataframe["오류 항목"] == "상품 그룹 상품명 불일치").sum() == 2
+    pd.testing.assert_frame_equal(dataframe, original)
 
 
 def test_inspect_dataframe_excludes_blank_category_from_group_category_issues():
