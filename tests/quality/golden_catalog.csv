@@ -38,3 +38,5 @@ G-PRICE-BASE-2,P-PRICE-BASE-2,골든 가방 가격 기준 둘,BAG,WHITE,,10,2100
 G-PRICE-BASE-3,P-PRICE-BASE-3,골든 가방 가격 기준 셋,BAG,NAVY,,10,22000,images/price-base-3.jpg,,,
 G-PRICE-BASE-4,P-PRICE-BASE-4,골든 가방 가격 기준 넷,BAG,GRAY,,10,23000,images/price-base-4.jpg,,,
 G-PRICE-OUTLIER,P-PRICE-OUTLIER,골든 가방 가격 이상치,BAG,BROWN,,10,100000,images/price-outlier.jpg,,,
+G-GOLDEN-NAME,P-GOLDEN-NAME-1,코튼 라운드 티셔츠,TOP,BLACK,M,10,20000,images/group-name-a.jpg,,,
+G-GOLDEN-NAME,P-GOLDEN-NAME-2,베이직 코튼 티셔츠,TOP,WHITE,L,10,21000,images/group-name-b.jpg,,,

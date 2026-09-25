@@ -12,7 +12,7 @@ ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl`의 버전�
 
 v0.3.0 기준으로는 기존 OpenAI 경로를 유지하면서 optional OpenAI / Ollama provider 선택과 Local Ollama Two-Phase Inspection Copilot을 추가했습니다. Local Ollama 경로는 v0.2.0의 OpenAI-only Copilot에는 포함되지 않았습니다.
 
-공식 배포 기준은 **v0.3.0**입니다. 현재 `main`에는 v0.3.0 이후의 미출시 변경으로 inspection 관계 행 명시 저장, DB 연결과 repository Alembic single head·DB current revision 일치까지 확인하는 schema-aware `/ready`, CSV/XLSX Web ETL 업로드, 전체 Rule Engine의 Golden Rule Quality Regression이 추가되어 있습니다. 현재 `main`의 Alembic 단일 head는 `20260915_0020`, `INSPECTION_VERSION`은 `15`, FastAPI 애플리케이션 버전은 `0.1.0`이며, 이 변경들을 v0.3.0에 포함된 기능으로 소급하지 않습니다. 최근 `main`은 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 GitHub Actions 검증을 통과했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
+공식 배포 기준은 **v0.3.0**입니다. 현재 `main`에는 v0.3.0 이후의 미출시 변경으로 inspection 관계 행 명시 저장, DB 연결과 repository Alembic single head·DB current revision 일치까지 확인하는 schema-aware `/ready`, CSV/XLSX Web ETL 업로드, 전체 Rule Engine의 Golden Rule Quality Regression이 추가되어 있습니다. 현재 작업 기준 Alembic 단일 head는 `20260915_0020`, `INSPECTION_VERSION`은 `16`, FastAPI 애플리케이션 버전은 `0.1.0`이며, 이 변경들을 v0.3.0에 포함된 기능으로 소급하지 않습니다. 최근 `main`은 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 GitHub Actions 검증을 통과했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
 
 공개 Streamlit 앱은 아래 주소에서 확인할 수 있습니다.
 
@@ -54,6 +54,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - 상품 ID, 상품명, 상품 내용 중복 탐지
 - 상품 그룹 내 색상·사이즈 옵션 조합 중복 탐지
 - 상품 그룹 내 카테고리 일관성 검수
+- 같은 상품 그룹에서 서로 다른 상품명이 함께 사용된 경우 경고
 - 상품 그룹 내 사이즈 체계 일관성 검수
 - 가격 오류와 카테고리별 가격 이상치 탐지
 - 상품명과 카테고리 불일치 탐지
@@ -2469,7 +2470,7 @@ curl.exe "http://127.0.0.1:8001/api/v1/inspections?limit=10&offset=0&filename=pr
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
 | `file_sha256` | `String(64)`, nullable | CSV bytes의 SHA-256 hex 문자열입니다. migration 이전 기존 이력은 NULL입니다. |
-| `inspection_version` | `String(20)`, nullable 아님 | 검수 결과 저장 계약 버전입니다. 현재 main의 `INSPECTION_VERSION` 값은 `"15"`입니다. DB `server_default`는 없습니다. |
+| `inspection_version` | `String(20)`, nullable 아님 | 검수 결과 저장 계약 버전입니다. 현재 작업 기준 `INSPECTION_VERSION` 값은 `"16"`입니다. DB `server_default`는 없습니다. |
 
 중복 판단 기준은 같은 `file_sha256`과 같은 `inspection_version`입니다.
 
@@ -2750,7 +2751,7 @@ ETL 프로필 runtime activation과 Airflow inactive 분류를 검증한 당시 
 
 ### Golden Rule Quality Regression
 
-현재 미출시 `main`은 개별 Rule의 조건을 확인하는 unit test와 별도로, 여러 Rule을 한 번에 실행했을 때 예상하지 못한 오탐·누락이 생기는지 확인하는 전체 Rule Engine 회귀 테스트를 둡니다. 고정 synthetic fixture는 상품 39행, expected issue 31건, 현재 활성 issue code 24/24와 정상 control 5행을 포함합니다. Golden 회귀 도입 시점의 비교 결과는 matched 31, false positive 0, false negative 0, relationship mismatch 0이며, 이는 이 fixture에 한정된 회귀 결과이지 CatalogGuard의 실서비스 정확도·precision·recall을 뜻하지 않습니다.
+현재 미출시 `main`은 개별 Rule의 조건을 확인하는 unit test와 별도로, 여러 Rule을 한 번에 실행했을 때 예상하지 못한 오탐·누락이 생기는지 확인하는 전체 Rule Engine 회귀 테스트를 둡니다. 고정 synthetic fixture는 상품 41행, expected issue 39건, 현재 활성 issue code 25/25와 정상 control 5행을 포함합니다. 현재 fixture의 비교 결과는 matched 39, false positive 0, false negative 0, relationship mismatch 0이며, 이는 이 fixture에 한정된 회귀 결과이지 CatalogGuard의 실서비스 정확도·precision·recall을 뜻하지 않습니다.
 
 기준 데이터와 비교 로직은 `tests/quality/golden_catalog.csv`, `tests/quality/golden_expected_issues.json`, `tests/quality/test_rule_quality_golden.py`에 있습니다. 새 Rule이나 정규화 변경 뒤 정상 control에 새 문제가 생기거나 기존 expected issue가 빠지면 테스트가 실패합니다. 이 기능을 추가한 PR #99 시점의 로컬 전체 suite 기록은 `2540 passed`, `391 skipped`, `14 deselected`, `0 failed`, `14 warnings`이며, skip 조건이 다른 CI 결과와 동일하다고 해석하지 않습니다.
 
@@ -3062,7 +3063,6 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - Refresh Token, 회원가입, password reset, OAuth/MFA/SSO, AWS staging·Kubernetes의 로그인 rate limit 활성화
 - 중복 저장 이벤트 로그 또는 감사 기록 검토
 - 카테고리와 가격 이상치 기준을 설정 파일이나 관리 화면에서 조정
-- 상품 그룹 내 상품명 일관성 검수
 - 카테고리별 사이즈 형식 검수
 - 브랜드 표준화
 - `gender` 선택 컬럼과 표준화

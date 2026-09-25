@@ -222,6 +222,62 @@
       "rule": "category_price_anomaly",
       "field": "price",
       "severity": "warning"
+    },
+    {
+      "case": "group product name mismatch",
+      "source_row_number": 28,
+      "rule": "inconsistent_group_product_name",
+      "field": "product_name",
+      "severity": "warning"
+    },
+    {
+      "case": "group product name mismatch",
+      "source_row_number": 29,
+      "rule": "inconsistent_group_product_name",
+      "field": "product_name",
+      "severity": "warning"
+    },
+    {
+      "case": "group product name mismatch",
+      "source_row_number": 30,
+      "rule": "inconsistent_group_product_name",
+      "field": "product_name",
+      "severity": "warning"
+    },
+    {
+      "case": "group product name mismatch",
+      "source_row_number": 31,
+      "rule": "inconsistent_group_product_name",
+      "field": "product_name",
+      "severity": "warning"
+    },
+    {
+      "case": "group product name mismatch",
+      "source_row_number": 32,
+      "rule": "inconsistent_group_product_name",
+      "field": "product_name",
+      "severity": "warning"
+    },
+    {
+      "case": "group product name mismatch",
+      "source_row_number": 33,
+      "rule": "inconsistent_group_product_name",
+      "field": "product_name",
+      "severity": "warning"
+    },
+    {
+      "case": "dedicated group product name mismatch",
+      "source_row_number": 41,
+      "rule": "inconsistent_group_product_name",
+      "field": "product_name",
+      "severity": "warning"
+    },
+    {
+      "case": "dedicated group product name mismatch",
+      "source_row_number": 42,
+      "rule": "inconsistent_group_product_name",
+      "field": "product_name",
+      "severity": "warning"
     }
   ]
 }

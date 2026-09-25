@@ -5,6 +5,7 @@ import pytest
 from core import presentation
 from core.duplicate_detector import build_duplicate_variant_message
 from core.group_category_consistency_detector import build_group_category_message
+from core.group_product_name_consistency_detector import build_group_product_name_message
 from core.group_size_consistency_detector import GROUP_SIZE_SYSTEM_MESSAGE
 from core.models import ValidationIssue
 from core.presentation import (
@@ -31,6 +32,29 @@ def make_issue(**overrides) -> ValidationIssue:
     )
     defaults.update(overrides)
     return ValidationIssue(**defaults)
+
+
+def test_group_product_name_presentation_is_human_readable():
+    message = build_group_product_name_message("G001", [
+        {"display_value": "베이직 티셔츠", "product_ids": ["P001", "P002"]},
+        {"display_value": "프리미엄 티셔츠", "product_ids": ["P003"]},
+    ])
+    issue = make_issue(rule="inconsistent_group_product_name", severity="warning", message=message)
+    row = build_result_dataframe([issue]).iloc[0]
+    assert row["오류 항목"] == "상품 그룹 상품명 불일치"
+    assert row["검수 상태"] == "주의"
+    assert "G001" in row["오류 이유"]
+    assert "베이직 티셔츠" in row["오류 이유"]
+    assert "P003" in row["오류 이유"]
+    assert "동일한 상품 기준" in row["수정 권장사항"]
+    assert "운영 정책" in row["수정 권장사항"]
+    assert "inconsistent_group_product_name:" not in row["오류 이유"]
+    assert "product_ids" not in row["오류 이유"]
+
+
+def test_malformed_group_product_name_message_uses_safe_fallback():
+    issue = make_issue(rule="inconsistent_group_product_name", message="inconsistent_group_product_name:{broken")
+    assert translate_issue_message(issue) == "상품 그룹에 서로 다른 상품명이 사용되었습니다."
 
 
 def make_result_dataframe() -> pd.DataFrame:

@@ -23,6 +23,9 @@ from core.fashion_attribute_validator import (
 from core.group_category_consistency_detector import (
     find_inconsistent_group_categories,
 )
+from core.group_product_name_consistency_detector import (
+    find_inconsistent_group_product_names,
+)
 from core.group_size_consistency_detector import (
     find_inconsistent_group_size_systems,
 )
@@ -184,6 +187,12 @@ def check_inconsistent_group_category(
     products: list[Product],
 ) -> list[ValidationIssue]:
     return find_inconsistent_group_categories(products)
+
+
+def check_inconsistent_group_product_name(
+    products: list[Product],
+) -> list[ValidationIssue]:
+    return find_inconsistent_group_product_names(products)
 
 
 def check_inconsistent_group_size_system(
@@ -559,6 +568,7 @@ RULES = [
     # 이 순서대로 실행되므로, 새 규칙을 추가할 때 결과 순서도 함께 고려해야 합니다.
     check_duplicate_product_id,
     check_inconsistent_group_category,
+    check_inconsistent_group_product_name,
     check_inconsistent_group_size_system,
     check_duplicate_variant_combination,
     check_duplicate_product_name,
