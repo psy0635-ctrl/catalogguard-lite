@@ -355,7 +355,7 @@ def test_inspection_pipeline_before_baseline() -> None:
         "persistence": {"executed": False, "reason": "no TEST_DATABASE_URL benchmark was added"},
     }
 
-    assert len(RULES) == 16
+    assert len(RULES) == 18
     assert normal["normal_unique_10000"]["products"] == MAX_CSV_ROWS
     assert issue_heavy["issue_heavy_10000"]["issues"] == MAX_CSV_ROWS
     assert all(item["products"] == rows for item, rows in zip(duplicate.values(), DUPLICATE_ROWS))

@@ -16,6 +16,8 @@ from core.duplicate_detector import (
     find_duplicate_variant_combinations,
 )
 from core.fashion_attribute_validator import (
+    SIZE_SYSTEM_ALPHA,
+    find_size_system,
     find_standard_color,
     find_standard_size,
     is_field_required_for_category,
@@ -287,6 +289,35 @@ def check_non_standard_size(
                 message=(
                     f"size '{product.size}' should be standardized to "
                     f"'{standard_size}'"
+                ),
+                source_row_number=product.source_row_number,
+            )
+        )
+    return issues
+
+
+def check_incompatible_category_size_system(
+    products: list[Product],
+) -> list[ValidationIssue]:
+    """카테고리와 명확하게 판정된 사이즈 체계가 호환되는지 검사합니다."""
+    issues = []
+    for product in products:
+        # MVP에서 TOP/BOTTOM/OUTER는 두 체계를 모두 허용하고 BAG은 적용하지 않습니다.
+        # 판정 불가능한 값과 FREE도 find_size_system()이 None을 반환하므로 추측하지 않습니다.
+        if product.category != "SHOES":
+            continue
+        if find_size_system(product.size) != SIZE_SYSTEM_ALPHA:
+            continue
+
+        issues.append(
+            ValidationIssue(
+                rule="incompatible_category_size_system",
+                severity="warning",
+                product_id=product.product_id,
+                product_group_id=product.product_group_id,
+                message=(
+                    f"category '{product.category}' does not allow ALPHA size system "
+                    f"for size '{product.size}'"
                 ),
                 source_row_number=product.source_row_number,
             )
@@ -576,6 +607,7 @@ RULES = [
     check_missing_required_fields,
     check_non_standard_color,
     check_non_standard_size,
+    check_incompatible_category_size_system,
     check_invalid_category,
     check_stock,
     check_price,

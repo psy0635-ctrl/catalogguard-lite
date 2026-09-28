@@ -896,6 +896,27 @@ def test_build_result_dataframe_displays_non_standard_size_warning_in_korean():
     assert issue.message not in row["오류 이유"]
 
 
+def test_build_result_dataframe_displays_category_size_system_warning_in_korean():
+    issue = make_issue(
+        rule="incompatible_category_size_system",
+        severity="warning",
+        message="category 'SHOES' does not allow ALPHA size system for size 'XL'",
+    )
+
+    row = build_result_dataframe([issue]).iloc[0]
+
+    assert row["검수 상태"] == "주의"
+    assert row["오류 항목"] == "카테고리 사이즈 형식 불일치"
+    assert row["오류 이유"] == (
+        "사이즈 값 'XL'은 신발 카테고리에 사용할 수 없는 문자형입니다."
+    )
+    assert row["수정 권장사항"] == (
+        "신발 카테고리의 사이즈 형식을 확인하고 숫자형 신발 사이즈를 사용하세요."
+    )
+    assert row["위험 수준"] == "중간"
+    assert issue.message not in row["오류 이유"]
+
+
 @pytest.mark.parametrize(
     ("total_issue_count", "error_count", "warning_count", "expected"),
     [

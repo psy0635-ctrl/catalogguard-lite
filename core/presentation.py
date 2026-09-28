@@ -21,6 +21,7 @@ RULE_LABELS = {
     "missing_required_field": "필수 값 누락",
     "non_standard_color": "색상 표기 비표준",
     "non_standard_size": "사이즈 표기 비표준",
+    "incompatible_category_size_system": "카테고리 사이즈 형식 불일치",
     "invalid_category": "카테고리 오류",
     "invalid_stock": "재고 형식 오류",
     "out_of_stock": "품절 상품",
@@ -66,6 +67,9 @@ RECOMMENDATIONS = {
     "missing_required_field": "누락된 필수 값을 입력하세요.",
     "non_standard_color": "오류 이유에 표시된 표준 색상값으로 수정하세요.",
     "non_standard_size": "오류 이유에 표시된 표준 사이즈값으로 수정하세요.",
+    "incompatible_category_size_system": (
+        "신발 카테고리의 사이즈 형식을 확인하고 숫자형 신발 사이즈를 사용하세요."
+    ),
     "invalid_category": "허용된 카테고리 값으로 수정하세요.",
     "invalid_stock": "재고를 0 이상의 정수로 입력하세요.",
     "out_of_stock": "판매 상태와 재입고 여부를 확인하세요.",
@@ -114,6 +118,7 @@ RISK_LEVELS = {
     "missing_required_field": "높음",
     "non_standard_color": "낮음",
     "non_standard_size": "낮음",
+    "incompatible_category_size_system": "중간",
     "invalid_category": "중간",
     "invalid_stock": "중간",
     "out_of_stock": "낮음",
@@ -343,6 +348,17 @@ def translate_issue_message(issue: ValidationIssue) -> str:
             return (
                 f"사이즈 '{original_size}'은 표준값 '{standard_size}'으로 "
                 "통일하는 것이 좋습니다."
+            )
+
+    if issue.rule == "incompatible_category_size_system":
+        match = re.fullmatch(
+            r"category 'SHOES' does not allow ALPHA size system for size '([^']*)'",
+            message,
+        )
+        if match:
+            return (
+                f"사이즈 값 '{match.group(1)}'은 신발 카테고리에 사용할 수 없는 "
+                "문자형입니다."
             )
 
     if issue.rule == "duplicate_product_content":

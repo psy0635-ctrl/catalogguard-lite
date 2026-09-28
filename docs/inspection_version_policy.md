@@ -2,7 +2,7 @@
 
 ## 목적과 범위
 
-`INSPECTION_VERSION`은 검수 결과의 의미를 구분하는 단순 증가 문자열입니다. 현재 값은 `"16"`이며, 저장 결과가 달라지는 다음 변경에서는 `"17"`, `"18"`처럼 올립니다. 이 문서는 version model, semantic versioning, 자동 backfill 또는 cross-version comparison을 추가하지 않습니다.
+`INSPECTION_VERSION`은 검수 결과의 의미를 구분하는 단순 증가 문자열입니다. 현재 값은 `"17"`이며, 저장 결과가 달라지는 다음 변경에서는 `"18"`, `"19"`처럼 올립니다. 이 문서는 version model, semantic versioning, 자동 backfill 또는 cross-version comparison을 추가하지 않습니다.
 
 판단 기준은 변경의 이름이 아니라 **같은 CSV를 다시 검사했을 때 저장되는 검수 결과의 의미가 달라질 수 있는가**입니다. 여기서 결과는 run의 요약뿐 아니라 저장되는 문제 row의 `status`, `error_field`, `reason`, `recommendation`, `risk_level`, `product_group_id`, `product_id`, `source_row_number`, `related_source_rows`를 포함합니다. `source_row_number`는 CSV header를 1로 보는 논리 record 번호이며, quoted multiline field도 하나의 record로 계산합니다. Run Comparison은 기존 일곱 판정 필드만 문제 identity로 사용하므로, source-row metadata 추가는 비교 identity를 바꾸지 않습니다.
 
@@ -74,6 +74,10 @@ Version 15는 `duplicate_product_id` / `duplicate_product_name`의 관련 원본
 ### Version 16: group product name consistency
 
 같은 `product_group_id`에 비어 있지 않은 상품명이 두 종류 이상이면 해당 그룹의 비어 있지 않은 상품명 행 모두에 warning을 추가합니다. 비교할 때만 앞뒤·연속 공백과 영문 대소문자를 정리하며, 어떤 상품명이 정답인지 선택하거나 원본을 수정하지 않습니다. 빈 그룹 ID는 가짜 그룹으로 묶지 않고 빈 상품명은 기존 필수값 규칙이 담당합니다. 같은 CSV의 저장 issue가 달라지므로 version을 16으로 올립니다. DB schema 변경이 없어 migration은 추가하지 않습니다.
+
+### Version 17: category-size system compatibility
+
+개별 상품에서 명확하게 문자형으로 판정된 신발 사이즈에 `incompatible_category_size_system` warning을 추가합니다. 숫자형 신발 사이즈는 허용하고, `find_size_system()`이 판정하지 못하는 값과 FREE 및 BAG은 제외합니다. 같은 CSV의 저장 issue가 달라지므로 version을 17로 올리며 DB schema와 migration은 변경하지 않습니다.
 
 ## 과거 run과 backfill
 

@@ -433,9 +433,9 @@ def test_build_result_create_items_maps_group_category_without_schema_changes():
     assert {item.risk_level for item in category_items} == {"중간"}
 
 
-def test_current_inspection_version_is_sixteen_for_group_product_name_rule():
-    # 같은 CSV가 새 상품명 일관성 규칙이 없는 v15 결과를 재사용하지 않도록 고정합니다.
-    assert INSPECTION_VERSION == "16"
+def test_current_inspection_version_is_seventeen_for_category_size_system_rule():
+    # 같은 CSV가 새 카테고리-사이즈 체계 규칙이 없는 v16 결과를 재사용하지 않도록 고정합니다.
+    assert INSPECTION_VERSION == "17"
 
 
 def test_build_result_create_items_rejects_blank_required_result_fields():

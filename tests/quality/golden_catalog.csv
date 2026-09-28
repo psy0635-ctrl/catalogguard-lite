@@ -40,3 +40,4 @@ G-PRICE-BASE-4,P-PRICE-BASE-4,골든 가방 가격 기준 넷,BAG,GRAY,,10,23000
 G-PRICE-OUTLIER,P-PRICE-OUTLIER,골든 가방 가격 이상치,BAG,BROWN,,10,100000,images/price-outlier.jpg,,,
 G-GOLDEN-NAME,P-GOLDEN-NAME-1,코튼 라운드 티셔츠,TOP,BLACK,M,10,20000,images/group-name-a.jpg,,,
 G-GOLDEN-NAME,P-GOLDEN-NAME-2,베이직 코튼 티셔츠,TOP,WHITE,L,10,21000,images/group-name-b.jpg,,,
+G-CATEGORY-SIZE,P-CATEGORY-SIZE,골든 신발 사이즈 형식,SHOES,BLACK,M,10,24000,images/category-size.jpg,,,
