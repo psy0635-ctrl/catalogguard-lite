@@ -278,6 +278,13 @@
       "rule": "inconsistent_group_product_name",
       "field": "product_name",
       "severity": "warning"
+    },
+    {
+      "case": "incompatible category size system",
+      "source_row_number": 43,
+      "rule": "incompatible_category_size_system",
+      "field": "size",
+      "severity": "warning"
     }
   ]
 }

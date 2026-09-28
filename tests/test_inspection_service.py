@@ -42,6 +42,35 @@ def test_inspect_dataframe_reports_fashion_warnings_without_changing_source_data
     assert report.products[0].size == "medium"
 
 
+def test_inspect_dataframe_reports_incompatible_shoe_size_without_changing_source_data():
+    dataframe = pd.DataFrame(
+        [
+            {
+                "product_group_id": "G-SHOES",
+                "product_id": "P-SHOES",
+                "product_name": "클래식 신발",
+                "category": "SHOES",
+                "color": "BLACK",
+                "size": "M",
+                "stock": "10",
+                "price": "99000",
+                "image_path": "shoes.jpg",
+            }
+        ]
+    )
+    original_dataframe = dataframe.copy(deep=True)
+
+    report = inspect_dataframe(dataframe)
+
+    assert [issue.rule for issue in report.issues] == [
+        "incompatible_category_size_system"
+    ]
+    pd.testing.assert_frame_equal(dataframe, original_dataframe)
+    pd.testing.assert_frame_equal(report.source_dataframe, original_dataframe)
+    assert report.products[0].category == "SHOES"
+    assert report.products[0].size == "M"
+
+
 def test_inspect_dataframe_accepts_sale_price_as_optional_column():
     dataframe = pd.DataFrame(
         [

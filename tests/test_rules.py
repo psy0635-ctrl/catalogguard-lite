@@ -14,6 +14,7 @@ from core.loader import load_products
 from core.models import Product
 from core.rules import (
     RULES,
+    check_incompatible_category_size_system,
     check_duplicate_product_content,
     check_duplicate_product_id,
     check_inconsistent_group_category,
@@ -1208,12 +1209,67 @@ def test_size_rule_is_registered_once():
     assert RULES.count(check_non_standard_size) == 1
 
 
+@pytest.mark.parametrize(
+    ("category", "size"),
+    [
+        ("TOP", "M"),
+        ("TOP", "100"),
+        ("BOTTOM", "M"),
+        ("BOTTOM", "30"),
+        ("OUTER", "L"),
+        ("OUTER", "100"),
+        ("SHOES", "270"),
+        ("SHOES", "42"),
+        ("BAG", ""),
+        ("SHOES", "US 9"),
+        ("SHOES", "270mm"),
+        ("SHOES", "FREE"),
+    ],
+)
+def test_check_incompatible_category_size_system_allows_mvp_values(category, size):
+    assert check_incompatible_category_size_system(
+        [make_product(category=category, size=size)]
+    ) == []
+
+
+@pytest.mark.parametrize("size", ["M", "XL"])
+def test_check_incompatible_category_size_system_warns_for_alpha_shoe_size(size):
+    product = make_product(category="SHOES", size=size, source_row_number=7)
+
+    issues = check_incompatible_category_size_system([product])
+
+    assert len(issues) == 1
+    assert issues[0].rule == "incompatible_category_size_system"
+    assert issues[0].severity == "warning"
+    assert issues[0].product_id == product.product_id
+    assert issues[0].product_group_id == product.product_group_id
+    assert issues[0].source_row_number == 7
+    assert size in issues[0].message
+
+
+def test_category_size_system_rule_is_registered_once():
+    assert RULES.count(check_incompatible_category_size_system) == 1
+
+
+def test_check_incompatible_category_size_system_does_not_modify_products():
+    products = [
+        make_product(category="SHOES", size="M"),
+        make_product(category="SHOES", size="270"),
+    ]
+    original_products = [asdict(product) for product in products]
+
+    check_incompatible_category_size_system(products)
+
+    assert [asdict(product) for product in products] == original_products
+
+
 def test_products_dev_standard_fashion_values_do_not_create_new_warnings():
     issues = run_all_rules(load_products(DEV_DATA_PATH))
     issue_rules = {issue.rule for issue in issues}
 
     assert "non_standard_color" not in issue_rules
     assert "non_standard_size" not in issue_rules
+    assert "incompatible_category_size_system" not in issue_rules
 
 
 def test_group_category_rule_is_registered_once_after_duplicate_product_id():
@@ -1449,7 +1505,13 @@ def test_run_all_rules_keeps_name_mismatch_for_allowed_shoes_and_bag(
     category,
 ):
     # SHOES/BAG는 허용 카테고리지만 상품명과 의미가 다르면 기존 경고는 그대로 나옵니다.
-    products = [make_product(product_name=product_name, category=category)]
+    products = [
+        make_product(
+            product_name=product_name,
+            category=category,
+            size="270" if category == "SHOES" else "M",
+        )
+    ]
 
     issues = run_all_rules(products)
 
