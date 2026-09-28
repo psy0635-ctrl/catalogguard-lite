@@ -1903,6 +1903,130 @@ def test_unknown_size_token_dataframe_uses_operator_facing_columns():
     ]
 
 
+def test_unknown_size_token_csv_matches_displayed_dataframe_and_uses_bom():
+    dataframe = etl_load_history.build_unknown_size_token_dataframe(
+        [
+            {"token": "4XL", "count": 8},
+            {"token": "OS", "count": 3},
+            {"token": "4 XL", "count": 2},
+            {"token": "4-XL", "count": 1},
+            {"token": "4/XL", "count": 1},
+            {"token": "4,XL", "count": 1},
+            {"token": '"4XL"', "count": 1},
+            {"token": "=4XL", "count": 1},
+            {"token": "+4XL", "count": 1},
+            {"token": "-4XL", "count": 1},
+            {"token": "@4XL", "count": 1},
+        ]
+    )
+
+    csv_bytes = etl_load_history.build_unknown_size_token_csv(dataframe)
+
+    assert csv_bytes.startswith(b"\xef\xbb\xbf")
+    assert list(csv.DictReader(io.StringIO(csv_bytes.decode("utf-8-sig")))) == [
+        {"사이즈 토큰": "4XL", "개수": "8"},
+        {"사이즈 토큰": "OS", "개수": "3"},
+        {"사이즈 토큰": "4 XL", "개수": "2"},
+        {"사이즈 토큰": "4-XL", "개수": "1"},
+        {"사이즈 토큰": "4/XL", "개수": "1"},
+        {"사이즈 토큰": "4,XL", "개수": "1"},
+        {"사이즈 토큰": '"4XL"', "개수": "1"},
+        {"사이즈 토큰": "'=4XL", "개수": "1"},
+        {"사이즈 토큰": "'+4XL", "개수": "1"},
+        {"사이즈 토큰": "'-4XL", "개수": "1"},
+        {"사이즈 토큰": "'@4XL", "개수": "1"},
+    ]
+
+
+class UnknownSizeTokenStreamlit:
+    def __init__(self):
+        self.downloads = []
+        self.dataframes = []
+        self.infos = []
+        self.errors = []
+
+    def divider(self):
+        pass
+
+    def subheader(self, _value):
+        pass
+
+    def caption(self, _value):
+        pass
+
+    def dataframe(self, value, **_kwargs):
+        self.dataframes.append(value)
+
+    def download_button(self, label, **kwargs):
+        self.downloads.append({"label": label, **kwargs})
+
+    def info(self, value):
+        self.infos.append(value)
+
+    def error(self, value):
+        self.errors.append(value)
+
+
+def test_render_unknown_size_token_report_downloads_the_displayed_snapshot(monkeypatch):
+    api_client = FakeEtlApiClient()
+    fake_streamlit = UnknownSizeTokenStreamlit()
+    monkeypatch.setattr(etl_load_history, "st", fake_streamlit)
+
+    etl_load_history._render_unknown_size_token_report(api_client)
+
+    assert api_client.unknown_size_token_calls == [20]
+    assert len(fake_streamlit.dataframes) == 1
+    assert len(fake_streamlit.downloads) == 1
+    download = fake_streamlit.downloads[0]
+    assert download["label"] == "미판정 사이즈 토큰 CSV 다운로드"
+    assert download["file_name"] == "catalogguard_unknown_size_tokens.csv"
+    assert download["mime"] == "text/csv"
+    assert download["key"] == "unknown_size_token_csv_download"
+    assert download["data"].startswith(b"\xef\xbb\xbf")
+    assert list(csv.DictReader(io.StringIO(download["data"].decode("utf-8-sig")))) == [
+        {"사이즈 토큰": "4XL", "개수": "8"},
+        {"사이즈 토큰": "OS", "개수": "3"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("api_client", "expected_message", "message_collection"),
+    [
+        (
+            FakeEtlApiClient(unknown_size_tokens=[]),
+            "현재 운영 카탈로그에 미판정 사이즈 토큰이 없습니다.",
+            "infos",
+        ),
+        (
+            FakeEtlApiClient(
+                unknown_size_token_error=catalogguard_api.CatalogGuardApiResponseError(
+                    "upstream failure"
+                )
+            ),
+            "미판정 사이즈 토큰을 불러오지 못했습니다.",
+            "errors",
+        ),
+    ],
+)
+def test_render_unknown_size_token_report_has_no_download_for_empty_or_error(
+    monkeypatch,
+    api_client,
+    expected_message,
+    message_collection,
+):
+    fake_streamlit = UnknownSizeTokenStreamlit()
+    monkeypatch.setattr(etl_load_history, "st", fake_streamlit)
+
+    etl_load_history._render_unknown_size_token_report(api_client)
+
+    assert api_client.unknown_size_token_calls == [20]
+    assert fake_streamlit.downloads == []
+    assert any(
+        expected_message in message
+        for message in getattr(fake_streamlit, message_collection)
+    )
+
+
 def test_etl_load_history_shows_unknown_size_token_report(monkeypatch):
     api_client = FakeEtlApiClient()
     _patch_etl_api_client(monkeypatch, api_client)

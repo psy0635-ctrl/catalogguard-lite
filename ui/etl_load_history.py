@@ -212,6 +212,7 @@ CATALOG_RECONCILIATION_LEGACY_QUALITY_NOTICE = (
     "원본 입력 대비 비교 범위를 확인할 수 없습니다."
 )
 UNKNOWN_SIZE_TOKEN_DISPLAY_COLUMNS = ["사이즈 토큰", "개수"]
+UNKNOWN_SIZE_TOKEN_DOWNLOAD_FILENAME = "catalogguard_unknown_size_tokens.csv"
 ETL_PRODUCT_DISPLAY_COLUMNS = [
     "staging 상품 ID",
     "상품 그룹 ID",
@@ -947,6 +948,12 @@ def build_unknown_size_token_dataframe(items: list[dict[str, Any]]) -> pd.DataFr
         for item in items
     ]
     return pd.DataFrame(rows, columns=UNKNOWN_SIZE_TOKEN_DISPLAY_COLUMNS)
+
+
+def build_unknown_size_token_csv(dataframe: pd.DataFrame) -> bytes:
+    """Build a formula-safe UTF-8 BOM CSV from the displayed token snapshot."""
+    export_dataframe = prepare_export_dataframe(dataframe)
+    return export_dataframe.to_csv(index=False).encode("utf-8-sig")
 
 
 def build_etl_product_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
@@ -4285,10 +4292,18 @@ def _render_unknown_size_token_report(api_client) -> None:
         st.info("현재 운영 카탈로그에 미판정 사이즈 토큰이 없습니다.")
         return
 
+    dataframe = build_unknown_size_token_dataframe(items)
     st.dataframe(
-        build_unknown_size_token_dataframe(items),
+        dataframe,
         width="stretch",
         hide_index=True,
+    )
+    st.download_button(
+        "미판정 사이즈 토큰 CSV 다운로드",
+        data=build_unknown_size_token_csv(dataframe),
+        file_name=UNKNOWN_SIZE_TOKEN_DOWNLOAD_FILENAME,
+        mime="text/csv",
+        key="unknown_size_token_csv_download",
     )
 
 
