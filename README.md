@@ -994,6 +994,8 @@ medium, m -> M
 
 운영자는 ETL 적재 이력 화면의 `미판정 사이즈 토큰` 표에서 현재 운영 카탈로그(`catalog_products`)에 남아 있는 미판정 원본 토큰과 건수를 확인할 수 있습니다. API는 `GET /api/v1/catalog/unknown-size-tokens`이며 viewer 이상 권한에서 호출할 수 있고, 기본 상위 20개(최대 100개)를 `{"items": [{"token": "4XL", "count": 8}]}` 형식으로 반환합니다.
 
+화면에 표시된 현재 미판정 사이즈 토큰 snapshot은 UTF-8 BOM CSV로 다운로드해 vocabulary/alias 검토 자료로 사용할 수 있습니다. 다운로드는 별도 조회 없이 표에 보이는 동일한 상위 20개 snapshot만 포함합니다.
+
 보고서는 raw `size` 값별 DB `GROUP BY` 결과를 사용합니다. 앞뒤·연속 공백과 대소문자만 정리해 같은 미판정 토큰을 합산하되, 사전 밖 값의 하이픈·슬래시·공백 차이(`4XL`, `4-XL`, `4/XL`, `4 XL`)는 근거 없이 합치지 않습니다. 이미 지원하는 별칭, `find_size_system()`이 NUMERIC으로 판정하는 숫자 사이즈, 빈 값은 제외합니다. 이 보고서는 오류 판정이나 자동 alias 추가가 아니라 Policy C 검토를 위한 관측 도구이며, 운영 카탈로그의 현재 스냅샷만 보므로 미승격 staging·inspection 전용 데이터와 과거 추이는 포함하지 않습니다.
 
 ### 상품 그룹 내 중복 색상·사이즈 옵션 기준
