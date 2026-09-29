@@ -94,6 +94,65 @@ def test_list_unknown_size_tokens_keeps_unregistered_separator_variants_separate
     ]
 
 
+def test_list_unknown_color_tokens_groups_unknown_values_and_excludes_known_colors():
+    from core.fashion_attribute_validator import find_standard_color
+    from db.catalog_promotion_query_service import list_unknown_color_tokens
+
+    for known in (
+        "BLACK", "black", "블랙", "검정", "검정색", "WHITE", "white",
+        "GRAY", "gray", "grey", "그레이", "NAVY", "navy", "네이비",
+        "BEIGE", "beige", "베이지",
+    ):
+        assert find_standard_color(known) is not None
+    assert find_standard_color("MELANGE GRAY") is None
+    assert find_standard_color("CHARCOAL") is None
+
+    session = _ReadOnlyListSession(
+        [
+            ("BLACK", 100), ("black", 3), ("블랙", 2), ("검정", 1),
+            ("WHITE", 80), ("gray", 70), ("grey", 60), ("그레이", 50),
+            ("NAVY", 40), ("", 20), ("   ", 10), ("\t", 5),
+            ("MELANGE GRAY", 2), ("melange gray", 3),
+            ("melange   gray", 4), ("CHARCOAL", 8), ("MINT", 8),
+        ]
+    )
+
+    result = list_unknown_color_tokens(session, limit=20)
+
+    assert [(item.token, item.count) for item in result] == [
+        ("MELANGE GRAY", 9), ("CHARCOAL", 8), ("MINT", 8),
+    ]
+    assert session.execute_calls == 1
+
+    assert [
+        (item.token, item.count)
+        for item in list_unknown_color_tokens(
+            _ReadOnlyListSession(
+                [
+                    ("MINT", 8), ("CHARCOAL", 8), ("melange   gray", 4),
+                    ("melange gray", 3), ("MELANGE GRAY", 2),
+                ]
+            ),
+            limit=2,
+        )
+    ] == [("MELANGE GRAY", 9), ("CHARCOAL", 8)]
+
+
+def test_list_unknown_color_tokens_keeps_unregistered_separator_variants_separate():
+    from db.catalog_promotion_query_service import list_unknown_color_tokens
+
+    result = list_unknown_color_tokens(
+        _ReadOnlyListSession(
+            [("MELANGE GRAY", 2), ("MELANGE-GRAY", 2), ("MELANGE/GRAY", 2)]
+        ),
+        limit=20,
+    )
+
+    assert [(item.token, item.count) for item in result] == [
+        ("MELANGE GRAY", 2), ("MELANGE-GRAY", 2), ("MELANGE/GRAY", 2),
+    ]
+
+
 def test_list_unknown_size_tokens_processes_ten_thousand_grouped_catalog_sizes_in_one_query():
     from db.catalog_promotion_query_service import list_unknown_size_tokens
 

@@ -137,16 +137,29 @@ def fake_promotion_history_query_service(monkeypatch):
         )
         return state.unknown_size_tokens[:limit]
 
+    def fake_unknown_color_tokens(session, *, limit):
+        calls.append(
+            {"operation": "unknown_color_tokens", "session": session, "limit": limit}
+        )
+        return state.unknown_color_tokens[:limit]
+
     state.unknown_size_tokens = [
         SimpleNamespace(token="4XL", count=8),
         SimpleNamespace(token="OS", count=3),
     ]
+    state.unknown_color_tokens = [SimpleNamespace(token="CHARCOAL", count=8)]
 
     app.dependency_overrides[get_session] = override_session
     monkeypatch.setattr(
         etl_loads_route,
         "list_catalog_promotions",
         fake_list,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        etl_loads_route,
+        "list_unknown_color_tokens",
+        fake_unknown_color_tokens,
         raising=False,
     )
     monkeypatch.setattr(
@@ -210,6 +223,31 @@ def test_list_unknown_size_tokens_requires_authenticated_user(
 @pytest.mark.parametrize("limit", [0, 101])
 def test_list_unknown_size_tokens_rejects_invalid_limits(limit):
     response = client.get("/api/v1/catalog/unknown-size-tokens", params={"limit": limit})
+
+    assert response.status_code == 422
+
+
+def test_list_unknown_color_tokens_returns_read_only_contract_for_viewers(
+    fake_promotion_history_query_service,
+):
+    override_current_user(role="viewer")
+
+    response = client.get(
+        "/api/v1/catalog/unknown-color-tokens", params={"limit": 7}
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"items": [{"token": "CHARCOAL", "count": 8}]}
+    call = fake_promotion_history_query_service.calls[-1]
+    assert call["operation"] == "unknown_color_tokens"
+    assert call["limit"] == 7
+
+
+@pytest.mark.parametrize("limit", [0, 101])
+def test_list_unknown_color_tokens_rejects_invalid_limits(limit):
+    response = client.get(
+        "/api/v1/catalog/unknown-color-tokens", params={"limit": limit}
+    )
 
     assert response.status_code == 422
 

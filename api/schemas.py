@@ -611,6 +611,15 @@ class UnknownSizeTokenReportResponse(BaseModel):
     items: list[UnknownSizeTokenItemResponse]
 
 
+class UnknownColorTokenItemResponse(BaseModel):
+    token: str
+    count: int
+
+
+class UnknownColorTokenReportResponse(BaseModel):
+    items: list[UnknownColorTokenItemResponse]
+
+
 InspectionJobStatus = Literal["queued", "running", "succeeded", "failed"]
 
 
