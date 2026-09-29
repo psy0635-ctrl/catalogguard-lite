@@ -380,6 +380,7 @@ ETL_PROFILE_DETAIL_RESPONSE_KEYS = (
     "defaults",
 )
 UNKNOWN_SIZE_TOKEN_REPORT_RESPONSE_KEYS = ("items",)
+UNKNOWN_COLOR_TOKEN_REPORT_RESPONSE_KEYS = ("items",)
 ETL_UNSUPPORTED_PROFILE_MESSAGE = "지원하지 않는 공급사 프로필입니다."
 ETL_INACTIVE_PROFILE_MESSAGE = (
     "선택한 ETL 프로필이 비활성화되었습니다. 사용할 수 있는 프로필을 다시 선택하세요."
@@ -1237,6 +1238,22 @@ def _validate_etl_web_run_response(data: dict[str, Any]) -> None:
 def _validate_unknown_size_token_report_response(data: dict[str, Any]) -> None:
     if (
         any(key not in data for key in UNKNOWN_SIZE_TOKEN_REPORT_RESPONSE_KEYS)
+        or not isinstance(data["items"], list)
+        or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("token"), str)
+            or not item["token"].strip()
+            or type(item.get("count")) is not int
+            or item["count"] < 1
+            for item in data["items"]
+        )
+    ):
+        raise _invalid_etl_response()
+
+
+def _validate_unknown_color_token_report_response(data: dict[str, Any]) -> None:
+    if (
+        any(key not in data for key in UNKNOWN_COLOR_TOKEN_REPORT_RESPONSE_KEYS)
         or not isinstance(data["items"], list)
         or any(
             not isinstance(item, dict)
@@ -2424,6 +2441,15 @@ class CatalogGuardApiClient:
             params={"limit": limit},
         )
         _validate_unknown_size_token_report_response(data)
+        return data
+
+    def list_unknown_color_tokens(self, *, limit: int = 20) -> dict[str, Any]:
+        _validate_etl_pagination(limit, 0)
+        data = self._get_json(
+            "/api/v1/catalog/unknown-color-tokens",
+            params={"limit": limit},
+        )
+        _validate_unknown_color_token_report_response(data)
         return data
 
     def get_etl_load_detail(

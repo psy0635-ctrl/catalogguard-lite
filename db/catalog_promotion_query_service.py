@@ -7,8 +7,10 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from core.fashion_attribute_validator import (
+    build_color_comparison_key,
     build_size_comparison_key,
     collapse_comparison_whitespace,
+    find_standard_color,
     find_size_system,
     find_standard_size,
 )
@@ -85,6 +87,54 @@ class CatalogPromotionAuditList:
 class UnknownSizeToken:
     token: str
     count: int
+
+
+@dataclass(frozen=True)
+class UnknownColorToken:
+    token: str
+    count: int
+
+
+def list_unknown_color_tokens(
+    session: Session,
+    *,
+    limit: int,
+) -> list[UnknownColorToken]:
+    """Return frequent color values not covered by the current color vocabulary."""
+    grouped_color_counts = session.execute(
+        select(CatalogProduct.color, func.count(CatalogProduct.id))
+        .group_by(CatalogProduct.color)
+    ).all()
+
+    grouped_tokens: dict[str, tuple[str, int]] = {}
+    for raw_color, raw_count in grouped_color_counts:
+        if not isinstance(raw_color, str):
+            continue
+        display_token = collapse_comparison_whitespace(raw_color)
+        if not display_token or find_standard_color(display_token) is not None:
+            continue
+
+        report_key = build_color_comparison_key(display_token)
+        if report_key is None:
+            continue
+        existing = grouped_tokens.get(report_key)
+        if existing is None:
+            grouped_tokens[report_key] = (display_token, int(raw_count))
+            continue
+
+        existing_token, existing_count = existing
+        grouped_tokens[report_key] = (
+            min(existing_token, display_token, key=lambda token: (token.casefold(), token)),
+            existing_count + int(raw_count),
+        )
+
+    items = [
+        UnknownColorToken(token=token, count=count)
+        for token, count in grouped_tokens.values()
+    ]
+    return sorted(items, key=lambda item: (-item.count, item.token.casefold(), item.token))[
+        :limit
+    ]
 
 
 def _is_unknown_size_token(size: object) -> bool:

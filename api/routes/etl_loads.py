@@ -69,6 +69,8 @@ from api.schemas import (
     ETLStagingProductListResponse,
     ETLStagingProductResponse,
     ETLWebRunResponse,
+    UnknownColorTokenItemResponse,
+    UnknownColorTokenReportResponse,
     UnknownSizeTokenItemResponse,
     UnknownSizeTokenReportResponse,
 )
@@ -168,6 +170,7 @@ from db.catalog_promotion_query_service import (
     list_catalog_promotion_audits,
     list_catalog_promotions,
     list_unknown_size_tokens,
+    list_unknown_color_tokens,
 )
 from db.catalog_promotion_rollback_query_service import (
     CatalogPromotionRollbackChangeList,
@@ -201,6 +204,24 @@ def get_unknown_size_token_report(
     return UnknownSizeTokenReportResponse(
         items=[
             UnknownSizeTokenItemResponse(token=item.token, count=item.count)
+            for item in items
+        ]
+    )
+
+
+@router.get(
+    "/api/v1/catalog/unknown-color-tokens",
+    response_model=UnknownColorTokenReportResponse,
+)
+def get_unknown_color_token_report(
+    limit: int = Query(default=20, ge=1, le=100),
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> UnknownColorTokenReportResponse:
+    items = list_unknown_color_tokens(session, limit=limit)
+    return UnknownColorTokenReportResponse(
+        items=[
+            UnknownColorTokenItemResponse(token=item.token, count=item.count)
             for item in items
         ]
     )

@@ -2241,6 +2241,54 @@ def test_list_unknown_size_tokens_rejects_invalid_limits_without_request(limit):
     assert session.calls == []
 
 
+def test_list_unknown_color_tokens_calls_get_with_limit_and_validates_contract():
+    response = {"items": [{"token": "CHARCOAL", "count": 8}]}
+    client, session = make_client(
+        response=FakeResponse(payload=response), timeout_seconds=4.0
+    )
+
+    assert client.list_unknown_color_tokens(limit=7) == response
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/catalog/unknown-color-tokens",
+            "params": {"limit": 7},
+            "timeout": 4.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize("limit", [0, 101])
+def test_list_unknown_color_tokens_rejects_invalid_limits_without_request(limit):
+    client, session = make_client(
+        response=FakeResponse(payload={"items": [{"token": "CHARCOAL", "count": 8}]})
+    )
+
+    with pytest.raises(ValueError):
+        client.list_unknown_color_tokens(limit=limit)
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"items": {}},
+        {"items": ["CHARCOAL"]},
+        {"items": [{"count": 1}]},
+        {"items": [{"token": 1, "count": 1}]},
+        {"items": [{"token": "CHARCOAL", "count": True}]},
+        {"items": [{"token": "CHARCOAL", "count": 0}]},
+    ],
+)
+def test_list_unknown_color_tokens_rejects_invalid_contract(payload):
+    client, _session = make_client(response=FakeResponse(payload=payload))
+    client_module = import_client_module()
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.list_unknown_color_tokens()
+
+
 def test_list_catalog_promotions_calls_get_with_filters_and_validates_contract():
     client, session = make_client(
         response=FakeResponse(payload=CATALOG_PROMOTION_RUN_LIST_RESPONSE),

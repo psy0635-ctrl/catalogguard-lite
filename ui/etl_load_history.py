@@ -34,6 +34,7 @@ ETL_PRODUCT_LIMIT = 20
 ETL_REJECT_LIMIT = 20
 ETL_REJECTION_EXPORT_PAGE_SIZE = 100
 UNKNOWN_SIZE_TOKEN_LIMIT = 20
+UNKNOWN_COLOR_TOKEN_LIMIT = 20
 PROMOTION_HISTORY_LIMIT = 10
 PROMOTION_AUDIT_LIMIT = 10
 ROLLBACK_HISTORY_LIMIT = 10
@@ -213,6 +214,8 @@ CATALOG_RECONCILIATION_LEGACY_QUALITY_NOTICE = (
 )
 UNKNOWN_SIZE_TOKEN_DISPLAY_COLUMNS = ["사이즈 토큰", "개수"]
 UNKNOWN_SIZE_TOKEN_DOWNLOAD_FILENAME = "catalogguard_unknown_size_tokens.csv"
+UNKNOWN_COLOR_TOKEN_DISPLAY_COLUMNS = ["색상 토큰", "개수"]
+UNKNOWN_COLOR_TOKEN_DOWNLOAD_FILENAME = "catalogguard_unknown_color_tokens.csv"
 ETL_PRODUCT_DISPLAY_COLUMNS = [
     "staging 상품 ID",
     "상품 그룹 ID",
@@ -952,6 +955,20 @@ def build_unknown_size_token_dataframe(items: list[dict[str, Any]]) -> pd.DataFr
 
 def build_unknown_size_token_csv(dataframe: pd.DataFrame) -> bytes:
     """Build a formula-safe UTF-8 BOM CSV from the displayed token snapshot."""
+    export_dataframe = prepare_export_dataframe(dataframe)
+    return export_dataframe.to_csv(index=False).encode("utf-8-sig")
+
+
+def build_unknown_color_token_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
+    rows = [
+        {"색상 토큰": item.get("token"), "개수": item.get("count")}
+        for item in items
+    ]
+    return pd.DataFrame(rows, columns=UNKNOWN_COLOR_TOKEN_DISPLAY_COLUMNS)
+
+
+def build_unknown_color_token_csv(dataframe: pd.DataFrame) -> bytes:
+    """Build a formula-safe UTF-8 BOM CSV from the displayed color snapshot."""
     export_dataframe = prepare_export_dataframe(dataframe)
     return export_dataframe.to_csv(index=False).encode("utf-8-sig")
 
@@ -4307,6 +4324,46 @@ def _render_unknown_size_token_report(api_client) -> None:
     )
 
 
+def _render_unknown_color_token_report(api_client) -> None:
+    st.divider()
+    st.subheader("미판정 색상 토큰")
+    st.caption(
+        "현재 운영 카탈로그에서 CatalogGuard 색상 사전으로 표준값을 찾지 못한 "
+        "원본 색상 표현과 발생 건수입니다. 자동 오류 판정이나 자동 표준화가 아니라 "
+        "색상 vocabulary 검토를 위한 현재 snapshot입니다."
+    )
+    try:
+        response = api_client.list_unknown_color_tokens(limit=UNKNOWN_COLOR_TOKEN_LIMIT)
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        st.error(
+            build_etl_api_error_display_message(
+                "미판정 색상 토큰을 불러오지 못했습니다.", error
+            )
+        )
+        return
+
+    items = response.get("items") or []
+    if not items:
+        st.info("현재 운영 카탈로그에 표시할 미판정 색상 토큰이 없습니다.")
+        return
+
+    dataframe = build_unknown_color_token_dataframe(items)
+    st.dataframe(dataframe, width="stretch", hide_index=True)
+    st.download_button(
+        "미판정 색상 토큰 CSV 다운로드",
+        data=build_unknown_color_token_csv(dataframe),
+        file_name=UNKNOWN_COLOR_TOKEN_DOWNLOAD_FILENAME,
+        mime="text/csv",
+        key="unknown_color_token_csv_download",
+    )
+
+
 def render_etl_load_history(api_client=None) -> None:
     initialize_etl_load_state()
 
@@ -4322,6 +4379,7 @@ def render_etl_load_history(api_client=None) -> None:
     # 복잡하게 만들지 않도록 divider로 나눕니다.
     _render_etl_profile_management(api_client)
     _render_unknown_size_token_report(api_client)
+    _render_unknown_color_token_report(api_client)
 
     st.subheader("ETL 적재 이력")
     st.write(

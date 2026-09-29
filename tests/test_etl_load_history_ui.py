@@ -837,6 +837,8 @@ class FakeEtlApiClient:
         etl_run_error=None,
         unknown_size_tokens=None,
         unknown_size_token_error=None,
+        unknown_color_tokens=None,
+        unknown_color_token_error=None,
         quality_summary=None,
         quality_trend=None,
         quality_trend_error=None,
@@ -861,6 +863,7 @@ class FakeEtlApiClient:
         self.etl_profile_detail_calls = []
         self.etl_run_calls = []
         self.unknown_size_token_calls = []
+        self.unknown_color_token_calls = []
         self.quality_summary_calls = []
         self.quality_trend_calls = []
         self.observability_calls = []
@@ -936,6 +939,12 @@ class FakeEtlApiClient:
             else unknown_size_tokens
         )
         self.unknown_size_token_error = unknown_size_token_error
+        self.unknown_color_tokens = (
+            [{"token": "CHARCOAL", "count": 8}, {"token": "MINT", "count": 3}]
+            if unknown_color_tokens is None
+            else unknown_color_tokens
+        )
+        self.unknown_color_token_error = unknown_color_token_error
         self.quality_summary = quality_summary or {
             "batch_count": 3,
             "quality_available_batch_count": 2,
@@ -1108,6 +1117,12 @@ class FakeEtlApiClient:
         if self.unknown_size_token_error is not None:
             raise self.unknown_size_token_error
         return {"items": self.unknown_size_tokens}
+
+    def list_unknown_color_tokens(self, *, limit=20):
+        self.unknown_color_token_calls.append(limit)
+        if self.unknown_color_token_error is not None:
+            raise self.unknown_color_token_error
+        return {"items": self.unknown_color_tokens}
 
     def get_etl_load_quality_summary(self, *, profile_name=None):
         self.quality_summary_calls.append(profile_name)
@@ -1944,12 +1959,13 @@ class UnknownSizeTokenStreamlit:
         self.dataframes = []
         self.infos = []
         self.errors = []
+        self.subheaders = []
 
     def divider(self):
         pass
 
-    def subheader(self, _value):
-        pass
+    def subheader(self, value):
+        self.subheaders.append(value)
 
     def caption(self, _value):
         pass
@@ -2069,6 +2085,112 @@ def test_unknown_size_token_report_failure_does_not_block_etl_history(monkeypatc
     assert api_client.unknown_size_token_calls == [20]
     assert "ETL 적재 이력" in [subheader.value for subheader in app.subheader]
     assert any("미판정 사이즈 토큰을 불러오지 못했습니다." in error.value for error in app.error)
+
+
+def test_unknown_color_token_dataframe_and_csv_preserve_order_and_escape_formulas():
+    items = [
+        {"token": "CHARCOAL", "count": 8},
+        {"token": "BLACK,WHITE", "count": 7},
+        {"token": '"MINT"', "count": 6},
+        {"token": "=RED", "count": 5},
+        {"token": "+BLUE", "count": 4},
+        {"token": "-GREEN", "count": 3},
+        {"token": "@BLACK", "count": 2},
+    ]
+    dataframe = etl_load_history.build_unknown_color_token_dataframe(items)
+    assert list(dataframe.columns) == ["색상 토큰", "개수"]
+    assert dataframe.to_dict("records") == [
+        {"색상 토큰": item["token"], "개수": item["count"]} for item in items
+    ]
+
+    csv_bytes = etl_load_history.build_unknown_color_token_csv(dataframe)
+    assert csv_bytes.startswith(b"\xef\xbb\xbf")
+    assert list(csv.DictReader(io.StringIO(csv_bytes.decode("utf-8-sig")))) == [
+        {"색상 토큰": "CHARCOAL", "개수": "8"},
+        {"색상 토큰": "BLACK,WHITE", "개수": "7"},
+        {"색상 토큰": '"MINT"', "개수": "6"},
+        {"색상 토큰": "'=RED", "개수": "5"},
+        {"색상 토큰": "'+BLUE", "개수": "4"},
+        {"색상 토큰": "'-GREEN", "개수": "3"},
+        {"색상 토큰": "'@BLACK", "개수": "2"},
+    ]
+
+
+def test_render_unknown_color_token_report_uses_one_displayed_snapshot(monkeypatch):
+    api_client = FakeEtlApiClient()
+    fake_streamlit = UnknownSizeTokenStreamlit()
+    monkeypatch.setattr(etl_load_history, "st", fake_streamlit)
+
+    etl_load_history._render_unknown_color_token_report(api_client)
+
+    assert api_client.unknown_color_token_calls == [20]
+    assert fake_streamlit.subheaders == ["미판정 색상 토큰"]
+    assert len(fake_streamlit.dataframes) == 1
+    assert fake_streamlit.dataframes[0].to_dict("records") == [
+        {"색상 토큰": "CHARCOAL", "개수": 8},
+        {"색상 토큰": "MINT", "개수": 3},
+    ]
+    assert len(fake_streamlit.downloads) == 1
+    download = fake_streamlit.downloads[0]
+    assert download["label"] == "미판정 색상 토큰 CSV 다운로드"
+    assert download["file_name"] == "catalogguard_unknown_color_tokens.csv"
+    assert download["mime"] == "text/csv"
+    assert download["key"] == "unknown_color_token_csv_download"
+    assert list(csv.DictReader(io.StringIO(download["data"].decode("utf-8-sig")))) == [
+        {"색상 토큰": "CHARCOAL", "개수": "8"},
+        {"색상 토큰": "MINT", "개수": "3"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("client", "message_collection", "expected_message"),
+    [
+        (
+            FakeEtlApiClient(unknown_color_tokens=[]),
+            "infos",
+            "현재 운영 카탈로그에 표시할 미판정 색상 토큰이 없습니다.",
+        ),
+        (
+            FakeEtlApiClient(
+                unknown_color_token_error=catalogguard_api.CatalogGuardApiResponseError(
+                    "upstream failure"
+                )
+            ),
+            "errors",
+            "미판정 색상 토큰을 불러오지 못했습니다.",
+        ),
+    ],
+)
+def test_render_unknown_color_token_report_has_no_download_for_empty_or_error(
+    monkeypatch, client, message_collection, expected_message
+):
+    fake_streamlit = UnknownSizeTokenStreamlit()
+    monkeypatch.setattr(etl_load_history, "st", fake_streamlit)
+
+    etl_load_history._render_unknown_color_token_report(client)
+
+    assert client.unknown_color_token_calls == [20]
+    assert fake_streamlit.downloads == []
+    assert any(
+        expected_message in message
+        for message in getattr(fake_streamlit, message_collection)
+    )
+
+
+def test_etl_load_history_shows_unknown_color_token_report(monkeypatch):
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(timeout=10)
+
+    assert len(app.exception) == 0
+    assert api_client.unknown_color_token_calls == [20]
+    assert "미판정 색상 토큰" in [subheader.value for subheader in app.subheader]
+    assert any(
+        set(dataframe.value.columns)
+        == set(etl_load_history.UNKNOWN_COLOR_TOKEN_DISPLAY_COLUMNS)
+        for dataframe in app.dataframe
+    )
 
 
 def _patch_etl_api_client(monkeypatch, api_client):
