@@ -620,6 +620,23 @@ class UnknownColorTokenReportResponse(BaseModel):
     items: list[UnknownColorTokenItemResponse]
 
 
+class UnknownColorTokenProductResponse(BaseModel):
+    catalog_product_id: int
+    supplier_key: str
+    external_product_id: str
+    product_group_id: str
+    product_name: str
+    category: str
+    color: str
+    size: str
+
+
+class UnknownColorTokenProductListResponse(BaseModel):
+    token: str
+    total: int
+    items: list[UnknownColorTokenProductResponse]
+
+
 InspectionJobStatus = Literal["queued", "running", "succeeded", "failed"]
 
 

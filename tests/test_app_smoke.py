@@ -213,6 +213,9 @@ class FakeInspectionApiClient:
     def list_unknown_color_tokens(self, *, limit=20):
         return {"items": []}
 
+    def list_unknown_color_token_products(self, token, *, limit=20):
+        return {"token": token, "total": 0, "items": []}
+
     def get_etl_load_quality_summary(self, **params):
         raise catalogguard_api.CatalogGuardApiConfigurationError("not configured")
 

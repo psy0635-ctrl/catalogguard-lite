@@ -839,6 +839,8 @@ class FakeEtlApiClient:
         unknown_size_token_error=None,
         unknown_color_tokens=None,
         unknown_color_token_error=None,
+        unknown_color_token_products=None,
+        unknown_color_token_product_error=None,
         quality_summary=None,
         quality_trend=None,
         quality_trend_error=None,
@@ -864,6 +866,7 @@ class FakeEtlApiClient:
         self.etl_run_calls = []
         self.unknown_size_token_calls = []
         self.unknown_color_token_calls = []
+        self.unknown_color_token_product_calls = []
         self.quality_summary_calls = []
         self.quality_trend_calls = []
         self.observability_calls = []
@@ -945,6 +948,23 @@ class FakeEtlApiClient:
             else unknown_color_tokens
         )
         self.unknown_color_token_error = unknown_color_token_error
+        self.unknown_color_token_products = (
+            [
+                {
+                    "catalog_product_id": 101,
+                    "supplier_key": "sample_vendor",
+                    "external_product_id": "SKU-001",
+                    "product_group_id": "GROUP-01",
+                    "product_name": "오버핏 후드",
+                    "category": "TOP",
+                    "color": "CHARCOAL",
+                    "size": "M",
+                }
+            ]
+            if unknown_color_token_products is None
+            else unknown_color_token_products
+        )
+        self.unknown_color_token_product_error = unknown_color_token_product_error
         self.quality_summary = quality_summary or {
             "batch_count": 3,
             "quality_available_batch_count": 2,
@@ -1123,6 +1143,18 @@ class FakeEtlApiClient:
         if self.unknown_color_token_error is not None:
             raise self.unknown_color_token_error
         return {"items": self.unknown_color_tokens}
+
+    def list_unknown_color_token_products(self, token, *, limit=20):
+        self.unknown_color_token_product_calls.append(
+            {"token": token, "limit": limit}
+        )
+        if self.unknown_color_token_product_error is not None:
+            raise self.unknown_color_token_product_error
+        return {
+            "token": token,
+            "total": len(self.unknown_color_token_products),
+            "items": self.unknown_color_token_products[:limit],
+        }
 
     def get_etl_load_quality_summary(self, *, profile_name=None):
         self.quality_summary_calls.append(profile_name)
@@ -1954,12 +1986,14 @@ def test_unknown_size_token_csv_matches_displayed_dataframe_and_uses_bom():
 
 
 class UnknownSizeTokenStreamlit:
-    def __init__(self):
+    def __init__(self, *, selected_token=None):
         self.downloads = []
         self.dataframes = []
         self.infos = []
         self.errors = []
         self.subheaders = []
+        self.selected_token = selected_token
+        self.selectboxes = []
 
     def divider(self):
         pass
@@ -1969,6 +2003,10 @@ class UnknownSizeTokenStreamlit:
 
     def caption(self, _value):
         pass
+
+    def selectbox(self, label, **kwargs):
+        self.selectboxes.append({"label": label, **kwargs})
+        return self.selected_token
 
     def dataframe(self, value, **_kwargs):
         self.dataframes.append(value)
@@ -2124,6 +2162,7 @@ def test_render_unknown_color_token_report_uses_one_displayed_snapshot(monkeypat
     etl_load_history._render_unknown_color_token_report(api_client)
 
     assert api_client.unknown_color_token_calls == [20]
+    assert api_client.unknown_color_token_product_calls == []
     assert fake_streamlit.subheaders == ["미판정 색상 토큰"]
     assert len(fake_streamlit.dataframes) == 1
     assert fake_streamlit.dataframes[0].to_dict("records") == [
@@ -2140,6 +2179,75 @@ def test_render_unknown_color_token_report_uses_one_displayed_snapshot(monkeypat
         {"색상 토큰": "CHARCOAL", "개수": "8"},
         {"색상 토큰": "MINT", "개수": "3"},
     ]
+    assert any(
+        "색상 토큰을 선택하면" in message for message in fake_streamlit.infos
+    )
+
+
+def test_render_unknown_color_token_report_fetches_and_displays_selected_products(
+    monkeypatch,
+):
+    api_client = FakeEtlApiClient()
+    fake_streamlit = UnknownSizeTokenStreamlit(selected_token="CHARCOAL")
+    monkeypatch.setattr(etl_load_history, "st", fake_streamlit)
+
+    etl_load_history._render_unknown_color_token_report(api_client)
+
+    assert api_client.unknown_color_token_calls == [20]
+    assert api_client.unknown_color_token_product_calls == [
+        {"token": "CHARCOAL", "limit": 20}
+    ]
+    assert len(fake_streamlit.dataframes) == 2
+    assert fake_streamlit.dataframes[1].to_dict("records") == [
+        {
+            "공급사": "sample_vendor",
+            "외부 상품 ID": "SKU-001",
+            "상품 그룹 ID": "GROUP-01",
+            "상품명": "오버핏 후드",
+            "카테고리": "TOP",
+            "원본 색상": "CHARCOAL",
+            "사이즈": "M",
+            "운영 상품 ID": 101,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("client", "message_collection", "expected_message"),
+    [
+        (
+            FakeEtlApiClient(unknown_color_token_products=[]),
+            "infos",
+            "선택한 색상 토큰을 사용하는 현재 운영 상품이 없습니다.",
+        ),
+        (
+            FakeEtlApiClient(
+                unknown_color_token_product_error=(
+                    catalogguard_api.CatalogGuardApiResponseError("upstream failure")
+                )
+            ),
+            "errors",
+            "미판정 색상 토큰의 영향 상품을 불러오지 못했습니다.",
+        ),
+    ],
+)
+def test_render_unknown_color_token_product_empty_or_failure_is_isolated(
+    monkeypatch, client, message_collection, expected_message
+):
+    fake_streamlit = UnknownSizeTokenStreamlit(selected_token="CHARCOAL")
+    monkeypatch.setattr(etl_load_history, "st", fake_streamlit)
+
+    etl_load_history._render_unknown_color_token_report(client)
+
+    assert client.unknown_color_token_calls == [20]
+    assert client.unknown_color_token_product_calls == [
+        {"token": "CHARCOAL", "limit": 20}
+    ]
+    assert len(fake_streamlit.dataframes) == 1
+    assert any(
+        expected_message in message
+        for message in getattr(fake_streamlit, message_collection)
+    )
 
 
 @pytest.mark.parametrize(

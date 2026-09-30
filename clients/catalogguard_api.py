@@ -381,6 +381,17 @@ ETL_PROFILE_DETAIL_RESPONSE_KEYS = (
 )
 UNKNOWN_SIZE_TOKEN_REPORT_RESPONSE_KEYS = ("items",)
 UNKNOWN_COLOR_TOKEN_REPORT_RESPONSE_KEYS = ("items",)
+UNKNOWN_COLOR_TOKEN_PRODUCT_LIST_RESPONSE_KEYS = ("token", "total", "items")
+UNKNOWN_COLOR_TOKEN_PRODUCT_KEYS = (
+    "catalog_product_id",
+    "supplier_key",
+    "external_product_id",
+    "product_group_id",
+    "product_name",
+    "category",
+    "color",
+    "size",
+)
 ETL_UNSUPPORTED_PROFILE_MESSAGE = "지원하지 않는 공급사 프로필입니다."
 ETL_INACTIVE_PROFILE_MESSAGE = (
     "선택한 ETL 프로필이 비활성화되었습니다. 사용할 수 있는 프로필을 다시 선택하세요."
@@ -1263,6 +1274,31 @@ def _validate_unknown_color_token_report_response(data: dict[str, Any]) -> None:
             or item["count"] < 1
             for item in data["items"]
         )
+    ):
+        raise _invalid_etl_response()
+
+
+def _validate_unknown_color_token_product_list_response(data: dict[str, Any]) -> None:
+    items = data.get("items")
+    if (
+        any(key not in data for key in UNKNOWN_COLOR_TOKEN_PRODUCT_LIST_RESPONSE_KEYS)
+        or not isinstance(data.get("token"), str)
+        or not data["token"].strip()
+        or type(data.get("total")) is not int
+        or data["total"] < 0
+        or not isinstance(items, list)
+        or len(items) > data["total"]
+    ):
+        raise _invalid_etl_response()
+
+    text_fields = UNKNOWN_COLOR_TOKEN_PRODUCT_KEYS[1:]
+    if any(
+        not isinstance(item, dict)
+        or any(key not in item for key in UNKNOWN_COLOR_TOKEN_PRODUCT_KEYS)
+        or type(item["catalog_product_id"]) is not int
+        or item["catalog_product_id"] < 1
+        or any(not isinstance(item[field], str) for field in text_fields)
+        for item in items
     ):
         raise _invalid_etl_response()
 
@@ -2450,6 +2486,23 @@ class CatalogGuardApiClient:
             params={"limit": limit},
         )
         _validate_unknown_color_token_report_response(data)
+        return data
+
+    def list_unknown_color_token_products(
+        self,
+        token: str,
+        *,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        if not isinstance(token, str) or not token.strip():
+            raise ValueError("token must be a non-empty string")
+        _validate_etl_pagination(limit, 0)
+        normalized_token = token.strip()
+        data = self._get_json(
+            "/api/v1/catalog/unknown-color-token-products",
+            params={"token": normalized_token, "limit": limit},
+        )
+        _validate_unknown_color_token_product_list_response(data)
         return data
 
     def get_etl_load_detail(
