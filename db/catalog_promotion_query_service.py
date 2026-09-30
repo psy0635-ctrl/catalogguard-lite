@@ -95,6 +95,35 @@ class UnknownColorToken:
     count: int
 
 
+@dataclass(frozen=True)
+class UnknownColorTokenProduct:
+    catalog_product_id: int
+    supplier_key: str
+    external_product_id: str
+    product_group_id: str
+    product_name: str
+    category: str
+    color: str
+    size: str
+
+
+@dataclass(frozen=True)
+class UnknownColorTokenProductList:
+    token: str
+    total: int
+    items: list[UnknownColorTokenProduct]
+
+
+def _unknown_color_comparison_key(raw_color: object) -> str | None:
+    if not isinstance(raw_color, str):
+        return None
+
+    display_token = collapse_comparison_whitespace(raw_color)
+    if not display_token or find_standard_color(display_token) is not None:
+        return None
+    return build_color_comparison_key(display_token)
+
+
 def list_unknown_color_tokens(
     session: Session,
     *,
@@ -108,15 +137,10 @@ def list_unknown_color_tokens(
 
     grouped_tokens: dict[str, tuple[str, int]] = {}
     for raw_color, raw_count in grouped_color_counts:
-        if not isinstance(raw_color, str):
-            continue
-        display_token = collapse_comparison_whitespace(raw_color)
-        if not display_token or find_standard_color(display_token) is not None:
-            continue
-
-        report_key = build_color_comparison_key(display_token)
+        report_key = _unknown_color_comparison_key(raw_color)
         if report_key is None:
             continue
+        display_token = collapse_comparison_whitespace(raw_color)
         existing = grouped_tokens.get(report_key)
         if existing is None:
             grouped_tokens[report_key] = (display_token, int(raw_count))
@@ -135,6 +159,64 @@ def list_unknown_color_tokens(
     return sorted(items, key=lambda item: (-item.count, item.token.casefold(), item.token))[
         :limit
     ]
+
+
+def list_unknown_color_token_products(
+    session: Session,
+    *,
+    token: str,
+    limit: int,
+) -> UnknownColorTokenProductList:
+    """Return operational catalog products affected by one unknown color token."""
+    display_token = collapse_comparison_whitespace(token)
+    comparison_key = _unknown_color_comparison_key(display_token)
+    if comparison_key is None:
+        return UnknownColorTokenProductList(token=display_token, total=0, items=[])
+
+    raw_colors = [
+        raw_color
+        for raw_color in session.scalars(select(CatalogProduct.color).distinct()).all()
+        if _unknown_color_comparison_key(raw_color) == comparison_key
+    ]
+    if not raw_colors:
+        return UnknownColorTokenProductList(token=display_token, total=0, items=[])
+
+    color_filter = CatalogProduct.color.in_(raw_colors)
+    total = int(
+        session.scalar(
+            select(func.count()).select_from(CatalogProduct).where(color_filter)
+        )
+        or 0
+    )
+    products = list(
+        session.scalars(
+            select(CatalogProduct)
+            .where(color_filter)
+            .order_by(
+                CatalogProduct.supplier_key.asc(),
+                CatalogProduct.external_product_id.asc(),
+                CatalogProduct.id.asc(),
+            )
+            .limit(limit)
+        ).all()
+    )
+    return UnknownColorTokenProductList(
+        token=display_token,
+        total=total,
+        items=[
+            UnknownColorTokenProduct(
+                catalog_product_id=product.id,
+                supplier_key=product.supplier_key,
+                external_product_id=product.external_product_id,
+                product_group_id=product.product_group_id,
+                product_name=product.product_name,
+                category=product.category,
+                color=product.color,
+                size=product.size,
+            )
+            for product in products
+        ],
+    )
 
 
 def _is_unknown_size_token(size: object) -> bool:

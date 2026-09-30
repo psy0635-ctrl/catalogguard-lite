@@ -143,11 +143,39 @@ def fake_promotion_history_query_service(monkeypatch):
         )
         return state.unknown_color_tokens[:limit]
 
+    def fake_unknown_color_token_products(session, *, token, limit):
+        calls.append(
+            {
+                "operation": "unknown_color_token_products",
+                "session": session,
+                "token": token,
+                "limit": limit,
+            }
+        )
+        return SimpleNamespace(
+            token=token.strip(),
+            total=state.unknown_color_token_product_total,
+            items=state.unknown_color_token_products[:limit],
+        )
+
     state.unknown_size_tokens = [
         SimpleNamespace(token="4XL", count=8),
         SimpleNamespace(token="OS", count=3),
     ]
     state.unknown_color_tokens = [SimpleNamespace(token="CHARCOAL", count=8)]
+    state.unknown_color_token_products = [
+        SimpleNamespace(
+            catalog_product_id=101,
+            supplier_key="sample_vendor",
+            external_product_id="SKU-001",
+            product_group_id="GROUP-01",
+            product_name="오버핏 후드",
+            category="TOP",
+            color="CHARCOAL",
+            size="M",
+        )
+    ]
+    state.unknown_color_token_product_total = 8
 
     app.dependency_overrides[get_session] = override_session
     monkeypatch.setattr(
@@ -160,6 +188,12 @@ def fake_promotion_history_query_service(monkeypatch):
         etl_loads_route,
         "list_unknown_color_tokens",
         fake_unknown_color_tokens,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        etl_loads_route,
+        "list_unknown_color_token_products",
+        fake_unknown_color_token_products,
         raising=False,
     )
     monkeypatch.setattr(
@@ -247,6 +281,72 @@ def test_list_unknown_color_tokens_returns_read_only_contract_for_viewers(
 def test_list_unknown_color_tokens_rejects_invalid_limits(limit):
     response = client.get(
         "/api/v1/catalog/unknown-color-tokens", params={"limit": limit}
+    )
+
+    assert response.status_code == 422
+
+
+def test_list_unknown_color_token_products_returns_read_only_contract_for_viewers(
+    fake_promotion_history_query_service,
+):
+    override_current_user(role="viewer")
+
+    response = client.get(
+        "/api/v1/catalog/unknown-color-token-products",
+        params={"token": "CHARCOAL", "limit": 7},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "token": "CHARCOAL",
+        "total": 8,
+        "items": [
+            {
+                "catalog_product_id": 101,
+                "supplier_key": "sample_vendor",
+                "external_product_id": "SKU-001",
+                "product_group_id": "GROUP-01",
+                "product_name": "오버핏 후드",
+                "category": "TOP",
+                "color": "CHARCOAL",
+                "size": "M",
+            }
+        ],
+    }
+    call = fake_promotion_history_query_service.calls[-1]
+    assert call["operation"] == "unknown_color_token_products"
+    assert call["token"] == "CHARCOAL"
+    assert call["limit"] == 7
+
+
+def test_list_unknown_color_token_products_requires_authenticated_user(
+    fake_promotion_history_query_service,
+):
+    clear_current_user_override()
+
+    response = client.get(
+        "/api/v1/catalog/unknown-color-token-products",
+        params={"token": "CHARCOAL"},
+    )
+
+    assert response.status_code == 401
+    assert fake_promotion_history_query_service.calls == []
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        {"token": ""},
+        {"token": "   "},
+        {"token": "CHARCOAL", "limit": 0},
+        {"token": "CHARCOAL", "limit": 101},
+    ],
+)
+def test_list_unknown_color_token_products_rejects_invalid_query(params):
+    response = client.get(
+        "/api/v1/catalog/unknown-color-token-products",
+        params=params,
     )
 
     assert response.status_code == 422

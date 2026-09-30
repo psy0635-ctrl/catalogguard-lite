@@ -216,6 +216,17 @@ UNKNOWN_SIZE_TOKEN_DISPLAY_COLUMNS = ["사이즈 토큰", "개수"]
 UNKNOWN_SIZE_TOKEN_DOWNLOAD_FILENAME = "catalogguard_unknown_size_tokens.csv"
 UNKNOWN_COLOR_TOKEN_DISPLAY_COLUMNS = ["색상 토큰", "개수"]
 UNKNOWN_COLOR_TOKEN_DOWNLOAD_FILENAME = "catalogguard_unknown_color_tokens.csv"
+UNKNOWN_COLOR_TOKEN_PRODUCT_LIMIT = 20
+UNKNOWN_COLOR_TOKEN_PRODUCT_DISPLAY_COLUMNS = [
+    "공급사",
+    "외부 상품 ID",
+    "상품 그룹 ID",
+    "상품명",
+    "카테고리",
+    "원본 색상",
+    "사이즈",
+    "운영 상품 ID",
+]
 ETL_PRODUCT_DISPLAY_COLUMNS = [
     "staging 상품 ID",
     "상품 그룹 ID",
@@ -971,6 +982,25 @@ def build_unknown_color_token_csv(dataframe: pd.DataFrame) -> bytes:
     """Build a formula-safe UTF-8 BOM CSV from the displayed color snapshot."""
     export_dataframe = prepare_export_dataframe(dataframe)
     return export_dataframe.to_csv(index=False).encode("utf-8-sig")
+
+
+def build_unknown_color_token_product_dataframe(
+    items: list[dict[str, Any]],
+) -> pd.DataFrame:
+    rows = [
+        {
+            "공급사": item.get("supplier_key"),
+            "외부 상품 ID": item.get("external_product_id"),
+            "상품 그룹 ID": item.get("product_group_id"),
+            "상품명": item.get("product_name"),
+            "카테고리": item.get("category"),
+            "원본 색상": item.get("color"),
+            "사이즈": item.get("size"),
+            "운영 상품 ID": item.get("catalog_product_id"),
+        }
+        for item in items
+    ]
+    return pd.DataFrame(rows, columns=UNKNOWN_COLOR_TOKEN_PRODUCT_DISPLAY_COLUMNS)
 
 
 def build_etl_product_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
@@ -4361,6 +4391,52 @@ def _render_unknown_color_token_report(api_client) -> None:
         file_name=UNKNOWN_COLOR_TOKEN_DOWNLOAD_FILENAME,
         mime="text/csv",
         key="unknown_color_token_csv_download",
+    )
+
+    selected_token = st.selectbox(
+        "영향 상품을 확인할 색상 토큰",
+        options=[None, *[item.get("token") for item in items]],
+        format_func=lambda value: "선택하세요" if value is None else value,
+        index=0,
+        key="unknown_color_token_product_token",
+    )
+    if selected_token is None:
+        st.info("색상 토큰을 선택하면 현재 운영 카탈로그의 영향 상품을 조회합니다.")
+        return
+
+    try:
+        product_response = api_client.list_unknown_color_token_products(
+            selected_token,
+            limit=UNKNOWN_COLOR_TOKEN_PRODUCT_LIMIT,
+        )
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        st.error(
+            build_etl_api_error_display_message(
+                "미판정 색상 토큰의 영향 상품을 불러오지 못했습니다.", error
+            )
+        )
+        return
+
+    product_items = product_response.get("items") or []
+    if not product_items:
+        st.info("선택한 색상 토큰을 사용하는 현재 운영 상품이 없습니다.")
+        return
+
+    total = product_response.get("total", len(product_items))
+    st.caption(
+        f"현재 운영 카탈로그 영향 상품 {total}개 중 "
+        f"최대 {UNKNOWN_COLOR_TOKEN_PRODUCT_LIMIT}개를 표시합니다."
+    )
+    st.dataframe(
+        build_unknown_color_token_product_dataframe(product_items),
+        width="stretch",
+        hide_index=True,
     )
 
 

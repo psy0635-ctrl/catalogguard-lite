@@ -2289,6 +2289,106 @@ def test_list_unknown_color_tokens_rejects_invalid_contract(payload):
         client.list_unknown_color_tokens()
 
 
+UNKNOWN_COLOR_TOKEN_PRODUCT_LIST_RESPONSE = {
+    "token": "CHARCOAL",
+    "total": 8,
+    "items": [
+        {
+            "catalog_product_id": 101,
+            "supplier_key": "sample_vendor",
+            "external_product_id": "SKU-001",
+            "product_group_id": "GROUP-01",
+            "product_name": "오버핏 후드",
+            "category": "TOP",
+            "color": "CHARCOAL",
+            "size": "M",
+        }
+    ],
+}
+
+
+def test_list_unknown_color_token_products_calls_get_with_token_and_limit():
+    client, session = make_client(
+        response=FakeResponse(payload=UNKNOWN_COLOR_TOKEN_PRODUCT_LIST_RESPONSE),
+        timeout_seconds=4.0,
+    )
+
+    assert client.list_unknown_color_token_products(
+        "  CHARCOAL  ", limit=7
+    ) == UNKNOWN_COLOR_TOKEN_PRODUCT_LIST_RESPONSE
+    assert session.calls == [
+        {
+            "url": (
+                "https://api.example.com/api/v1/catalog/"
+                "unknown-color-token-products"
+            ),
+            "params": {"token": "CHARCOAL", "limit": 7},
+            "timeout": 4.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("token", "limit"),
+    [
+        (None, 20),
+        (1, 20),
+        ("", 20),
+        ("   ", 20),
+        ("CHARCOAL", 0),
+        ("CHARCOAL", 101),
+        ("CHARCOAL", True),
+    ],
+)
+def test_list_unknown_color_token_products_rejects_invalid_input_without_request(
+    token, limit
+):
+    client, session = make_client(
+        response=FakeResponse(payload=UNKNOWN_COLOR_TOKEN_PRODUCT_LIST_RESPONSE)
+    )
+
+    with pytest.raises(ValueError):
+        client.list_unknown_color_token_products(token, limit=limit)
+
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"token": "CHARCOAL", "total": 0, "items": {}},
+        {"token": "", "total": 0, "items": []},
+        {"token": "CHARCOAL", "total": True, "items": []},
+        {"token": "CHARCOAL", "total": 0, "items": [{}]},
+        {
+            **UNKNOWN_COLOR_TOKEN_PRODUCT_LIST_RESPONSE,
+            "items": [
+                {
+                    **UNKNOWN_COLOR_TOKEN_PRODUCT_LIST_RESPONSE["items"][0],
+                    "catalog_product_id": True,
+                }
+            ],
+        },
+        {
+            **UNKNOWN_COLOR_TOKEN_PRODUCT_LIST_RESPONSE,
+            "items": [
+                {
+                    **UNKNOWN_COLOR_TOKEN_PRODUCT_LIST_RESPONSE["items"][0],
+                    "supplier_key": 1,
+                }
+            ],
+        },
+    ],
+)
+def test_list_unknown_color_token_products_rejects_invalid_contract(payload):
+    client, _session = make_client(response=FakeResponse(payload=payload))
+    client_module = import_client_module()
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.list_unknown_color_token_products("CHARCOAL")
+
+
 def test_list_catalog_promotions_calls_get_with_filters_and_validates_contract():
     client, session = make_client(
         response=FakeResponse(payload=CATALOG_PROMOTION_RUN_LIST_RESPONSE),

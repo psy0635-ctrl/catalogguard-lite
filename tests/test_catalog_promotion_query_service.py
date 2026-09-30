@@ -44,6 +44,36 @@ class _ReadOnlyListSession:
         raise AssertionError("query service must not rollback")
 
 
+class _ScalarRows:
+    def __init__(self, values):
+        self._values = values
+
+    def all(self):
+        return self._values
+
+
+class _UnknownColorProductSession:
+    def __init__(self, *, raw_colors, products, total):
+        self._scalar_results = [raw_colors, products]
+        self.total = total
+        self.scalars_statements = []
+        self.scalar_statements = []
+
+    def scalars(self, statement):
+        self.scalars_statements.append(statement)
+        return _ScalarRows(self._scalar_results.pop(0))
+
+    def scalar(self, statement):
+        self.scalar_statements.append(statement)
+        return self.total
+
+    def commit(self):
+        raise AssertionError("query service must not commit")
+
+    def rollback(self):
+        raise AssertionError("query service must not rollback")
+
+
 def test_list_unknown_size_tokens_groups_only_unknown_catalog_sizes_deterministically():
     from db.catalog_promotion_query_service import list_unknown_size_tokens
 
@@ -151,6 +181,86 @@ def test_list_unknown_color_tokens_keeps_unregistered_separator_variants_separat
     assert [(item.token, item.count) for item in result] == [
         ("MELANGE GRAY", 2), ("MELANGE-GRAY", 2), ("MELANGE/GRAY", 2),
     ]
+
+
+def test_list_unknown_color_token_products_matches_only_the_selected_comparison_key():
+    from db.catalog_promotion_query_service import list_unknown_color_token_products
+
+    products = [
+        SimpleNamespace(
+            id=2,
+            supplier_key="alpha",
+            external_product_id="SKU-002",
+            product_group_id="GROUP-02",
+            product_name="후드",
+            category="TOP",
+            color="melange   gray",
+            size="M",
+        ),
+        SimpleNamespace(
+            id=5,
+            supplier_key="beta",
+            external_product_id="SKU-001",
+            product_group_id="GROUP-01",
+            product_name="셔츠",
+            category="TOP",
+            color="MELANGE GRAY",
+            size="L",
+        ),
+    ]
+    session = _UnknownColorProductSession(
+        raw_colors=[
+            "MELANGE GRAY",
+            "melange gray",
+            "melange   gray",
+            "MELANGE-GRAY",
+            "MELANGE/GRAY",
+            "BLACK",
+        ],
+        products=products,
+        total=3,
+    )
+
+    result = list_unknown_color_token_products(
+        session, token="  MeLaNgE   GrAy ", limit=2
+    )
+
+    assert result.token == "MeLaNgE GrAy"
+    assert result.total == 3
+    assert [item.catalog_product_id for item in result.items] == [2, 5]
+    assert [item.color for item in result.items] == [
+        "melange   gray",
+        "MELANGE GRAY",
+    ]
+    assert len(session.scalars_statements) == 2
+    assert len(session.scalar_statements) == 1
+
+    product_statement = session.scalars_statements[1]
+    assert [clause.element.name for clause in product_statement._order_by_clauses] == [
+        "supplier_key",
+        "external_product_id",
+        "id",
+    ]
+    assert product_statement._limit_clause.value == 2
+    assert product_statement.compile().params["color_1"] == [
+        "MELANGE GRAY",
+        "melange gray",
+        "melange   gray",
+    ]
+
+
+def test_list_unknown_color_token_products_returns_empty_for_known_color_without_query():
+    from db.catalog_promotion_query_service import list_unknown_color_token_products
+
+    session = _UnknownColorProductSession(raw_colors=[], products=[], total=0)
+
+    result = list_unknown_color_token_products(session, token=" black ", limit=20)
+
+    assert result.token == "black"
+    assert result.total == 0
+    assert result.items == []
+    assert session.scalars_statements == []
+    assert session.scalar_statements == []
 
 
 def test_list_unknown_size_tokens_processes_ten_thousand_grouped_catalog_sizes_in_one_query():
