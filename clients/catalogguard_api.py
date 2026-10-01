@@ -394,6 +394,20 @@ UNKNOWN_COLOR_TOKEN_PRODUCT_KEYS = (
 )
 UNKNOWN_SIZE_TOKEN_PRODUCT_LIST_RESPONSE_KEYS = ("token", "total", "items")
 UNKNOWN_SIZE_TOKEN_PRODUCT_KEYS = UNKNOWN_COLOR_TOKEN_PRODUCT_KEYS
+CATALOG_VOCABULARY_COVERAGE_COLOR_KEYS = (
+    "non_empty_count",
+    "recognized_count",
+    "unknown_count",
+    "empty_count",
+)
+CATALOG_VOCABULARY_COVERAGE_SIZE_KEYS = (
+    "non_empty_count",
+    "recognized_count",
+    "standard_count",
+    "numeric_count",
+    "unknown_count",
+    "empty_count",
+)
 ETL_UNSUPPORTED_PROFILE_MESSAGE = "지원하지 않는 공급사 프로필입니다."
 ETL_INACTIVE_PROFILE_MESSAGE = (
     "선택한 ETL 프로필이 비활성화되었습니다. 사용할 수 있는 프로필을 다시 선택하세요."
@@ -1326,6 +1340,41 @@ def _validate_unknown_size_token_product_list_response(data: dict[str, Any]) -> 
         or item["catalog_product_id"] < 1
         or any(not isinstance(item[field], str) for field in text_fields)
         for item in items
+    ):
+        raise _invalid_etl_response()
+
+
+def _validate_catalog_vocabulary_coverage_response(data: dict[str, Any]) -> None:
+    color = data.get("color")
+    size = data.get("size")
+    if (
+        type(data.get("catalog_product_count")) is not int
+        or data["catalog_product_count"] < 0
+        or not isinstance(color, dict)
+        or any(key not in color for key in CATALOG_VOCABULARY_COVERAGE_COLOR_KEYS)
+        or any(
+            type(color[key]) is not int or color[key] < 0
+            for key in CATALOG_VOCABULARY_COVERAGE_COLOR_KEYS
+        )
+        or not isinstance(size, dict)
+        or any(key not in size for key in CATALOG_VOCABULARY_COVERAGE_SIZE_KEYS)
+        or any(
+            type(size[key]) is not int or size[key] < 0
+            for key in CATALOG_VOCABULARY_COVERAGE_SIZE_KEYS
+        )
+    ):
+        raise _invalid_etl_response()
+
+    catalog_product_count = data["catalog_product_count"]
+    if (
+        color["non_empty_count"]
+        != color["recognized_count"] + color["unknown_count"]
+        or size["non_empty_count"]
+        != size["standard_count"] + size["numeric_count"] + size["unknown_count"]
+        or size["recognized_count"] != size["standard_count"] + size["numeric_count"]
+        or catalog_product_count
+        != color["non_empty_count"] + color["empty_count"]
+        or catalog_product_count != size["non_empty_count"] + size["empty_count"]
     ):
         raise _invalid_etl_response()
 
@@ -2504,6 +2553,11 @@ class CatalogGuardApiClient:
             params={"limit": limit},
         )
         _validate_unknown_size_token_report_response(data)
+        return data
+
+    def get_catalog_vocabulary_coverage(self) -> dict[str, Any]:
+        data = self._get_json("/api/v1/catalog/vocabulary-coverage")
+        _validate_catalog_vocabulary_coverage_response(data)
         return data
 
     def list_unknown_color_tokens(self, *, limit: int = 20) -> dict[str, Any]:

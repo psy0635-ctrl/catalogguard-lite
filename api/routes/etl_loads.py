@@ -44,6 +44,8 @@ from api.schemas import (
     CatalogPromotionRollbackRunListItemResponse,
     CatalogPromotionRollbackRunListResponse,
     CatalogPromotionRollbackRunStatus,
+    CatalogVocabularyCoverageResponse,
+    ColorVocabularyCoverageResponse,
     ETLHTTPFeedLoadRequest,
     ETLLoadDetailResponse,
     ETLLoadListItemResponse,
@@ -69,6 +71,7 @@ from api.schemas import (
     ETLStagingProductListResponse,
     ETLStagingProductResponse,
     ETLWebRunResponse,
+    SizeVocabularyCoverageResponse,
     UnknownColorTokenItemResponse,
     UnknownColorTokenProductListResponse,
     UnknownColorTokenProductResponse,
@@ -171,6 +174,7 @@ from db.catalog_promotion_query_service import (
     CatalogPromotionRunDetail,
     CatalogPromotionRunList,
     get_catalog_promotion_detail,
+    get_catalog_vocabulary_coverage,
     list_catalog_promotion_audits,
     list_catalog_promotions,
     list_unknown_color_token_products,
@@ -195,6 +199,34 @@ CATALOG_PROMOTION_NOT_FOUND_MESSAGE = "Promotion run not found."
 CATALOG_PROMOTION_ROLLBACK_NOT_FOUND_MESSAGE = "Rollback run not found."
 ETL_LOAD_NOT_FOUND_MESSAGE = "ETL 적재 배치를 찾을 수 없습니다."
 SERVER_SIDE_INACTIVE_PROFILE_MESSAGE = "Supplier profile is inactive."
+
+
+@router.get(
+    "/api/v1/catalog/vocabulary-coverage",
+    response_model=CatalogVocabularyCoverageResponse,
+)
+def get_catalog_vocabulary_coverage_summary(
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> CatalogVocabularyCoverageResponse:
+    result = get_catalog_vocabulary_coverage(session)
+    return CatalogVocabularyCoverageResponse(
+        catalog_product_count=result.catalog_product_count,
+        color=ColorVocabularyCoverageResponse(
+            non_empty_count=result.color.non_empty_count,
+            recognized_count=result.color.recognized_count,
+            unknown_count=result.color.unknown_count,
+            empty_count=result.color.empty_count,
+        ),
+        size=SizeVocabularyCoverageResponse(
+            non_empty_count=result.size.non_empty_count,
+            recognized_count=result.size.recognized_count,
+            standard_count=result.size.standard_count,
+            numeric_count=result.size.numeric_count,
+            unknown_count=result.size.unknown_count,
+            empty_count=result.size.empty_count,
+        ),
+    )
 
 
 @router.get(

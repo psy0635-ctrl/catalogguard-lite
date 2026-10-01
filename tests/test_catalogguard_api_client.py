@@ -2442,6 +2442,80 @@ def test_list_unknown_size_token_products_rejects_invalid_contract(payload):
         client.list_unknown_size_token_products("4XL")
 
 
+CATALOG_VOCABULARY_COVERAGE_RESPONSE = {
+    "catalog_product_count": 15,
+    "color": {
+        "non_empty_count": 12,
+        "recognized_count": 6,
+        "unknown_count": 6,
+        "empty_count": 3,
+    },
+    "size": {
+        "non_empty_count": 12,
+        "recognized_count": 9,
+        "standard_count": 7,
+        "numeric_count": 2,
+        "unknown_count": 3,
+        "empty_count": 3,
+    },
+}
+
+
+def test_get_catalog_vocabulary_coverage_calls_get_without_query_parameters():
+    client, session = make_client(
+        response=FakeResponse(payload=CATALOG_VOCABULARY_COVERAGE_RESPONSE),
+        timeout_seconds=4.0,
+    )
+
+    assert client.get_catalog_vocabulary_coverage() == CATALOG_VOCABULARY_COVERAGE_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/catalog/vocabulary-coverage",
+            "params": None,
+            "timeout": 4.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {**CATALOG_VOCABULARY_COVERAGE_RESPONSE, "catalog_product_count": True},
+        {
+            **CATALOG_VOCABULARY_COVERAGE_RESPONSE,
+            "color": {**CATALOG_VOCABULARY_COVERAGE_RESPONSE["color"], "unknown_count": -1},
+        },
+        {
+            **CATALOG_VOCABULARY_COVERAGE_RESPONSE,
+            "color": {**CATALOG_VOCABULARY_COVERAGE_RESPONSE["color"], "unknown_count": True},
+        },
+        {
+            **CATALOG_VOCABULARY_COVERAGE_RESPONSE,
+            "color": {**CATALOG_VOCABULARY_COVERAGE_RESPONSE["color"], "unknown_count": 5},
+        },
+        {
+            **CATALOG_VOCABULARY_COVERAGE_RESPONSE,
+            "size": {**CATALOG_VOCABULARY_COVERAGE_RESPONSE["size"], "recognized_count": 8},
+        },
+        {
+            **CATALOG_VOCABULARY_COVERAGE_RESPONSE,
+            "size": {**CATALOG_VOCABULARY_COVERAGE_RESPONSE["size"], "numeric_count": -1},
+        },
+        {
+            **CATALOG_VOCABULARY_COVERAGE_RESPONSE,
+            "size": {**CATALOG_VOCABULARY_COVERAGE_RESPONSE["size"], "empty_count": 2},
+        },
+    ],
+)
+def test_get_catalog_vocabulary_coverage_rejects_invalid_contract(payload):
+    client, _session = make_client(response=FakeResponse(payload=payload))
+    client_module = import_client_module()
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.get_catalog_vocabulary_coverage()
+
+
 def test_list_catalog_promotions_calls_get_with_filters_and_validates_contract():
     client, session = make_client(
         response=FakeResponse(payload=CATALOG_PROMOTION_RUN_LIST_RESPONSE),

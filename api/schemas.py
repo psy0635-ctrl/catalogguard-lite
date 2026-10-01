@@ -654,6 +654,28 @@ class UnknownSizeTokenProductListResponse(BaseModel):
     items: list[UnknownSizeTokenProductResponse]
 
 
+class ColorVocabularyCoverageResponse(BaseModel):
+    non_empty_count: int = Field(ge=0)
+    recognized_count: int = Field(ge=0)
+    unknown_count: int = Field(ge=0)
+    empty_count: int = Field(ge=0)
+
+
+class SizeVocabularyCoverageResponse(BaseModel):
+    non_empty_count: int = Field(ge=0)
+    recognized_count: int = Field(ge=0)
+    standard_count: int = Field(ge=0)
+    numeric_count: int = Field(ge=0)
+    unknown_count: int = Field(ge=0)
+    empty_count: int = Field(ge=0)
+
+
+class CatalogVocabularyCoverageResponse(BaseModel):
+    catalog_product_count: int = Field(ge=0)
+    color: ColorVocabularyCoverageResponse
+    size: SizeVocabularyCoverageResponse
+
+
 InspectionJobStatus = Literal["queued", "running", "succeeded", "failed"]
 
 

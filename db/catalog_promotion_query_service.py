@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from core.fashion_attribute_validator import (
+    SIZE_SYSTEM_NUMERIC,
     build_color_comparison_key,
     build_size_comparison_key,
     collapse_comparison_whitespace,
@@ -131,6 +132,100 @@ class UnknownSizeTokenProductList:
     token: str
     total: int
     items: list[UnknownSizeTokenProduct]
+
+
+@dataclass(frozen=True)
+class ColorVocabularyCoverage:
+    non_empty_count: int
+    recognized_count: int
+    unknown_count: int
+    empty_count: int
+
+
+@dataclass(frozen=True)
+class SizeVocabularyCoverage:
+    non_empty_count: int
+    recognized_count: int
+    standard_count: int
+    numeric_count: int
+    unknown_count: int
+    empty_count: int
+
+
+@dataclass(frozen=True)
+class CatalogVocabularyCoverage:
+    catalog_product_count: int
+    color: ColorVocabularyCoverage
+    size: SizeVocabularyCoverage
+
+
+def _is_empty_vocabulary_value(value: object) -> bool:
+    return not isinstance(value, str) or not collapse_comparison_whitespace(value)
+
+
+def get_catalog_vocabulary_coverage(
+    session: Session,
+) -> CatalogVocabularyCoverage:
+    """Summarize current catalog color and size vocabulary coverage from grouped values."""
+    grouped_color_counts = session.execute(
+        select(CatalogProduct.color, func.count(CatalogProduct.id)).group_by(
+            CatalogProduct.color
+        )
+    ).all()
+    grouped_size_counts = session.execute(
+        select(CatalogProduct.size, func.count(CatalogProduct.id)).group_by(
+            CatalogProduct.size
+        )
+    ).all()
+
+    color_empty = 0
+    color_recognized = 0
+    color_unknown = 0
+    for raw_color, raw_count in grouped_color_counts:
+        count = int(raw_count)
+        if _is_empty_vocabulary_value(raw_color):
+            color_empty += count
+        elif find_standard_color(collapse_comparison_whitespace(raw_color)) is not None:
+            color_recognized += count
+        else:
+            color_unknown += count
+
+    size_empty = 0
+    size_standard = 0
+    size_numeric = 0
+    size_unknown = 0
+    for raw_size, raw_count in grouped_size_counts:
+        count = int(raw_count)
+        if _is_empty_vocabulary_value(raw_size):
+            size_empty += count
+            continue
+
+        normalized_size = collapse_comparison_whitespace(raw_size)
+        if find_standard_size(normalized_size) is not None:
+            size_standard += count
+        elif find_size_system(normalized_size) == SIZE_SYSTEM_NUMERIC:
+            size_numeric += count
+        else:
+            size_unknown += count
+
+    catalog_product_count = color_empty + color_recognized + color_unknown
+    return CatalogVocabularyCoverage(
+        catalog_product_count=catalog_product_count,
+        color=ColorVocabularyCoverage(
+            non_empty_count=color_recognized + color_unknown,
+            recognized_count=color_recognized,
+            unknown_count=color_unknown,
+            empty_count=color_empty,
+        ),
+        size=SizeVocabularyCoverage(
+            non_empty_count=size_standard + size_numeric + size_unknown,
+            recognized_count=size_standard + size_numeric,
+            standard_count=size_standard,
+            numeric_count=size_numeric,
+            unknown_count=size_unknown,
+            empty_count=size_empty,
+        ),
+    )
 
 
 def _unknown_color_comparison_key(raw_color: object) -> str | None:

@@ -74,6 +74,31 @@ class _UnknownColorProductSession:
         raise AssertionError("query service must not rollback")
 
 
+class _VocabularyCoverageSession:
+    def __init__(self, color_counts, size_counts):
+        self._grouped_results = [color_counts, size_counts]
+        self.statements = []
+
+    def execute(self, statement):
+        self.statements.append(statement)
+        return _Rows(self._grouped_results.pop(0))
+
+    def commit(self):
+        raise AssertionError("query service must not commit")
+
+    def rollback(self):
+        raise AssertionError("query service must not rollback")
+
+    def flush(self):
+        raise AssertionError("query service must not flush")
+
+    def add(self, _item):
+        raise AssertionError("query service must not add")
+
+    def delete(self, _item):
+        raise AssertionError("query service must not delete")
+
+
 def test_list_unknown_size_tokens_groups_only_unknown_catalog_sizes_deterministically():
     from db.catalog_promotion_query_service import list_unknown_size_tokens
 
@@ -312,6 +337,57 @@ def test_list_unknown_size_token_products_returns_empty_without_query_for_known_
     assert result.items == []
     assert session.scalars_statements == []
     assert session.scalar_statements == []
+
+
+def test_get_catalog_vocabulary_coverage_classifies_grouped_values_read_only():
+    from db.catalog_promotion_query_service import get_catalog_vocabulary_coverage
+
+    session = _VocabularyCoverageSession(
+        color_counts=[
+            ("BLACK", 2), ("black", 1), ("블랙", 3),
+            ("CHARCOAL", 4), ("MINT", 2), ("", 1), ("   ", 1), (None, 1),
+        ],
+        size_counts=[
+            ("M", 2), ("medium", 3), ("FREE", 2),
+            ("95", 1), ("100", 1), ("4XL", 2), ("OS", 1),
+            ("", 1), ("   ", 1), (None, 1),
+        ],
+    )
+
+    result = get_catalog_vocabulary_coverage(session)
+
+    assert result.catalog_product_count == 15
+    assert result.color.non_empty_count == 12
+    assert result.color.recognized_count == 6
+    assert result.color.unknown_count == 6
+    assert result.color.empty_count == 3
+    assert result.size.non_empty_count == 12
+    assert result.size.recognized_count == 9
+    assert result.size.standard_count == 7
+    assert result.size.numeric_count == 2
+    assert result.size.unknown_count == 3
+    assert result.size.empty_count == 3
+    assert len(session.statements) == 2
+    assert all(statement._group_by_clauses for statement in session.statements)
+
+
+def test_catalog_vocabulary_unknown_counts_match_unknown_token_reports():
+    from db.catalog_promotion_query_service import (
+        get_catalog_vocabulary_coverage,
+        list_unknown_color_tokens,
+        list_unknown_size_tokens,
+    )
+
+    color_counts = [("BLACK", 2), ("CHARCOAL", 4), ("MINT", 2), ("", 1)]
+    size_counts = [("M", 2), ("95", 1), ("4XL", 2), ("OS", 1), ("", 1)]
+    coverage = get_catalog_vocabulary_coverage(
+        _VocabularyCoverageSession(color_counts, size_counts)
+    )
+    colors = list_unknown_color_tokens(_ReadOnlyListSession(color_counts), limit=100)
+    sizes = list_unknown_size_tokens(_ReadOnlyListSession(size_counts), limit=100)
+
+    assert coverage.color.unknown_count == sum(item.count for item in colors) == 6
+    assert coverage.size.unknown_count == sum(item.count for item in sizes) == 3
 
 
 def test_list_unknown_size_tokens_processes_ten_thousand_grouped_catalog_sizes_in_one_query():
