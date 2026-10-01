@@ -981,6 +981,79 @@ def build_unknown_size_token_csv(dataframe: pd.DataFrame) -> bytes:
     return export_dataframe.to_csv(index=False).encode("utf-8-sig")
 
 
+def _vocabulary_unknown_percent(unknown_count: int, non_empty_count: int) -> float:
+    if non_empty_count == 0:
+        return 0.0
+    return unknown_count / non_empty_count * 100
+
+
+def _render_vocabulary_metric_row(metrics: list[tuple[str, str]]) -> None:
+    columns = st.columns(len(metrics))
+    for column, (label, value) in zip(columns, metrics):
+        column.metric(label, value)
+
+
+def _render_catalog_vocabulary_coverage(api_client) -> None:
+    st.divider()
+    st.subheader("운영 카탈로그 표준화 현황")
+    try:
+        coverage = api_client.get_catalog_vocabulary_coverage()
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        st.error(
+            build_etl_api_error_display_message(
+                "운영 카탈로그 표준화 현황을 불러오지 못했습니다.", error
+            )
+        )
+        return
+
+    st.metric("전체 운영 상품", f"{coverage['catalog_product_count']:,}")
+    st.markdown("#### 색상")
+    color = coverage["color"]
+    _render_vocabulary_metric_row(
+        [
+            ("입력 있음", f"{color['non_empty_count']:,}"),
+            ("판정 가능", f"{color['recognized_count']:,}"),
+            ("미판정", f"{color['unknown_count']:,}"),
+            ("빈 값", f"{color['empty_count']:,}"),
+        ]
+    )
+    st.metric(
+        "색상 미판정 비율",
+        f"{_vocabulary_unknown_percent(color['unknown_count'], color['non_empty_count']):.1f}%",
+    )
+
+    st.markdown("#### 사이즈")
+    size = coverage["size"]
+    _render_vocabulary_metric_row(
+        [
+            ("입력 있음", f"{size['non_empty_count']:,}"),
+            ("판정 가능", f"{size['recognized_count']:,}"),
+            ("표준/별칭", f"{size['standard_count']:,}"),
+            ("숫자형", f"{size['numeric_count']:,}"),
+        ]
+    )
+    _render_vocabulary_metric_row(
+        [
+            ("미판정", f"{size['unknown_count']:,}"),
+            ("빈 값", f"{size['empty_count']:,}"),
+            (
+                "사이즈 미판정 비율",
+                f"{_vocabulary_unknown_percent(size['unknown_count'], size['non_empty_count']):.1f}%",
+            ),
+        ]
+    )
+    st.caption(
+        "미판정은 오류가 아니라 현재 vocabulary로 표준값을 판단할 수 없는 원본 표현입니다. "
+        "빈 값은 별도로 집계하며 미판정에 포함하지 않습니다. 숫자형 사이즈는 정상 판정 가능 값입니다."
+    )
+
+
 def build_unknown_color_token_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
     rows = [
         {"색상 토큰": item.get("token"), "개수": item.get("count")}
@@ -4530,6 +4603,7 @@ def render_etl_load_history(api_client=None) -> None:
     # 실행 흐름 바로 아래, 별도 구획으로 둡니다. 관리 기능이 일반 ETL 실행 화면을
     # 복잡하게 만들지 않도록 divider로 나눕니다.
     _render_etl_profile_management(api_client)
+    _render_catalog_vocabulary_coverage(api_client)
     _render_unknown_size_token_report(api_client)
     _render_unknown_color_token_report(api_client)
 

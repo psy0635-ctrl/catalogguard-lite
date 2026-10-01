@@ -213,6 +213,25 @@ class FakeInspectionApiClient:
     def list_unknown_size_token_products(self, token, *, limit=20):
         return {"token": token, "total": 0, "items": []}
 
+    def get_catalog_vocabulary_coverage(self):
+        return {
+            "catalog_product_count": 0,
+            "color": {
+                "non_empty_count": 0,
+                "recognized_count": 0,
+                "unknown_count": 0,
+                "empty_count": 0,
+            },
+            "size": {
+                "non_empty_count": 0,
+                "recognized_count": 0,
+                "standard_count": 0,
+                "numeric_count": 0,
+                "unknown_count": 0,
+                "empty_count": 0,
+            },
+        }
+
     def list_unknown_color_tokens(self, *, limit=20):
         return {"items": []}
 
