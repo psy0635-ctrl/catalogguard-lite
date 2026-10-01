@@ -114,6 +114,25 @@ class UnknownColorTokenProductList:
     items: list[UnknownColorTokenProduct]
 
 
+@dataclass(frozen=True)
+class UnknownSizeTokenProduct:
+    catalog_product_id: int
+    supplier_key: str
+    external_product_id: str
+    product_group_id: str
+    product_name: str
+    category: str
+    color: str
+    size: str
+
+
+@dataclass(frozen=True)
+class UnknownSizeTokenProductList:
+    token: str
+    total: int
+    items: list[UnknownSizeTokenProduct]
+
+
 def _unknown_color_comparison_key(raw_color: object) -> str | None:
     if not isinstance(raw_color, str):
         return None
@@ -228,6 +247,68 @@ def _is_unknown_size_token(size: object) -> bool:
         normalized_size
         and find_standard_size(normalized_size) is None
         and find_size_system(normalized_size) is None
+    )
+
+
+def list_unknown_size_token_products(
+    session: Session,
+    *,
+    token: str,
+    limit: int,
+) -> UnknownSizeTokenProductList:
+    """Return current catalog products using one unknown size comparison key."""
+    display_token = collapse_comparison_whitespace(token)
+    if not _is_unknown_size_token(display_token):
+        return UnknownSizeTokenProductList(token=display_token, total=0, items=[])
+
+    comparison_key = build_size_comparison_key(display_token)
+    if comparison_key is None:
+        return UnknownSizeTokenProductList(token=display_token, total=0, items=[])
+
+    raw_sizes = [
+        raw_size
+        for raw_size in session.scalars(select(CatalogProduct.size).distinct()).all()
+        if _is_unknown_size_token(raw_size)
+        and build_size_comparison_key(raw_size) == comparison_key
+    ]
+    if not raw_sizes:
+        return UnknownSizeTokenProductList(token=display_token, total=0, items=[])
+
+    size_filter = CatalogProduct.size.in_(raw_sizes)
+    total = int(
+        session.scalar(
+            select(func.count()).select_from(CatalogProduct).where(size_filter)
+        )
+        or 0
+    )
+    products = list(
+        session.scalars(
+            select(CatalogProduct)
+            .where(size_filter)
+            .order_by(
+                CatalogProduct.supplier_key.asc(),
+                CatalogProduct.external_product_id.asc(),
+                CatalogProduct.id.asc(),
+            )
+            .limit(limit)
+        ).all()
+    )
+    return UnknownSizeTokenProductList(
+        token=display_token,
+        total=total,
+        items=[
+            UnknownSizeTokenProduct(
+                catalog_product_id=product.id,
+                supplier_key=product.supplier_key,
+                external_product_id=product.external_product_id,
+                product_group_id=product.product_group_id,
+                product_name=product.product_name,
+                category=product.category,
+                color=product.color,
+                size=product.size,
+            )
+            for product in products
+        ],
     )
 
 

@@ -2389,6 +2389,59 @@ def test_list_unknown_color_token_products_rejects_invalid_contract(payload):
         client.list_unknown_color_token_products("CHARCOAL")
 
 
+def test_list_unknown_size_token_products_calls_get_with_token_and_limit():
+    response = {
+        **UNKNOWN_COLOR_TOKEN_PRODUCT_LIST_RESPONSE,
+        "items": [
+            {
+                **UNKNOWN_COLOR_TOKEN_PRODUCT_LIST_RESPONSE["items"][0],
+                "size": "4XL",
+            }
+        ],
+    }
+    client, session = make_client(
+        response=FakeResponse(payload=response), timeout_seconds=4.0
+    )
+    assert client.list_unknown_size_token_products(" 4XL ", limit=7) == response
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/catalog/unknown-size-token-products",
+            "params": {"token": "4XL", "limit": 7},
+            "timeout": 4.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("token", "limit"),
+    [(None, 20), (1, 20), ("", 20), ("   ", 20), ("4XL", 0), ("4XL", 101), ("4XL", True)],
+)
+def test_list_unknown_size_token_products_rejects_invalid_input_without_request(token, limit):
+    client, session = make_client(response=FakeResponse(payload={}))
+    with pytest.raises(ValueError):
+        client.list_unknown_size_token_products(token, limit=limit)
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"token": "4XL", "total": 0, "items": {}},
+        {"token": "", "total": 0, "items": []},
+        {"token": "4XL", "total": True, "items": []},
+        {"token": "4XL", "total": 0, "items": [{"catalog_product_id": 1}]},
+        {"token": "4XL", "total": 1, "items": [{**UNKNOWN_COLOR_TOKEN_PRODUCT_LIST_RESPONSE["items"][0], "catalog_product_id": True}]},
+        {"token": "4XL", "total": 1, "items": [{**UNKNOWN_COLOR_TOKEN_PRODUCT_LIST_RESPONSE["items"][0], "supplier_key": 3}]},
+    ],
+)
+def test_list_unknown_size_token_products_rejects_invalid_contract(payload):
+    client, _session = make_client(response=FakeResponse(payload=payload))
+    client_module = import_client_module()
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.list_unknown_size_token_products("4XL")
+
+
 def test_list_catalog_promotions_calls_get_with_filters_and_validates_contract():
     client, session = make_client(
         response=FakeResponse(payload=CATALOG_PROMOTION_RUN_LIST_RESPONSE),
