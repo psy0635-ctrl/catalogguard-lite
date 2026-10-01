@@ -2516,6 +2516,91 @@ def test_get_catalog_vocabulary_coverage_rejects_invalid_contract(payload):
         client.get_catalog_vocabulary_coverage()
 
 
+SUPPLIER_VOCABULARY_COVERAGE_RESPONSE = {
+    "items": [
+        {
+            "supplier_key": "sample_vendor",
+            "catalog_product_count": 6,
+            "color": {
+                "non_empty_count": 5,
+                "recognized_count": 3,
+                "unknown_count": 2,
+                "empty_count": 1,
+            },
+            "size": {
+                "non_empty_count": 5,
+                "recognized_count": 4,
+                "standard_count": 2,
+                "numeric_count": 2,
+                "unknown_count": 1,
+                "empty_count": 1,
+            },
+        }
+    ]
+}
+
+
+def test_list_supplier_vocabulary_coverage_calls_get_without_query_parameters():
+    client, session = make_client(
+        response=FakeResponse(payload=SUPPLIER_VOCABULARY_COVERAGE_RESPONSE),
+        timeout_seconds=4.0,
+    )
+
+    assert client.list_supplier_vocabulary_coverage() == SUPPLIER_VOCABULARY_COVERAGE_RESPONSE
+    assert session.calls == [
+        {
+            "url": "https://api.example.com/api/v1/catalog/vocabulary-coverage/suppliers",
+            "params": None,
+            "timeout": 4.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"items": {}},
+        {"items": [{**SUPPLIER_VOCABULARY_COVERAGE_RESPONSE["items"][0], "supplier_key": " "}]},
+        {"items": [{**SUPPLIER_VOCABULARY_COVERAGE_RESPONSE["items"][0], "catalog_product_count": True}]},
+        {
+            "items": [
+                {
+                    **SUPPLIER_VOCABULARY_COVERAGE_RESPONSE["items"][0],
+                    "color": {
+                        **SUPPLIER_VOCABULARY_COVERAGE_RESPONSE["items"][0]["color"],
+                        "unknown_count": 3,
+                    },
+                }
+            ]
+        },
+        {
+            "items": [
+                {
+                    **SUPPLIER_VOCABULARY_COVERAGE_RESPONSE["items"][0],
+                    "size": {
+                        **SUPPLIER_VOCABULARY_COVERAGE_RESPONSE["items"][0]["size"],
+                        "numeric_count": -1,
+                    },
+                }
+            ]
+        },
+    ],
+)
+def test_list_supplier_vocabulary_coverage_rejects_invalid_contract(payload):
+    client, _session = make_client(response=FakeResponse(payload=payload))
+    client_module = import_client_module()
+
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.list_supplier_vocabulary_coverage()
+
+
+def test_list_supplier_vocabulary_coverage_accepts_empty_catalog():
+    client, _session = make_client(response=FakeResponse(payload={"items": []}))
+
+    assert client.list_supplier_vocabulary_coverage() == {"items": []}
+
+
 def test_list_catalog_promotions_calls_get_with_filters_and_validates_contract():
     client, session = make_client(
         response=FakeResponse(payload=CATALOG_PROMOTION_RUN_LIST_RESPONSE),

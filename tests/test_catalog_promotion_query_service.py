@@ -102,6 +102,34 @@ class _VocabularyCoverageSession:
         raise AssertionError("query service must not delete")
 
 
+class _SupplierVocabularyCoverageSession:
+    def __init__(self, grouped_counts):
+        self.grouped_counts = grouped_counts
+        self.statements = []
+
+    def execute(self, statement):
+        self.statements.append(statement)
+        return _Rows(self.grouped_counts)
+
+    def commit(self):
+        raise AssertionError("query service must not commit")
+
+    def rollback(self):
+        raise AssertionError("query service must not rollback")
+
+    def flush(self):
+        raise AssertionError("query service must not flush")
+
+    def add(self, _item):
+        raise AssertionError("query service must not add")
+
+    def delete(self, _item):
+        raise AssertionError("query service must not delete")
+
+    def update(self, _item):
+        raise AssertionError("query service must not update")
+
+
 def test_list_unknown_size_tokens_groups_only_unknown_catalog_sizes_deterministically():
     from db.catalog_promotion_query_service import list_unknown_size_tokens
 
@@ -399,6 +427,97 @@ def test_catalog_vocabulary_unknown_counts_match_unknown_token_reports():
 
     assert coverage.color.unknown_count == sum(item.count for item in colors) == 6
     assert coverage.size.unknown_count == sum(item.count for item in sizes) == 3
+
+
+def test_list_supplier_vocabulary_coverage_groups_by_supplier_in_one_read_only_statement():
+    from db.catalog_promotion_query_service import (
+        get_catalog_vocabulary_coverage,
+        list_supplier_vocabulary_coverage,
+    )
+
+    grouped_counts = [
+        ("supplier-a", "color", "BLACK", 3),
+        ("supplier-a", "color", "CHARCOAL", 2),
+        ("supplier-a", "color", "", 1),
+        ("supplier-a", "size", "M", 2),
+        ("supplier-a", "size", "95", 2),
+        ("supplier-a", "size", "4XL", 1),
+        ("supplier-a", "size", "", 1),
+        ("supplier-b", "color", "BLACK", 2),
+        ("supplier-b", "color", "CHARCOAL", 7),
+        ("supplier-b", "color", None, 1),
+        ("supplier-b", "size", "FREE", 3),
+        ("supplier-b", "size", "100", 2),
+        ("supplier-b", "size", "OS", 3),
+        ("supplier-b", "size", None, 2),
+    ]
+    session = _SupplierVocabularyCoverageSession(grouped_counts)
+
+    suppliers = list_supplier_vocabulary_coverage(session)
+
+    assert [item.supplier_key for item in suppliers] == ["supplier-a", "supplier-b"]
+    supplier_a, supplier_b = suppliers
+    assert supplier_a.catalog_product_count == 6
+    assert supplier_a.color.recognized_count == 3
+    assert supplier_a.color.unknown_count == 2
+    assert supplier_a.color.empty_count == 1
+    assert supplier_a.size.standard_count == 2
+    assert supplier_a.size.numeric_count == 2
+    assert supplier_a.size.unknown_count == 1
+    assert supplier_a.size.empty_count == 1
+    assert supplier_b.catalog_product_count == 10
+    assert supplier_b.color.unknown_count == 7
+    assert supplier_b.size.standard_count == 3
+    assert supplier_b.size.numeric_count == 2
+    assert supplier_b.size.unknown_count == 3
+    assert supplier_b.size.empty_count == 2
+    for supplier in suppliers:
+        assert supplier.catalog_product_count == (
+            supplier.color.non_empty_count + supplier.color.empty_count
+        )
+        assert supplier.color.non_empty_count == (
+            supplier.color.recognized_count + supplier.color.unknown_count
+        )
+        assert supplier.catalog_product_count == (
+            supplier.size.non_empty_count + supplier.size.empty_count
+        )
+        assert supplier.size.non_empty_count == (
+            supplier.size.standard_count
+            + supplier.size.numeric_count
+            + supplier.size.unknown_count
+        )
+        assert supplier.size.recognized_count == (
+            supplier.size.standard_count + supplier.size.numeric_count
+        )
+
+    assert len(session.statements) == 1
+    statement_sql = str(session.statements[0])
+    assert "UNION ALL" in statement_sql
+    assert "GROUP BY catalog_products.supplier_key, catalog_products.color" in statement_sql
+    assert "GROUP BY catalog_products.supplier_key, catalog_products.size" in statement_sql
+
+    all_color_counts = {}
+    all_size_counts = {}
+    for _supplier_key, kind, raw_value, count in grouped_counts:
+        counts = all_color_counts if kind == "color" else all_size_counts
+        counts[raw_value] = counts.get(raw_value, 0) + count
+    overall = get_catalog_vocabulary_coverage(
+        _VocabularyCoverageSession(
+            list(all_color_counts.items()), list(all_size_counts.items())
+        )
+    )
+    assert sum(item.catalog_product_count for item in suppliers) == overall.catalog_product_count
+    assert sum(item.color.unknown_count for item in suppliers) == overall.color.unknown_count
+    assert sum(item.size.unknown_count for item in suppliers) == overall.size.unknown_count
+
+
+def test_list_supplier_vocabulary_coverage_returns_empty_for_empty_catalog():
+    from db.catalog_promotion_query_service import list_supplier_vocabulary_coverage
+
+    session = _SupplierVocabularyCoverageSession([])
+
+    assert list_supplier_vocabulary_coverage(session) == []
+    assert len(session.statements) == 1
 
 
 def test_list_unknown_size_tokens_processes_ten_thousand_grouped_catalog_sizes_in_one_query():

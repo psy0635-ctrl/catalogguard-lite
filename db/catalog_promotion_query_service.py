@@ -159,8 +159,35 @@ class CatalogVocabularyCoverage:
     size: SizeVocabularyCoverage
 
 
+@dataclass(frozen=True)
+class SupplierVocabularyCoverage:
+    supplier_key: str
+    catalog_product_count: int
+    color: ColorVocabularyCoverage
+    size: SizeVocabularyCoverage
+
+
 def _is_empty_vocabulary_value(value: object) -> bool:
     return not isinstance(value, str) or not collapse_comparison_whitespace(value)
+
+
+def _classify_color_vocabulary_value(value: object) -> str:
+    if _is_empty_vocabulary_value(value):
+        return "empty"
+    if find_standard_color(collapse_comparison_whitespace(value)) is not None:
+        return "recognized"
+    return "unknown"
+
+
+def _classify_size_vocabulary_value(value: object) -> str:
+    if _is_empty_vocabulary_value(value):
+        return "empty"
+    normalized_size = collapse_comparison_whitespace(value)
+    if find_standard_size(normalized_size) is not None:
+        return "standard"
+    if find_size_system(normalized_size) == SIZE_SYSTEM_NUMERIC:
+        return "numeric"
+    return "unknown"
 
 
 def get_catalog_vocabulary_coverage(
@@ -192,21 +219,21 @@ def get_catalog_vocabulary_coverage(
     for kind, raw_value, raw_count in grouped_counts:
         count = int(raw_count)
         if kind == "color":
-            if _is_empty_vocabulary_value(raw_value):
+            classification = _classify_color_vocabulary_value(raw_value)
+            if classification == "empty":
                 color_empty += count
-            elif find_standard_color(collapse_comparison_whitespace(raw_value)) is not None:
+            elif classification == "recognized":
                 color_recognized += count
             else:
                 color_unknown += count
         else:
-            if _is_empty_vocabulary_value(raw_value):
+            classification = _classify_size_vocabulary_value(raw_value)
+            if classification == "empty":
                 size_empty += count
                 continue
-
-            normalized_size = collapse_comparison_whitespace(raw_value)
-            if find_standard_size(normalized_size) is not None:
+            if classification == "standard":
                 size_standard += count
-            elif find_size_system(normalized_size) == SIZE_SYSTEM_NUMERIC:
+            elif classification == "numeric":
                 size_numeric += count
             else:
                 size_unknown += count
@@ -229,6 +256,79 @@ def get_catalog_vocabulary_coverage(
             empty_count=size_empty,
         ),
     )
+
+
+def list_supplier_vocabulary_coverage(
+    session: Session,
+) -> list[SupplierVocabularyCoverage]:
+    """Summarize color and size vocabulary coverage grouped by supplier key."""
+    grouped_counts = session.execute(
+        union_all(
+            select(
+                CatalogProduct.supplier_key.label("supplier_key"),
+                literal("color").label("kind"),
+                CatalogProduct.color.label("raw_value"),
+                func.count(CatalogProduct.id).label("count"),
+            ).group_by(CatalogProduct.supplier_key, CatalogProduct.color),
+            select(
+                CatalogProduct.supplier_key.label("supplier_key"),
+                literal("size").label("kind"),
+                CatalogProduct.size.label("raw_value"),
+                func.count(CatalogProduct.id).label("count"),
+            ).group_by(CatalogProduct.supplier_key, CatalogProduct.size),
+        )
+    ).all()
+
+    counts_by_supplier: dict[str, dict[str, int]] = {}
+    for supplier_key, kind, raw_value, raw_count in grouped_counts:
+        counts = counts_by_supplier.setdefault(
+            supplier_key,
+            {
+                "color_empty": 0,
+                "color_recognized": 0,
+                "color_unknown": 0,
+                "size_empty": 0,
+                "size_standard": 0,
+                "size_numeric": 0,
+                "size_unknown": 0,
+            },
+        )
+        count = int(raw_count)
+        if kind == "color":
+            classification = _classify_color_vocabulary_value(raw_value)
+            counts[f"color_{classification}"] += count
+        else:
+            classification = _classify_size_vocabulary_value(raw_value)
+            counts[f"size_{classification}"] += count
+
+    result = []
+    for supplier_key in sorted(counts_by_supplier):
+        counts = counts_by_supplier[supplier_key]
+        color_non_empty = counts["color_recognized"] + counts["color_unknown"]
+        size_non_empty = (
+            counts["size_standard"] + counts["size_numeric"] + counts["size_unknown"]
+        )
+        result.append(
+            SupplierVocabularyCoverage(
+                supplier_key=supplier_key,
+                catalog_product_count=color_non_empty + counts["color_empty"],
+                color=ColorVocabularyCoverage(
+                    non_empty_count=color_non_empty,
+                    recognized_count=counts["color_recognized"],
+                    unknown_count=counts["color_unknown"],
+                    empty_count=counts["color_empty"],
+                ),
+                size=SizeVocabularyCoverage(
+                    non_empty_count=size_non_empty,
+                    recognized_count=counts["size_standard"] + counts["size_numeric"],
+                    standard_count=counts["size_standard"],
+                    numeric_count=counts["size_numeric"],
+                    unknown_count=counts["size_unknown"],
+                    empty_count=counts["size_empty"],
+                ),
+            )
+        )
+    return result
 
 
 def _unknown_color_comparison_key(raw_color: object) -> str | None:

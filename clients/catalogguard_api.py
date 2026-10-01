@@ -1379,6 +1379,31 @@ def _validate_catalog_vocabulary_coverage_response(data: dict[str, Any]) -> None
         raise _invalid_etl_response()
 
 
+def _validate_supplier_vocabulary_coverage_response(data: dict[str, Any]) -> None:
+    items = data.get("items")
+    if not isinstance(items, list):
+        raise _invalid_etl_response()
+
+    for item in items:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("supplier_key"), str)
+            or not item["supplier_key"].strip()
+            or any(
+                key not in item
+                for key in ("catalog_product_count", "color", "size")
+            )
+        ):
+            raise _invalid_etl_response()
+        _validate_catalog_vocabulary_coverage_response(
+            {
+                "catalog_product_count": item["catalog_product_count"],
+                "color": item["color"],
+                "size": item["size"],
+            }
+        )
+
+
 def _is_catalog_promotion_value(value: object) -> bool:
     return value is None or isinstance(value, str) or type(value) is int
 
@@ -2558,6 +2583,11 @@ class CatalogGuardApiClient:
     def get_catalog_vocabulary_coverage(self) -> dict[str, Any]:
         data = self._get_json("/api/v1/catalog/vocabulary-coverage")
         _validate_catalog_vocabulary_coverage_response(data)
+        return data
+
+    def list_supplier_vocabulary_coverage(self) -> dict[str, Any]:
+        data = self._get_json("/api/v1/catalog/vocabulary-coverage/suppliers")
+        _validate_supplier_vocabulary_coverage_response(data)
         return data
 
     def list_unknown_color_tokens(self, *, limit: int = 20) -> dict[str, Any]:

@@ -992,6 +992,8 @@ medium, m -> M
 
 운영 카탈로그의 현재 전체 snapshot에 대한 색상·사이즈 vocabulary coverage는 ETL 화면의 `운영 카탈로그 표준화 현황` 및 `GET /api/v1/catalog/vocabulary-coverage`에서 확인할 수 있습니다(viewer 이상). 색상은 recognized·unknown·empty, 사이즈는 standard·numeric·unknown·empty count로 요약하며, 현재 `catalog_products`의 DB 그룹 집계를 사용하는 read-only 관측 기능입니다. 미판정은 오류가 아니라 현재 vocabulary로 표준값을 판단할 수 없는 원본 표현이고, 빈 값은 별도 집계합니다. 자동 표준화나 alias 등록, 검수 판정 변경은 하지 않습니다.
 
+같은 화면의 `공급사별 표준화 현황`과 `GET /api/v1/catalog/vocabulary-coverage/suppliers`는 `CatalogProduct.supplier_key` 기준으로 현재 운영 상품의 coverage를 read-only 집계합니다. 미판정 비율은 오류율이나 공급사 평가 점수가 아니라 현재 vocabulary로 표준값을 판단할 수 없는 원본 값의 비율입니다.
+
 #### 미판정 사이즈 토큰 빈도 보고서
 
 운영자는 ETL 적재 이력 화면의 `미판정 사이즈 토큰` 표에서 현재 운영 카탈로그(`catalog_products`)에 남아 있는 미판정 원본 토큰과 건수를 확인할 수 있습니다. API는 `GET /api/v1/catalog/unknown-size-tokens`이며 viewer 이상 권한에서 호출할 수 있고, 기본 상위 20개(최대 100개)를 `{"items": [{"token": "4XL", "count": 8}]}` 형식으로 반환합니다.

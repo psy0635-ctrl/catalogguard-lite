@@ -232,6 +232,9 @@ class FakeInspectionApiClient:
             },
         }
 
+    def list_supplier_vocabulary_coverage(self):
+        return {"items": []}
+
     def list_unknown_color_tokens(self, *, limit=20):
         return {"items": []}
 
