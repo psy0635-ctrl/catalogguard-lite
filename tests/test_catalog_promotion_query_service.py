@@ -76,12 +76,15 @@ class _UnknownColorProductSession:
 
 class _VocabularyCoverageSession:
     def __init__(self, color_counts, size_counts):
-        self._grouped_results = [color_counts, size_counts]
+        self._grouped_results = [
+            *(('color', raw_value, count) for raw_value, count in color_counts),
+            *(('size', raw_value, count) for raw_value, count in size_counts),
+        ]
         self.statements = []
 
     def execute(self, statement):
         self.statements.append(statement)
-        return _Rows(self._grouped_results.pop(0))
+        return _Rows(self._grouped_results)
 
     def commit(self):
         raise AssertionError("query service must not commit")
@@ -367,8 +370,16 @@ def test_get_catalog_vocabulary_coverage_classifies_grouped_values_read_only():
     assert result.size.numeric_count == 2
     assert result.size.unknown_count == 3
     assert result.size.empty_count == 3
-    assert len(session.statements) == 2
-    assert all(statement._group_by_clauses for statement in session.statements)
+    assert len(session.statements) == 1
+    assert result.catalog_product_count == (
+        result.color.non_empty_count + result.color.empty_count
+    )
+    assert result.catalog_product_count == (
+        result.size.non_empty_count + result.size.empty_count
+    )
+    statement_sql = str(session.statements[0])
+    assert "UNION ALL" in statement_sql
+    assert statement_sql.count("GROUP BY") == 2
 
 
 def test_catalog_vocabulary_unknown_counts_match_unknown_token_reports():
