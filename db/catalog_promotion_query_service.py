@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, select, union_all
 from sqlalchemy.orm import Session
 
 from core.fashion_attribute_validator import (
@@ -167,46 +167,49 @@ def get_catalog_vocabulary_coverage(
     session: Session,
 ) -> CatalogVocabularyCoverage:
     """Summarize current catalog color and size vocabulary coverage from grouped values."""
-    grouped_color_counts = session.execute(
-        select(CatalogProduct.color, func.count(CatalogProduct.id)).group_by(
-            CatalogProduct.color
-        )
-    ).all()
-    grouped_size_counts = session.execute(
-        select(CatalogProduct.size, func.count(CatalogProduct.id)).group_by(
-            CatalogProduct.size
+    grouped_counts = session.execute(
+        union_all(
+            select(
+                literal("color").label("kind"),
+                CatalogProduct.color.label("raw_value"),
+                func.count(CatalogProduct.id).label("count"),
+            ).group_by(CatalogProduct.color),
+            select(
+                literal("size").label("kind"),
+                CatalogProduct.size.label("raw_value"),
+                func.count(CatalogProduct.id).label("count"),
+            ).group_by(CatalogProduct.size),
         )
     ).all()
 
     color_empty = 0
     color_recognized = 0
     color_unknown = 0
-    for raw_color, raw_count in grouped_color_counts:
-        count = int(raw_count)
-        if _is_empty_vocabulary_value(raw_color):
-            color_empty += count
-        elif find_standard_color(collapse_comparison_whitespace(raw_color)) is not None:
-            color_recognized += count
-        else:
-            color_unknown += count
-
     size_empty = 0
     size_standard = 0
     size_numeric = 0
     size_unknown = 0
-    for raw_size, raw_count in grouped_size_counts:
+    for kind, raw_value, raw_count in grouped_counts:
         count = int(raw_count)
-        if _is_empty_vocabulary_value(raw_size):
-            size_empty += count
-            continue
-
-        normalized_size = collapse_comparison_whitespace(raw_size)
-        if find_standard_size(normalized_size) is not None:
-            size_standard += count
-        elif find_size_system(normalized_size) == SIZE_SYSTEM_NUMERIC:
-            size_numeric += count
+        if kind == "color":
+            if _is_empty_vocabulary_value(raw_value):
+                color_empty += count
+            elif find_standard_color(collapse_comparison_whitespace(raw_value)) is not None:
+                color_recognized += count
+            else:
+                color_unknown += count
         else:
-            size_unknown += count
+            if _is_empty_vocabulary_value(raw_value):
+                size_empty += count
+                continue
+
+            normalized_size = collapse_comparison_whitespace(raw_value)
+            if find_standard_size(normalized_size) is not None:
+                size_standard += count
+            elif find_size_system(normalized_size) == SIZE_SYSTEM_NUMERIC:
+                size_numeric += count
+            else:
+                size_unknown += count
 
     catalog_product_count = color_empty + color_recognized + color_unknown
     return CatalogVocabularyCoverage(
