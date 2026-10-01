@@ -676,6 +676,17 @@ class CatalogVocabularyCoverageResponse(BaseModel):
     size: SizeVocabularyCoverageResponse
 
 
+class SupplierVocabularyCoverageResponse(BaseModel):
+    supplier_key: str
+    catalog_product_count: int = Field(ge=0)
+    color: ColorVocabularyCoverageResponse
+    size: SizeVocabularyCoverageResponse
+
+
+class SupplierVocabularyCoverageListResponse(BaseModel):
+    items: list[SupplierVocabularyCoverageResponse]
+
+
 InspectionJobStatus = Literal["queued", "running", "succeeded", "failed"]
 
 

@@ -213,6 +213,18 @@ CATALOG_RECONCILIATION_LEGACY_QUALITY_NOTICE = (
     "원본 입력 대비 비교 범위를 확인할 수 없습니다."
 )
 UNKNOWN_SIZE_TOKEN_DISPLAY_COLUMNS = ["사이즈 토큰", "개수"]
+SUPPLIER_VOCABULARY_COVERAGE_DISPLAY_COLUMNS = [
+    "공급사",
+    "상품 수",
+    "색상 판정 가능",
+    "색상 미판정",
+    "색상 빈 값",
+    "색상 미판정 비율",
+    "사이즈 판정 가능",
+    "사이즈 미판정",
+    "사이즈 빈 값",
+    "사이즈 미판정 비율",
+]
 UNKNOWN_SIZE_TOKEN_DOWNLOAD_FILENAME = "catalogguard_unknown_size_tokens.csv"
 UNKNOWN_SIZE_TOKEN_PRODUCT_LIMIT = 20
 UNKNOWN_SIZE_TOKEN_PRODUCT_DISPLAY_COLUMNS = [
@@ -1051,6 +1063,58 @@ def _render_catalog_vocabulary_coverage(api_client) -> None:
     st.caption(
         "미판정은 오류가 아니라 현재 vocabulary로 표준값을 판단할 수 없는 원본 표현입니다. "
         "빈 값은 별도로 집계하며 미판정에 포함하지 않습니다. 숫자형 사이즈는 정상 판정 가능 값입니다."
+    )
+
+    st.markdown("#### 공급사별 표준화 현황")
+    try:
+        supplier_coverage = api_client.list_supplier_vocabulary_coverage()
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ValueError,
+    ) as error:
+        st.error(
+            build_etl_api_error_display_message(
+                "공급사별 표준화 현황을 불러오지 못했습니다.", error
+            )
+        )
+        return
+
+    supplier_rows = []
+    for item in supplier_coverage["items"]:
+        color = item["color"]
+        size = item["size"]
+        supplier_rows.append(
+            {
+                "공급사": item["supplier_key"],
+                "상품 수": item["catalog_product_count"],
+                "색상 판정 가능": color["recognized_count"],
+                "색상 미판정": color["unknown_count"],
+                "색상 빈 값": color["empty_count"],
+                "색상 미판정 비율": (
+                    f"{_vocabulary_unknown_percent(color['unknown_count'], color['non_empty_count']):.1f}%"
+                ),
+                "사이즈 판정 가능": size["recognized_count"],
+                "사이즈 미판정": size["unknown_count"],
+                "사이즈 빈 값": size["empty_count"],
+                "사이즈 미판정 비율": (
+                    f"{_vocabulary_unknown_percent(size['unknown_count'], size['non_empty_count']):.1f}%"
+                ),
+            }
+        )
+    st.dataframe(
+        pd.DataFrame(
+            supplier_rows,
+            columns=SUPPLIER_VOCABULARY_COVERAGE_DISPLAY_COLUMNS,
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+    st.caption(
+        "미판정 비율은 오류율이나 공급사 평가 점수가 아닙니다. "
+        "현재 vocabulary로 표준값을 판단할 수 없는 원본 값의 비율입니다."
     )
 
 

@@ -841,6 +841,8 @@ class FakeEtlApiClient:
         unknown_size_token_product_error=None,
         vocabulary_coverage=None,
         vocabulary_coverage_error=None,
+        supplier_vocabulary_coverage=None,
+        supplier_vocabulary_coverage_error=None,
         unknown_color_tokens=None,
         unknown_color_token_error=None,
         unknown_color_token_products=None,
@@ -871,6 +873,7 @@ class FakeEtlApiClient:
         self.unknown_size_token_calls = []
         self.unknown_size_token_product_calls = []
         self.vocabulary_coverage_calls = 0
+        self.supplier_vocabulary_coverage_calls = 0
         self.unknown_color_token_calls = []
         self.unknown_color_token_product_calls = []
         self.quality_summary_calls = []
@@ -983,6 +986,33 @@ class FakeEtlApiClient:
             },
         }
         self.vocabulary_coverage_error = vocabulary_coverage_error
+        self.supplier_vocabulary_coverage = (
+            {
+                "items": [
+                    {
+                        "supplier_key": "sample_vendor",
+                        "catalog_product_count": 6,
+                        "color": {
+                            "non_empty_count": 5,
+                            "recognized_count": 3,
+                            "unknown_count": 2,
+                            "empty_count": 1,
+                        },
+                        "size": {
+                            "non_empty_count": 5,
+                            "recognized_count": 4,
+                            "standard_count": 2,
+                            "numeric_count": 2,
+                            "unknown_count": 1,
+                            "empty_count": 1,
+                        },
+                    }
+                ]
+            }
+            if supplier_vocabulary_coverage is None
+            else supplier_vocabulary_coverage
+        )
+        self.supplier_vocabulary_coverage_error = supplier_vocabulary_coverage_error
         self.unknown_color_tokens = (
             [{"token": "CHARCOAL", "count": 8}, {"token": "MINT", "count": 3}]
             if unknown_color_tokens is None
@@ -1194,6 +1224,12 @@ class FakeEtlApiClient:
         if self.vocabulary_coverage_error is not None:
             raise self.vocabulary_coverage_error
         return self.vocabulary_coverage
+
+    def list_supplier_vocabulary_coverage(self):
+        self.supplier_vocabulary_coverage_calls += 1
+        if self.supplier_vocabulary_coverage_error is not None:
+            raise self.supplier_vocabulary_coverage_error
+        return self.supplier_vocabulary_coverage
 
     def list_unknown_color_tokens(self, *, limit=20):
         self.unknown_color_token_calls.append(limit)
@@ -2098,10 +2134,19 @@ def test_render_catalog_vocabulary_coverage_shows_summary_and_rates(monkeypatch)
     etl_load_history._render_catalog_vocabulary_coverage(client)
 
     assert client.vocabulary_coverage_calls == 1
+    assert client.supplier_vocabulary_coverage_calls == 1
     assert ("전체 운영 상품", "15") in fake_streamlit.metrics
     assert ("색상 미판정 비율", "50.0%") in fake_streamlit.metrics
     assert ("사이즈 미판정 비율", "25.0%") in fake_streamlit.metrics
     assert any("미판정은 오류가 아니라" in value for value in fake_streamlit.captions)
+    assert any(
+        "미판정 비율은 오류율이나 공급사 평가 점수가 아닙니다." in value
+        for value in fake_streamlit.captions
+    )
+    supplier_table = fake_streamlit.dataframes[0]
+    assert supplier_table.iloc[0]["공급사"] == "sample_vendor"
+    assert supplier_table.iloc[0]["색상 미판정 비율"] == "40.0%"
+    assert supplier_table.iloc[0]["사이즈 미판정 비율"] == "20.0%"
 
 
 def test_render_catalog_vocabulary_coverage_handles_empty_catalog_without_division_by_zero(
@@ -2119,7 +2164,29 @@ def test_render_catalog_vocabulary_coverage_handles_empty_catalog_without_divisi
                 "standard_count": 0, "numeric_count": 0,
                 "unknown_count": 0, "empty_count": 0,
             },
-        }
+        },
+        supplier_vocabulary_coverage={
+            "items": [
+                {
+                    "supplier_key": "empty_vendor",
+                    "catalog_product_count": 0,
+                    "color": {
+                        "non_empty_count": 0,
+                        "recognized_count": 0,
+                        "unknown_count": 0,
+                        "empty_count": 0,
+                    },
+                    "size": {
+                        "non_empty_count": 0,
+                        "recognized_count": 0,
+                        "standard_count": 0,
+                        "numeric_count": 0,
+                        "unknown_count": 0,
+                        "empty_count": 0,
+                    },
+                }
+            ]
+        },
     )
     fake_streamlit = UnknownSizeTokenStreamlit()
     monkeypatch.setattr(etl_load_history, "st", fake_streamlit)
@@ -2129,6 +2196,32 @@ def test_render_catalog_vocabulary_coverage_handles_empty_catalog_without_divisi
     assert ("전체 운영 상품", "0") in fake_streamlit.metrics
     assert ("색상 미판정 비율", "0.0%") in fake_streamlit.metrics
     assert ("사이즈 미판정 비율", "0.0%") in fake_streamlit.metrics
+    assert fake_streamlit.dataframes[0].iloc[0]["색상 미판정 비율"] == "0.0%"
+    assert fake_streamlit.dataframes[0].iloc[0]["사이즈 미판정 비율"] == "0.0%"
+
+
+def test_supplier_vocabulary_coverage_error_does_not_block_other_reports(monkeypatch):
+    client = FakeEtlApiClient(
+        supplier_vocabulary_coverage_error=catalogguard_api.CatalogGuardApiResponseError(
+            "upstream failure"
+        )
+    )
+    fake_streamlit = UnknownSizeTokenStreamlit()
+    monkeypatch.setattr(etl_load_history, "st", fake_streamlit)
+
+    etl_load_history._render_catalog_vocabulary_coverage(client)
+    etl_load_history._render_unknown_size_token_report(client)
+    etl_load_history._render_unknown_color_token_report(client)
+
+    assert client.vocabulary_coverage_calls == 1
+    assert client.supplier_vocabulary_coverage_calls == 1
+    assert client.unknown_size_token_calls == [20]
+    assert client.unknown_color_token_calls == [20]
+    assert ("전체 운영 상품", "15") in fake_streamlit.metrics
+    assert any(
+        "공급사별 표준화 현황을 불러오지 못했습니다." in item
+        for item in fake_streamlit.errors
+    )
 
 
 def test_vocabulary_coverage_error_does_not_block_existing_token_reports(monkeypatch):

@@ -512,6 +512,87 @@ def test_get_catalog_vocabulary_coverage_requires_authentication(monkeypatch):
     assert calls == []
 
 
+def test_list_supplier_vocabulary_coverage_is_available_to_viewers(monkeypatch):
+    override_current_user(role="viewer")
+    calls = []
+    supplier = SimpleNamespace(
+        supplier_key="sample_vendor",
+        catalog_product_count=6,
+        color=SimpleNamespace(
+            non_empty_count=5, recognized_count=3, unknown_count=2, empty_count=1
+        ),
+        size=SimpleNamespace(
+            non_empty_count=5, recognized_count=4, standard_count=2,
+            numeric_count=2, unknown_count=1, empty_count=1,
+        ),
+    )
+
+    def fake_coverage(session):
+        calls.append(session)
+        return [supplier]
+
+    monkeypatch.setattr(
+        etl_loads_route, "list_supplier_vocabulary_coverage", fake_coverage
+    )
+    response = client.get("/api/v1/catalog/vocabulary-coverage/suppliers")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "supplier_key": "sample_vendor",
+                "catalog_product_count": 6,
+                "color": {
+                    "non_empty_count": 5,
+                    "recognized_count": 3,
+                    "unknown_count": 2,
+                    "empty_count": 1,
+                },
+                "size": {
+                    "non_empty_count": 5,
+                    "recognized_count": 4,
+                    "standard_count": 2,
+                    "numeric_count": 2,
+                    "unknown_count": 1,
+                    "empty_count": 1,
+                },
+            }
+        ]
+    }
+    assert len(calls) == 1
+
+
+def test_list_supplier_vocabulary_coverage_returns_empty_items(monkeypatch):
+    override_current_user(role="viewer")
+    calls = []
+    monkeypatch.setattr(
+        etl_loads_route,
+        "list_supplier_vocabulary_coverage",
+        lambda session: calls.append(session) or [],
+    )
+
+    response = client.get("/api/v1/catalog/vocabulary-coverage/suppliers")
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+    assert len(calls) == 1
+
+
+def test_list_supplier_vocabulary_coverage_requires_authentication(monkeypatch):
+    clear_current_user_override()
+    calls = []
+    monkeypatch.setattr(
+        etl_loads_route,
+        "list_supplier_vocabulary_coverage",
+        lambda session: calls.append(session),
+    )
+
+    response = client.get("/api/v1/catalog/vocabulary-coverage/suppliers")
+
+    assert response.status_code == 401
+    assert calls == []
+
+
 def test_list_catalog_promotions_returns_safe_paged_contract(
     fake_promotion_history_query_service,
 ):

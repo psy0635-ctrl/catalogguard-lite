@@ -71,6 +71,8 @@ from api.schemas import (
     ETLStagingProductListResponse,
     ETLStagingProductResponse,
     ETLWebRunResponse,
+    SupplierVocabularyCoverageListResponse,
+    SupplierVocabularyCoverageResponse,
     SizeVocabularyCoverageResponse,
     UnknownColorTokenItemResponse,
     UnknownColorTokenProductListResponse,
@@ -177,6 +179,7 @@ from db.catalog_promotion_query_service import (
     get_catalog_vocabulary_coverage,
     list_catalog_promotion_audits,
     list_catalog_promotions,
+    list_supplier_vocabulary_coverage,
     list_unknown_color_token_products,
     list_unknown_size_token_products,
     list_unknown_size_tokens,
@@ -226,6 +229,40 @@ def get_catalog_vocabulary_coverage_summary(
             unknown_count=result.size.unknown_count,
             empty_count=result.size.empty_count,
         ),
+    )
+
+
+@router.get(
+    "/api/v1/catalog/vocabulary-coverage/suppliers",
+    response_model=SupplierVocabularyCoverageListResponse,
+)
+def get_supplier_vocabulary_coverage_summary(
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> SupplierVocabularyCoverageListResponse:
+    items = list_supplier_vocabulary_coverage(session)
+    return SupplierVocabularyCoverageListResponse(
+        items=[
+            SupplierVocabularyCoverageResponse(
+                supplier_key=item.supplier_key,
+                catalog_product_count=item.catalog_product_count,
+                color=ColorVocabularyCoverageResponse(
+                    non_empty_count=item.color.non_empty_count,
+                    recognized_count=item.color.recognized_count,
+                    unknown_count=item.color.unknown_count,
+                    empty_count=item.color.empty_count,
+                ),
+                size=SizeVocabularyCoverageResponse(
+                    non_empty_count=item.size.non_empty_count,
+                    recognized_count=item.size.recognized_count,
+                    standard_count=item.size.standard_count,
+                    numeric_count=item.size.numeric_count,
+                    unknown_count=item.size.unknown_count,
+                    empty_count=item.size.empty_count,
+                ),
+            )
+            for item in items
+        ]
     )
 
 
