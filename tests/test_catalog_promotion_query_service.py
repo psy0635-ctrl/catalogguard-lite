@@ -263,6 +263,57 @@ def test_list_unknown_color_token_products_returns_empty_for_known_color_without
     assert session.scalar_statements == []
 
 
+def test_list_unknown_size_token_products_matches_existing_size_comparison_policy():
+    from db.catalog_promotion_query_service import list_unknown_size_token_products
+
+    products = [
+        SimpleNamespace(
+            id=2, supplier_key="vendor_a", external_product_id="SKU-1",
+            product_group_id="GROUP-1", product_name="후드", category="TOP",
+            color="BLACK", size=" 4XL ",
+        ),
+        SimpleNamespace(
+            id=4, supplier_key="vendor_a", external_product_id="SKU-1",
+            product_group_id="GROUP-1", product_name="후드", category="TOP",
+            color="BLACK", size="4xl",
+        ),
+    ]
+    session = _UnknownColorProductSession(
+        raw_colors=["4XL", "4xl", " 4XL ", "4-XL", "4/XL", "4 XL", "M", "95"],
+        products=products,
+        total=7,
+    )
+
+    result = list_unknown_size_token_products(session, token=" 4XL ", limit=2)
+
+    assert result.token == "4XL"
+    assert result.total == 7
+    assert [item.catalog_product_id for item in result.items] == [2, 4]
+    assert [item.size for item in result.items] == [" 4XL ", "4xl"]
+    assert len(session.scalars_statements) == 2
+    assert len(session.scalar_statements) == 1
+    product_statement = session.scalars_statements[1]
+    assert [clause.element.name for clause in product_statement._order_by_clauses] == [
+        "supplier_key", "external_product_id", "id",
+    ]
+    assert product_statement._limit_clause.value == 2
+    assert set(product_statement.compile().params["size_1"]) == {"4XL", "4xl", " 4XL "}
+
+
+@pytest.mark.parametrize("token", ["M", "95", "   "])
+def test_list_unknown_size_token_products_returns_empty_without_query_for_known_size(token):
+    from db.catalog_promotion_query_service import list_unknown_size_token_products
+
+    session = _UnknownColorProductSession(raw_colors=[], products=[], total=0)
+
+    result = list_unknown_size_token_products(session, token=token, limit=20)
+
+    assert result.total == 0
+    assert result.items == []
+    assert session.scalars_statements == []
+    assert session.scalar_statements == []
+
+
 def test_list_unknown_size_tokens_processes_ten_thousand_grouped_catalog_sizes_in_one_query():
     from db.catalog_promotion_query_service import list_unknown_size_tokens
 

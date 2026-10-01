@@ -74,6 +74,8 @@ from api.schemas import (
     UnknownColorTokenProductResponse,
     UnknownColorTokenReportResponse,
     UnknownSizeTokenItemResponse,
+    UnknownSizeTokenProductListResponse,
+    UnknownSizeTokenProductResponse,
     UnknownSizeTokenReportResponse,
 )
 from config.metrics import record_web_etl_run, record_web_etl_rows
@@ -172,6 +174,7 @@ from db.catalog_promotion_query_service import (
     list_catalog_promotion_audits,
     list_catalog_promotions,
     list_unknown_color_token_products,
+    list_unknown_size_token_products,
     list_unknown_size_tokens,
     list_unknown_color_tokens,
 )
@@ -209,6 +212,36 @@ def get_unknown_size_token_report(
             UnknownSizeTokenItemResponse(token=item.token, count=item.count)
             for item in items
         ]
+    )
+
+
+@router.get(
+    "/api/v1/catalog/unknown-size-token-products",
+    response_model=UnknownSizeTokenProductListResponse,
+)
+def get_unknown_size_token_products(
+    token: str = Query(..., min_length=1, pattern=r".*\S.*"),
+    limit: int = Query(default=20, ge=1, le=100),
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> UnknownSizeTokenProductListResponse:
+    result = list_unknown_size_token_products(session, token=token, limit=limit)
+    return UnknownSizeTokenProductListResponse(
+        token=result.token,
+        total=result.total,
+        items=[
+            UnknownSizeTokenProductResponse(
+                catalog_product_id=item.catalog_product_id,
+                supplier_key=item.supplier_key,
+                external_product_id=item.external_product_id,
+                product_group_id=item.product_group_id,
+                product_name=item.product_name,
+                category=item.category,
+                color=item.color,
+                size=item.size,
+            )
+            for item in result.items
+        ],
     )
 
 

@@ -158,6 +158,21 @@ def fake_promotion_history_query_service(monkeypatch):
             items=state.unknown_color_token_products[:limit],
         )
 
+    def fake_unknown_size_token_products(session, *, token, limit):
+        calls.append(
+            {
+                "operation": "unknown_size_token_products",
+                "session": session,
+                "token": token,
+                "limit": limit,
+            }
+        )
+        return SimpleNamespace(
+            token=token.strip(),
+            total=state.unknown_size_token_product_total,
+            items=state.unknown_size_token_products[:limit],
+        )
+
     state.unknown_size_tokens = [
         SimpleNamespace(token="4XL", count=8),
         SimpleNamespace(token="OS", count=3),
@@ -176,6 +191,14 @@ def fake_promotion_history_query_service(monkeypatch):
         )
     ]
     state.unknown_color_token_product_total = 8
+    state.unknown_size_token_products = [
+        SimpleNamespace(
+            catalog_product_id=101, supplier_key="sample_vendor",
+            external_product_id="SKU-001", product_group_id="GROUP-01",
+            product_name="오버핏 후드", category="TOP", color="BLACK", size="4XL",
+        )
+    ]
+    state.unknown_size_token_product_total = 8
 
     app.dependency_overrides[get_session] = override_session
     monkeypatch.setattr(
@@ -194,6 +217,12 @@ def fake_promotion_history_query_service(monkeypatch):
         etl_loads_route,
         "list_unknown_color_token_products",
         fake_unknown_color_token_products,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        etl_loads_route,
+        "list_unknown_size_token_products",
+        fake_unknown_size_token_products,
         raising=False,
     )
     monkeypatch.setattr(
@@ -349,6 +378,63 @@ def test_list_unknown_color_token_products_rejects_invalid_query(params):
         params=params,
     )
 
+    assert response.status_code == 422
+
+
+def test_list_unknown_size_token_products_returns_read_only_contract_for_viewers(
+    fake_promotion_history_query_service,
+):
+    override_current_user(role="viewer")
+    response = client.get(
+        "/api/v1/catalog/unknown-size-token-products",
+        params={"token": "4XL", "limit": 7},
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "token": "4XL",
+        "total": 8,
+        "items": [
+            {
+                "catalog_product_id": 101,
+                "supplier_key": "sample_vendor",
+                "external_product_id": "SKU-001",
+                "product_group_id": "GROUP-01",
+                "product_name": "오버핏 후드",
+                "category": "TOP",
+                "color": "BLACK",
+                "size": "4XL",
+            }
+        ],
+    }
+    assert (
+        fake_promotion_history_query_service.calls[-1]["operation"]
+        == "unknown_size_token_products"
+    )
+
+
+def test_list_unknown_size_token_products_requires_authenticated_user(
+    fake_promotion_history_query_service,
+):
+    clear_current_user_override()
+    response = client.get(
+        "/api/v1/catalog/unknown-size-token-products", params={"token": "4XL"}
+    )
+    assert response.status_code == 401
+    assert fake_promotion_history_query_service.calls == []
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        {"token": ""},
+        {"token": "   "},
+        {"token": "4XL", "limit": 0},
+        {"token": "4XL", "limit": 101},
+    ],
+)
+def test_list_unknown_size_token_products_rejects_invalid_query(params):
+    response = client.get("/api/v1/catalog/unknown-size-token-products", params=params)
     assert response.status_code == 422
 
 

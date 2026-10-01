@@ -837,6 +837,8 @@ class FakeEtlApiClient:
         etl_run_error=None,
         unknown_size_tokens=None,
         unknown_size_token_error=None,
+        unknown_size_token_products=None,
+        unknown_size_token_product_error=None,
         unknown_color_tokens=None,
         unknown_color_token_error=None,
         unknown_color_token_products=None,
@@ -865,6 +867,7 @@ class FakeEtlApiClient:
         self.etl_profile_detail_calls = []
         self.etl_run_calls = []
         self.unknown_size_token_calls = []
+        self.unknown_size_token_product_calls = []
         self.unknown_color_token_calls = []
         self.unknown_color_token_product_calls = []
         self.quality_summary_calls = []
@@ -942,6 +945,23 @@ class FakeEtlApiClient:
             else unknown_size_tokens
         )
         self.unknown_size_token_error = unknown_size_token_error
+        self.unknown_size_token_products = (
+            [
+                {
+                    "catalog_product_id": 202,
+                    "supplier_key": "sample_vendor",
+                    "external_product_id": "SKU-004",
+                    "product_group_id": "GROUP-04",
+                    "product_name": "오버핏 후드",
+                    "category": "TOP",
+                    "color": "BLACK",
+                    "size": "4XL",
+                }
+            ]
+            if unknown_size_token_products is None
+            else unknown_size_token_products
+        )
+        self.unknown_size_token_product_error = unknown_size_token_product_error
         self.unknown_color_tokens = (
             [{"token": "CHARCOAL", "count": 8}, {"token": "MINT", "count": 3}]
             if unknown_color_tokens is None
@@ -1137,6 +1157,16 @@ class FakeEtlApiClient:
         if self.unknown_size_token_error is not None:
             raise self.unknown_size_token_error
         return {"items": self.unknown_size_tokens}
+
+    def list_unknown_size_token_products(self, token, *, limit=20):
+        self.unknown_size_token_product_calls.append({"token": token, "limit": limit})
+        if self.unknown_size_token_product_error is not None:
+            raise self.unknown_size_token_product_error
+        return {
+            "token": token,
+            "total": len(self.unknown_size_token_products),
+            "items": self.unknown_size_token_products[:limit],
+        }
 
     def list_unknown_color_tokens(self, *, limit=20):
         self.unknown_color_token_calls.append(limit)
@@ -2029,6 +2059,7 @@ def test_render_unknown_size_token_report_downloads_the_displayed_snapshot(monke
     etl_load_history._render_unknown_size_token_report(api_client)
 
     assert api_client.unknown_size_token_calls == [20]
+    assert api_client.unknown_size_token_product_calls == []
     assert len(fake_streamlit.dataframes) == 1
     assert len(fake_streamlit.downloads) == 1
     download = fake_streamlit.downloads[0]
@@ -2041,6 +2072,48 @@ def test_render_unknown_size_token_report_downloads_the_displayed_snapshot(monke
         {"사이즈 토큰": "4XL", "개수": "8"},
         {"사이즈 토큰": "OS", "개수": "3"},
     ]
+
+
+def test_render_unknown_size_token_report_fetches_and_displays_selected_products(monkeypatch):
+    api_client = FakeEtlApiClient()
+    fake_streamlit = UnknownSizeTokenStreamlit(selected_token="4XL")
+    monkeypatch.setattr(etl_load_history, "st", fake_streamlit)
+    etl_load_history._render_unknown_size_token_report(api_client)
+    assert api_client.unknown_size_token_calls == [20]
+    assert api_client.unknown_size_token_product_calls == [
+        {"token": "4XL", "limit": 20}
+    ]
+    assert len(fake_streamlit.dataframes) == 2
+    assert "원본 사이즈" in list(fake_streamlit.dataframes[1].columns)
+    assert fake_streamlit.dataframes[1].iloc[0]["원본 사이즈"] == "4XL"
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_render_unknown_size_token_product_empty_or_failure_is_isolated(
+    monkeypatch, failure
+):
+    error = (
+        catalogguard_api.CatalogGuardApiResponseError("upstream failure")
+        if failure
+        else None
+    )
+    client = FakeEtlApiClient(
+        unknown_size_token_products=[] if not failure else None,
+        unknown_size_token_product_error=error,
+    )
+    fake_streamlit = UnknownSizeTokenStreamlit(selected_token="4XL")
+    monkeypatch.setattr(etl_load_history, "st", fake_streamlit)
+    etl_load_history._render_unknown_size_token_report(client)
+    assert client.unknown_size_token_calls == [20]
+    assert len(fake_streamlit.downloads) == 1
+    assert client.unknown_size_token_product_calls == [{"token": "4XL", "limit": 20}]
+    if failure:
+        assert any(
+            "미판정 사이즈 토큰의 영향 상품을 불러오지 못했습니다." in item
+            for item in fake_streamlit.errors
+        )
+    else:
+        assert "선택한 사이즈 토큰을 사용하는 현재 운영 상품이 없습니다." in fake_streamlit.infos
 
 
 @pytest.mark.parametrize(
