@@ -5104,3 +5104,76 @@ def test_the_actor_caption_constant_points_at_the_history_section():
     assert STALE_NO_HISTORY_CAPTION not in caption
     assert "현재 런타임 override" in caption
     assert "Activation 운영 이력" in caption
+
+
+class SupplierUnknownVocabularyClient(FakeEtlApiClient):
+    def __init__(self, *, failure=None, empty=False):
+        super().__init__()
+        self.detail_calls = []
+        self.failure = failure
+        self.empty = empty
+
+    def _report(self, attribute, supplier_key):
+        self.detail_calls.append((attribute, supplier_key))
+        if self.failure == attribute:
+            raise catalogguard_api.CatalogGuardApiResponseError("upstream failure")
+        if self.empty or supplier_key == "supplier-b":
+            return {"items": []}
+        return {"items": [{"token": "CHARCOAL" if attribute == "color" else "4XL", "count": 2}]}
+
+    def list_unknown_color_tokens(self, *, limit=20, supplier_key=None):
+        if supplier_key is None:
+            return super().list_unknown_color_tokens(limit=limit)
+        return self._report("color", supplier_key)
+
+    def list_unknown_size_tokens(self, *, limit=20, supplier_key=None):
+        if supplier_key is None:
+            return super().list_unknown_size_tokens(limit=limit)
+        return self._report("size", supplier_key)
+
+
+def _supplier_detail_test_app(client):
+    from ui.etl_load_history import _render_supplier_unknown_vocabulary
+    _render_supplier_unknown_vocabulary(client, ["supplier-a", "supplier-b"])
+
+
+def test_supplier_unknown_detail_selection_clears_stale_tables():
+    from streamlit.testing.v1 import AppTest
+    client = SupplierUnknownVocabularyClient()
+    app = AppTest.from_function(_supplier_detail_test_app, args=(client,)).run()
+    assert not app.exception
+    assert client.detail_calls == []
+    app.selectbox[0].select("supplier-a").run()
+    assert not app.exception
+    assert client.detail_calls == [("color", "supplier-a"), ("size", "supplier-a")]
+    assert app.dataframe[0].value.iloc[0]["색상 토큰"] == "CHARCOAL"
+    assert app.dataframe[1].value.iloc[0]["사이즈 토큰"] == "4XL"
+    app.selectbox[0].select("supplier-b").run()
+    assert not app.exception
+    assert client.detail_calls[-2:] == [("color", "supplier-b"), ("size", "supplier-b")]
+    assert len(app.dataframe) == 0
+    assert len(app.info) == 2
+
+
+@pytest.mark.parametrize("failure", ["color", "size"])
+def test_supplier_unknown_detail_error_isolated_from_other_attribute_and_reports(monkeypatch, failure):
+    client = SupplierUnknownVocabularyClient(failure=failure)
+    fake_streamlit = UnknownSizeTokenStreamlit(selected_token="supplier-a")
+    monkeypatch.setattr(etl_load_history, "st", fake_streamlit)
+    etl_load_history._render_supplier_unknown_vocabulary(client, ["supplier-a"])
+    assert len(fake_streamlit.errors) == 1
+    assert len(fake_streamlit.dataframes) == 1
+    fake_streamlit.selected_token = None
+    etl_load_history._render_unknown_color_token_report(client)
+    etl_load_history._render_unknown_size_token_report(client)
+    assert client.unknown_color_token_calls == [20]
+    assert client.unknown_size_token_calls == [20]
+
+
+def test_supplier_unknown_detail_empty_suppliers_does_not_query(monkeypatch):
+    client = SupplierUnknownVocabularyClient()
+    fake_streamlit = UnknownSizeTokenStreamlit()
+    monkeypatch.setattr(etl_load_history, "st", fake_streamlit)
+    etl_load_history._render_supplier_unknown_vocabulary(client, [])
+    assert client.detail_calls == []
+    assert not fake_streamlit.selectboxes

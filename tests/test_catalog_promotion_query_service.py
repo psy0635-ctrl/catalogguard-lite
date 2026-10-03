@@ -927,3 +927,31 @@ def test_catalog_promotion_queries_do_not_modify_database(seeded_promotions):
             CatalogProductChange.promotion_run_id == oldest.id
         )
     ).changed_fields == before_audits
+
+
+@pytest.mark.parametrize("attribute, token, known", [("color", "CHARCOAL", "BLACK"), ("size", "4XL", "M")])
+def test_unknown_tokens_filter_suppliers_before_grouping(attribute, token, known):
+    from sqlalchemy import create_engine, event, text
+    from sqlalchemy.orm import Session
+    from db import catalog_promotion_query_service as service
+
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE catalog_products (id INTEGER PRIMARY KEY, supplier_key TEXT, color TEXT, size TEXT)"))
+        values = []
+        for supplier, count in [("supplier-a", 2), ("supplier-b", 7)]:
+            for value in [token] * count + [known, "", "   ", "95" if attribute == "size" else known]:
+                values.append({"supplier": supplier, "value": value})
+        connection.execute(text(f"INSERT INTO catalog_products (supplier_key, {attribute}) VALUES (:supplier, :value)"), values)
+    statements = []
+    event.listen(engine, "before_cursor_execute", lambda conn, cursor, statement, parameters, context, many: statements.append(statement))
+    report = getattr(service, f"list_unknown_{attribute}_tokens")
+    with Session(engine) as session:
+        for supplier, expected in [("supplier-a", 2), ("supplier-b", 7), (None, 9), ("missing", 0)]:
+            before = len(statements)
+            items = report(session, limit=20, supplier_key=supplier)
+            assert [(item.token, item.count) for item in items] == ([(token, expected)] if expected else [])
+            assert len(statements) == before + 1
+            if supplier is not None:
+                assert "WHERE catalog_products.supplier_key =" in statements[-1]
+    engine.dispose()

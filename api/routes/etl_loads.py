@@ -272,10 +272,11 @@ def get_supplier_vocabulary_coverage_summary(
 )
 def get_unknown_size_token_report(
     limit: int = Query(default=20, ge=1, le=100),
+    supplier_key: str | None = Query(default=None),
     _current_user=Depends(require_viewer),
     session: Session = Depends(get_session),
 ) -> UnknownSizeTokenReportResponse:
-    items = list_unknown_size_tokens(session, limit=limit)
+    items = list_unknown_size_tokens(session, limit=limit, supplier_key=supplier_key)
     return UnknownSizeTokenReportResponse(
         items=[
             UnknownSizeTokenItemResponse(token=item.token, count=item.count)
@@ -320,10 +321,11 @@ def get_unknown_size_token_products(
 )
 def get_unknown_color_token_report(
     limit: int = Query(default=20, ge=1, le=100),
+    supplier_key: str | None = Query(default=None),
     _current_user=Depends(require_viewer),
     session: Session = Depends(get_session),
 ) -> UnknownColorTokenReportResponse:
-    items = list_unknown_color_tokens(session, limit=limit)
+    items = list_unknown_color_tokens(session, limit=limit, supplier_key=supplier_key)
     return UnknownColorTokenReportResponse(
         items=[
             UnknownColorTokenItemResponse(token=item.token, count=item.count)

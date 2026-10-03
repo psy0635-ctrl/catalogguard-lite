@@ -2571,11 +2571,16 @@ class CatalogGuardApiClient:
         _validate_etl_quality_observability_response(data)
         return data
 
-    def list_unknown_size_tokens(self, *, limit: int = 20) -> dict[str, Any]:
+    def list_unknown_size_tokens(
+        self, *, limit: int = 20, supplier_key: str | None = None
+    ) -> dict[str, Any]:
         _validate_etl_pagination(limit, 0)
+        params = {"limit": limit}
+        if supplier_key is not None:
+            params["supplier_key"] = supplier_key
         data = self._get_json(
             "/api/v1/catalog/unknown-size-tokens",
-            params={"limit": limit},
+            params=params,
         )
         _validate_unknown_size_token_report_response(data)
         return data
@@ -2590,11 +2595,16 @@ class CatalogGuardApiClient:
         _validate_supplier_vocabulary_coverage_response(data)
         return data
 
-    def list_unknown_color_tokens(self, *, limit: int = 20) -> dict[str, Any]:
+    def list_unknown_color_tokens(
+        self, *, limit: int = 20, supplier_key: str | None = None
+    ) -> dict[str, Any]:
         _validate_etl_pagination(limit, 0)
+        params = {"limit": limit}
+        if supplier_key is not None:
+            params["supplier_key"] = supplier_key
         data = self._get_json(
             "/api/v1/catalog/unknown-color-tokens",
-            params={"limit": limit},
+            params=params,
         )
         _validate_unknown_color_token_report_response(data)
         return data

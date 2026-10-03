@@ -994,6 +994,10 @@ medium, m -> M
 
 같은 화면의 `공급사별 표준화 현황`과 `GET /api/v1/catalog/vocabulary-coverage/suppliers`는 `CatalogProduct.supplier_key` 기준으로 현재 운영 상품의 coverage를 read-only 집계합니다. 미판정 비율은 오류율이나 공급사 평가 점수가 아니라 현재 vocabulary로 표준값을 판단할 수 없는 원본 값의 비율입니다.
 
+공급사별 표 아래에서 공급사를 선택하면 `공급사 미판정 Vocabulary 상세`에 해당 공급사의 미판정 색상·사이즈 토큰을 각각 상위 20개까지 표시합니다. 기존 `GET /api/v1/catalog/unknown-color-tokens`와 `GET /api/v1/catalog/unknown-size-tokens`는 optional `supplier_key` query를 지원합니다. 예를 들어 `?supplier_key=sample_fashion_vendor&limit=20`은 해당 `CatalogProduct.supplier_key`의 현재 운영 상품만 DB에서 필터링한 뒤 기존 vocabulary·비교 정규화 정책으로 집계합니다. `supplier_key`를 생략하면 기존 전체 집계이며, 현재 상품이 없는 공급사는 HTTP 200과 `{"items": []}`를 반환합니다. viewer 권한·limit 범위·응답 구조는 동일하며 API client도 `list_unknown_color_tokens(limit=20, supplier_key="sample_fashion_vendor")` 및 동일한 사이즈 호출을 지원합니다.
+
+공급사 상세의 색상·사이즈 조회 오류는 각각 표시하고 다른 보고서와 ETL 이력은 계속 동작합니다. 공급사를 바꾸면 상세를 다시 조회하며 이전 표를 보존하지 않습니다. 영향 상품 조사는 아래 기존 전체 미판정 토큰 보고서에서 같은 토큰을 선택해 진행합니다. 영향 상품 API는 전체 공급사 범위를 유지하고 상품별 공급사를 함께 표시하며, 전체 보고서의 상위 20개에 없는 토큰은 기존 영향 상품 API에 직접 지정해 조회할 수 있습니다. 미판정은 오류나 공급사 평가 점수가 아니며 자동 alias 등록·데이터 수정은 하지 않습니다.
+
 #### 미판정 사이즈 토큰 빈도 보고서
 
 운영자는 ETL 적재 이력 화면의 `미판정 사이즈 토큰` 표에서 현재 운영 카탈로그(`catalog_products`)에 남아 있는 미판정 원본 토큰과 건수를 확인할 수 있습니다. API는 `GET /api/v1/catalog/unknown-size-tokens`이며 viewer 이상 권한에서 호출할 수 있고, 기본 상위 20개(최대 100개)를 `{"items": [{"token": "4XL", "count": 8}]}` 형식으로 반환합니다.
@@ -3060,7 +3064,6 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 운영 정책에 맞는 금지어, 개인정보, 카테고리 규칙 확장
 - 실제 retention 요구가 확정될 경우 검수 이력 deletion audit event와 보관 실행 방식 설계
 - dedup 요청자를 포함한 요청 단위 감사 event가 필요할 경우 별도 audit event 모델 검토
-- Rollback 실행 이력만 목록으로 조회하는 전용 GET API
 - Prometheus 서버 구축과 scrape 설정, Grafana 대시보드
 - 여러 Uvicorn worker 환경을 위한 metric 통합(현재는 프로세스 단일 registry)
 - Async Inspection/Celery, Redis queue depth, Promotion·Rollback, Actor Audit, DB connection pool domain metric 추가
@@ -3073,7 +3076,6 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - Refresh Token, 회원가입, password reset, OAuth/MFA/SSO, AWS staging·Kubernetes의 로그인 rate limit 활성화
 - 중복 저장 이벤트 로그 또는 감사 기록 검토
 - 카테고리와 가격 이상치 기준을 설정 파일이나 관리 화면에서 조정
-- 카테고리별 사이즈 형식 검수
 - 브랜드 표준화
 - `gender` 선택 컬럼과 표준화
 - 웹 ETL 처리 시간이 길어질 경우의 비동기(Celery) 실행
