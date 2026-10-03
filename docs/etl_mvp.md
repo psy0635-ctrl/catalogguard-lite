@@ -273,6 +273,20 @@ non-retryable failure로 끝난다. active pre-check가 시작한 read transacti
 정리하며, `run_web_etl()`의 activation 검사는 pre-check 뒤 deactivate되는 race의 최종 방어선으로
 남는다. 따라서 그 race에서는 HTTP fetch 0회를 보장하지 않는다.
 
+### Activation/source failure precedence 계약
+
+등록된 profile의 S3·HTTP API와 Airflow HTTP feed는 effective activation을 source adapter 호출 전에 조회한다. DB lookup이 실패하면 source가 호출될 경우 실패할 수 있어도 source를 호출하지 않고 pipeline·staging loader에도 도달하지 않는다. 이미 inactive인 경우도 source 호출 0회다. API의 DB 예외 응답은 기존 일반 `500 Internal Server Error`이며 새 `activation_lookup_failed` 코드나 retryable 필드를 제공하지 않는다. inactive는 API `409 inactive_profile`, Airflow `etl_profile_inactive`(non-retryable)로 유지한다.
+
+unknown profile은 의도적인 예외다. `is_etl_profile_inactive()`가 allowlist 밖 ID를 False로 통과시키므로 source 실패가 먼저 반환된다. source가 성공해야 후속 `get_profile_path()`에서 profile 오류가 발생한다. 이 maintenance는 unknown profile을 등록된 profile의 activation-first 정책으로 바꾸지 않는다.
+
+Web multipart는 외부 source adapter가 없으며, route의 `await file.read(MAX_UPLOAD_SIZE_BYTES + 1)`이 `run_web_etl()`의 profile·activation 조회보다 먼저다. 업로드 읽기가 실패하면 activation lookup은 호출되지 않는다. 업로드 읽기가 성공하고 activation DB 조회가 실패하면 pipeline·loader를 호출하지 않는다. CLI는 profile JSON 파일 경로를 직접 받는 별도 경로라 runtime activation lookup 대상이 아니다.
+
+등록된 profile의 source 기반 정상 경로는 pre-check 조회 → read transaction 정리 → source fetch → `run_web_etl()`의 activation 재조회 순서다. 두 번째 조회에서 inactive 또는 DB 오류가 나면 source는 이미 1회 호출됐지만 pipeline·loader는 호출되지 않는다. **최종 guard는 source fetch 이후, pipeline 이전의 재확인이며 database lock이나 atomic execution 보장이 아니다.** 최종 guard 통과 직후 deactivate되는 race는 여전히 존재한다. 외부 HTTP/S3 I/O 동안 DB transaction이나 lock을 유지하지 않으며, `end_activation_read_transaction()`의 pending ORM write 보호도 유지한다.
+
+Airflow는 pre-check와 최종 guard의 DB 오류에도 기존 분류를 적용한다. `OperationalError`의 `connection_invalidated=True` 또는 SQLSTATE `40001`·`40P01`만 `catalogguard_db_transient`(`AirflowException`, retryable)다. 나머지 OperationalError·SQLAlchemyError는 `catalogguard_db_non_retryable`(`AirflowFailException`)이다. source timeout·지정된 network 오류·HTTP 429/5xx의 retry와 영구 source 오류의 non-retryable 분류도 변경하지 않는다. 안전한 실패 메시지에는 DB 연결 문자열·password·token·원본 SQL 예외를 넣지 않는다.
+
+회귀 테스트는 `tests/test_api_etl_http_load.py`, `tests/test_api_etl_s3_load.py`, `tests/test_api_etl_web_run.py`에서 실제 resolver를 통과하며 source·pipeline·loader 호출 횟수와 일반 500 응답을 확인한다. Airflow pre-check의 transient/non-transient DB 실패는 `airflow/tests/test_catalogguard_http_feed_to_staging.py`에서 검증하며, 이 파일은 기존 `airflow-smoke` CI의 격리 Airflow image에서 실행한다. SDK 없는 기본 로컬 pytest에서 module skip된 결과는 Airflow 검증 성공을 의미하지 않는다.
+
 ### runtime과 DB 분리
 
 ```text

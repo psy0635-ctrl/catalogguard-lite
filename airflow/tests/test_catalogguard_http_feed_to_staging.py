@@ -245,6 +245,55 @@ class CatalogGuardHTTPFeedDagTest(unittest.TestCase):
             str(unknown_error.exception),
         )
 
+    def _assert_activation_db_failure_before_source(self, db_error, *, retryable):
+        from unittest.mock import MagicMock, Mock
+        from airflow.exceptions import AirflowException, AirflowFailException
+        from sqlalchemy.orm import Session
+        from etl.http_source import HTTPFeedTransientError
+
+        module = _load_dag_module()
+        session = MagicMock(spec=Session)
+        session.scalars.side_effect = db_error
+        source = Mock(side_effect=HTTPFeedTransientError())
+        pipeline, loader = Mock(), Mock()
+        with patch(
+            "db.session.get_session_factory", return_value=lambda: nullcontext(session)
+        ), patch("etl.http_source.read_http_feed_csv", source), patch(
+            "etl.web_service.run_pipeline", pipeline
+        ), patch("etl.web_service.load_standard_csv", loader):
+            with self.assertRaises(AirflowException) as caught:
+                module.run_configured_http_feed_to_staging("sample_fashion_vendor_v1")
+        expected_code = "catalogguard_db_transient" if retryable else "catalogguard_db_non_retryable"
+        self.assertEqual(str(caught.exception), f"CatalogGuard HTTP feed ingestion failed [{expected_code}]")
+        self.assertEqual(isinstance(caught.exception, AirflowFailException), not retryable)
+        self.assertIsNone(caught.exception.__cause__)
+        session.scalars.assert_called_once()
+        source.assert_not_called()
+        pipeline.assert_not_called()
+        loader.assert_not_called()
+        for method in (session.add, session.add_all, session.flush, session.commit, session.execute):
+            method.assert_not_called()
+
+    def test_activation_precheck_transient_db_failure_prevents_source_and_remains_retryable(self):
+        from sqlalchemy.exc import OperationalError
+
+        for sqlstate, invalidated in [(None, True), ("40001", False), ("40P01", False)]:
+            with self.subTest(sqlstate=sqlstate, connection_invalidated=invalidated):
+                original = RuntimeError("postgresql://user:private-password@internal-db?token=private-token")
+                original.sqlstate = sqlstate
+                error = OperationalError("SELECT private_sql", {}, original, connection_invalidated=invalidated)
+                self._assert_activation_db_failure_before_source(error, retryable=True)
+
+    def test_activation_precheck_other_db_failures_prevent_source_without_retry(self):
+        from sqlalchemy.exc import OperationalError, SQLAlchemyError
+
+        for error in (
+            OperationalError("SELECT private_sql", {}, RuntimeError("private-password")),
+            SQLAlchemyError("private-token internal-db"),
+        ):
+            with self.subTest(error_type=type(error).__name__):
+                self._assert_activation_db_failure_before_source(error, retryable=False)
+
     def test_transient_database_failure_stays_retryable(self) -> None:
         """The inactive branch must not have changed the transient DB retry contract."""
         from airflow.exceptions import AirflowException, AirflowFailException

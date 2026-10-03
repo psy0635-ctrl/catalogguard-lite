@@ -3030,7 +3030,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 운영 이력의 append-only는 **애플리케이션 계약**입니다. 수정·삭제·purge API를 두지 않고 쓰기 경로가 INSERT 하나뿐이라는 뜻이며, DB superuser의 직접 `UPDATE`/`DELETE`까지 막는 WORM 저장소를 구현한 것은 아닙니다. retention/purge 정책도 없어 event는 계속 누적됩니다.
 - Streamlit `ETL 프로필 운영 관리` 화면(운영 이력 포함)은 API integration·API client·Streamlit AppTest·PostgreSQL 통합 테스트에 더해 전용 Chromium E2E로 검증합니다. 이 E2E는 local disposable PostgreSQL과 Chromium 한 경로만 다루며 Profile CRUD·동시 update 경쟁은 범위 밖입니다.
 - Airflow는 effective activation을 HTTP feed fetch 전에 확인합니다. 이미 inactive면 `read_http_feed_csv()`를 호출하지 않고 `etl_profile_inactive`(non-retryable)로 차단됩니다. pre-check 뒤 deactivate되는 race는 `run_web_etl()`의 최종 guard가 처리하지만 HTTP fetch 0회까지 보장하지는 않습니다.
-- activation DB 조회와 외부 source가 동시에 실패할 때의 failure precedence는 사전 검사 순서에 따릅니다. 모든 activation/source failure 우선순위의 재설계는 별도 범위입니다.
+- 등록된 ETL profile의 S3·HTTP API와 Airflow 실행은 activation lookup을 source fetch보다 먼저 수행합니다. activation DB 조회가 실패하면 source·pipeline·staging loader를 호출하지 않습니다. API는 기존 일반 `500 Internal Server Error`를 유지하고 Airflow는 기존 DB retry 분류를 사용합니다. unknown profile은 pre-check를 통과해 기존 source-first 예외를 유지하며, Web multipart는 업로드 bytes 읽기가 activation lookup보다 먼저입니다. fetch 뒤 `run_web_etl()`의 최종 guard는 pipeline 전에 재확인하지만 lock이나 원자적 실행 보장은 아닙니다. 상세 계약과 회귀 테스트는 [ETL MVP](docs/etl_mvp.md)의 failure precedence 절을 참고하세요.
 - Activation 변경 범위는 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)의 Phase 5A·5A.1·5B.1·5B.2·5B.3·5B.4·5B.5·5B.6을 참고하세요.
 - `etl_load_runs`는 `profile_name`·`profile_version` 외에 semantic profile snapshot·definition fingerprint·application commit SHA를 lineage metadata로 기록합니다. raw profile 전체나 완전한 실행 환경은 보존하지 않으므로, 이 정보는 과거 batch 차이를 조사하는 근거이지 결과 원인을 자동으로 증명하거나 재실행을 보장하는 기능은 아닙니다. 버전 증가 기준과 향후 방향은 [ETL Profile Version Lifecycle Policy](docs/etl_profile_lifecycle.md)에 정리했습니다.
 - S3 ingestion은 호출자가 `object_key` 하나를 지정하는 pull 방식입니다. S3 event 알림·Lambda·SQS 기반 자동 수집과 prefix 일괄 처리는 지원하지 않습니다.
@@ -3081,7 +3081,6 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - 웹 ETL 처리 시간이 길어질 경우의 비동기(Celery) 실행
 - 웹 ETL 다중 파일 업로드 및 XLSX 이외 추가 입력 형식 지원
 - Airflow pre-check 뒤 deactivate되는 race에서 HTTP fetch 0회까지 보장하는 lock 구조
-- activation 조회 실패와 외부 source 실패가 겹칠 때의 failure precedence 정책
 - 사용자 정의 ETL 프로필 등록·관리(Profile CRUD)
 - DB-backed Profile / ProfileVersion 모델 도입 여부 검토(현재 정의는 code/config)
 - 실제 운영 공급사·production catalog 연동과 배포 환경 promotion 검증
