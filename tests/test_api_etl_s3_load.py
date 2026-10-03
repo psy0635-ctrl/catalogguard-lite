@@ -531,6 +531,13 @@ def test_inactive_profile_is_rejected_before_any_s3_read(monkeypatch):
 
 
 def test_inactive_profile_outranks_a_source_error_that_would_fire_first(monkeypatch):
+    from unittest.mock import Mock
+    import etl.web_service as web_service
+
+    source = Mock(side_effect=S3KeyNotAllowedError("source would fail"))
+    pipeline, loader = Mock(), Mock()
+    monkeypatch.setattr(web_service, "run_pipeline", pipeline)
+    monkeypatch.setattr(web_service, "load_standard_csv", loader)
     # 허용되지 않은 object_key처럼 source adapter가 먼저 실패했을 상황에서도
     # 비활성 차단이 앞섭니다. Phase 5A 정책이 source 오류에 가려지면 안 됩니다.
     monkeypatch.setitem(
@@ -542,7 +549,7 @@ def test_inactive_profile_outranks_a_source_error_that_would_fire_first(monkeypa
     monkeypatch.setattr(
         etl_loads_route,
         "read_s3_csv_object",
-        lambda key: (_ for _ in ()).throw(S3KeyNotAllowedError("not allowed")),
+        source,
     )
 
     response = client.post(
@@ -552,6 +559,10 @@ def test_inactive_profile_outranks_a_source_error_that_would_fire_first(monkeypa
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "inactive_profile"
+
+    source.assert_not_called()
+    pipeline.assert_not_called()
+    loader.assert_not_called()
 
 
 def test_unknown_profile_keeps_the_existing_source_error_precedence(monkeypatch):
@@ -568,3 +579,53 @@ def test_unknown_profile_keeps_the_existing_source_error_precedence(monkeypatch)
 
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "s3_object_not_found"
+
+
+@pytest.mark.parametrize("failure_at", ["precheck_db", "final_inactive", "final_db"])
+def test_registered_profile_activation_failure_blocks_downstream_work(monkeypatch, failure_at):
+    from types import SimpleNamespace
+    from unittest.mock import Mock, MagicMock
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session
+    import etl.web_service as web_service
+
+    secret = "postgresql://user:private-password@internal-db/catalog?token=private-token"
+    db_error = OperationalError("SELECT private_sql", {}, RuntimeError(secret))
+    session = MagicMock(spec=Session)
+    session.new = session.dirty = session.deleted = ()
+    active = SimpleNamespace(one_or_none=lambda: None)
+    inactive = SimpleNamespace(one_or_none=lambda: SimpleNamespace(active_version=None))
+    session.scalars.side_effect = (
+        [db_error] if failure_at == "precheck_db"
+        else [active, inactive if failure_at == "final_inactive" else db_error]
+    )
+    app.dependency_overrides[get_session] = lambda: session
+
+    def fetch(*args):
+        assert session.scalars.call_count == 1
+        session.rollback.assert_called_once_with()
+        return S3SourceObject("supplier_feed.csv", b"header\nvalue\n")
+
+    source = Mock(side_effect=S3ReadError("source would fail") if failure_at == "precheck_db" else fetch)
+    pipeline = Mock()
+    loader = Mock()
+    monkeypatch.setattr(etl_loads_route, "read_s3_csv_object", source)
+    monkeypatch.setattr(web_service, "run_pipeline", pipeline)
+    monkeypatch.setattr(web_service, "load_standard_csv", loader)
+
+    response = client.post(ENDPOINT, json=REQUEST)
+
+    if failure_at == "final_inactive":
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "inactive_profile"
+    else:
+        assert response.status_code == 500
+        assert response.text == "Internal Server Error"
+    assert session.scalars.call_count == (1 if failure_at == "precheck_db" else 2)
+    assert source.call_count == (0 if failure_at == "precheck_db" else 1)
+    pipeline.assert_not_called()
+    loader.assert_not_called()
+    for method in (session.add, session.add_all, session.flush, session.commit, session.execute):
+        method.assert_not_called()
+    for value in (secret, "private-password", "private-token", "private_sql", "internal-db"):
+        assert value not in response.text

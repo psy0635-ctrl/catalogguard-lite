@@ -533,3 +533,39 @@ def test_real_endpoint_rejects_oversized_upload_with_no_pipeline_run_and_no_db_c
     with session_factory() as after_session:
         after_count = after_session.scalar(select(ETLLoadRun.id).limit(1))
         assert after_count == before_count
+
+
+@pytest.mark.parametrize("upload_read_fails", [True, False])
+def test_multipart_read_precedes_activation_and_failures_prevent_staging(monkeypatch, upload_read_fails):
+    from unittest.mock import AsyncMock, MagicMock, Mock
+    from starlette.datastructures import UploadFile
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session
+    import etl.web_service as web_service
+
+    secret = "postgresql://user:private-password@internal-db/catalog?token=private-token"
+    session = MagicMock(spec=Session)
+    session.scalars.side_effect = OperationalError("SELECT private_sql", {}, RuntimeError(secret))
+    app.dependency_overrides[get_session] = lambda: session
+    read = AsyncMock(
+        return_value=b"header\nvalue\n",
+        side_effect=OSError(secret) if upload_read_fails else None,
+    )
+    pipeline, loader = Mock(), Mock()
+    monkeypatch.setattr(UploadFile, "read", read)
+    monkeypatch.setattr(web_service, "run_pipeline", pipeline)
+    monkeypatch.setattr(web_service, "load_standard_csv", loader)
+    with TestClient(app, raise_server_exceptions=False) as safe_client:
+        response = safe_client.post(
+            ENDPOINT, data={"profile_id": "sample_fashion_vendor_v1"}, files=_files()
+        )
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+    read.assert_awaited_once_with(MAX_UPLOAD_SIZE_BYTES + 1)
+    assert session.scalars.call_count == (0 if upload_read_fails else 1)
+    pipeline.assert_not_called()
+    loader.assert_not_called()
+    for method in (session.add, session.add_all, session.flush, session.commit, session.execute):
+        method.assert_not_called()
+    assert "private-password" not in response.text
+    assert "private-token" not in response.text
