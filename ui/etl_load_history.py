@@ -1116,6 +1116,63 @@ def _render_catalog_vocabulary_coverage(api_client) -> None:
         "미판정 비율은 오류율이나 공급사 평가 점수가 아닙니다. "
         "현재 vocabulary로 표준값을 판단할 수 없는 원본 값의 비율입니다."
     )
+    _render_supplier_unknown_vocabulary(
+        api_client, [item["supplier_key"] for item in supplier_coverage["items"]]
+    )
+
+
+def _render_supplier_unknown_vocabulary(api_client, supplier_keys: list[str]) -> None:
+    st.markdown("#### 공급사 미판정 Vocabulary 상세")
+    st.caption(
+        "미판정 값은 오류나 공급사 평가 점수가 아닙니다. "
+        "현재 vocabulary로 표준값을 판단할 수 없는 원본 값입니다."
+    )
+    if not supplier_keys:
+        st.info("조회할 공급사가 없습니다.")
+        return
+    supplier_key = st.selectbox(
+        "미판정 상세 공급사 선택",
+        options=supplier_keys,
+        index=None,
+        placeholder="공급사를 선택하세요",
+        key="supplier_unknown_vocabulary_supplier",
+    )
+    if supplier_key is None:
+        return
+
+    for label, fetch, build_dataframe, limit in (
+        ("색상", api_client.list_unknown_color_tokens,
+         build_unknown_color_token_dataframe, UNKNOWN_COLOR_TOKEN_LIMIT),
+        ("사이즈", api_client.list_unknown_size_tokens,
+         build_unknown_size_token_dataframe, UNKNOWN_SIZE_TOKEN_LIMIT),
+    ):
+        st.markdown(f"##### {label}")
+        try:
+            response = fetch(limit=limit, supplier_key=supplier_key)
+        except (
+            CatalogGuardApiConfigurationError,
+            CatalogGuardApiConnectionError,
+            CatalogGuardApiTimeoutError,
+            CatalogGuardApiResponseError,
+            ValueError,
+        ) as error:
+            st.error(
+                build_etl_api_error_display_message(
+                    f"공급사 미판정 {label} 토큰을 불러오지 못했습니다.", error
+                )
+            )
+            continue
+        if not response["items"]:
+            st.info(f"선택한 공급사의 미판정 {label} 토큰이 없습니다.")
+            continue
+        st.dataframe(
+            build_dataframe(response["items"]), hide_index=True, width="stretch"
+        )
+        st.caption(f"선택한 공급사의 미판정 {label} 토큰 상위 {limit}개입니다.")
+    st.caption(
+        "영향 상품은 아래 전체 미판정 색상·사이즈 토큰 보고서에서 같은 토큰을 선택해 "
+        "조회하세요. 영향 상품 조회는 전체 공급사 범위이며 상품의 공급사를 함께 표시합니다."
+    )
 
 
 def build_unknown_color_token_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:

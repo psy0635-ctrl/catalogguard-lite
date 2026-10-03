@@ -127,7 +127,7 @@ def fake_promotion_history_query_service(monkeypatch):
             return None
         return SimpleNamespace(items=[_audit()], total=1, limit=limit, offset=offset)
 
-    def fake_unknown_size_tokens(session, *, limit):
+    def fake_unknown_size_tokens(session, *, limit, supplier_key=None):
         calls.append(
             {
                 "operation": "unknown_size_tokens",
@@ -137,7 +137,7 @@ def fake_promotion_history_query_service(monkeypatch):
         )
         return state.unknown_size_tokens[:limit]
 
-    def fake_unknown_color_tokens(session, *, limit):
+    def fake_unknown_color_tokens(session, *, limit, supplier_key=None):
         calls.append(
             {"operation": "unknown_color_tokens", "session": session, "limit": limit}
         )
@@ -738,3 +738,28 @@ def test_catalog_promotion_history_hides_internal_database_errors(
     assert response.text == "Internal Server Error"
     assert "postgresql" not in response.text.lower()
     assert "secret" not in response.text.lower()
+
+
+@pytest.mark.parametrize("attribute", ["color", "size"])
+@pytest.mark.parametrize("supplier", [None, "supplier-a", "missing"])
+def test_unknown_token_api_optional_supplier_contract(monkeypatch, attribute, supplier):
+    override_current_user(role="viewer")
+    app.dependency_overrides[get_session] = lambda: object()
+    calls = []
+    def report(session, *, limit, supplier_key=None):
+        calls.append((limit, supplier_key))
+        return [] if supplier_key == "missing" else [SimpleNamespace(token="RAW", count=2)]
+    monkeypatch.setattr(etl_loads_route, f"list_unknown_{attribute}_tokens", report)
+    try:
+        params = {"limit": 7}
+        if supplier is not None:
+            params["supplier_key"] = supplier
+        response = client.get(f"/api/v1/catalog/unknown-{attribute}-tokens", params=params)
+        assert response.status_code == 200
+        assert response.json() == {"items": [] if supplier == "missing" else [{"token": "RAW", "count": 2}]}
+        assert calls == [(7, supplier)]
+        clear_current_user_override()
+        assert client.get(f"/api/v1/catalog/unknown-{attribute}-tokens", params=params).status_code == 401
+        assert calls == [(7, supplier)]
+    finally:
+        app.dependency_overrides.pop(get_session, None)

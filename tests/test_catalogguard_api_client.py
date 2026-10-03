@@ -4948,3 +4948,15 @@ def test_the_client_has_no_history_write_methods():
 
     for name in dir(client):
         assert "activation_history" not in name or name.startswith("list_"), name
+
+
+@pytest.mark.parametrize("attribute", ["color", "size"])
+def test_unknown_token_client_includes_optional_supplier_and_preserves_validation(attribute):
+    payload = {"items": [{"token": "RAW", "count": 2}]}
+    client, session = make_client(response=FakeResponse(payload=payload))
+    report = getattr(client, f"list_unknown_{attribute}_tokens")
+    assert report(limit=7, supplier_key="supplier / a") == payload
+    assert session.calls[0]["params"] == {"limit": 7, "supplier_key": "supplier / a"}
+    malformed, _ = make_client(response=FakeResponse(payload={"items": [{"token": "RAW", "count": True}]}))
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        getattr(malformed, f"list_unknown_{attribute}_tokens")(supplier_key="supplier-a")

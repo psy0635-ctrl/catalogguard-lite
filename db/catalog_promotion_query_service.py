@@ -345,12 +345,16 @@ def list_unknown_color_tokens(
     session: Session,
     *,
     limit: int,
+    supplier_key: str | None = None,
 ) -> list[UnknownColorToken]:
     """Return frequent color values not covered by the current color vocabulary."""
-    grouped_color_counts = session.execute(
+    statement = (
         select(CatalogProduct.color, func.count(CatalogProduct.id))
         .group_by(CatalogProduct.color)
-    ).all()
+    )
+    if supplier_key is not None:
+        statement = statement.where(CatalogProduct.supplier_key == supplier_key)
+    grouped_color_counts = session.execute(statement).all()
 
     grouped_tokens: dict[str, tuple[str, int]] = {}
     for raw_color, raw_count in grouped_color_counts:
@@ -514,12 +518,16 @@ def list_unknown_size_tokens(
     session: Session,
     *,
     limit: int,
+    supplier_key: str | None = None,
 ) -> list[UnknownSizeToken]:
     """Return the most frequent non-standard, non-numeric catalog size tokens."""
-    grouped_size_counts = session.execute(
+    statement = (
         select(CatalogProduct.size, func.count(CatalogProduct.id))
         .group_by(CatalogProduct.size)
-    ).all()
+    )
+    if supplier_key is not None:
+        statement = statement.where(CatalogProduct.supplier_key == supplier_key)
+    grouped_size_counts = session.execute(statement).all()
 
     grouped_tokens: dict[str, tuple[str, int]] = {}
     for raw_size, raw_count in grouped_size_counts:
