@@ -120,6 +120,12 @@ REQUIRED_FIELDS = [
 
 VALID_CATEGORIES = {"TOP", "BOTTOM", "OUTER", "SHOES", "BAG"}
 
+# 카테고리별 가격 중앙값과 비교할 이상치 판단 기준입니다.
+# 값을 변경하면 검수 결과가 달라질 수 있으므로 Inspection Version 정책을 확인합니다.
+PRICE_ANOMALY_MIN_CATEGORY_SAMPLE_SIZE = 5
+PRICE_ANOMALY_LOW_RATIO = 0.25
+PRICE_ANOMALY_HIGH_RATIO = 4.0
+
 # 카테고리마다 다른 필수 패션 속성 정책입니다. 정책의 기준은 이 표 하나뿐입니다.
 # key는 VALID_CATEGORIES의 canonical 표기와 정확히 같아야 합니다.
 # 여기에 없는 카테고리(빈 값, 허용 목록에 없는 값 포함)는 카테고리를 추정하지 않고

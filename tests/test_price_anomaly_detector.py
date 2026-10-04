@@ -1,6 +1,7 @@
 # 역할: 카테고리별 가격 이상치 탐지 로직이 경계값과 예외를 올바르게 처리하는지 테스트합니다.
 from dataclasses import asdict
 
+from config import settings
 from core.duplicate_detector import find_duplicate_product_ids
 from core.models import Product
 from core.price_anomaly_detector import (
@@ -27,6 +28,46 @@ def make_product(**overrides) -> Product:
     )
     defaults.update(overrides)
     return Product(**defaults)
+
+
+def test_price_anomaly_settings_keep_existing_policy_values():
+    assert getattr(settings, "PRICE_ANOMALY_MIN_CATEGORY_SAMPLE_SIZE", None) == 5
+    assert getattr(settings, "PRICE_ANOMALY_LOW_RATIO", None) == 0.25
+    assert getattr(settings, "PRICE_ANOMALY_HIGH_RATIO", None) == 4.0
+
+
+def test_find_category_price_anomalies_flags_adjacent_boundary_prices():
+    products = [
+        make_product(product_id=f"P{index}", price=10000)
+        for index in range(5)
+    ]
+    products.extend([
+        make_product(product_id="LOW", price=2499, source_row_number=7),
+        make_product(product_id="HIGH", price=40001, source_row_number=8),
+    ])
+
+    issues = find_category_price_anomalies(products)
+
+    assert [asdict(issue) for issue in issues] == [
+        {
+            "rule": "category_price_anomaly",
+            "severity": "warning",
+            "product_id": "LOW",
+            "product_group_id": "G001",
+            "message": "price 2499 in category 'TOP' has median 10000 and ratio 0.25",
+            "source_row_number": 7,
+            "related_source_rows": [],
+        },
+        {
+            "rule": "category_price_anomaly",
+            "severity": "warning",
+            "product_id": "HIGH",
+            "product_group_id": "G001",
+            "message": "price 40001 in category 'TOP' has median 10000 and ratio 4.00",
+            "source_row_number": 8,
+            "related_source_rows": [],
+        },
+    ]
 
 
 def test_check_price_flags_zero_as_non_positive_error():

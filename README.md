@@ -1099,6 +1099,8 @@ medium, m -> M
 
 ### 카테고리별 가격 이상치 비교 기준
 
+가격 이상치 기준은 `config/settings.py`의 `PRICE_ANOMALY_MIN_CATEGORY_SAMPLE_SIZE`, `PRICE_ANOMALY_LOW_RATIO`, `PRICE_ANOMALY_HIGH_RATIO`에서 관리합니다. 기존과 동일하게 유효 가격 5개 이상일 때 중앙값을 계산하고, 중앙값의 0.25배 미만 또는 4.0배 초과인 가격만 이상치로 표시합니다. 이번 상수 위치 이동은 검수 결과를 바꾸지 않아 `INSPECTION_VERSION = "17"`을 유지합니다. 향후 실제 정책값을 바꿔 검수 결과가 달라지는 경우에는 [Inspection Version 정책](docs/inspection_version_policy.md)에 따라 버전을 올려야 합니다. 환경변수나 관리 화면을 통한 runtime override는 지원하지 않습니다.
+
 카테고리별 가격 중앙값을 기준으로 지나치게 낮거나 높은 가격을 `가격 이상치` 주의로 표시합니다. 이때 상품을 같은 카테고리로 묶는 비교 기준은 `core.category_mismatch_detector.normalize_category()`를 그대로 재사용합니다. 따라서 `TOP`/`top`/`상의`, `SHOES`/`shoes`/`신발`, `BAG`/`bag`/`가방`은 의미상 같은 카테고리 그룹으로 함께 비교합니다.
 
 이전에는 이 규칙만 앞뒤 공백과 영문 대소문자만 정리해서 비교했기 때문에 `TOP`과 `top`은 같은 그룹이지만 `상의`는 별도 그룹이 되었습니다. 그 결과 한 카테고리의 표기가 섞이면 각 그룹의 상품 수가 최소 비교 기준 아래로 내려가, 표기가 정상인 canonical 상품의 가격 이상치까지 검출되지 않을 수 있었습니다. 비교 기준을 통일해 이 누락을 없앴습니다.
@@ -3075,7 +3077,7 @@ Authentication은 "누가 실행할 수 있는지"를 통제하는 기능입니�
 - custom VPC·private subnet 기반 네트워크 구성의 Terraform 코드화
 - Refresh Token, 회원가입, password reset, OAuth/MFA/SSO, AWS staging·Kubernetes의 로그인 rate limit 활성화
 - 중복 저장 이벤트 로그 또는 감사 기록 검토
-- 카테고리와 가격 이상치 기준을 설정 파일이나 관리 화면에서 조정
+- 운영 요구가 확인되면 카테고리·가격 이상치 정책의 동적 설정 및 관리 화면 검토(정책 버전과 실행 시 설정 snapshot 포함). 카테고리 허용값·alias·keyword·필수 속성과 가격 이상치 기준은 이미 Python `config/settings.py`에서 관리합니다.
 - 브랜드 표준화
 - `gender` 선택 컬럼과 표준화
 - 웹 ETL 처리 시간이 길어질 경우의 비동기(Celery) 실행
