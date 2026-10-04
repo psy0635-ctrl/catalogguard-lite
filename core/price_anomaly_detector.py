@@ -1,16 +1,17 @@
 # 역할: 카테고리별 가격 분포를 기준으로 지나치게 낮거나 높은 가격을 찾습니다.
 from statistics import median
 
+from config.settings import (
+    PRICE_ANOMALY_HIGH_RATIO,
+    PRICE_ANOMALY_LOW_RATIO,
+    PRICE_ANOMALY_MIN_CATEGORY_SAMPLE_SIZE,
+)
+
 # 가격 그룹 비교도 상품명·카테고리 불일치 검수와 같은 의미 기준을 써야 하므로
 # 기존 카테고리 별칭 정규화를 그대로 재사용합니다. 공식 입력값 검증은 별개이며
 # 여전히 config.settings.VALID_CATEGORIES 직접 비교로만 수행합니다.
 from core.category_mismatch_detector import normalize_category
 from core.models import Product, ValidationIssue
-
-
-MIN_CATEGORY_SAMPLE_SIZE = 5
-LOW_PRICE_RATIO = 0.25
-HIGH_PRICE_RATIO = 4.0
 
 
 def get_valid_price(price) -> int | None:
@@ -49,7 +50,7 @@ def calculate_category_price_medians(products: list[Product]) -> dict[str, float
     medians = {}
     for category, prices in prices_by_category.items():
         # 샘플이 너무 적으면 정상 가격대를 판단하기 어려워 이상치 계산에서 제외합니다.
-        if len(prices) < MIN_CATEGORY_SAMPLE_SIZE:
+        if len(prices) < PRICE_ANOMALY_MIN_CATEGORY_SAMPLE_SIZE:
             continue
         medians[category] = float(median(prices))
 
@@ -72,8 +73,8 @@ def find_category_price_anomalies(products: list[Product]) -> list[ValidationIss
             continue
 
         if not (
-            price < median_price * LOW_PRICE_RATIO
-            or price > median_price * HIGH_PRICE_RATIO
+            price < median_price * PRICE_ANOMALY_LOW_RATIO
+            or price > median_price * PRICE_ANOMALY_HIGH_RATIO
         ):
             continue
 
