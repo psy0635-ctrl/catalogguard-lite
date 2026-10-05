@@ -260,10 +260,12 @@ def fake_etl_query_service(monkeypatch):
         etl_load_run_id,
         limit,
         offset,
+        error_code=None,
     ):
         calls.append(
             {
                 "operation": "rejections",
+                "error_code": error_code,
                 "session": session,
                 "etl_load_run_id": etl_load_run_id,
                 "limit": limit,
@@ -890,6 +892,29 @@ def test_detail_rejects_invalid_product_pagination(params):
 def test_non_positive_path_id_is_rejected(fake_etl_query_service):
     assert client.get(f"{ENDPOINT}/0").status_code == 422
     assert client.get(f"{ENDPOINT}/-1").status_code == 422
+
+
+@pytest.mark.parametrize("value,expected", [
+    (None, None), ("", None), ("   ", None),
+    ("  MISSING_SOURCE_VALUE  ", "MISSING_SOURCE_VALUE"),
+    ("missing_source_value", "missing_source_value"),
+])
+def test_rejections_error_code_uses_existing_filter_policy(fake_etl_query_service, value, expected):
+    params = {} if value is None else {"error_code": value}
+    response = client.get(f"{ENDPOINT}/12/rejections", params=params)
+    assert response.status_code == 200
+    assert fake_etl_query_service.calls[-1]["error_code"] == expected
+
+
+def test_filtered_rejections_preserve_viewer_rbac_and_missing_batch(fake_etl_query_service):
+    params = {"error_code": "MISSING_SOURCE_VALUE"}
+    for role in ("viewer", "operator"):
+        override_current_user(role=role)
+        assert client.get(f"{ENDPOINT}/12/rejections", params=params).status_code == 200
+    fake_etl_query_service.state.load_exists = False
+    assert client.get(f"{ENDPOINT}/999999/rejections", params=params).status_code == 404
+    clear_current_user_override()
+    assert client.get(f"{ENDPOINT}/12/rejections", params=params).status_code == 401
 
 
 def test_rejections_endpoint_returns_structured_masked_rows(fake_etl_query_service):

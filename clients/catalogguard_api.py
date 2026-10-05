@@ -2672,13 +2672,17 @@ class CatalogGuardApiClient:
         *,
         limit: int = 20,
         offset: int = 0,
+        error_code: str | None = None,
     ) -> dict[str, Any]:
         _validate_positive_etl_int(etl_load_run_id, "etl_load_run_id")
         _validate_etl_pagination(limit, offset)
+        params = {"limit": limit, "offset": offset}
+        if error_code is not None:
+            params["error_code"] = error_code
 
         data = self._get_json(
             f"/api/v1/etl-loads/{etl_load_run_id}/rejections",
-            params={"limit": limit, "offset": offset},
+            params=params,
             raise_not_found=True,
             not_found_error=ETLLoadNotFoundError,
             not_found_message="ETL ?곸옱 諛곗튂瑜?李얠쓣 ???놁뒿?덈떎.",

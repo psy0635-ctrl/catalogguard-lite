@@ -301,9 +301,9 @@ class ETLBrowserE2ERunner:
                 rejects_path=rejects_path,
                 summary_path=summary_path,
                 expected_counts={
-                    "total_rows": 3,
+                    "total_rows": 4,
                     "loaded_rows": 2,
-                    "rejected_rows": 1,
+                    "rejected_rows": 2,
                 },
                 name_prefix="ETL reject-details",
             )

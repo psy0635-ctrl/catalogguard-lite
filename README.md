@@ -3290,6 +3290,6 @@ DB 적재 완료
 거부 행: 0
 ```
 
-적재 후에는 `GET /api/v1/etl-loads`로 배치 목록을, `GET /api/v1/etl-loads/{etl_load_run_id}`로 파일 해시와 해당 배치의 staging 상품을, `GET /api/v1/etl-loads/{etl_load_run_id}/rejections`로 구조화된 오류와 마스킹된 원본을 페이지 단위로 조회할 수 있습니다. 프로필 구조, 변환·오류 기준, 조회 규칙과 제한사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.
+적재 후에는 `GET /api/v1/etl-loads`로 배치 목록을, `GET /api/v1/etl-loads/{etl_load_run_id}`로 파일 해시와 해당 배치의 staging 상품을, `GET /api/v1/etl-loads/{etl_load_run_id}/rejections`로 구조화된 오류와 마스킹된 원본을 페이지 단위로 조회할 수 있습니다. 선택적 `error_code`는 앞뒤 공백을 제거한 정확한 오류 코드가 포함된 행만 조회하며, `total`과 pagination도 필터 결과 기준입니다. UI의 ‘거부 행 오류 코드’에서 ‘전체’를 선택하면 기존 전체 목록을 조회합니다. 필터는 조회 전용이며 raw 개인정보는 노출하지 않습니다. CSV 다운로드는 필터와 관계없이 해당 배치의 전체 거부 행을 포함합니다. 프로필 구조, 변환·오류 기준, 조회 규칙과 제한사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.
 
 위 두 CLI 명령과 같은 변환·적재 로직을 Streamlit에서도 실행할 수 있습니다. `ETL 실행` 영역에서 공급사 CSV 또는 XLSX를 업로드하고 `ETL 실행 프로필`을 선택한 뒤 버튼을 클릭하면 `POST /api/v1/etl-loads`가 같은 `run_pipeline()`·`load_standard_csv()`를 호출해 staging까지 적재합니다. XLSX 지원은 이 Web multipart 경로에만 적용되며 CLI·S3·HTTP feed·Airflow는 CSV-only입니다. 웹 ETL의 profile allowlist, 업로드 검증, 중복 재사용과 임시 파일 정리 같은 구현 세부사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.

@@ -1713,6 +1713,99 @@ def test_etl_load_history_marks_legacy_comparison_values_as_unknown(monkeypatch)
     assert "한 실행의 Profile snapshot이 없어 필드 수준 비교를 할 수 없습니다." in body
 
 
+def test_rejection_filter_resets_offset_paginates_and_preserves_full_csv(monkeypatch):
+    items = [_rejection_item(number) for number in range(2, 27)]
+    items[-1]["errors"] = [{"code": "NEGATIVE_STOCK", "field": "stock", "message": "synthetic"}]
+
+    class FilteredClient(FakeEtlApiClient):
+        def list_etl_rejections(self, run_id, **params):
+            self.rejection_calls.append((run_id, params))
+            code = params.get("error_code")
+            matched = [item for item in items if code is None or any(
+                error["code"] == code for error in item["errors"]
+            )]
+            offset, limit = params["offset"], params["limit"]
+            return {"available": True, "items": matched[offset:offset + limit],
+                    "total": len(matched), "limit": limit, "offset": offset}
+
+    api_client = FilteredClient(reject_details_stored=True, list_items=[make_load(12), make_load(11)])
+    monkeypatch.setattr(etl_load_history, "get_authenticated_api_client", lambda: api_client)
+    monkeypatch.setattr(catalogguard_api, "create_catalogguard_api_client", lambda: api_client)
+    app = run_authenticated_app_test(timeout=10)
+    select_etl_batch(app, 12)
+    next(widget for widget in app.button if widget.label == "상세 조회").click().run()
+    def selector():
+        return next(widget for widget in app.selectbox if widget.key == "etl_reject_error_code")
+    assert selector().value is None
+    assert selector().options == ["전체", "INVALID_PRICE", "NEGATIVE_STOCK"]
+    next(widget for widget in app.button if widget.key == "etl_reject_next").click().run()
+    selector().select("INVALID_PRICE").run()
+    assert api_client.rejection_calls[-1] == (12, {"limit": 20, "offset": 0, "error_code": "INVALID_PRICE"})
+    next(widget for widget in app.button if widget.key == "etl_reject_next").click().run()
+    assert api_client.rejection_calls[-1][1]["offset"] == 20
+    selector().select("NEGATIVE_STOCK").run()
+    assert api_client.rejection_calls[-1] == (12, {"limit": 20, "offset": 0, "error_code": "NEGATIVE_STOCK"})
+    reject_frame = next(frame.value for frame in app.dataframe if list(frame.value.columns) == ETL_REJECT_DISPLAY_COLUMNS)
+    assert reject_frame["원본 행"].tolist() == [26]
+    next(widget for widget in app.button if widget.key == "etl_reject_export_prepare").click().run()
+    assert api_client.rejection_calls[-1] == (12, {"limit": 100, "offset": 0})
+    assert app.session_state["etl_reject_export_download"]["total"] == 25
+    assert any("필터와 관계없이" in caption.value for caption in app.caption)
+    selector().select(None).run()
+    assert api_client.rejection_calls[-1] == (12, {"limit": 20, "offset": 0})
+    selector().select("INVALID_PRICE").run()
+    select_etl_batch(app, 11)
+    next(widget for widget in app.button if widget.label == "상세 조회").click().run()
+    assert selector().value is None
+    assert api_client.rejection_calls[-1] == (11, {"limit": 20, "offset": 0})
+    assert len(app.exception) == 0
+
+
+@pytest.mark.parametrize("mode", ["empty", "error", "legacy"])
+def test_rejection_filter_handles_empty_error_and_legacy_metadata(monkeypatch, mode):
+    class FilteredClient(FakeEtlApiClient):
+        def get_etl_load_detail(self, run_id, **params):
+            response = super().get_etl_load_detail(run_id, **params)
+            if mode == "legacy":
+                response["error_counts"] = None
+            return response
+
+        def list_etl_rejections(self, run_id, **params):
+            self.rejection_calls.append((run_id, params))
+            if params.get("error_code") is not None:
+                if mode == "error":
+                    raise catalogguard_api.CatalogGuardApiConnectionError("synthetic failure")
+                return {"available": True, "items": [], "total": 0,
+                        "limit": params["limit"], "offset": params["offset"]}
+            return {"available": True, "items": [_rejection_item(2)], "total": 1,
+                    "limit": params["limit"], "offset": params["offset"]}
+
+    api_client = FilteredClient(reject_details_stored=True)
+    monkeypatch.setattr(etl_load_history, "get_authenticated_api_client", lambda: api_client)
+    monkeypatch.setattr(catalogguard_api, "create_catalogguard_api_client", lambda: api_client)
+    app = run_authenticated_app_test(timeout=10)
+    select_etl_batch(app, 12)
+    next(widget for widget in app.button if widget.label == "상세 조회").click().run()
+    selector = next(widget for widget in app.selectbox if widget.key == "etl_reject_error_code")
+    if mode == "legacy":
+        assert selector.options == ["전체"]
+        assert any("오류 코드 집계가 없어" in caption.value for caption in app.caption)
+        assert "error_code" not in api_client.rejection_calls[-1][1]
+    else:
+        selector.select("INVALID_PRICE").run()
+        if mode == "empty":
+            assert any("선택한 오류 코드" in info.value for info in app.info)
+            assert any(button.key == "etl_reject_export_prepare" for button in app.button)
+        else:
+            assert app.error
+            assert app.session_state["etl_load_detail_response"] is not None
+            assert app.session_state["etl_load_detail_error"] is None
+            assert app.session_state["etl_reject_error"] is not None
+        next(widget for widget in app.selectbox if widget.key == "etl_reject_error_code").select(None).run()
+        assert app.session_state["etl_reject_error"] is None
+    assert len(app.exception) == 0
+
+
 def test_etl_load_history_shows_rejection_rows_and_paginates(monkeypatch):
     rejection_items = [
         {
