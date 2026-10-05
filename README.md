@@ -1466,7 +1466,7 @@ curl.exe -X POST "http://127.0.0.1:8001/api/v1/inspections" `
 
 #### 로컬 환경변수 파일 준비
 
-저장소 루트에서 예시 파일을 복사하고 `.env.local`의 `CHANGE_ME`만 URL-safe 임의 문자열로 바꿉니다. 실제 비밀번호나 전체 DB 연결 문자열은 문서, 명령 출력 또는 Git에 기록하지 않습니다. `.env.local`과 일반 `.env`는 `.gitignore` 및 `.dockerignore`에서 제외됩니다.
+저장소 루트에서 예시 파일을 복사하고 `.env.local`의 `POSTGRES_PASSWORD`와 `CATALOGGUARD_JWT_SECRET`에 있는 `CHANGE_ME`를 각각 직접 설정한 로컬 전용 값으로 바꿉니다. DB 비밀번호는 URL-safe 문자열을 사용하고 JWT secret은 production 값과 공유하지 않습니다. Compose는 JWT secret 누락·빈 값을 실행 전에 차단하며, `CHANGE_ME`는 기존 API 검증에서 로그인·토큰 검증 시 거부됩니다. 실제 비밀번호·secret·토큰·전체 DB 연결 문자열은 출력하거나 Git에 기록하지 않습니다. `.env.local`과 일반 `.env`는 `.gitignore` 및 `.dockerignore`에서 제외됩니다. 기존 `.env.local`이 있다면 덮어쓰지 말고 JWT 항목만 추가합니다.
 
 ```powershell
 cd C:\study\catalogguard-lite
@@ -1522,6 +1522,34 @@ $readyResponse.Headers["X-Request-ID"]
 ```
 
 API 문서는 http://127.0.0.1:8001/docs 에서 확인할 수 있습니다. CSV 저장·목록·상세 조회 API는 위의 기존 FastAPI 사용법과 동일합니다.
+
+#### 계정 준비와 로그인 확인
+
+Health 응답만으로 로그인 가능 여부를 판단하지 않습니다. API 컨테이너 안에서 기존 bootstrap CLI로 로컬 테스트 계정을 만들고, 비밀번호는 대화형 prompt에 입력합니다. 이미 있는 계정은 다시 생성하지 않습니다.
+
+```powershell
+docker compose --env-file .env.local -f compose.local.yaml exec api `
+  python scripts/create_user.py --username local_operator --role operator
+```
+
+아래 예시는 기본 API 호스트 포트 `8001`을 사용합니다. 변경했다면 주소의 포트도 맞춥니다. 로그인 비밀번호와 응답 토큰은 메모리에서만 사용하고 원문을 출력하지 않습니다.
+
+```powershell
+$localCredential = Get-Credential -UserName local_operator -Message "로컬 테스트 계정 비밀번호"
+$localLogin = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8001/api/v1/auth/login" `
+  -ContentType "application/json" `
+  -Body (@{ username = $localCredential.UserName; password = $localCredential.GetNetworkCredential().Password } | ConvertTo-Json)
+if (-not $localLogin.access_token) { throw "로그인 응답에 토큰이 없습니다." }
+$localMe = Invoke-RestMethod -Uri "http://127.0.0.1:8001/api/v1/auth/me" `
+  -Headers @{ Authorization = "Bearer $($localLogin.access_token)" }
+$localMe | Select-Object username, role
+Remove-Variable localCredential, localLogin, localMe
+
+# Authorization 헤더 없이 요청하면 HTTP 401이어야 합니다.
+curl.exe -s -o NUL -w "%{http_code}" "http://127.0.0.1:8001/api/v1/auth/me"
+```
+
+JWT secret은 API 컨테이너에만 전달합니다. Worker는 JWT를 발급·검증하지 않고 API가 전달한 actor 정보로 검수·저장을 수행합니다.
 
 #### 중지, 삭제, 데이터 보존
 

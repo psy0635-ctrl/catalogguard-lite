@@ -37,26 +37,23 @@ C와 D는 선택 구간이다. Quick Demo 3분을 늘리지 않으며, 핵심 �
 
 1. local demo DB만 사용한다. `docker compose down`은 container와 network만 종료하며 named volume의 데이터는 남는다. 이 경로를 “매번 초기화되는 DB”라고 부르지 않는다.
 2. `.env.local`과 `.env`는 Git에 추가하지 않고, secret·database URL은 출력·스크린샷·문서에 남기지 않는다.
-3. `CHANGE_ME`는 JWT secret으로 사용할 수 없다. 아래 `<…>`는 현재 터미널에서만 넣는 placeholder다.
+3. `.env.local`의 `POSTGRES_PASSWORD`와 `CATALOGGUARD_JWT_SECRET`에 있는 `CHANGE_ME`를 각각 직접 설정한 로컬 전용 값으로 바꾼다. `CHANGE_ME`는 JWT secret으로 사용할 수 없다. 기존 `.env.local`이 있다면 복사로 덮어쓰지 않고 필요한 항목만 추가한다.
 
 ```powershell
 cd C:\study\catalogguard-lite
 .\.venv\Scripts\Activate.ps1
 Copy-Item .env.local.example .env.local
 notepad .env.local
-docker compose --env-file .env.local -f compose.local.yaml up -d db redis
+docker compose --env-file .env.local -f compose.local.yaml up --build -d
 ```
 
-현재 `compose.local.yaml`은 API service에 `CATALOGGUARD_JWT_SECRET`을 전달하지 않는다. 따라서 로그인까지 보여 주는 데모에서는 API를 호스트 프로세스로 시작한다. 이는 설정 누락을 숨기지 않기 위한 현재 제약이다.
+Compose API가 migration을 적용하고 `.env.local`의 JWT secret으로 로그인·토큰 검증을 수행한다. 계정은 API 컨테이너의 기존 CLI로 준비하고 비밀번호를 대화형 prompt에 입력한다. health·ready뿐 아니라 로그인과 `/api/v1/auth/me`도 [README의 로컬 Compose 인증 확인 절](../README.md#계정-준비와-로그인-확인)대로 확인한다. 기본 API 포트는 `8001`이며 `.env.local`에서 바꾸면 아래 주소도 맞춘다.
 
 ```powershell
-# 현재 PowerShell에서만 설정하고 출력하지 않는다.
-$env:DATABASE_URL = "<LOCAL_DEMO_POSTGRES_URL>"
-$env:CATALOGGUARD_JWT_SECRET = "<YOUR_LOCAL_JWT_SECRET>"
-
-python -m alembic upgrade head
-python scripts/create_user.py --username demo_operator --role operator
-python -m uvicorn api.main:app --host 127.0.0.1 --port 8001 --no-access-log
+docker compose --env-file .env.local -f compose.local.yaml exec api python -m alembic current
+docker compose --env-file .env.local -f compose.local.yaml exec api python -m alembic heads
+docker compose --env-file .env.local -f compose.local.yaml exec api `
+  python scripts/create_user.py --username demo_operator --role operator
 ```
 
 별도 PowerShell에서 Streamlit을 시작한다.
@@ -85,6 +82,8 @@ python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501
 개인정보 의심 패턴 탐지와 마스킹은 다르다. 검수 규칙은 이메일·전화번호·식별번호 같은 패턴을 찾고, 화면 미리보기와 ETL reject 상세/API는 민감값을 그대로 보여 주지 않는다. 이는 모든 개인정보를 자동 익명화한다는 뜻이 아니다.
 
 ### ETL batch 준비 (타이머 시작 전)
+
+아래 host-side `etl.load_cli`에는 Compose DB의 호스트 포트(기본 `5433`)로 연결하는 로컬 `DATABASE_URL`을 현재 PowerShell에 별도로 설정한다. Compose의 `--env-file`은 호스트 Python 환경변수를 자동으로 설정하지 않는다. 연결 문자열은 출력하지 않는다.
 
 아래 명령은 Full Demo에서 보여 줄 두 batch를 미리 만든다. **순서대로** 실행한다. 나중에 적재한 clean batch가 `ETL 품질 관찰`의 “최신 배치”가 되기 때문이다. `output\demo` 생성물은 local artefact이며 Git에 추가하지 않는다.
 
