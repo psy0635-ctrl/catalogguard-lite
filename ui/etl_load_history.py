@@ -681,6 +681,14 @@ def invalidate_etl_quality_observability(session_state) -> None:
     session_state["etl_quality_observability_error"] = None
 
 
+def refresh_etl_quality_observability(session_state) -> None:
+    """Clear only observation caches; selection is resolved against the new list."""
+    session_state["etl_quality_observability_profiles_initialized"] = False
+    session_state["etl_quality_observability_profiles_response"] = None
+    session_state["etl_quality_observability_profiles_error"] = None
+    invalidate_etl_quality_observability(session_state)
+
+
 def build_etl_profile_mapping_dataframe(
     source_columns: dict[str, list[str]],
 ) -> pd.DataFrame:
@@ -2040,6 +2048,13 @@ def _render_etl_quality_observability(api_client) -> None:
         "코드를 보여 줍니다."
     )
 
+    st.button(
+        "품질 관찰 새로고침",
+        key="etl_quality_observability_refresh",
+        on_click=refresh_etl_quality_observability,
+        args=(st.session_state,),
+    )
+
     profiles_response = _fetch_etl_quality_observability_profiles(
         api_client,
         st.session_state,
@@ -2060,6 +2075,13 @@ def _render_etl_quality_observability(api_client) -> None:
     )
     # 고를 공급사가 없으면 비교 조회를 보내 봐야 빈 결과뿐이므로 요청하지 않습니다.
     if not profile_options:
+        st.session_state["etl_quality_observability_selected_profile"] = (
+            resolve_etl_quality_observability_selection(
+                profile_options,
+                st.session_state.get("etl_quality_observability_selected_profile"),
+            )
+        )
+        invalidate_etl_quality_observability(st.session_state)
         st.info(ETL_QUALITY_OBSERVABILITY_NO_PROFILE_MESSAGE)
         return
 
