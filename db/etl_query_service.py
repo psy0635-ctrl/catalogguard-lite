@@ -426,6 +426,7 @@ def list_etl_rejections(
     etl_load_run_id: int,
     limit: int,
     offset: int,
+    error_code: str | None = None,
 ) -> ETLRejectedRowList | None:
     load_run = session.get(ETLLoadRun, etl_load_run_id)
     if load_run is None:
@@ -439,16 +440,21 @@ def list_etl_rejections(
             offset=offset,
         )
 
+    conditions = [ETLRejectedRow.etl_load_run_id == etl_load_run_id]
+    normalized_code = normalize_etl_filter(error_code)
+    if normalized_code is not None:
+        conditions.append(ETLRejectedRow.errors.contains([{"code": normalized_code}]))
+
     rows_statement = (
         select(ETLRejectedRow)
-        .where(ETLRejectedRow.etl_load_run_id == etl_load_run_id)
+        .where(*conditions)
         .order_by(ETLRejectedRow.source_row_number.asc(), ETLRejectedRow.id.asc())
         .limit(limit)
         .offset(offset)
     )
     rows = list(session.scalars(rows_statement).all())
     total_statement = select(func.count()).select_from(ETLRejectedRow).where(
-        ETLRejectedRow.etl_load_run_id == etl_load_run_id
+        *conditions
     )
     total = int(session.scalar(total_statement) or 0)
     return ETLRejectedRowList(

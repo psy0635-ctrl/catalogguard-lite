@@ -1991,19 +1991,22 @@ def test_get_etl_load_detail_accepts_nullable_quality_summary_for_legacy_batch()
     assert client.get_etl_load_detail(12)["error_counts"] is None
 
 
-def test_list_etl_rejections_calls_endpoint_and_validates_contract():
+@pytest.mark.parametrize("error_code", [None, "MISSING_SOURCE_VALUE"])
+def test_list_etl_rejections_calls_endpoint_and_validates_contract(error_code):
     client, session = make_client(
         response=FakeResponse(payload=ETL_REJECTIONS_RESPONSE),
         timeout_seconds=3.0,
     )
 
-    data = client.list_etl_rejections(12, limit=20, offset=40)
+    data = client.list_etl_rejections(12, limit=20, offset=40, error_code=error_code)
 
     assert data == ETL_REJECTIONS_RESPONSE
     assert session.calls == [
         {
             "url": "https://api.example.com/api/v1/etl-loads/12/rejections",
-            "params": {"limit": 20, "offset": 40},
+            "params": {"limit": 20, "offset": 40, **(
+                {} if error_code is None else {"error_code": error_code}
+            )},
             "timeout": 3.0,
         }
     ]

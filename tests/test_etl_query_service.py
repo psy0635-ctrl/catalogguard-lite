@@ -332,6 +332,52 @@ def test_list_etl_rejections_paginates_and_returns_masked_structured_rows(seeded
     ) is None
 
 
+def test_rejection_error_code_filter_uses_postgresql_jsonb(seeded_runs, monkeypatch):
+    from db.etl_query_service import list_etl_rejections
+
+    session, _prefix, newest, tied, _older = seeded_runs
+    for row_number, codes in (
+        (5, ["MISSING_SOURCE_VALUE", "INVALID_PRICE"]),
+        (6, ["MISSING_SOURCE_VALUE", "MISSING_SOURCE_VALUE"]),
+        (7, ["missing_source_value"]),
+    ):
+        session.add(ETLRejectedRow(
+            etl_load_run_id=newest.id,
+            source_row_number=row_number,
+            errors=[{"code": code, "field": "price", "message": "synthetic"}
+                    for code in codes],
+            masked_source_data={"sku": f"SYNTHETIC-{row_number}"},
+        ))
+    session.flush()
+
+    def unexpected_write(*args, **kwargs):
+        pytest.fail("Reject query must remain read-only")
+
+    with monkeypatch.context() as patch:
+        for method in ("commit", "rollback", "flush", "add", "delete"):
+            patch.setattr(session, method, unexpected_write)
+        def query(code=None, offset=0, run_id=newest.id):
+            return list_etl_rejections(session, etl_load_run_id=run_id,
+                                       limit=1, offset=offset, error_code=code)
+
+        assert query().total == 4
+        assert query("  ").total == 4
+        first = query("  MISSING_SOURCE_VALUE  ")
+        assert first.total == 2
+        assert first.items[0].source_row_number == 5
+        second = query("MISSING_SOURCE_VALUE", offset=1)
+        assert second.total == 2
+        assert second.items[0].source_row_number == 6
+        assert second.limit == 1 and second.offset == 1
+        assert query("MISSING_SOURCE_VALUE", offset=2).items == []
+        assert query("INVALID_PRICE").total == 2
+        assert query("missing_source_value").total == 1
+        for code in ("MISSING", "SOURCE_VALUE", "synthetic", "UNKNOWN"):
+            assert query(code).total == 0
+        assert query("MISSING_SOURCE_VALUE", run_id=tied.id).available is False
+        assert query("MISSING_SOURCE_VALUE", run_id=999999) is None
+
+
 def test_query_service_does_not_modify_database(seeded_runs):
     from db.etl_query_service import list_etl_loads
 

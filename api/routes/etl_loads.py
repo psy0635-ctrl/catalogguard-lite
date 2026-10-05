@@ -1690,6 +1690,7 @@ def list_etl_rejected_rows(
     etl_load_run_id: int = Path(..., ge=1),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    error_code: str | None = Query(default=None),
     _current_user=Depends(require_viewer),
     session: Session = Depends(get_session),
 ) -> ETLRejectedRowListResponse:
@@ -1698,6 +1699,7 @@ def list_etl_rejected_rows(
         etl_load_run_id=etl_load_run_id,
         limit=limit,
         offset=offset,
+        error_code=normalize_etl_filter(error_code),
     )
     if result is None:
         raise HTTPException(

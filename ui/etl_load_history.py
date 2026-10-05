@@ -359,6 +359,7 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_lineage_compare_detail_response": None,
     "etl_lineage_compare_detail_error": None,
     "etl_reject_offset": 0,
+    "etl_reject_error_code": None,
     "etl_reject_response": None,
     "etl_reject_error": None,
     "etl_reject_export_download": None,
@@ -1571,6 +1572,7 @@ def reset_etl_load_detail_state(session_state) -> None:
     session_state["etl_load_detail_error"] = None
     session_state["etl_load_product_offset"] = 0
     session_state["etl_reject_offset"] = 0
+    session_state.pop("etl_reject_error_code", None)
     session_state["etl_reject_response"] = None
     session_state["etl_reject_error"] = None
     session_state["etl_reject_export_download"] = None
@@ -2460,11 +2462,15 @@ def _fetch_etl_rejections(api_client, session_state) -> dict[str, Any] | None:
     selected_run_id = session_state.get("etl_load_selected_run_id")
     if selected_run_id is None:
         return None
+    filter_params = {}
+    if session_state.get("etl_reject_error_code") is not None:
+        filter_params["error_code"] = session_state["etl_reject_error_code"]
     try:
         response = api_client.list_etl_rejections(
             int(selected_run_id),
             limit=ETL_REJECT_LIMIT,
             offset=session_state["etl_reject_offset"],
+            **filter_params,
         )
         session_state["etl_reject_response"] = response
         session_state["etl_reject_error"] = None
@@ -2567,12 +2573,36 @@ def _render_etl_rejection_export(api_client, *, etl_load_run_id: int) -> None:
     )
 
 
+def reset_etl_rejection_filter_state(session_state) -> None:
+    session_state["etl_reject_offset"] = 0
+    session_state["etl_reject_response"] = None
+    session_state["etl_reject_error"] = None
+
+
 def _render_etl_rejections(api_client, detail_response: dict[str, Any]) -> None:
     if not detail_response.get("reject_details_stored", False):
         st.info(
             "이 배치는 reject 상세 저장 기능 도입 전에 생성되어 거부 행 상세가 없습니다."
         )
         return
+
+    error_counts = detail_response.get("error_counts")
+    codes = sorted(error_counts) if isinstance(error_counts, dict) else []
+    options = [None, *codes]
+    if st.session_state.get("etl_reject_error_code") not in options:
+        st.session_state["etl_reject_error_code"] = None
+        reset_etl_rejection_filter_state(st.session_state)
+    st.selectbox(
+        "거부 행 오류 코드",
+        options=options,
+        format_func=lambda code: "전체" if code is None else code,
+        key="etl_reject_error_code",
+        on_change=reset_etl_rejection_filter_state,
+        args=(st.session_state,),
+    )
+    if error_counts is None:
+        st.caption("이 배치는 오류 코드 집계가 없어 전체 거부 행을 조회합니다.")
+    st.caption("CSV 다운로드는 오류 코드 필터와 관계없이 배치의 전체 거부 행을 포함합니다.")
 
     response = _fetch_etl_rejections(api_client, st.session_state)
     if response is None:
@@ -2586,7 +2616,13 @@ def _render_etl_rejections(api_client, detail_response: dict[str, Any]) -> None:
 
     items = response.get("items") or []
     if not items:
-        st.info("거부 행이 없습니다.")
+        if st.session_state.get("etl_reject_error_code") is not None:
+            st.info("선택한 오류 코드에 해당하는 거부 행이 없습니다.")
+            selected_run_id = st.session_state.get("etl_load_selected_run_id")
+            if isinstance(selected_run_id, int):
+                _render_etl_rejection_export(api_client, etl_load_run_id=selected_run_id)
+        else:
+            st.info("거부 행이 없습니다.")
         return
 
     st.subheader("거부 행 상세")
