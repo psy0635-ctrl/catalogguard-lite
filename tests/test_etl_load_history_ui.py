@@ -3797,6 +3797,133 @@ def test_etl_load_history_observability_is_readable_by_viewer_and_operator(monke
 # ---- ETL 품질 관찰: 공급사 목록 전용 조회 -----------------------------------
 
 
+def _refresh_observability(app):
+    return app.button(key="etl_quality_observability_refresh").click().run(timeout=10)
+
+
+def test_observability_refresh_updates_suppliers_and_selected_detail(monkeypatch):
+    api_client = FakeEtlApiClient()
+    def forbid_write(*args, **kwargs):
+        pytest.fail("Quality observation refresh must not call write APIs")
+
+    for method in (
+        "run_etl_load", "create_catalog_promotion", "create_catalog_promotion_rollback",
+        "update_etl_profile_activation", "reset_etl_profile_activation", "create_inspection",
+    ):
+        monkeypatch.setattr(api_client, method, forbid_write, raising=False)
+    _patch_etl_api_client(monkeypatch, api_client)
+    app = run_authenticated_app_test(timeout=10)
+    app = _select_observability_profile(app, "sample_fashion_vendor")
+    old_response = app.session_state["etl_quality_observability_response"]
+    api_client.observability_profiles.append("new_supplier")
+    api_client.observability_response = make_quality_observability(
+        profile_name="sample_fashion_vendor",
+        batches=[make_quality_observability_batch(rejection_rate=15.0)],
+    )
+    app = _refresh_observability(app)
+
+    assert not app.exception
+    selector = app.selectbox(key="etl_quality_observability_selected_profile")
+    assert "new_supplier" in selector.options
+    assert selector.value == "sample_fashion_vendor"
+    assert app.session_state["etl_quality_observability_response"] != old_response
+    assert app.session_state["etl_quality_observability_response"] == api_client.observability_response
+    assert next(metric.value for metric in app.metric if metric.label == "최신 Reject 비율") == "15.00%"
+    assert api_client.etl_run_calls == []
+    assert api_client.promotion_calls == []
+    assert api_client.observability_profile_calls == 2
+    assert len(api_client.observability_calls) == 2
+    app.run(timeout=10)
+    assert api_client.observability_profile_calls == 2
+    assert len(api_client.observability_calls) == 2
+
+
+@pytest.mark.parametrize("profiles", [["sample_marketplace_vendor"], []])
+def test_observability_refresh_clears_vanished_supplier(monkeypatch, profiles):
+    api_client = FakeEtlApiClient()
+    _patch_etl_api_client(monkeypatch, api_client)
+    app = run_authenticated_app_test(timeout=10)
+    app = _select_observability_profile(app, "sample_fashion_vendor")
+    api_client.observability_profiles = profiles
+    app = _refresh_observability(app)
+
+    assert not app.exception
+    assert app.session_state["etl_quality_observability_selected_profile"] is None
+    assert app.session_state["etl_quality_observability_response"] is None
+    assert len(api_client.observability_calls) == 1
+    if not profiles:
+        assert etl_load_history.ETL_QUALITY_OBSERVABILITY_NO_PROFILE_MESSAGE in [
+            info.value for info in app.info
+        ]
+    assert app.button(key="etl_quality_observability_refresh")
+
+
+@pytest.mark.parametrize("failure", ["list", "detail", "empty"])
+def test_observability_refresh_recovers_from_error_or_empty(monkeypatch, failure):
+    api_client = FakeEtlApiClient()
+    error = catalogguard_api.CatalogGuardApiResponseError("temporary failure")
+    if failure == "list":
+        api_client.observability_profiles_error = error
+    elif failure == "detail":
+        api_client.observability_error = error
+    else:
+        api_client.observability_profiles = []
+    _patch_etl_api_client(monkeypatch, api_client)
+    app = run_authenticated_app_test(timeout=10)
+    if failure == "detail":
+        app = _select_observability_profile(app, "sample_fashion_vendor")
+        assert app.session_state["etl_quality_observability_error"] is not None
+        assert app.session_state["etl_quality_observability_response"] is None
+    elif failure == "list":
+        assert app.session_state["etl_quality_observability_profiles_error"] is not None
+        assert app.session_state["etl_quality_observability_profiles_response"] is None
+    else:
+        assert api_client.observability_calls == []
+    assert app.button(key="etl_quality_observability_refresh")
+    api_client.observability_profiles_error = None
+    api_client.observability_error = None
+    api_client.observability_profiles = ["sample_fashion_vendor"]
+    app = _refresh_observability(app)
+
+    assert not app.exception
+    assert app.session_state["etl_quality_observability_profiles_error"] is None
+    assert "sample_fashion_vendor" in app.selectbox(
+        key="etl_quality_observability_selected_profile"
+    ).options
+    assert api_client.observability_profile_calls == 2
+    if failure == "detail":
+        assert app.session_state["etl_quality_observability_error"] is None
+        assert app.session_state["etl_quality_observability_response"] == api_client.observability_response
+        assert len(api_client.observability_calls) == 2
+    else:
+        assert api_client.observability_calls == []
+
+
+def test_observability_refresh_preserves_unrelated_state():
+    state = dict(etl_load_history.ETL_LOAD_STATE_DEFAULTS)
+    state.update({
+        "etl_quality_observability_selected_profile": "sample_fashion_vendor",
+        "etl_quality_observability_profiles_initialized": True,
+        "etl_quality_observability_profiles_response": {"items": []},
+        "etl_quality_observability_profiles_error": "old list error",
+        "etl_quality_observability_initialized": True,
+        "etl_quality_observability_response": {"batch_count": 1},
+        "etl_quality_observability_error": "old detail error",
+        "login_marker": "keep",
+    })
+    before = dict(state)
+    etl_load_history.refresh_etl_quality_observability(state)
+    expected_changes = {
+        "etl_quality_observability_profiles_initialized": False,
+        "etl_quality_observability_profiles_response": None,
+        "etl_quality_observability_profiles_error": None,
+        "etl_quality_observability_initialized": False,
+        "etl_quality_observability_response": None,
+        "etl_quality_observability_error": None,
+    }
+    assert state == {**before, **expected_changes}
+
+
 def test_fetch_observability_profiles_caches_within_one_render():
     api_client = FakeEtlApiClient()
     state = dict(etl_load_history.ETL_LOAD_STATE_DEFAULTS)
