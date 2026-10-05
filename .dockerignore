@@ -20,7 +20,8 @@ logs
 outputs
 tests/
 docs/
-scripts/
+scripts/*
+!scripts/create_user.py
 data/
 이력서/
 *.log

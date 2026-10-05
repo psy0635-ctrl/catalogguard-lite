@@ -100,8 +100,12 @@ def test_decode_access_token_rejects_garbage_token():
         decode_access_token("not.a.jwt")
 
 
-def test_get_jwt_secret_raises_clear_error_when_missing(monkeypatch):
-    monkeypatch.delenv("CATALOGGUARD_JWT_SECRET", raising=False)
+@pytest.mark.parametrize("configured_secret", [None, "", "   "])
+def test_get_jwt_secret_raises_clear_error_when_missing(monkeypatch, configured_secret):
+    if configured_secret is None:
+        monkeypatch.delenv("CATALOGGUARD_JWT_SECRET", raising=False)
+    else:
+        monkeypatch.setenv("CATALOGGUARD_JWT_SECRET", configured_secret)
 
     with pytest.raises(JWTConfigurationError):
         get_jwt_secret()
