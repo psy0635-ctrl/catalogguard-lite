@@ -61,6 +61,7 @@ from api.schemas import (
     ETLProfileListResponse,
     ETLProfileResponse,
     ETLQualityObservabilityErrorCodeResponse,
+    ETLQualityObservabilityErrorBatchResponse,
     ETLQualityObservabilityProfileListResponse,
     ETLQualityObservabilityProfileResponse,
     ETLQualityObservabilityResponse,
@@ -457,6 +458,14 @@ def _build_quality_observability_response(
                 error_code=item.error_code,
                 total_count=item.total_count,
                 affected_batch_count=item.affected_batch_count,
+                batches=[
+                    ETLQualityObservabilityErrorBatchResponse(
+                        etl_load_run_id=batch.etl_load_run_id,
+                        count=batch.count,
+                        reject_details_stored=batch.reject_details_stored,
+                    )
+                    for batch in item.batches
+                ],
             )
             for item in result.error_codes
         ],

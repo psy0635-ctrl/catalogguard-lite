@@ -207,12 +207,19 @@ class ETLQualityObservabilityProfileListResponse(BaseModel):
     items: list[ETLQualityObservabilityProfileResponse]
 
 
+class ETLQualityObservabilityErrorBatchResponse(BaseModel):
+    etl_load_run_id: int = Field(gt=0)
+    count: int = Field(gt=0)
+    reject_details_stored: bool
+
+
 class ETLQualityObservabilityErrorCodeResponse(BaseModel):
     error_code: str
     # 관찰 구간 전체에서 이 코드로 거부된 행 수의 합입니다.
     total_count: int
     # 이 코드가 나타난 배치 수입니다. 한 배치만의 사고인지 여러 배치의 문제인지 구분합니다.
     affected_batch_count: int
+    batches: list[ETLQualityObservabilityErrorBatchResponse]
 
 
 class ETLQualityObservabilityResponse(BaseModel):

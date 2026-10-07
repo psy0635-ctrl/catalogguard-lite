@@ -181,6 +181,10 @@ def fake_etl_query_service(monkeypatch):
                 error_code="INVALID_PRICE",
                 total_count=8,
                 affected_batch_count=2,
+                batches=[
+                    SimpleNamespace(etl_load_run_id=12, count=5, reject_details_stored=True),
+                    SimpleNamespace(etl_load_run_id=11, count=3, reject_details_stored=False),
+                ],
             )
         ],
         recent_batches=[
@@ -540,6 +544,10 @@ def test_quality_observability_returns_comparison_and_static_route_wins(
                 "error_code": "INVALID_PRICE",
                 "total_count": 8,
                 "affected_batch_count": 2,
+                "batches": [
+                    {"etl_load_run_id": 12, "count": 5, "reject_details_stored": True},
+                    {"etl_load_run_id": 11, "count": 3, "reject_details_stored": False},
+                ],
             }
         ],
         "recent_batches": [

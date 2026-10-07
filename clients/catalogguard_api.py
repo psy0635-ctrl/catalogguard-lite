@@ -788,6 +788,28 @@ def _validate_etl_quality_observability_error_code(item: object) -> bool:
         key not in item for key in ETL_QUALITY_OBSERVABILITY_ERROR_CODE_KEYS
     ):
         return False
+    # Old servers may omit this additive field; supplied mappings must be coherent.
+    if "batches" in item:
+        batches = item["batches"]
+        if not isinstance(batches, list):
+            return False
+        for batch in batches:
+            if (
+                not isinstance(batch, dict)
+                or type(batch.get("etl_load_run_id")) is not int
+                or batch["etl_load_run_id"] < 1
+                or type(batch.get("count")) is not int
+                or batch["count"] < 1
+                or type(batch.get("reject_details_stored")) is not bool
+            ):
+                return False
+        ids = [batch["etl_load_run_id"] for batch in batches]
+        if (
+            len(ids) != len(set(ids))
+            or len(batches) != item["affected_batch_count"]
+            or sum(batch["count"] for batch in batches) != item["total_count"]
+        ):
+            return False
     return (
         isinstance(item["error_code"], str)
         and bool(item["error_code"].strip())
@@ -895,6 +917,15 @@ def _validate_etl_quality_observability_response(data: dict[str, Any]) -> None:
         raise _invalid_etl_response()
     if not _is_etl_quality_batches_in_chronological_order(recent_batches):
         raise _invalid_etl_response()
+
+    recent_ids = [batch["etl_load_run_id"] for batch in recent_batches]
+    for item in error_codes:
+        if "batches" in item:
+            mapped_ids = [batch["etl_load_run_id"] for batch in item["batches"]]
+            if any(run_id not in recent_ids for run_id in mapped_ids):
+                raise _invalid_etl_response()
+            if mapped_ids != [run_id for run_id in reversed(recent_ids) if run_id in mapped_ids]:
+                raise _invalid_etl_response()
 
     # latest/previous는 recent_batches와 다른 출처가 아니라 그 목록의 마지막 두 배치입니다.
     # 값이 어긋나면 요약 지표와 아래 목록이 서로 다른 배치를 가리키게 됩니다.

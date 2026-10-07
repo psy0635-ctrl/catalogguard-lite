@@ -3627,7 +3627,10 @@ def test_invalidate_etl_quality_observability_drops_the_cached_comparison():
 
     invalidate_etl_quality_observability(state)
 
-    assert state == {
+    assert {key: state[key] for key in (
+        "etl_quality_observability_initialized", "etl_quality_observability_response",
+        "etl_quality_observability_error",
+    )} == {
         "etl_quality_observability_initialized": False,
         "etl_quality_observability_response": None,
         "etl_quality_observability_error": None,
@@ -3635,6 +3638,10 @@ def test_invalidate_etl_quality_observability_drops_the_cached_comparison():
 
 
 # ---- ETL 품질 관찰: fetch/state 단위 테스트 --------------------------------
+
+    assert state["etl_quality_drilldown_error_code"] is None
+    assert state["etl_quality_drilldown_run_id"] is None
+    assert state["etl_quality_drilldown_offset"] == 0
 
 
 def test_fetch_etl_quality_observability_sends_the_exact_selected_profile():
@@ -5501,4 +5508,121 @@ def test_all_four_token_widgets_are_independent():
     assert app.selectbox(key="unknown_size_token_product_token").value == "4XL"
     assert app.selectbox(key="supplier_unknown_color_product_token").value is None
     assert app.selectbox(key="supplier_unknown_size_product_token").value is None
+    assert not app.exception
+
+
+class QualityDrilldownClient(FakeEtlApiClient):
+    def __init__(self, *, stored=True, zero=False, failure=False, no_codes=False):
+        super().__init__(observability_profiles=["supplier-a", "supplier-b"])
+        self.stored, self.zero, self.failure, self.no_codes = stored, zero, failure, no_codes
+
+    def get_etl_quality_observability(self, *, profile_name, limit=10):
+        self.observability_calls.append({"profile_name": profile_name, "limit": limit})
+        payload = make_quality_observability(profile_name=profile_name)
+        payload["error_codes"] = [] if self.no_codes else [
+            {"error_code": "INVALID_PRICE", "total_count": 28, "affected_batch_count": 2,
+             "batches": [{"etl_load_run_id": 12, "count": 25, "reject_details_stored": self.stored},
+                         {"etl_load_run_id": 11, "count": 3, "reject_details_stored": self.stored}]},
+            {"error_code": "STOCK", "total_count": 1, "affected_batch_count": 1,
+             "batches": [{"etl_load_run_id": 11, "count": 1, "reject_details_stored": self.stored}]}]
+        return payload
+
+    def list_etl_rejections(self, run_id, **params):
+        self.rejection_calls.append((run_id, params))
+        if self.failure:
+            raise catalogguard_api.CatalogGuardApiResponseError("private DB URL and secret")
+        count = 0 if self.zero else (25 if run_id == 12 else 3)
+        rows = [_rejection_item(number, source_data={"product_name": f"MASKED-{run_id}-{number}"})
+                for number in range(2, 2 + count)]
+        offset, limit = params["offset"], params["limit"]
+        return {"available": True, "items": rows[offset:offset+limit], "total": count,
+                "offset": offset, "limit": limit}
+
+
+def _quality_drilldown_test_app(client):
+    import streamlit as st
+    from ui.etl_load_history import initialize_etl_load_state, _render_etl_quality_observability
+    initialize_etl_load_state()
+    if not st.session_state.get("quality_test_seeded"):
+        st.session_state["etl_reject_error_code"] = "UNRELATED"
+        st.session_state["etl_reject_offset"] = 40
+        st.session_state["etl_reject_response"] = {"ordinary": "cached"}
+        st.session_state["etl_reject_error"] = "ordinary error"
+        st.session_state["quality_test_seeded"] = True
+    _render_etl_quality_observability(client)
+
+
+def _quality_app(client):
+    from streamlit.testing.v1 import AppTest
+    return AppTest.from_function(_quality_drilldown_test_app, args=(client,)).run()
+
+
+def test_quality_drilldown_filters_batches_paginates_caches_and_resets():
+    client = QualityDrilldownClient()
+    app = _quality_app(client)
+    assert client.rejection_calls == []
+    app.selectbox(key="etl_quality_observability_selected_profile").select("supplier-a").run()
+    assert client.rejection_calls == []
+    app.selectbox(key="etl_quality_drilldown_error_code").select("INVALID_PRICE").run()
+    assert [batch.split(" · ")[0] for batch in app.selectbox(key="etl_quality_drilldown_run_id").options[1:]] == ["#12", "#11"]
+    assert client.rejection_calls == []
+    app.selectbox(key="etl_quality_drilldown_run_id").select(12).run()
+    assert client.rejection_calls == [(12, {"limit": 20, "offset": 0, "error_code": "INVALID_PRICE"})]
+    app.run()
+    assert len(client.rejection_calls) == 1
+    app.button(key="etl_quality_drilldown_next").click().run()
+    assert client.rejection_calls[-1][1]["offset"] == 20
+    assert len(app.json) == 5
+    app.button(key="etl_quality_drilldown_previous").click().run()
+    assert client.rejection_calls[-1][1]["offset"] == 0
+    app.button(key="etl_quality_drilldown_next").click().run()
+    app.selectbox(key="etl_quality_drilldown_run_id").select(11).run()
+    assert client.rejection_calls[-1] == (11, {"limit": 20, "offset": 0, "error_code": "INVALID_PRICE"})
+    assert all("MASKED-12" not in element.value for element in app.json)
+    before = len(client.rejection_calls)
+    app.selectbox(key="etl_quality_drilldown_error_code").select("STOCK").run()
+    assert len(client.rejection_calls) == before
+    assert app.selectbox(key="etl_quality_drilldown_run_id").value is None
+    assert app.selectbox(key="etl_quality_drilldown_run_id").options[1].startswith("#11")
+    assert len(app.json) == 0
+    app.selectbox(key="etl_quality_drilldown_run_id").select(11).run()
+    app.selectbox(key="etl_quality_observability_selected_profile").select("supplier-b").run()
+    assert app.selectbox(key="etl_quality_drilldown_error_code").value is None
+    assert app.session_state["etl_quality_drilldown_run_id"] is None
+    assert app.session_state["etl_quality_drilldown_offset"] == 0
+    assert app.session_state["etl_quality_drilldown_response"] is None
+    assert app.session_state["etl_quality_drilldown_error"] is None
+    assert app.session_state["etl_reject_error_code"] == "UNRELATED"
+    assert app.session_state["etl_reject_offset"] == 40
+    assert app.session_state["etl_reject_response"] == {"ordinary": "cached"}
+    assert app.session_state["etl_reject_error"] == "ordinary error"
+    assert len(app.json) == 0
+    assert not app.exception
+
+
+@pytest.mark.parametrize("mode", ["legacy", "zero", "failure", "no_codes"])
+def test_quality_drilldown_empty_legacy_errors_and_summary_isolation(mode):
+    client = QualityDrilldownClient(stored=mode != "legacy", zero=mode == "zero",
+                                   failure=mode == "failure", no_codes=mode == "no_codes")
+    app = _quality_app(client)
+    app.selectbox(key="etl_quality_observability_selected_profile").select("supplier-a").run()
+    if mode == "no_codes":
+        assert not any(widget.key == "etl_quality_drilldown_error_code" for widget in app.selectbox)
+        assert client.rejection_calls == []
+    else:
+        app.selectbox(key="etl_quality_drilldown_error_code").select("INVALID_PRICE").run()
+        app.selectbox(key="etl_quality_drilldown_run_id").select(12).run()
+        assert len(client.rejection_calls) == (0 if mode == "legacy" else 1)
+        if mode == "failure":
+            assert len(app.error) == 1
+            assert "private DB" not in app.error[0].value
+            app.run()
+            assert len(client.rejection_calls) == 1
+            client.failure = False
+            app.selectbox(key="etl_quality_drilldown_run_id").select(11).run()
+            assert not app.error
+        else:
+            assert app.info
+    assert len(app.metric) == 4
+    assert len(app.dataframe) >= (1 if mode == "no_codes" else 2)
     assert not app.exception

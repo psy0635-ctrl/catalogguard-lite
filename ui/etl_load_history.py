@@ -346,6 +346,12 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_quality_observability_profiles_response": None,
     "etl_quality_observability_profiles_error": None,
     "etl_quality_observability_selected_profile": None,
+    "etl_quality_drilldown_error_code": None,
+    "etl_quality_drilldown_run_id": None,
+    "etl_quality_drilldown_offset": 0,
+    "etl_quality_drilldown_response": None,
+    "etl_quality_drilldown_error": None,
+    "etl_quality_drilldown_request": None,
     "etl_quality_observability_initialized": False,
     "etl_quality_observability_response": None,
     "etl_quality_observability_error": None,
@@ -677,6 +683,7 @@ def build_etl_quality_observability_notice(
 
 def invalidate_etl_quality_observability(session_state) -> None:
     """Drop the cached comparison so another supplier's numbers are never reused."""
+    reset_etl_quality_drilldown(session_state)
     session_state["etl_quality_observability_initialized"] = False
     session_state["etl_quality_observability_response"] = None
     session_state["etl_quality_observability_error"] = None
@@ -2227,6 +2234,140 @@ def _render_etl_quality_observability(api_client) -> None:
             width="stretch",
             hide_index=True,
         )
+
+    _render_etl_quality_error_drilldown(api_client, response)
+
+
+def reset_etl_quality_drilldown_page(session_state) -> None:
+    session_state["etl_quality_drilldown_offset"] = 0
+    session_state["etl_quality_drilldown_response"] = None
+    session_state["etl_quality_drilldown_error"] = None
+    session_state["etl_quality_drilldown_request"] = None
+
+
+def reset_etl_quality_drilldown_batch(session_state) -> None:
+    session_state["etl_quality_drilldown_run_id"] = None
+    reset_etl_quality_drilldown_page(session_state)
+
+
+def reset_etl_quality_drilldown(session_state) -> None:
+    session_state["etl_quality_drilldown_error_code"] = None
+    reset_etl_quality_drilldown_batch(session_state)
+
+
+def _change_etl_quality_drilldown_page(session_state, delta: int) -> None:
+    offset = max(0, session_state.get("etl_quality_drilldown_offset", 0) + delta)
+    reset_etl_quality_drilldown_page(session_state)
+    session_state["etl_quality_drilldown_offset"] = offset
+
+
+def _fetch_etl_quality_drilldown(api_client, session_state):
+    request = (
+        session_state.get("etl_quality_observability_selected_profile"),
+        session_state.get("etl_quality_drilldown_error_code"),
+        session_state.get("etl_quality_drilldown_run_id"),
+        session_state.get("etl_quality_drilldown_offset", 0),
+    )
+    if request[1] is None or request[2] is None:
+        return None
+    if session_state.get("etl_quality_drilldown_request") == request:
+        return session_state.get("etl_quality_drilldown_response")
+    session_state["etl_quality_drilldown_response"] = None
+    session_state["etl_quality_drilldown_error"] = None
+    try:
+        session_state["etl_quality_drilldown_response"] = api_client.list_etl_rejections(
+            request[2], limit=ETL_REJECT_LIMIT, offset=request[3], error_code=request[1]
+        )
+    except (
+        CatalogGuardApiConfigurationError,
+        CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError,
+        CatalogGuardApiResponseError,
+        ETLLoadNotFoundError,
+        ValueError,
+    ) as error:
+        session_state["etl_quality_drilldown_error"] = error
+    session_state["etl_quality_drilldown_request"] = request
+    return session_state["etl_quality_drilldown_response"]
+
+
+def _render_etl_quality_error_drilldown(api_client, observation) -> None:
+    state = st.session_state
+    error_codes = observation.get("error_codes") or []
+    if not error_codes:
+        reset_etl_quality_drilldown(state)
+        return
+    st.markdown("#### 오류 코드 Reject 상세")
+    options = [None, *[item["error_code"] for item in error_codes]]
+    if state.get("etl_quality_drilldown_error_code") not in options:
+        reset_etl_quality_drilldown(state)
+    code = st.selectbox(
+        "조사할 오류 코드", options=options,
+        format_func=lambda value: "오류 코드를 선택하세요" if value is None else value,
+        key="etl_quality_drilldown_error_code",
+        on_change=reset_etl_quality_drilldown_batch, args=(state,),
+    )
+    if code is None:
+        return
+    error_item = next(item for item in error_codes if item["error_code"] == code)
+    batches = error_item.get("batches") or []
+    if not batches:
+        reset_etl_quality_drilldown_batch(state)
+        st.info("이 응답에는 오류 코드별 발생 배치 정보가 없습니다.")
+        return
+    by_id = {batch["etl_load_run_id"]: batch for batch in batches}
+    dates = {batch["etl_load_run_id"]: batch["created_at"]
+             for batch in observation.get("recent_batches", [])}
+    run_options = [None, *by_id]
+    if state.get("etl_quality_drilldown_run_id") not in run_options:
+        reset_etl_quality_drilldown_batch(state)
+    run_id = st.selectbox(
+        "오류 발생 배치", options=run_options,
+        format_func=lambda value: "배치를 선택하세요" if value is None else (
+            f"#{value} · {format_etl_datetime(dates.get(value))} · {by_id[value]['count']}건"
+        ),
+        key="etl_quality_drilldown_run_id",
+        on_change=reset_etl_quality_drilldown_page, args=(state,),
+    )
+    if run_id is None:
+        return
+    if not by_id[run_id]["reject_details_stored"]:
+        reset_etl_quality_drilldown_page(state)
+        st.info("이 배치는 품질 집계는 있지만 저장된 Reject 상세가 없어 원본 행 상세를 조회할 수 없습니다.")
+        return
+    response = _fetch_etl_quality_drilldown(api_client, state)
+    if response is None:
+        error = state.get("etl_quality_drilldown_error")
+        if error is not None:
+            st.error(build_etl_api_error_display_message(
+                "선택한 오류 코드의 Reject 상세를 불러오지 못했습니다.", error
+            ))
+        return
+    if not response.get("available", False):
+        st.info("이 배치에는 저장된 Reject 상세가 없습니다.")
+        return
+    items = response.get("items") or []
+    if not items:
+        st.info("선택한 오류 코드에 해당하는 저장된 Reject 행이 없습니다.")
+        return
+    st.dataframe(build_etl_rejection_dataframe(items), hide_index=True, width="stretch")
+    for item in items:
+        with st.expander(f"품질 관찰 원본 행 {item.get('source_row_number')} - 마스킹 원본"):
+            st.json(item.get("masked_source_data") or {})
+    page, pages, previous, following = calculate_etl_pagination(
+        total=response["total"], limit=ETL_REJECT_LIMIT,
+        offset=state.get("etl_quality_drilldown_offset", 0),
+    )
+    st.caption(f"Reject 상세 {page} / {pages} 페이지 · 전체 {response['total']}개")
+    previous_col, next_col = st.columns(2)
+    previous_col.button(
+        "Reject 상세 이전", disabled=not previous, key="etl_quality_drilldown_previous",
+        on_click=_change_etl_quality_drilldown_page, args=(state, -ETL_REJECT_LIMIT),
+    )
+    next_col.button(
+        "Reject 상세 다음", disabled=not following, key="etl_quality_drilldown_next",
+        on_click=_change_etl_quality_drilldown_page, args=(state, ETL_REJECT_LIMIT),
+    )
 
 
 def _fetch_etl_load_detail(api_client, session_state) -> dict[str, Any] | None:

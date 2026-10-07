@@ -2383,6 +2383,8 @@ PostgreSQL staging에 저장된 ETL 적재 배치 목록을 조회합니다. 목
 
 품질 metadata가 불완전한 legacy 배치는 `quality-summary`와 같은 기준으로 비교 대상에서 제외합니다. 비교할 배치가 없으면 `batch_count`가 `0`이고 `latest_batch`·`previous_batch`·`rejection_rate_delta`가 `null`, `direction`이 `no_baseline`입니다.
 
+품질 관찰의 `error_codes`는 기존 집계에 최신순 `batches`(배치 ID·해당 코드 건수·`reject_details_stored`)를 함께 제공합니다. 화면에서 오류 코드 → 발생 배치를 선택하면 기존 Reject `error_code` 필터로 마스킹된 거부 행을 read-only 조회하고 독립적인 이전/다음 페이지를 사용할 수 있습니다. Reject 상세가 저장되지 않은 과거 배치는 안내만 표시합니다. 오류 코드는 조사할 원인 후보이며 자동 원인 확정·수정·차단은 하지 않습니다.
+
 ### `GET /api/v1/etl-loads/quality-observability/profiles`
 
 품질 관찰을 실제로 실행할 수 있는 공급사 `profile_name` 목록을 반환합니다. 선택에 필요한 이름만 담습니다.
