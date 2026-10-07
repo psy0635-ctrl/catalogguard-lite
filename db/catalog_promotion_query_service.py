@@ -387,6 +387,7 @@ def list_unknown_color_token_products(
     *,
     token: str,
     limit: int,
+    supplier_key: str | None = None,
 ) -> UnknownColorTokenProductList:
     """Return operational catalog products affected by one unknown color token."""
     display_token = collapse_comparison_whitespace(token)
@@ -394,15 +395,23 @@ def list_unknown_color_token_products(
     if comparison_key is None:
         return UnknownColorTokenProductList(token=display_token, total=0, items=[])
 
+    candidate_statement = select(CatalogProduct.color).distinct()
+    if supplier_key is not None:
+        candidate_statement = candidate_statement.where(
+            CatalogProduct.supplier_key == supplier_key
+        )
+
     raw_colors = [
         raw_color
-        for raw_color in session.scalars(select(CatalogProduct.color).distinct()).all()
+        for raw_color in session.scalars(candidate_statement).all()
         if _unknown_color_comparison_key(raw_color) == comparison_key
     ]
     if not raw_colors:
         return UnknownColorTokenProductList(token=display_token, total=0, items=[])
 
     color_filter = CatalogProduct.color.in_(raw_colors)
+    if supplier_key is not None:
+        color_filter = color_filter & (CatalogProduct.supplier_key == supplier_key)
     total = int(
         session.scalar(
             select(func.count()).select_from(CatalogProduct).where(color_filter)
@@ -457,6 +466,7 @@ def list_unknown_size_token_products(
     *,
     token: str,
     limit: int,
+    supplier_key: str | None = None,
 ) -> UnknownSizeTokenProductList:
     """Return current catalog products using one unknown size comparison key."""
     display_token = collapse_comparison_whitespace(token)
@@ -467,9 +477,15 @@ def list_unknown_size_token_products(
     if comparison_key is None:
         return UnknownSizeTokenProductList(token=display_token, total=0, items=[])
 
+    candidate_statement = select(CatalogProduct.size).distinct()
+    if supplier_key is not None:
+        candidate_statement = candidate_statement.where(
+            CatalogProduct.supplier_key == supplier_key
+        )
+
     raw_sizes = [
         raw_size
-        for raw_size in session.scalars(select(CatalogProduct.size).distinct()).all()
+        for raw_size in session.scalars(candidate_statement).all()
         if _is_unknown_size_token(raw_size)
         and build_size_comparison_key(raw_size) == comparison_key
     ]
@@ -477,6 +493,8 @@ def list_unknown_size_token_products(
         return UnknownSizeTokenProductList(token=display_token, total=0, items=[])
 
     size_filter = CatalogProduct.size.in_(raw_sizes)
+    if supplier_key is not None:
+        size_filter = size_filter & (CatalogProduct.supplier_key == supplier_key)
     total = int(
         session.scalar(
             select(func.count()).select_from(CatalogProduct).where(size_filter)

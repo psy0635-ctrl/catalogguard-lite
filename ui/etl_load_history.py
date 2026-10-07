@@ -1139,21 +1139,29 @@ def _render_supplier_unknown_vocabulary(api_client, supplier_keys: list[str]) ->
     if not supplier_keys:
         st.info("조회할 공급사가 없습니다.")
         return
+
+    def clear_supplier_selection():
+        for attribute in ("color", "size"):
+            st.session_state.pop(f"supplier_unknown_{attribute}_product_token", None)
+
     supplier_key = st.selectbox(
         "미판정 상세 공급사 선택",
         options=supplier_keys,
         index=None,
         placeholder="공급사를 선택하세요",
         key="supplier_unknown_vocabulary_supplier",
+        on_change=clear_supplier_selection,
     )
     if supplier_key is None:
         return
 
-    for label, fetch, build_dataframe, limit in (
-        ("색상", api_client.list_unknown_color_tokens,
-         build_unknown_color_token_dataframe, UNKNOWN_COLOR_TOKEN_LIMIT),
-        ("사이즈", api_client.list_unknown_size_tokens,
-         build_unknown_size_token_dataframe, UNKNOWN_SIZE_TOKEN_LIMIT),
+    for attribute, label, fetch, build_dataframe, fetch_products, build_products, limit in (
+        ("color", "색상", api_client.list_unknown_color_tokens,
+         build_unknown_color_token_dataframe, api_client.list_unknown_color_token_products,
+         build_unknown_color_token_product_dataframe, UNKNOWN_COLOR_TOKEN_LIMIT),
+        ("size", "사이즈", api_client.list_unknown_size_tokens,
+         build_unknown_size_token_dataframe, api_client.list_unknown_size_token_products,
+         build_unknown_size_token_product_dataframe, UNKNOWN_SIZE_TOKEN_LIMIT),
     ):
         st.markdown(f"##### {label}")
         try:
@@ -1178,10 +1186,42 @@ def _render_supplier_unknown_vocabulary(api_client, supplier_keys: list[str]) ->
             build_dataframe(response["items"]), hide_index=True, width="stretch"
         )
         st.caption(f"선택한 공급사의 미판정 {label} 토큰 상위 {limit}개입니다.")
-    st.caption(
-        "영향 상품은 아래 전체 미판정 색상·사이즈 토큰 보고서에서 같은 토큰을 선택해 "
-        "조회하세요. 영향 상품 조회는 전체 공급사 범위이며 상품의 공급사를 함께 표시합니다."
-    )
+        selected_token = st.selectbox(
+            f"공급사 미판정 {label} 영향 상품 토큰 선택",
+            options=[item["token"] for item in response["items"]],
+            index=None,
+            placeholder="토큰을 선택하세요",
+            key=f"supplier_unknown_{attribute}_product_token",
+        )
+        if selected_token is None:
+            continue
+        # Responses and errors are local to this render: changing either selection
+        # cannot retain an earlier result, and color/size failures stay independent.
+        try:
+            product_response = fetch_products(
+                selected_token, limit=limit, supplier_key=supplier_key
+            )
+        except (
+            CatalogGuardApiConfigurationError,
+            CatalogGuardApiConnectionError,
+            CatalogGuardApiTimeoutError,
+            CatalogGuardApiResponseError,
+            ValueError,
+        ) as error:
+            st.error(build_etl_api_error_display_message(
+                f"공급사 미판정 {label} 영향 상품을 불러오지 못했습니다.", error
+            ))
+            continue
+        if not product_response["items"]:
+            st.info("선택한 공급사에서 이 토큰을 사용하는 영향 상품이 없습니다.")
+            continue
+        st.caption(
+            f"선택한 공급사의 영향 상품 {product_response['total']}개 중 "
+            f"{len(product_response['items'])}개를 표시합니다."
+        )
+        st.dataframe(
+            build_products(product_response["items"]), hide_index=True, width="stretch"
+        )
 
 
 def build_unknown_color_token_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:

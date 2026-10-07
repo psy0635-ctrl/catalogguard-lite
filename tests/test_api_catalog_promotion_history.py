@@ -143,7 +143,7 @@ def fake_promotion_history_query_service(monkeypatch):
         )
         return state.unknown_color_tokens[:limit]
 
-    def fake_unknown_color_token_products(session, *, token, limit):
+    def fake_unknown_color_token_products(session, *, token, limit, supplier_key=None):
         calls.append(
             {
                 "operation": "unknown_color_token_products",
@@ -158,7 +158,7 @@ def fake_promotion_history_query_service(monkeypatch):
             items=state.unknown_color_token_products[:limit],
         )
 
-    def fake_unknown_size_token_products(session, *, token, limit):
+    def fake_unknown_size_token_products(session, *, token, limit, supplier_key=None):
         calls.append(
             {
                 "operation": "unknown_size_token_products",
@@ -763,3 +763,22 @@ def test_unknown_token_api_optional_supplier_contract(monkeypatch, attribute, su
         assert calls == [(7, supplier)]
     finally:
         app.dependency_overrides.pop(get_session, None)
+
+
+@pytest.mark.parametrize("attribute, token", [("color", "CHARCOAL"), ("size", "4XL")])
+@pytest.mark.parametrize("supplier", [None, "A", " A ", "   ", ""])
+@pytest.mark.parametrize("role", ["viewer", "operator"])
+def test_unknown_product_api_preserves_supplier_identity(monkeypatch, attribute, token, supplier, role):
+    calls = []
+    def report(session, *, token, limit, supplier_key=None):
+        calls.append((token, limit, supplier_key))
+        return SimpleNamespace(token=token, total=0, items=[])
+    monkeypatch.setattr(etl_loads_route, f"list_unknown_{attribute}_token_products", report)
+    override_current_user(role=role)
+    params = {"token": token, "limit": 5}
+    if supplier is not None:
+        params["supplier_key"] = supplier
+    response = client.get(f"/api/v1/catalog/unknown-{attribute}-token-products", params=params)
+    assert response.status_code == 200
+    assert response.json() == {"token": token, "total": 0, "items": []}
+    assert calls == [(token, 5, supplier)]

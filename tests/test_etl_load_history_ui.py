@@ -2180,6 +2180,7 @@ class UnknownSizeTokenStreamlit:
         self.subheaders = []
         self.selected_token = selected_token
         self.selectboxes = []
+        self.session_state = {}
         self.metrics = []
         self.markdowns = []
         self.captions = []
@@ -2204,7 +2205,7 @@ class UnknownSizeTokenStreamlit:
 
     def selectbox(self, label, **kwargs):
         self.selectboxes.append({"label": label, **kwargs})
-        return self.selected_token
+        return self.selected_token if self.selected_token in kwargs["options"] else None
 
     def dataframe(self, value, **_kwargs):
         self.dataframes.append(value)
@@ -5397,3 +5398,107 @@ def test_supplier_unknown_detail_empty_suppliers_does_not_query(monkeypatch):
     etl_load_history._render_supplier_unknown_vocabulary(client, [])
     assert client.detail_calls == []
     assert not fake_streamlit.selectboxes
+
+
+class SupplierProductClient(SupplierUnknownVocabularyClient):
+    def __init__(self, *, product_failure=None, zero=False):
+        super().__init__()
+        self.product_calls = []
+        self.product_failure = product_failure
+        self.zero = zero
+
+    def _report(self, attribute, supplier_key):
+        self.detail_calls.append((attribute, supplier_key))
+        return {"items": [{"token": "CHARCOAL" if attribute == "color" else "4XL", "count": 2},
+                          {"token": "ASH" if attribute == "color" else "5XL", "count": 1}]}
+
+    def _products(self, attribute, token, limit, supplier_key):
+        self.product_calls.append((attribute, token, limit, supplier_key))
+        if self.product_failure == attribute:
+            raise catalogguard_api.CatalogGuardApiResponseError("private database URL")
+        items = [] if self.zero else [{"catalog_product_id": 1, "supplier_key": supplier_key,
+                 "external_product_id": f"{supplier_key}-{token}", "product_group_id": "G",
+                 "product_name": "Synthetic", "category": "TOP", "color": "CHARCOAL", "size": "4XL"}]
+        return {"token": token, "total": len(items), "items": items}
+
+    def list_unknown_color_token_products(self, token, *, limit=20, supplier_key=None):
+        return self._products("color", token, limit, supplier_key)
+
+    def list_unknown_size_token_products(self, token, *, limit=20, supplier_key=None):
+        return self._products("size", token, limit, supplier_key)
+
+
+def test_supplier_products_selection_reset_and_attribute_isolation():
+    from streamlit.testing.v1 import AppTest
+    client = SupplierProductClient()
+    app = AppTest.from_function(_supplier_detail_test_app, args=(client,)).run()
+    assert client.product_calls == []
+    app.selectbox[0].select("supplier-a").run()
+    assert client.product_calls == []
+    app.selectbox(key="supplier_unknown_color_product_token").select("CHARCOAL").run()
+    assert client.product_calls[-1] == ("color", "CHARCOAL", 20, "supplier-a")
+    app.selectbox(key="supplier_unknown_size_product_token").select("4XL").run()
+    assert client.product_calls[-1] == ("size", "4XL", 20, "supplier-a")
+    app.selectbox(key="supplier_unknown_color_product_token").select("ASH").run()
+    assert app.selectbox(key="supplier_unknown_size_product_token").value == "4XL"
+    assert any("supplier-a-ASH" in str(frame.value) for frame in app.dataframe)
+    assert all("supplier-a-CHARCOAL" not in str(frame.value) for frame in app.dataframe)
+    before = len(client.product_calls)
+    app.selectbox[0].select("supplier-b").run()
+    assert len(client.product_calls) == before
+    assert app.selectbox(key="supplier_unknown_color_product_token").value is None
+    assert app.selectbox(key="supplier_unknown_size_product_token").value is None
+    assert all("supplier-a" not in str(frame.value) for frame in app.dataframe)
+    app.selectbox(key="supplier_unknown_color_product_token").select("CHARCOAL").run()
+    assert client.product_calls[-1] == ("color", "CHARCOAL", 20, "supplier-b")
+    assert not app.exception
+
+
+@pytest.mark.parametrize("failure", ["color", "size", None])
+def test_supplier_product_errors_and_zero_are_local(failure):
+    from streamlit.testing.v1 import AppTest
+    client = SupplierProductClient(product_failure=failure, zero=failure is None)
+    app = AppTest.from_function(_supplier_detail_test_app, args=(client,)).run()
+    app.selectbox[0].select("supplier-a").run()
+    app.selectbox(key="supplier_unknown_color_product_token").select("CHARCOAL").run()
+    app.selectbox(key="supplier_unknown_size_product_token").select("4XL").run()
+    assert not app.exception
+    assert len(app.error) == (1 if failure else 0)
+    assert all("private database" not in error.value for error in app.error)
+    if failure:
+        assert len(app.dataframe) == 3
+        client.product_failure = None
+        app.selectbox(key=f"supplier_unknown_{failure}_product_token").select("ASH" if failure == "color" else "5XL").run()
+        assert not app.error
+    else:
+        assert len(app.info) == 2
+        assert all("영향 상품이 없습니다" in info.value for info in app.info)
+
+
+def _supplier_and_global_test_app(client):
+    from ui.etl_load_history import (
+        _render_supplier_unknown_vocabulary,
+        _render_unknown_color_token_report,
+        _render_unknown_size_token_report,
+    )
+    _render_supplier_unknown_vocabulary(client, ["supplier-a", "supplier-b"])
+    _render_unknown_color_token_report(client)
+    _render_unknown_size_token_report(client)
+
+
+def test_all_four_token_widgets_are_independent():
+    from streamlit.testing.v1 import AppTest
+    client = SupplierProductClient()
+    app = AppTest.from_function(_supplier_and_global_test_app, args=(client,)).run()
+    app.selectbox(key="unknown_color_token_product_token").select("CHARCOAL").run()
+    app.selectbox(key="unknown_size_token_product_token").select("4XL").run()
+    assert all(call[3] is None for call in client.product_calls)
+    app.selectbox(key="supplier_unknown_vocabulary_supplier").select("supplier-a").run()
+    app.selectbox(key="supplier_unknown_color_product_token").select("ASH").run()
+    app.selectbox(key="supplier_unknown_size_product_token").select("5XL").run()
+    app.selectbox(key="supplier_unknown_vocabulary_supplier").select("supplier-b").run()
+    assert app.selectbox(key="unknown_color_token_product_token").value == "CHARCOAL"
+    assert app.selectbox(key="unknown_size_token_product_token").value == "4XL"
+    assert app.selectbox(key="supplier_unknown_color_product_token").value is None
+    assert app.selectbox(key="supplier_unknown_size_product_token").value is None
+    assert not app.exception

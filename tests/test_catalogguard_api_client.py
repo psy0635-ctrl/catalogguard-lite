@@ -4963,3 +4963,17 @@ def test_unknown_token_client_includes_optional_supplier_and_preserves_validatio
     malformed, _ = make_client(response=FakeResponse(payload={"items": [{"token": "RAW", "count": True}]}))
     with pytest.raises(import_client_module().CatalogGuardApiResponseError):
         getattr(malformed, f"list_unknown_{attribute}_tokens")(supplier_key="supplier-a")
+
+
+@pytest.mark.parametrize("attribute, token", [("color", "CHARCOAL"), ("size", "4XL")])
+@pytest.mark.parametrize("supplier", [None, "A", " A ", "   ", ""])
+def test_unknown_product_client_optional_supplier(attribute, token, supplier):
+    payload = {"token": token, "total": 0, "items": []}
+    client, session = make_client(response=FakeResponse(payload=payload))
+    assert getattr(client, f"list_unknown_{attribute}_token_products")(
+        f" {token} ", limit=5, supplier_key=supplier
+    ) == payload
+    expected = {"token": token, "limit": 5}
+    if supplier is not None:
+        expected["supplier_key"] = supplier
+    assert session.calls[0]["params"] == expected
