@@ -1012,6 +1012,8 @@ medium, m -> M
 
 같은 ETL 적재 이력 화면에는 `미판정 색상 토큰` 보고서도 있습니다. 현재 운영 카탈로그(`catalog_products`)의 raw `color`를 빈도순으로 집계해 현재 색상 사전에서 표준값을 찾지 못하는 원본 표현을 보여 주며, API는 `GET /api/v1/catalog/unknown-color-tokens`입니다(viewer 이상, 기본 20개·최대 100개). 화면의 동일한 상위 20개 snapshot을 UTF-8 BOM CSV(`catalogguard_unknown_color_tokens.csv`)로 다운로드할 수 있습니다. 토큰을 선택하면 현재 운영 카탈로그 snapshot에서 같은 comparison key를 사용하는 영향 상품을 read-only로 조회하며, `GET /api/v1/catalog/unknown-color-token-products?token=CHARCOAL&limit=20` API를 사용합니다(`token` 필수, `limit` 기본 20·최소 1·최대 100). 빈 값과 현재 `COLOR_ALIASES`에서 표준값을 찾는 색상은 제외하고, 사전 밖 표현은 앞뒤·연속 공백과 대소문자만 정리해 합산합니다. 상세 조회도 이 정책을 그대로 사용하며, 하이픈·슬래시 같은 구분자는 사용자 정의 색상 사이에서 임의로 통합하지 않습니다. 이는 vocabulary 검토를 위한 관측 기능으로 오류 판정이나 자동 alias 등록·표준화가 아니며, staging 또는 과거 이력 추이는 포함하지 않습니다.
 
+색상·사이즈 영향 상품은 화면에서 20개씩 탐색하며, `영향 상품 전체 CSV 다운로드 준비`를 누르면 기존 영향 상품 API를 `limit=100`, `offset=0`부터 반복 호출해 선택 토큰의 전체 상품을 수집합니다. Global은 전체 공급사 범위, 공급사 상세는 선택한 `supplier_key` 범위만 포함하며 화면 페이지 이동과 CSV 준비 상태는 독립입니다. 기존 표시 컬럼을 UTF-8 BOM·formula-safe CSV로 내보내고, 전체 페이지 수집 및 total·최종 개수·중복 상품 ID 검증에 성공한 경우에만 다운로드를 제공합니다. 중간 오류나 total 변경 시 부분 CSV를 제공하지 않으며, 토큰/공급사 변경 시 해당 준비 상태를 지웁니다. 기존 토큰 빈도 CSV와 구분되는 read-only 기능으로, 새 endpoint나 상품 수정은 없습니다.
+
 ### 상품 그룹 내 중복 색상·사이즈 옵션 기준
 
 다음 조건을 모두 만족하면 `상품 옵션 조합 중복` 오류로 표시합니다.

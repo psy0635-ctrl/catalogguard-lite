@@ -33,6 +33,7 @@ ETL_QUALITY_TREND_LIMIT = 10
 ETL_PRODUCT_LIMIT = 20
 ETL_REJECT_LIMIT = 20
 ETL_REJECTION_EXPORT_PAGE_SIZE = 100
+UNKNOWN_TOKEN_PRODUCT_EXPORT_PAGE_SIZE = 100
 UNKNOWN_SIZE_TOKEN_LIMIT = 20
 UNKNOWN_COLOR_TOKEN_LIMIT = 20
 PROMOTION_HISTORY_LIMIT = 10
@@ -350,6 +351,10 @@ ETL_LOAD_STATE_DEFAULTS = {
     "unknown_size_token_product_offset": 0,
     "supplier_unknown_color_product_offset": 0,
     "supplier_unknown_size_product_offset": 0,
+    "unknown_color_token_product_export": None,
+    "unknown_size_token_product_export": None,
+    "supplier_unknown_color_product_export": None,
+    "supplier_unknown_size_product_export": None,
     "etl_quality_drilldown_error_code": None,
     "etl_quality_drilldown_run_id": None,
     "etl_quality_drilldown_offset": 0,
@@ -1141,6 +1146,141 @@ def _render_catalog_vocabulary_coverage(api_client) -> None:
     )
 
 
+def build_unknown_token_product_csv(dataframe: pd.DataFrame) -> bytes:
+    """Export the existing display columns with the shared CSV safety policy."""
+    return prepare_export_dataframe(dataframe).to_csv(index=False).encode("utf-8-sig")
+
+
+def fetch_all_unknown_token_products(
+    fetch,
+    token: str,
+    *,
+    supplier_key: str | None = None,
+    page_size: int = UNKNOWN_TOKEN_PRODUCT_EXPORT_PAGE_SIZE,
+) -> tuple[list[dict[str, Any]], int]:
+    """Collect complete, consistent pages without returning partial products."""
+    if type(page_size) is not int or not 1 <= page_size <= 100:
+        raise ValueError("invalid unknown product export page size")
+    collected: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    initial_total: int | None = None
+    offset = 0
+    while True:
+        params = {"limit": page_size, "offset": offset}
+        if supplier_key is not None:
+            params["supplier_key"] = supplier_key
+        response = fetch(token, **params)
+        if not isinstance(response, dict):
+            raise ValueError("invalid unknown product export response")
+        total, items = response.get("total"), response.get("items")
+        if type(total) is not int or total < 0 or not isinstance(items, list):
+            raise ValueError("invalid unknown product export response")
+        if initial_total is None:
+            initial_total = total
+        elif total != initial_total:
+            raise ValueError("unknown product export total changed")
+        if len(items) != min(page_size, max(0, initial_total - offset)):
+            raise ValueError("incomplete unknown product export page")
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("invalid unknown product export item")
+            product_id = item.get("catalog_product_id")
+            if type(product_id) is not int or product_id < 1 or product_id in seen_ids:
+                raise ValueError("duplicate or invalid unknown product export ID")
+            if supplier_key is not None and item.get("supplier_key") != supplier_key:
+                raise ValueError("unknown product export supplier mismatch")
+            seen_ids.add(product_id)
+            collected.append(item)
+        offset += page_size
+        if offset >= initial_total:
+            if len(collected) != initial_total:
+                raise ValueError("incomplete unknown product export")
+            return collected, initial_total
+
+
+def _clear_unknown_product_export(prefix: str) -> None:
+    st.session_state[f"{prefix}_export"] = None
+    st.session_state.pop(f"{prefix}_export_error", None)
+
+
+def _reset_unknown_product_selection(prefix: str) -> None:
+    _reset_unknown_product_page(f"{prefix}_offset")
+    _clear_unknown_product_export(prefix)
+
+
+def _render_unknown_product_export(
+    fetch,
+    build_dataframe,
+    *,
+    token: str,
+    attribute: str,
+    prefix: str,
+    supplier_key: str | None = None,
+) -> None:
+    state_key = f"{prefix}_export"
+    prepared = st.session_state.get(state_key)
+    if not (
+        isinstance(prepared, dict)
+        and prepared.get("token") == token
+        and prepared.get("supplier_key") == supplier_key
+    ):
+        # Validate scope at render time as well as in selection callbacks.
+        st.session_state[state_key] = None
+        prepared = None
+    label = "색상" if attribute == "color" else "사이즈"
+    scope_label = "선택 공급사의 " if supplier_key is not None else ""
+    if st.button(
+        f"{scope_label}{label} 영향 상품 전체 CSV 다운로드 준비",
+        key=f"{prefix}_export_prepare",
+    ):
+        _clear_unknown_product_export(prefix)
+        prepared = None
+        try:
+            items, total = fetch_all_unknown_token_products(
+                fetch, token, supplier_key=supplier_key
+            )
+            if not items:
+                st.info("현재 영향 상품이 없습니다. 다시 조회해 주세요.")
+                return
+            prepared = {
+                "token": token,
+                "supplier_key": supplier_key,
+                "total": total,
+                "csv_bytes": build_unknown_token_product_csv(build_dataframe(items)),
+                "file_name": (
+                    f"catalogguard_{'supplier_' if supplier_key is not None else ''}"
+                    f"unknown_{attribute}_token_products.csv"
+                ),
+            }
+            st.session_state[state_key] = prepared
+        except (
+            CatalogGuardApiConfigurationError,
+            CatalogGuardApiConnectionError,
+            CatalogGuardApiTimeoutError,
+            CatalogGuardApiResponseError,
+            ValueError,
+        ) as error:
+            st.session_state[f"{prefix}_export_error"] = build_etl_api_error_display_message(
+                "영향 상품 목록이 CSV 준비 중 변경되었거나 전체 목록을 수집하지 못했습니다. "
+                "다시 준비해 주세요.", error
+            )
+    export_error = st.session_state.get(f"{prefix}_export_error")
+    if export_error:
+        st.error(export_error)
+        return
+    if prepared is not None:
+        st.caption(
+            f"{scope_label or '전체 '}영향 상품 {prepared['total']}개 CSV 준비가 완료되었습니다."
+        )
+        st.download_button(
+            f"{scope_label}{label} 영향 상품 전체 CSV 다운로드",
+            data=prepared["csv_bytes"],
+            file_name=prepared["file_name"],
+            mime="text/csv",
+            key=f"{prefix}_export_download",
+        )
+
+
 def _reset_unknown_product_page(offset_key: str) -> None:
     st.session_state[offset_key] = 0
 
@@ -1192,6 +1332,7 @@ def _render_supplier_unknown_vocabulary(api_client, supplier_keys: list[str]) ->
         for attribute in ("color", "size"):
             st.session_state.pop(f"supplier_unknown_{attribute}_product_token", None)
             _reset_unknown_product_page(f"supplier_unknown_{attribute}_product_offset")
+            _clear_unknown_product_export(f"supplier_unknown_{attribute}_product")
 
     supplier_key = st.selectbox(
         "미판정 상세 공급사 선택",
@@ -1241,8 +1382,8 @@ def _render_supplier_unknown_vocabulary(api_client, supplier_keys: list[str]) ->
             index=None,
             placeholder="토큰을 선택하세요",
             key=f"supplier_unknown_{attribute}_product_token",
-            on_change=_reset_unknown_product_page,
-            args=(f"supplier_unknown_{attribute}_product_offset",),
+            on_change=_reset_unknown_product_selection,
+            args=(f"supplier_unknown_{attribute}_product",),
         )
         if selected_token is None:
             continue
@@ -1277,6 +1418,10 @@ def _render_supplier_unknown_vocabulary(api_client, supplier_keys: list[str]) ->
         _render_unknown_product_pagination(
             total=product_response["total"], limit=limit,
             offset_key=f"supplier_unknown_{attribute}_product_offset",
+        )
+        _render_unknown_product_export(
+            fetch_products, build_products, token=selected_token, attribute=attribute,
+            supplier_key=supplier_key, prefix=f"supplier_unknown_{attribute}_product",
         )
 
 
@@ -4871,8 +5016,8 @@ def _render_unknown_size_token_report(api_client) -> None:
         format_func=lambda value: "선택하세요" if value is None else value,
         index=0,
         key="unknown_size_token_product_token",
-        on_change=_reset_unknown_product_page,
-        args=("unknown_size_token_product_offset",),
+        on_change=_reset_unknown_product_selection,
+        args=("unknown_size_token_product",),
     )
     if selected_token is None:
         st.info("사이즈 토큰을 선택하면 현재 운영 카탈로그의 영향 상품을 조회합니다.")
@@ -4916,6 +5061,10 @@ def _render_unknown_size_token_report(api_client) -> None:
     _render_unknown_product_pagination(
         total=total, limit=UNKNOWN_SIZE_TOKEN_PRODUCT_LIMIT,
         offset_key="unknown_size_token_product_offset",
+    )
+    _render_unknown_product_export(
+        api_client.list_unknown_size_token_products, build_unknown_size_token_product_dataframe,
+        token=selected_token, attribute="size", prefix="unknown_size_token_product",
     )
 
 
@@ -4964,8 +5113,8 @@ def _render_unknown_color_token_report(api_client) -> None:
         format_func=lambda value: "선택하세요" if value is None else value,
         index=0,
         key="unknown_color_token_product_token",
-        on_change=_reset_unknown_product_page,
-        args=("unknown_color_token_product_offset",),
+        on_change=_reset_unknown_product_selection,
+        args=("unknown_color_token_product",),
     )
     if selected_token is None:
         st.info("색상 토큰을 선택하면 현재 운영 카탈로그의 영향 상품을 조회합니다.")
@@ -5009,6 +5158,10 @@ def _render_unknown_color_token_report(api_client) -> None:
     _render_unknown_product_pagination(
         total=total, limit=UNKNOWN_COLOR_TOKEN_PRODUCT_LIMIT,
         offset_key="unknown_color_token_product_offset",
+    )
+    _render_unknown_product_export(
+        api_client.list_unknown_color_token_products, build_unknown_color_token_product_dataframe,
+        token=selected_token, attribute="color", prefix="unknown_color_token_product",
     )
 
 

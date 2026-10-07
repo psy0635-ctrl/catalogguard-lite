@@ -403,7 +403,7 @@ def test_etl_quality_observability_in_real_browser(page):
         _cleanup_quality_fixture(fixture)
 
 
-def test_supplier_unknown_color_products_in_real_browser(page):
+def test_supplier_unknown_color_products_in_real_browser(page, tmp_path):
     """Same comparison key across suppliers must never leak into detail results."""
     from playwright.sync_api import expect
     from sqlalchemy import delete
@@ -452,11 +452,31 @@ def test_supplier_unknown_color_products_in_real_browser(page):
         expect(_dataframe_grid_cell(products, f"{suppliers[0]}-SKU-020")).to_have_count(1)
         expect(_dataframe_grid_cell(products, f"{suppliers[0]}-SKU-000")).to_have_count(0)
         expect(page.get_by_role("button", name="영향 상품 다음", exact=True)).to_be_disabled()
+        page.get_by_role("button", name="선택 공급사의 색상 영향 상품 전체 CSV 다운로드 준비", exact=True).click()
+        expect(page.get_by_text("선택 공급사의 영향 상품 21개 CSV 준비가 완료되었습니다.", exact=True)).to_be_visible()
+        # Preparing the full export must keep the currently displayed second page.
+        expect(page.get_by_text("영향 상품 2 / 2 페이지 · 전체 21개", exact=True)).to_be_visible()
+        with page.expect_download() as download_info:
+            page.get_by_role("button", name="선택 공급사의 색상 영향 상품 전체 CSV 다운로드", exact=True).click()
+        download = download_info.value
+        assert download.suggested_filename == "catalogguard_supplier_unknown_color_token_products.csv"
+        destination = tmp_path / download.suggested_filename
+        download.save_as(destination)
+        csv_bytes = destination.read_bytes()
+        assert csv_bytes.startswith(b"\xef\xbb\xbf")
+        import csv
+        import io
+        rows = list(csv.DictReader(io.StringIO(csv_bytes.decode("utf-8-sig"))))
+        assert len(rows) == 21
+        assert {row["공급사"] for row in rows} == {suppliers[0]}
+        assert rows[0]["외부 상품 ID"] == f"{suppliers[0]}-SKU-000"
+        assert rows[-1]["외부 상품 ID"] == f"{suppliers[0]}-SKU-020"
         page.get_by_role("button", name="영향 상품 이전", exact=True).click()
         expect(page.get_by_text("영향 상품 1 / 2 페이지 · 전체 21개", exact=True)).to_be_visible()
         expect(_dataframe_grid_cell(products, f"{suppliers[0]}-SKU-000")).to_have_count(1)
         supplier_selector.click()
         page.get_by_role("option", name=suppliers[1], exact=True).click()
+        expect(page.get_by_role("button", name="선택 공급사의 색상 영향 상품 전체 CSV 다운로드", exact=True)).to_have_count(0)
         expect(page.get_by_text("선택한 공급사의 영향 상품 1개 중 1개를 표시합니다.", exact=True)).to_have_count(0)
         expect(products).to_have_count(0)
         token_selector.click()
