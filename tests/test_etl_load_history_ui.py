@@ -5661,6 +5661,94 @@ class PaginatedUnknownProductClient(SupplierProductClient):
         return self._page("size", token, limit, offset, supplier_key)
 
 
+@pytest.mark.parametrize("total", [0, 20, 100, 101, 243])
+@pytest.mark.parametrize("kind,supplier", [("color", None), ("size", None),
+    ("color", "supplier-a"), ("size", "supplier-a")])
+def test_unknown_product_export_fetches_all_pages(total, kind, supplier):
+    client = PaginatedUnknownProductClient(total=total)
+    fetch = getattr(client, f"list_unknown_{kind}_token_products")
+    items, count = etl_load_history.fetch_all_unknown_token_products(
+        fetch, "TOKEN", supplier_key=supplier)
+    assert count == total == len(items)
+    assert client.page_calls == [(kind, "TOKEN", 100, offset, supplier)
+        for offset in (range(0, total, 100) if total else [0])]
+    assert [item["catalog_product_id"] for item in items] == list(range(1, total + 1))
+
+
+@pytest.mark.parametrize("fault", ["total", "short", "duplicate", "failure", "empty", "extra"])
+def test_unknown_product_export_rejects_inconsistent_pages(fault):
+    client = PaginatedUnknownProductClient(total=150)
+    def fetch(token, **params):
+        response = client.list_unknown_color_token_products(token, **params)
+        if params["offset"]:
+            if fault == "total":
+                response["total"] += 1
+            elif fault == "short":
+                response["items"].pop()
+            elif fault == "duplicate":
+                response["items"][0]["catalog_product_id"] = 100
+            elif fault == "failure":
+                raise catalogguard_api.CatalogGuardApiResponseError("private URL")
+            elif fault == "empty":
+                response["items"] = []
+            else:
+                response["items"].append({"catalog_product_id": 151})
+        return response
+    with pytest.raises((ValueError, catalogguard_api.CatalogGuardApiResponseError)):
+        etl_load_history.fetch_all_unknown_token_products(fetch, "CHARCOAL")
+
+
+@pytest.mark.parametrize("supplier", [None, "supplier-a"])
+def test_unknown_product_export_request_scope_is_explicit_on_every_page(supplier):
+    client = PaginatedUnknownProductClient(total=101)
+    calls = []
+    def fetch(token, **params):
+        calls.append(params)
+        return client.list_unknown_color_token_products(token, **params)
+    etl_load_history.fetch_all_unknown_token_products(fetch, "CHARCOAL", supplier_key=supplier)
+    expected = [{"limit": 100, "offset": offset} for offset in (0, 100)]
+    if supplier is not None:
+        for params in expected:
+            params["supplier_key"] = supplier
+    assert calls == expected
+
+
+@pytest.mark.parametrize("response", [None, {"total": True, "items": []},
+    {"total": -1, "items": []}, {"total": 1, "items": None},
+    {"total": 1, "items": [None]}, {"total": 1, "items": [{"catalog_product_id": True}]},
+    {"total": 0, "items": [{"catalog_product_id": 1}]},
+    {"total": 1, "items": [{"catalog_product_id": 1, "supplier_key": "supplier-b"}]}])
+def test_unknown_product_export_rejects_invalid_contract_and_supplier_leak(response):
+    with pytest.raises(ValueError):
+        etl_load_history.fetch_all_unknown_token_products(lambda *args, **kwargs: response,
+            "CHARCOAL", supplier_key="supplier-a")
+
+
+@pytest.mark.parametrize("page_size", [0, 101, True])
+def test_unknown_product_export_rejects_invalid_page_size_before_fetch(page_size):
+    def fetch(*args, **kwargs):
+        pytest.fail("invalid page size must not fetch")
+    with pytest.raises(ValueError):
+        etl_load_history.fetch_all_unknown_token_products(fetch, "TOKEN", page_size=page_size)
+
+
+@pytest.mark.parametrize("kind", ["color", "size"])
+def test_unknown_product_csv_uses_display_columns_and_existing_formula_policy(kind):
+    build = getattr(etl_load_history, f"build_unknown_{kind}_token_product_dataframe")
+    dataframe = build([{"catalog_product_id": 1, "supplier_key": "=1+1",
+        "external_product_id": "+123", "product_group_id": "-123",
+        "product_name": "@SUM(A1:A2)", "category": "한글", "color": "CHARCOAL", "size": "4XL"}])
+    original = dataframe.copy(deep=True)
+    result = etl_load_history.build_unknown_token_product_csv(dataframe)
+    assert result.startswith(b"\xef\xbb\xbf")
+    rows = list(csv.DictReader(io.StringIO(result.decode("utf-8-sig"))))
+    assert list(rows[0]) == list(dataframe.columns)
+    assert [rows[0][name] for name in list(dataframe.columns)[:4]] == [
+        "'=1+1", "'+123", "'-123", "'@SUM(A1:A2)"]
+    assert rows[0]["카테고리"] == "한글"
+    pd.testing.assert_frame_equal(dataframe, original)
+
+
 def _unknown_pagination_test_app(client):
     from ui.etl_load_history import (
         initialize_etl_load_state, _render_supplier_unknown_vocabulary,
@@ -5670,6 +5758,128 @@ def _unknown_pagination_test_app(client):
     _render_supplier_unknown_vocabulary(client, ["supplier-a", "supplier-b"])
     _render_unknown_color_token_report(client)
     _render_unknown_size_token_report(client)
+
+
+UNKNOWN_EXPORT_FLOWS = [("unknown_color_token_product", "CHARCOAL", "color", None),
+    ("unknown_size_token_product", "4XL", "size", None),
+    ("supplier_unknown_color_product", "CHARCOAL", "color", "supplier-a"),
+    ("supplier_unknown_size_product", "4XL", "size", "supplier-a")]
+
+
+@pytest.mark.parametrize("prefix,token,kind,supplier", UNKNOWN_EXPORT_FLOWS)
+def test_unknown_product_export_ui_prepares_full_csv_without_changing_page(prefix, token, kind, supplier):
+    from streamlit.testing.v1 import AppTest
+    client = PaginatedUnknownProductClient(total=120)
+    app = AppTest.from_function(_unknown_pagination_test_app, args=(client,)).run()
+    if supplier:
+        app.selectbox(key="supplier_unknown_vocabulary_supplier").select(supplier).run()
+    app.selectbox(key=f"{prefix}_token").select(token).run()
+    app.button(key=f"{prefix}_offset_next").click().run()
+    assert all(call[2] == 20 for call in client.page_calls)
+    before = len(client.page_calls)
+    app.button(key=f"{prefix}_export_prepare").click().run()
+    assert client.page_calls[before:] == [(kind, token, 20, 20, supplier),
+        (kind, token, 100, 0, supplier), (kind, token, 100, 100, supplier)]
+    prepared = app.session_state[f"{prefix}_export"]
+    assert prepared["total"] == 120
+    assert prepared["token"] == token and prepared["supplier_key"] == supplier
+    rows = list(csv.DictReader(io.StringIO(prepared["csv_bytes"].decode("utf-8-sig"))))
+    assert len(rows) == 120
+    assert rows[0]["외부 상품 ID"] == f"{token}-000"
+    assert rows[-1]["외부 상품 ID"] == f"{token}-119"
+    assert {row["공급사"] for row in rows} == {supplier or "GLOBAL"}
+    filename = f"catalogguard_{'supplier_' if supplier else ''}unknown_{kind}_token_products.csv"
+    assert prepared["file_name"] == filename
+    label = f"{'선택 공급사의 ' if supplier else ''}{'색상' if kind == 'color' else '사이즈'} 영향 상품 전체 CSV 다운로드"
+    assert any(button.proto.label == label for button in app.get("download_button"))
+    assert any("120개 CSV 준비가 완료" in caption.value for caption in app.caption)
+    assert app.session_state[f"{prefix}_offset"] == 20
+    app.button(key=f"{prefix}_offset_previous").click().run()
+    assert app.session_state[f"{prefix}_export"] == prepared
+    assert len([call for call in client.page_calls if call[2] == 100]) == 2
+    assert not app.exception
+
+
+def test_unknown_product_export_selection_and_scope_reset_are_isolated():
+    from streamlit.testing.v1 import AppTest
+    client = PaginatedUnknownProductClient()
+    app = AppTest.from_function(_unknown_pagination_test_app, args=(client,)).run()
+    app.selectbox(key="supplier_unknown_vocabulary_supplier").select("supplier-a").run()
+    for prefix, token, _, _ in UNKNOWN_EXPORT_FLOWS:
+        app.selectbox(key=f"{prefix}_token").select(token).run()
+        app.button(key=f"{prefix}_export_prepare").click().run()
+    app.selectbox(key="unknown_color_token_product_token").select("ASH").run()
+    assert app.session_state["unknown_color_token_product_export"] is None
+    for prefix, _, _, _ in UNKNOWN_EXPORT_FLOWS[1:]:
+        assert app.session_state[f"{prefix}_export"] is not None
+    app.selectbox(key="supplier_unknown_color_product_token").select("ASH").run()
+    assert app.session_state["supplier_unknown_color_product_export"] is None
+    assert app.session_state["supplier_unknown_size_product_export"] is not None
+    app.button(key="unknown_color_token_product_export_prepare").click().run()
+    app.selectbox(key="supplier_unknown_vocabulary_supplier").select("supplier-b").run()
+    assert app.session_state["supplier_unknown_size_product_export"] is None
+    assert app.session_state["unknown_color_token_product_export"] is not None
+    assert app.session_state["unknown_size_token_product_export"] is not None
+    assert not app.exception
+
+
+@pytest.mark.parametrize("mismatch", ["token", "supplier_key"])
+def test_unknown_product_export_hides_stale_payload_without_callback(mismatch):
+    from streamlit.testing.v1 import AppTest
+    client = PaginatedUnknownProductClient()
+    app = AppTest.from_function(_unknown_pagination_test_app, args=(client,)).run()
+    app.selectbox(key="unknown_color_token_product_token").select("CHARCOAL").run()
+    app.button(key="unknown_color_token_product_export_prepare").click().run()
+    app.session_state["unknown_color_token_product_export"][mismatch] = "OTHER"
+    app.run()
+    assert app.session_state["unknown_color_token_product_export"] is None
+    assert not any(button.proto.label == "색상 영향 상품 전체 CSV 다운로드" for button in app.get("download_button"))
+    assert not app.exception
+
+
+@pytest.mark.parametrize("fault", ["failure", "total", "short", "duplicate", "zero"])
+def test_unknown_product_export_ui_failure_clears_old_download_and_keeps_other_flow(fault):
+    from streamlit.testing.v1 import AppTest
+    class ExportFailureClient(PaginatedUnknownProductClient):
+        fault = None
+        def _page(self, kind, token, limit, offset, supplier_key):
+            response = super()._page(kind, token, limit, offset, supplier_key)
+            if kind == "color" and limit == 100 and self.fault:
+                if self.fault == "zero":
+                    return {"token": token, "total": 0, "items": []}
+                if offset:
+                    if self.fault == "failure":
+                        raise catalogguard_api.CatalogGuardApiResponseError("private URL and DB")
+                    if self.fault == "total":
+                        response["total"] += 1
+                    elif self.fault == "short":
+                        response["items"].pop()
+                    elif self.fault == "duplicate":
+                        response["items"][0]["catalog_product_id"] = 100
+            return response
+    client = ExportFailureClient(total=120)
+    app = AppTest.from_function(_unknown_pagination_test_app, args=(client,)).run()
+    app.selectbox(key="supplier_unknown_vocabulary_supplier").select("supplier-a").run()
+    for prefix, token, _, _ in UNKNOWN_EXPORT_FLOWS:
+        app.selectbox(key=f"{prefix}_token").select(token).run()
+        app.button(key=f"{prefix}_export_prepare").click().run()
+    client.fault = fault
+    app.button(key="unknown_color_token_product_export_prepare").click().run()
+    assert app.session_state["unknown_color_token_product_export"] is None
+    for prefix, _, _, _ in UNKNOWN_EXPORT_FLOWS[1:]:
+        assert app.session_state[f"{prefix}_export"] is not None
+    assert not any(button.proto.label == "색상 영향 상품 전체 CSV 다운로드" for button in app.get("download_button"))
+    if fault == "zero":
+        assert any("현재 영향 상품이 없습니다" in item.value for item in app.info)
+    else:
+        assert len(app.error) == 1
+        assert "private" not in app.error[0].value
+    assert app.button(key="unknown_color_token_product_offset_next")
+    assert len(app.dataframe) >= 4
+    before = len([call for call in client.page_calls if call[2] == 100])
+    app.run()
+    assert len([call for call in client.page_calls if call[2] == 100]) == before
+    assert not app.exception
 
 
 @pytest.mark.parametrize("scope, kind, token, alternate", [
