@@ -53,6 +53,13 @@ MAX_BATCH_LIMIT = 50
 
 
 @dataclass(frozen=True)
+class ETLQualityErrorBatch:
+    etl_load_run_id: int
+    count: int
+    reject_details_stored: bool
+
+
+@dataclass(frozen=True)
 class ETLQualityErrorCodeCount:
     error_code: str
     # 관찰 구간 전체에서 이 코드로 거부된 행 수의 합입니다.
@@ -60,6 +67,7 @@ class ETLQualityErrorCodeCount:
     # 이 코드가 한 번이라도 나타난 배치 수입니다. 한 배치에서만 터진 사고인지,
     # 여러 배치에 걸친 구조적 문제인지 구분하는 데 씁니다.
     affected_batch_count: int
+    batches: list[ETLQualityErrorBatch]
 
 
 @dataclass(frozen=True)
@@ -95,7 +103,7 @@ def _aggregate_error_codes(
 ) -> list[ETLQualityErrorCodeCount]:
     """Sum error_counts across the observed batches, deterministically ordered."""
     total_counts: dict[str, int] = {}
-    affected_batch_counts: dict[str, int] = {}
+    batches_by_code: dict[str, list[ETLQualityErrorBatch]] = {}
     for load_run in load_runs:
         error_counts = load_run.error_counts or {}
         if not isinstance(error_counts, dict):
@@ -108,15 +116,20 @@ def _aggregate_error_codes(
             if isinstance(count, bool) or not isinstance(count, int) or count < 1:
                 continue
             total_counts[error_code] = total_counts.get(error_code, 0) + count
-            affected_batch_counts[error_code] = (
-                affected_batch_counts.get(error_code, 0) + 1
+            batches_by_code.setdefault(error_code, []).append(
+                ETLQualityErrorBatch(
+                    etl_load_run_id=load_run.id,
+                    count=count,
+                    reject_details_stored=load_run.reject_details_stored,
+                )
             )
     # 많이 터진 코드가 먼저 오고, 같은 수면 코드 이름 순서로 고정합니다.
     return [
         ETLQualityErrorCodeCount(
             error_code=error_code,
             total_count=total_count,
-            affected_batch_count=affected_batch_counts[error_code],
+            affected_batch_count=len(batches_by_code[error_code]),
+            batches=batches_by_code[error_code],
         )
         for error_code, total_count in sorted(
             total_counts.items(),

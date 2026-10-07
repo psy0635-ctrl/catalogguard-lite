@@ -121,10 +121,10 @@ def _make_hash() -> str:
 
 
 def _create_quality_fixture() -> _QualityFixture:
-    """Create only the two quality-metadata rows this read-only E2E needs."""
+    """Create two quality batches and their synthetic masked Reject rows."""
     from sqlalchemy import func, select
 
-    from db.models import ETLLoadRun
+    from db.models import ETLLoadRun, ETLRejectedRow
 
     with _new_session() as session:
         previous = ETLLoadRun(
@@ -137,6 +137,8 @@ def _create_quality_fixture() -> _QualityFixture:
             loaded_rows=8,
             rejected_rows=2,
             error_counts={"missing_required": 2},
+            reject_details_stored=True,
+            rejects_file_sha256=_make_hash(),
             created_at=datetime(2026, 1, 1, 10, tzinfo=timezone.utc),
         )
         latest = ETLLoadRun(
@@ -149,10 +151,20 @@ def _create_quality_fixture() -> _QualityFixture:
             loaded_rows=9,
             rejected_rows=1,
             error_counts={"missing_required": 1},
+            reject_details_stored=True,
+            rejects_file_sha256=_make_hash(),
             created_at=datetime(2026, 1, 1, 11, tzinfo=timezone.utc),
         )
         session.add_all((previous, latest))
         session.flush()
+        for run, numbers, label in ((previous, (2, 3), "QUALITY-PREVIOUS"),
+                                    (latest, (4,), "QUALITY-LATEST")):
+            for number in numbers:
+                session.add(ETLRejectedRow(
+                    etl_load_run_id=run.id, source_row_number=number,
+                    errors=[{"code": "missing_required", "field": "product_id", "message": label}],
+                    masked_source_data={"product_id": f"MASKED-{label}-{number}"},
+                ))
         fixture = _QualityFixture(
             previous=_snapshot_batch(previous),
             latest=_snapshot_batch(latest),
@@ -280,6 +292,10 @@ def _assert_api_observability(page, fixture: _QualityFixture) -> None:
             "error_code": "missing_required",
             "total_count": 3,
             "affected_batch_count": 2,
+            "batches": [
+                {"etl_load_run_id": fixture.latest.id, "count": 1, "reject_details_stored": True},
+                {"etl_load_run_id": fixture.previous.id, "count": 2, "reject_details_stored": True},
+            ],
         }
     ]
     assert [item["etl_load_run_id"] for item in payload["recent_batches"]] == [
@@ -354,6 +370,22 @@ def _run_quality_observability_scenario(page, fixture: _QualityFixture) -> None:
         )
         for grid_text in observed_grid_texts
     )
+
+    page.get_by_role("combobox", name=re.compile("조사할 오류 코드$")).click()
+    page.get_by_role("option", name="missing_required", exact=True).click()
+    batch_selector = page.get_by_role("combobox", name=re.compile("오류 발생 배치$"))
+    batch_selector.click()
+    page.get_by_role("option", name=re.compile(rf"^#{fixture.latest.id} ·")).click()
+    reject_grid = _dataframe_grid_with_column(page, "원본 행")
+    expect(_dataframe_grid_cell(reject_grid, "QUALITY-LATEST")).to_have_count(1)
+    expect(_dataframe_grid_cell(reject_grid, "QUALITY-PREVIOUS")).to_have_count(0)
+    page.get_by_text("품질 관찰 원본 행 4 - 마스킹 원본", exact=True).click()
+    expect(page.locator("body")).to_contain_text("MASKED-QUALITY-LATEST-4")
+    batch_selector.click()
+    page.get_by_role("option", name=re.compile(rf"^#{fixture.previous.id} ·")).click()
+    expect(_dataframe_grid_cell(reject_grid, "QUALITY-PREVIOUS")).to_have_count(2)
+    expect(_dataframe_grid_cell(reject_grid, "QUALITY-LATEST")).to_have_count(0)
+    expect(page.locator("body")).not_to_contain_text("MASKED-QUALITY-LATEST-4")
 
     _assert_fixture_unchanged(fixture)
     assert not console_errors, f"Unexpected browser console errors: {console_errors}"

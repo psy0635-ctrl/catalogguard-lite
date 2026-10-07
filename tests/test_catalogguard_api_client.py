@@ -4977,3 +4977,46 @@ def test_unknown_product_client_optional_supplier(attribute, token, supplier):
     if supplier is not None:
         expected["supplier_key"] = supplier
     assert session.calls[0]["params"] == expected
+
+
+def _quality_mapping_payload():
+    from copy import deepcopy
+    payload = deepcopy(ETL_QUALITY_OBSERVABILITY_RESPONSE)
+    payload["error_codes"] = [{"error_code": "INVALID_PRICE", "total_count": 8, "affected_batch_count": 2,
+        "batches": [{"etl_load_run_id": 12, "count": 5, "reject_details_stored": True},
+                    {"etl_load_run_id": 11, "count": 3, "reject_details_stored": False}]}]
+    return payload
+
+
+def test_quality_client_accepts_new_mapping_and_old_server_contract():
+    for payload in (_quality_mapping_payload(), ETL_QUALITY_OBSERVABILITY_RESPONSE):
+        client, _ = make_client(response=FakeResponse(payload=payload))
+        assert client.get_etl_quality_observability(profile_name="synthetic") == payload
+
+
+@pytest.mark.parametrize("replacement", [None, {}, "bad", [None], [{"etl_load_run_id": 0, "count": 8, "reject_details_stored": True}],
+    [{"etl_load_run_id": True, "count": 8, "reject_details_stored": True}],
+    [{"etl_load_run_id": 12, "count": True, "reject_details_stored": True}],
+    [{"etl_load_run_id": 12, "count": -1, "reject_details_stored": True}],
+    [{"etl_load_run_id": 12, "count": 8, "reject_details_stored": 1}],
+    [{"etl_load_run_id": 12, "count": 4, "reject_details_stored": True}] * 2,
+    [{"etl_load_run_id": 12, "count": 8, "reject_details_stored": True}]])
+def test_quality_client_rejects_malformed_mapping(replacement):
+    payload = _quality_mapping_payload()
+    payload["error_codes"][0]["batches"] = replacement
+    client, _ = make_client(response=FakeResponse(payload=payload))
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_quality_observability(profile_name="synthetic")
+
+
+@pytest.mark.parametrize("mutation", ["sum", "membership", "order", "length"])
+def test_quality_client_rejects_incoherent_mapping(mutation):
+    payload = _quality_mapping_payload()
+    item = payload["error_codes"][0]
+    if mutation == "sum": item["batches"][0]["count"] = 6
+    if mutation == "membership": item["batches"][0]["etl_load_run_id"] = 999
+    if mutation == "order": item["batches"].reverse()
+    if mutation == "length": item["affected_batch_count"] = 1
+    client, _ = make_client(response=FakeResponse(payload=payload))
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_quality_observability(profile_name="synthetic")

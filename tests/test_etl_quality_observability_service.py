@@ -570,3 +570,73 @@ def test_profile_listing_returns_exact_db_values_and_does_not_write(postgres_ses
         session, profile_name=listed[0]
     ).batch_count == 1
     assert session.scalar(select(func.count()).select_from(ETLLoadRun)) == before
+
+
+@pytest.mark.parametrize("counts", [None, [], {"": 3, " ": 1, "BOOL": True, "ZERO": 0, "NEG": -1, "FLOAT": 1.5, "STR": "2"}])
+def test_error_mapping_preserves_malformed_metadata_skip_policy(counts):
+    from types import SimpleNamespace
+    from db.etl_quality_observability_service import _aggregate_error_codes
+    assert _aggregate_error_codes([SimpleNamespace(id=1, error_counts=counts, reject_details_stored=False)]) == []
+
+
+def test_error_mapping_single_pass_newest_order_and_no_writes():
+    from types import SimpleNamespace
+    runs = [SimpleNamespace(id=3, created_at=BASE_TIME, total_rows=10, loaded_rows=5,
+                rejected_rows=5, error_counts={"PRICE": 3, "STOCK": 2}, reject_details_stored=True),
+            SimpleNamespace(id=2, created_at=BASE_TIME, total_rows=10, loaded_rows=7,
+                rejected_rows=3, error_counts={"PRICE": 3}, reject_details_stored=False)]
+    class ReadOnlySession:
+        calls = []
+        def scalars(self, statement):
+            self.calls.append(statement)
+            return SimpleNamespace(all=lambda: runs)
+        def commit(self):
+            raise AssertionError("read only")
+        def flush(self):
+            raise AssertionError("read only")
+    session = ReadOnlySession()
+    result = _observe(session, "synthetic")
+    assert len(session.calls) == 1
+    price, stock = result.error_codes
+    assert (price.total_count, price.affected_batch_count) == (6, 2)
+    assert [(b.etl_load_run_id, b.count, b.reject_details_stored) for b in price.batches] == [(3, 3, True), (2, 3, False)]
+    assert [(b.etl_load_run_id, b.count) for b in stock.batches] == [(3, 2)]
+    assert [item.etl_load_run_id for item in result.recent_batches] == [2, 3]
+
+
+def test_postgres_mapping_to_existing_reject_jsonb_filter(postgres_session):
+    from sqlalchemy import event
+    from db.models import ETLRejectedRow
+    from db.etl_query_service import list_etl_rejections
+    session, prefix = postgres_session
+    runs = [_add_run(session, profile_name=prefix, minutes=i, total_rows=10,
+                    rejected_rows=2, error_counts={"INVALID_PRICE": 1, "STOCK": 1}) for i in (1, 2)]
+    for run in runs:
+        run.reject_details_stored = True
+        run.rejects_file_sha256 = _unique_hash()
+        for number, code in [(2, "INVALID_PRICE"), (3, "STOCK")]:
+            session.add(ETLRejectedRow(etl_load_run_id=run.id, source_row_number=number,
+                errors=[{"code": code, "field": "price", "message": "synthetic"}],
+                masked_source_data={"product_id": f"SYNTHETIC-{run.id}-{number}"}))
+    session.flush()
+    statements = []
+    connection = session.connection()
+    def capture(conn, cursor, statement, parameters, context, many):
+        statements.append(statement)
+    event.listen(connection, "before_cursor_execute", capture)
+    try:
+        observation = _observe(session, prefix)
+        assert len(statements) == 1
+        price = next(item for item in observation.error_codes if item.error_code == "INVALID_PRICE")
+        assert [batch.etl_load_run_id for batch in price.batches] == [runs[1].id, runs[0].id]
+        assert sum(batch.count for batch in price.batches) == price.total_count == 2
+        for batch in price.batches:
+            rows = list_etl_rejections(session, etl_load_run_id=batch.etl_load_run_id,
+                                       error_code=price.error_code, limit=1, offset=0)
+            assert rows.total == batch.count == 1
+            assert rows.items[0].source_row_number == 2
+            assert rows.items[0].masked_source_data == {"product_id": f"SYNTHETIC-{batch.etl_load_run_id}-2"}
+        assert all(statement.lstrip().upper().startswith("SELECT") for statement in statements)
+        assert not session.new and not session.dirty and not session.deleted
+    finally:
+        event.remove(connection, "before_cursor_execute", capture)
