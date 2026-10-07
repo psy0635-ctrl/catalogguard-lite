@@ -998,6 +998,8 @@ medium, m -> M
 
 공급사별 색상·사이즈 조회 오류는 각각 표시하고 다른 상세와 ETL 이력은 계속 표시합니다. 공급사 상세에서 미판정 토큰을 선택하면 해당 공급사의 영향 상품만 조회합니다. 기존 색상·사이즈 영향 상품 API는 optional `supplier_key`를 지원하며, 생략하면 전체 공급사 범위를 유지합니다. 지정하면 raw 토큰 후보·`total`·상품 모두 해당 `CatalogProduct.supplier_key` 범위로 제한합니다. supplier identity는 기존 토큰 보고서처럼 공백 제거나 대소문자 변환 없이 정확히 비교하며, 존재하지 않는 값은 HTTP 200의 빈 결과입니다. 공급사를 바꾸면 토큰 선택이 초기화되고 이전 상품·오류가 남지 않습니다. 현재 운영 `catalog_products` snapshot의 read-only 조회이며 자동 alias 등록·상품 수정은 없습니다.
 
+색상·사이즈 영향 상품 API는 `limit`(기본 20, 1–100)과 `offset`(기본 0, 0 이상)을 지원하며 응답은 기존 `{token, total, items}`입니다. `total`은 pagination 전 전체 matching 건수입니다. 전체 보고서와 공급사 상세에서 이전/다음으로 상품을 탐색할 수 있고, 네 pagination 상태는 독립적이며 토큰·공급사 변경 시 첫 페이지로 초기화합니다. Global은 전체 운영 카탈로그, supplier 상세는 해당 공급사 범위의 read-only 조회로 vocabulary 판단 정책은 바꾸지 않습니다.
+
 #### 미판정 사이즈 토큰 빈도 보고서
 
 운영자는 ETL 적재 이력 화면의 `미판정 사이즈 토큰` 표에서 현재 운영 카탈로그(`catalog_products`)에 남아 있는 미판정 원본 토큰과 건수를 확인할 수 있습니다. API는 `GET /api/v1/catalog/unknown-size-tokens`이며 viewer 이상 권한에서 호출할 수 있고, 기본 상위 20개(최대 100개)를 `{"items": [{"token": "4XL", "count": 8}]}` 형식으로 반환합니다.

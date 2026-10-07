@@ -418,17 +418,19 @@ def test_supplier_unknown_color_products_in_real_browser(page):
             for supplier, color in zip(suppliers, ("CHARCOAL", "charcoal")):
                 load = ETLLoadRun(source_filename="synthetic_vocabulary.csv",
                     profile_name=supplier, profile_version="1", input_file_sha256=_make_hash(),
-                    output_file_sha256=_make_hash(), loaded_rows=1)
+                    output_file_sha256=_make_hash(), loaded_rows=21 if supplier == suppliers[0] else 1)
                 session.add(load)
                 session.flush()
                 load_ids.append(load.id)
-                product = CatalogProduct(supplier_key=supplier, external_product_id=f"{supplier}-SKU",
-                    product_group_id="SYNTHETIC", product_name="Synthetic vocabulary product",
-                    category="TOP", color=color, size="4XL", stock=1, price=100,
-                    image_path="synthetic.jpg", source_etl_load_run_id=load.id)
-                session.add(product)
-                session.flush()
-                product_ids.append(product.id)
+                for number in range(21 if supplier == suppliers[0] else 1):
+                    product = CatalogProduct(supplier_key=supplier,
+                        external_product_id=f"{supplier}-SKU-{number:03}",
+                        product_group_id="SYNTHETIC", product_name="Synthetic vocabulary product",
+                        category="TOP", color=color, size="4XL", stock=1, price=100,
+                        image_path="synthetic.jpg", source_etl_load_run_id=load.id)
+                    session.add(product)
+                    session.flush()
+                    product_ids.append(product.id)
             session.commit()
         page.goto(STREAMLIT_URL, wait_until="domcontentloaded")
         _login_as_operator(page)
@@ -439,18 +441,28 @@ def test_supplier_unknown_color_products_in_real_browser(page):
         token_selector = page.get_by_role("combobox", name=re.compile("공급사 미판정 색상 영향 상품 토큰 선택$"))
         token_selector.click()
         page.get_by_role("option", name="CHARCOAL", exact=True).click()
-        expect(page.get_by_text("선택한 공급사의 영향 상품 1개 중 1개를 표시합니다.", exact=True)).to_be_visible()
+        expect(page.get_by_text("선택한 공급사의 영향 상품 21개 중 20개를 표시합니다.", exact=True)).to_be_visible()
         products = _dataframe_grid_with_column(page, "외부 상품 ID")
-        expect(_dataframe_grid_cell(products, f"{suppliers[0]}-SKU")).to_have_count(1)
-        expect(_dataframe_grid_cell(products, f"{suppliers[1]}-SKU")).to_have_count(0)
+        expect(_dataframe_grid_cell(products, f"{suppliers[0]}-SKU-000")).to_have_count(1)
+        expect(_dataframe_grid_cell(products, f"{suppliers[1]}-SKU-000")).to_have_count(0)
+        expect(page.get_by_text("영향 상품 1 / 2 페이지 · 전체 21개", exact=True)).to_be_visible()
+        expect(page.get_by_role("button", name="영향 상품 이전", exact=True)).to_be_disabled()
+        page.get_by_role("button", name="영향 상품 다음", exact=True).click()
+        expect(page.get_by_text("영향 상품 2 / 2 페이지 · 전체 21개", exact=True)).to_be_visible()
+        expect(_dataframe_grid_cell(products, f"{suppliers[0]}-SKU-020")).to_have_count(1)
+        expect(_dataframe_grid_cell(products, f"{suppliers[0]}-SKU-000")).to_have_count(0)
+        expect(page.get_by_role("button", name="영향 상품 다음", exact=True)).to_be_disabled()
+        page.get_by_role("button", name="영향 상품 이전", exact=True).click()
+        expect(page.get_by_text("영향 상품 1 / 2 페이지 · 전체 21개", exact=True)).to_be_visible()
+        expect(_dataframe_grid_cell(products, f"{suppliers[0]}-SKU-000")).to_have_count(1)
         supplier_selector.click()
         page.get_by_role("option", name=suppliers[1], exact=True).click()
         expect(page.get_by_text("선택한 공급사의 영향 상품 1개 중 1개를 표시합니다.", exact=True)).to_have_count(0)
         expect(products).to_have_count(0)
         token_selector.click()
         page.get_by_role("option", name="charcoal", exact=True).click()
-        expect(_dataframe_grid_cell(products, f"{suppliers[1]}-SKU")).to_have_count(1)
-        expect(_dataframe_grid_cell(products, f"{suppliers[0]}-SKU")).to_have_count(0)
+        expect(_dataframe_grid_cell(products, f"{suppliers[1]}-SKU-000")).to_have_count(1)
+        expect(_dataframe_grid_cell(products, f"{suppliers[0]}-SKU-000")).to_have_count(0)
         expect(page.locator("body")).not_to_contain_text("StreamlitAPIException")
     except BaseException:
         _preserve_browser_failure_artifacts(page)

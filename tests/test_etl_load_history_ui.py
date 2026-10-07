@@ -1209,7 +1209,7 @@ class FakeEtlApiClient:
             raise self.unknown_size_token_error
         return {"items": self.unknown_size_tokens}
 
-    def list_unknown_size_token_products(self, token, *, limit=20):
+    def list_unknown_size_token_products(self, token, *, limit=20, offset=0):
         self.unknown_size_token_product_calls.append({"token": token, "limit": limit})
         if self.unknown_size_token_product_error is not None:
             raise self.unknown_size_token_product_error
@@ -1237,7 +1237,7 @@ class FakeEtlApiClient:
             raise self.unknown_color_token_error
         return {"items": self.unknown_color_tokens}
 
-    def list_unknown_color_token_products(self, token, *, limit=20):
+    def list_unknown_color_token_products(self, token, *, limit=20, offset=0):
         self.unknown_color_token_product_calls.append(
             {"token": token, "limit": limit}
         )
@@ -2212,6 +2212,9 @@ class UnknownSizeTokenStreamlit:
 
     def download_button(self, label, **kwargs):
         self.downloads.append({"label": label, **kwargs})
+
+    def button(self, label, **kwargs):
+        return False
 
     def info(self, value):
         self.infos.append(value)
@@ -5428,10 +5431,10 @@ class SupplierProductClient(SupplierUnknownVocabularyClient):
                  "product_name": "Synthetic", "category": "TOP", "color": "CHARCOAL", "size": "4XL"}]
         return {"token": token, "total": len(items), "items": items}
 
-    def list_unknown_color_token_products(self, token, *, limit=20, supplier_key=None):
+    def list_unknown_color_token_products(self, token, *, limit=20, supplier_key=None, offset=0):
         return self._products("color", token, limit, supplier_key)
 
-    def list_unknown_size_token_products(self, token, *, limit=20, supplier_key=None):
+    def list_unknown_size_token_products(self, token, *, limit=20, supplier_key=None, offset=0):
         return self._products("size", token, limit, supplier_key)
 
 
@@ -5625,4 +5628,174 @@ def test_quality_drilldown_empty_legacy_errors_and_summary_isolation(mode):
             assert app.info
     assert len(app.metric) == 4
     assert len(app.dataframe) >= (1 if mode == "no_codes" else 2)
+    assert not app.exception
+
+
+class PaginatedUnknownProductClient(SupplierProductClient):
+    def __init__(self, *, total=47, fail=None):
+        super().__init__()
+        self.total = total
+        self.page_calls = []
+        self.fail = fail
+
+    def list_unknown_color_tokens(self, *, limit=20, supplier_key=None):
+        return {"items": [{"token": token, "count": self.total} for token in ("CHARCOAL", "ASH")]}
+
+    def list_unknown_size_tokens(self, *, limit=20, supplier_key=None):
+        return {"items": [{"token": token, "count": self.total} for token in ("4XL", "5XL")]}
+
+    def _page(self, kind, token, limit, offset, supplier_key):
+        self.page_calls.append((kind, token, limit, offset, supplier_key))
+        if self.fail == (kind, supplier_key):
+            raise catalogguard_api.CatalogGuardApiResponseError("private URL")
+        return {"token": token, "total": self.total, "items": [
+            {"catalog_product_id": number + 1, "supplier_key": supplier_key or "GLOBAL",
+             "external_product_id": f"{token}-{number:03}", "product_group_id": "G",
+             "product_name": "Synthetic", "category": "TOP", "color": "CHARCOAL", "size": "4XL"}
+            for number in range(offset, min(offset+limit, self.total))]}
+
+    def list_unknown_color_token_products(self, token, *, limit=20, offset=0, supplier_key=None):
+        return self._page("color", token, limit, offset, supplier_key)
+
+    def list_unknown_size_token_products(self, token, *, limit=20, offset=0, supplier_key=None):
+        return self._page("size", token, limit, offset, supplier_key)
+
+
+def _unknown_pagination_test_app(client):
+    from ui.etl_load_history import (
+        initialize_etl_load_state, _render_supplier_unknown_vocabulary,
+        _render_unknown_color_token_report, _render_unknown_size_token_report,
+    )
+    initialize_etl_load_state()
+    _render_supplier_unknown_vocabulary(client, ["supplier-a", "supplier-b"])
+    _render_unknown_color_token_report(client)
+    _render_unknown_size_token_report(client)
+
+
+@pytest.mark.parametrize("scope, kind, token, alternate", [
+    ("global", "color", "CHARCOAL", "ASH"), ("global", "size", "4XL", "5XL"),
+    ("supplier", "color", "CHARCOAL", "ASH"), ("supplier", "size", "4XL", "5XL"),
+])
+def test_unknown_product_pagination_navigation_reset_and_isolation(scope, kind, token, alternate):
+    from streamlit.testing.v1 import AppTest
+    client = PaginatedUnknownProductClient()
+    app = AppTest.from_function(_unknown_pagination_test_app, args=(client,)).run()
+    assert client.page_calls == []
+    keys = ["unknown_color_token_product_offset", "unknown_size_token_product_offset",
+            "supplier_unknown_color_product_offset", "supplier_unknown_size_product_offset"]
+    if scope == "supplier":
+        app.selectbox(key="supplier_unknown_vocabulary_supplier").select("supplier-a").run()
+        assert client.page_calls == []
+        selector = f"supplier_unknown_{kind}_product_token"
+        offset_key = f"supplier_unknown_{kind}_product_offset"
+    else:
+        selector = f"unknown_{kind}_token_product_token"
+        offset_key = f"unknown_{kind}_token_product_offset"
+    supplier = "supplier-a" if scope == "supplier" else None
+    app.selectbox(key=selector).select(token).run()
+    assert client.page_calls[-1] == (kind, token, 20, 0, supplier)
+    assert app.button(key=f"{offset_key}_previous").disabled
+    assert any("1 / 3 페이지 · 전체 47개" in caption.value for caption in app.caption)
+    before = len(client.page_calls)
+    app.button(key=f"{offset_key}_next").click().run()
+    assert len(client.page_calls) == before + 1
+    assert client.page_calls[-1] == (kind, token, 20, 20, supplier)
+    assert all(app.session_state[key] == (20 if key == offset_key else 0) for key in keys)
+    app.button(key=f"{offset_key}_next").click().run()
+    assert client.page_calls[-1][3] == 40
+    assert app.button(key=f"{offset_key}_next").disabled
+    assert any(len(frame.value) == 7 and "외부 상품 ID" in frame.value for frame in app.dataframe)
+    app.button(key=f"{offset_key}_previous").click().run()
+    assert client.page_calls[-1][3] == 20
+    app.selectbox(key=selector).select(alternate).run()
+    assert client.page_calls[-1] == (kind, alternate, 20, 0, supplier)
+    if scope == "supplier":
+        app.button(key=f"{offset_key}_next").click().run()
+        before = len(client.page_calls)
+        app.selectbox(key="supplier_unknown_vocabulary_supplier").select("supplier-b").run()
+        assert len(client.page_calls) == before
+        assert app.selectbox(key="supplier_unknown_color_product_token").value is None
+        assert app.selectbox(key="supplier_unknown_size_product_token").value is None
+        assert all(app.session_state[key] == 0 for key in keys)
+        app.selectbox(key=selector).select(token).run()
+        assert client.page_calls[-1] == (kind, token, 20, 0, "supplier-b")
+    assert not app.exception
+
+
+@pytest.mark.parametrize("total", [0, 7])
+def test_unknown_product_pagination_zero_and_single_page(total):
+    from streamlit.testing.v1 import AppTest
+    client = PaginatedUnknownProductClient(total=total)
+    app = AppTest.from_function(_unknown_pagination_test_app, args=(client,)).run()
+    app.selectbox(key="unknown_color_token_product_token").select("CHARCOAL").run()
+    if total:
+        assert app.button(key="unknown_color_token_product_offset_previous").disabled
+        assert app.button(key="unknown_color_token_product_offset_next").disabled
+    else:
+        assert not any("product_offset" in (button.key or "") for button in app.button)
+        assert any("현재 운영 상품이 없습니다" in info.value for info in app.info)
+    assert not app.exception
+
+
+@pytest.mark.parametrize("kind, supplier", [("color", None), ("size", None), ("color", "supplier-a"), ("size", "supplier-a")])
+def test_unknown_product_pagination_stale_offset_recovers_once(kind, supplier):
+    from streamlit.testing.v1 import AppTest
+    client = PaginatedUnknownProductClient()
+    app = AppTest.from_function(_unknown_pagination_test_app, args=(client,)).run()
+    if supplier:
+        app.selectbox(key="supplier_unknown_vocabulary_supplier").select(supplier).run()
+    prefix = f"supplier_unknown_{kind}_product" if supplier else f"unknown_{kind}_token_product"
+    token = "CHARCOAL" if kind == "color" else "4XL"
+    app.selectbox(key=f"{prefix}_token").select(token).run()
+    app.button(key=f"{prefix}_offset_next").click().run()
+    app.button(key=f"{prefix}_offset_next").click().run()
+    client.total = 15
+    before = len(client.page_calls)
+    app.run()
+    assert [call[3] for call in client.page_calls[before:]] == [40, 0]
+    assert app.session_state[f"{prefix}_offset"] == 0
+    assert any("1 / 1 페이지 · 전체 15개" in caption.value for caption in app.caption)
+    assert not app.exception
+
+
+def test_unknown_product_pagination_error_does_not_block_other_flows():
+    from streamlit.testing.v1 import AppTest
+    client = PaginatedUnknownProductClient(fail=("color", None))
+    app = AppTest.from_function(_unknown_pagination_test_app, args=(client,)).run()
+    app.selectbox(key="unknown_color_token_product_token").select("CHARCOAL").run()
+    app.selectbox(key="unknown_size_token_product_token").select("4XL").run()
+    assert len(app.error) == 1
+    assert "private URL" not in app.error[0].value
+    assert app.button(key="unknown_size_token_product_offset_next")
+    app.selectbox(key="supplier_unknown_vocabulary_supplier").select("supplier-a").run()
+    app.selectbox(key="supplier_unknown_color_product_token").select("CHARCOAL").run()
+    assert app.button(key="supplier_unknown_color_product_offset_next")
+    assert not app.exception
+
+
+def test_unknown_product_all_four_active_pagination_states_stay_independent():
+    from collections import Counter
+    from streamlit.testing.v1 import AppTest
+    client = PaginatedUnknownProductClient()
+    app = AppTest.from_function(_unknown_pagination_test_app, args=(client,)).run()
+    app.selectbox(key="supplier_unknown_vocabulary_supplier").select("supplier-a").run()
+    flows = [("unknown_color_token_product", "CHARCOAL"), ("unknown_size_token_product", "4XL"),
+             ("supplier_unknown_color_product", "CHARCOAL"), ("supplier_unknown_size_product", "4XL")]
+    for prefix, token in flows:
+        app.selectbox(key=f"{prefix}_token").select(token).run()
+    for index, (prefix, _) in enumerate(flows):
+        before = len(client.page_calls)
+        app.button(key=f"{prefix}_offset_next").click().run()
+        assert len(client.page_calls[before:]) == 4
+        assert all(count == 1 for count in Counter(client.page_calls[before:]).values())
+        for other_index, (other, _) in enumerate(flows):
+            assert app.session_state[f"{other}_offset"] == (20 if other_index <= index else 0)
+    app.selectbox(key="supplier_unknown_color_product_token").select("ASH").run()
+    assert app.session_state["supplier_unknown_color_product_offset"] == 0
+    assert app.session_state["supplier_unknown_size_product_offset"] == 20
+    app.selectbox(key="supplier_unknown_vocabulary_supplier").select("supplier-b").run()
+    assert app.session_state["unknown_color_token_product_offset"] == 20
+    assert app.session_state["unknown_size_token_product_offset"] == 20
+    assert app.session_state["supplier_unknown_color_product_offset"] == 0
+    assert app.session_state["supplier_unknown_size_product_offset"] == 0
     assert not app.exception

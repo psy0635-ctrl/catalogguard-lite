@@ -2646,14 +2646,17 @@ class CatalogGuardApiClient:
         *,
         limit: int = 20,
         supplier_key: str | None = None,
+        offset: int = 0,
     ) -> dict[str, Any]:
         if not isinstance(token, str) or not token.strip():
             raise ValueError("token must be a non-empty string")
-        _validate_etl_pagination(limit, 0)
+        _validate_etl_pagination(limit, offset)
         normalized_token = token.strip()
         params = {"token": normalized_token, "limit": limit}
         if supplier_key is not None:
             params["supplier_key"] = supplier_key
+        if offset:
+            params["offset"] = offset
         data = self._get_json(
             "/api/v1/catalog/unknown-color-token-products",
             params=params,
@@ -2667,14 +2670,17 @@ class CatalogGuardApiClient:
         *,
         limit: int = 20,
         supplier_key: str | None = None,
+        offset: int = 0,
     ) -> dict[str, Any]:
         if not isinstance(token, str) or not token.strip():
             raise ValueError("token must be a non-empty string")
-        _validate_etl_pagination(limit, 0)
+        _validate_etl_pagination(limit, offset)
         normalized_token = token.strip()
         params = {"token": normalized_token, "limit": limit}
         if supplier_key is not None:
             params["supplier_key"] = supplier_key
+        if offset:
+            params["offset"] = offset
         data = self._get_json(
             "/api/v1/catalog/unknown-size-token-products",
             params=params,

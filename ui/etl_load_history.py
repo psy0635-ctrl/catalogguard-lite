@@ -346,6 +346,10 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_quality_observability_profiles_response": None,
     "etl_quality_observability_profiles_error": None,
     "etl_quality_observability_selected_profile": None,
+    "unknown_color_token_product_offset": 0,
+    "unknown_size_token_product_offset": 0,
+    "supplier_unknown_color_product_offset": 0,
+    "supplier_unknown_size_product_offset": 0,
     "etl_quality_drilldown_error_code": None,
     "etl_quality_drilldown_run_id": None,
     "etl_quality_drilldown_offset": 0,
@@ -1137,6 +1141,43 @@ def _render_catalog_vocabulary_coverage(api_client) -> None:
     )
 
 
+def _reset_unknown_product_page(offset_key: str) -> None:
+    st.session_state[offset_key] = 0
+
+
+def _change_unknown_product_page(offset_key: str, delta: int) -> None:
+    st.session_state[offset_key] = max(0, st.session_state.get(offset_key, 0) + delta)
+
+
+def _fetch_unknown_product_page(fetch, token, *, limit, offset_key, supplier_key=None):
+    params = {"limit": limit, "offset": st.session_state.get(offset_key, 0)}
+    if supplier_key is not None:
+        params["supplier_key"] = supplier_key
+    response = fetch(token, **params)
+    # A catalog snapshot can shrink between renders. Recover once, without a loop.
+    if params["offset"] > 0 and params["offset"] >= response["total"]:
+        _reset_unknown_product_page(offset_key)
+        params["offset"] = 0
+        response = fetch(token, **params)
+    return response
+
+
+def _render_unknown_product_pagination(*, total, limit, offset_key) -> None:
+    page, pages, previous, following = calculate_etl_pagination(
+        total=total, limit=limit, offset=st.session_state.get(offset_key, 0)
+    )
+    st.caption(f"영향 상품 {page} / {pages} 페이지 · 전체 {total}개")
+    previous_col, next_col = st.columns(2)
+    previous_col.button(
+        "영향 상품 이전", disabled=not previous, key=f"{offset_key}_previous",
+        on_click=_change_unknown_product_page, args=(offset_key, -limit),
+    )
+    next_col.button(
+        "영향 상품 다음", disabled=not following, key=f"{offset_key}_next",
+        on_click=_change_unknown_product_page, args=(offset_key, limit),
+    )
+
+
 def _render_supplier_unknown_vocabulary(api_client, supplier_keys: list[str]) -> None:
     st.markdown("#### 공급사 미판정 Vocabulary 상세")
     st.caption(
@@ -1150,6 +1191,7 @@ def _render_supplier_unknown_vocabulary(api_client, supplier_keys: list[str]) ->
     def clear_supplier_selection():
         for attribute in ("color", "size"):
             st.session_state.pop(f"supplier_unknown_{attribute}_product_token", None)
+            _reset_unknown_product_page(f"supplier_unknown_{attribute}_product_offset")
 
     supplier_key = st.selectbox(
         "미판정 상세 공급사 선택",
@@ -1199,14 +1241,17 @@ def _render_supplier_unknown_vocabulary(api_client, supplier_keys: list[str]) ->
             index=None,
             placeholder="토큰을 선택하세요",
             key=f"supplier_unknown_{attribute}_product_token",
+            on_change=_reset_unknown_product_page,
+            args=(f"supplier_unknown_{attribute}_product_offset",),
         )
         if selected_token is None:
             continue
         # Responses and errors are local to this render: changing either selection
         # cannot retain an earlier result, and color/size failures stay independent.
         try:
-            product_response = fetch_products(
-                selected_token, limit=limit, supplier_key=supplier_key
+            product_response = _fetch_unknown_product_page(
+                fetch_products, selected_token, limit=limit, supplier_key=supplier_key,
+                offset_key=f"supplier_unknown_{attribute}_product_offset",
             )
         except (
             CatalogGuardApiConfigurationError,
@@ -1228,6 +1273,10 @@ def _render_supplier_unknown_vocabulary(api_client, supplier_keys: list[str]) ->
         )
         st.dataframe(
             build_products(product_response["items"]), hide_index=True, width="stretch"
+        )
+        _render_unknown_product_pagination(
+            total=product_response["total"], limit=limit,
+            offset_key=f"supplier_unknown_{attribute}_product_offset",
         )
 
 
@@ -4822,15 +4871,17 @@ def _render_unknown_size_token_report(api_client) -> None:
         format_func=lambda value: "선택하세요" if value is None else value,
         index=0,
         key="unknown_size_token_product_token",
+        on_change=_reset_unknown_product_page,
+        args=("unknown_size_token_product_offset",),
     )
     if selected_token is None:
         st.info("사이즈 토큰을 선택하면 현재 운영 카탈로그의 영향 상품을 조회합니다.")
         return
 
     try:
-        product_response = api_client.list_unknown_size_token_products(
-            selected_token,
-            limit=UNKNOWN_SIZE_TOKEN_PRODUCT_LIMIT,
+        product_response = _fetch_unknown_product_page(
+            api_client.list_unknown_size_token_products, selected_token,
+            limit=UNKNOWN_SIZE_TOKEN_PRODUCT_LIMIT, offset_key="unknown_size_token_product_offset",
         )
     except (
         CatalogGuardApiConfigurationError,
@@ -4860,6 +4911,11 @@ def _render_unknown_size_token_report(api_client) -> None:
         build_unknown_size_token_product_dataframe(product_items),
         width="stretch",
         hide_index=True,
+    )
+
+    _render_unknown_product_pagination(
+        total=total, limit=UNKNOWN_SIZE_TOKEN_PRODUCT_LIMIT,
+        offset_key="unknown_size_token_product_offset",
     )
 
 
@@ -4908,15 +4964,17 @@ def _render_unknown_color_token_report(api_client) -> None:
         format_func=lambda value: "선택하세요" if value is None else value,
         index=0,
         key="unknown_color_token_product_token",
+        on_change=_reset_unknown_product_page,
+        args=("unknown_color_token_product_offset",),
     )
     if selected_token is None:
         st.info("색상 토큰을 선택하면 현재 운영 카탈로그의 영향 상품을 조회합니다.")
         return
 
     try:
-        product_response = api_client.list_unknown_color_token_products(
-            selected_token,
-            limit=UNKNOWN_COLOR_TOKEN_PRODUCT_LIMIT,
+        product_response = _fetch_unknown_product_page(
+            api_client.list_unknown_color_token_products, selected_token,
+            limit=UNKNOWN_COLOR_TOKEN_PRODUCT_LIMIT, offset_key="unknown_color_token_product_offset",
         )
     except (
         CatalogGuardApiConfigurationError,
@@ -4946,6 +5004,11 @@ def _render_unknown_color_token_report(api_client) -> None:
         build_unknown_color_token_product_dataframe(product_items),
         width="stretch",
         hide_index=True,
+    )
+
+    _render_unknown_product_pagination(
+        total=total, limit=UNKNOWN_COLOR_TOKEN_PRODUCT_LIMIT,
+        offset_key="unknown_color_token_product_offset",
     )
 
 

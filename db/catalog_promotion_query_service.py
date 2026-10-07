@@ -388,6 +388,7 @@ def list_unknown_color_token_products(
     token: str,
     limit: int,
     supplier_key: str | None = None,
+    offset: int = 0,
 ) -> UnknownColorTokenProductList:
     """Return operational catalog products affected by one unknown color token."""
     display_token = collapse_comparison_whitespace(token)
@@ -428,6 +429,7 @@ def list_unknown_color_token_products(
                 CatalogProduct.id.asc(),
             )
             .limit(limit)
+            .offset(offset)
         ).all()
     )
     return UnknownColorTokenProductList(
@@ -467,6 +469,7 @@ def list_unknown_size_token_products(
     token: str,
     limit: int,
     supplier_key: str | None = None,
+    offset: int = 0,
 ) -> UnknownSizeTokenProductList:
     """Return current catalog products using one unknown size comparison key."""
     display_token = collapse_comparison_whitespace(token)
@@ -511,6 +514,7 @@ def list_unknown_size_token_products(
                 CatalogProduct.id.asc(),
             )
             .limit(limit)
+            .offset(offset)
         ).all()
     )
     return UnknownSizeTokenProductList(

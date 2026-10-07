@@ -5020,3 +5020,26 @@ def test_quality_client_rejects_incoherent_mapping(mutation):
     client, _ = make_client(response=FakeResponse(payload=payload))
     with pytest.raises(import_client_module().CatalogGuardApiResponseError):
         client.get_etl_quality_observability(profile_name="synthetic")
+
+
+@pytest.mark.parametrize("kind, token", [("color", "CHARCOAL"), ("size", "4XL")])
+@pytest.mark.parametrize("supplier", [None, "A"])
+@pytest.mark.parametrize("offset", [0, 20])
+def test_unknown_product_client_pagination(kind, token, supplier, offset):
+    payload = {"token": token, "total": 25, "items": []}
+    client, session = make_client(response=FakeResponse(payload=payload))
+    assert getattr(client, f"list_unknown_{kind}_token_products")(
+        f" {token} ", limit=20, offset=offset, supplier_key=supplier) == payload
+    expected = {"token": token, "limit": 20}
+    if offset: expected["offset"] = offset
+    if supplier is not None: expected["supplier_key"] = supplier
+    assert session.calls[0]["params"] == expected
+
+
+@pytest.mark.parametrize("kind", ["color", "size"])
+@pytest.mark.parametrize("offset", [-1, True, 1.5, "20"])
+def test_unknown_product_client_invalid_offset_without_request(kind, offset):
+    client, session = make_client(response=FakeResponse(payload={}))
+    with pytest.raises(ValueError):
+        getattr(client, f"list_unknown_{kind}_token_products")("4XL", offset=offset)
+    assert session.calls == []
