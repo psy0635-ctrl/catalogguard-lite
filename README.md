@@ -996,7 +996,7 @@ medium, m -> M
 
 공급사별 표 아래에서 공급사를 선택하면 `공급사 미판정 Vocabulary 상세`에 해당 공급사의 미판정 색상·사이즈 토큰을 각각 상위 20개까지 표시합니다. 기존 `GET /api/v1/catalog/unknown-color-tokens`와 `GET /api/v1/catalog/unknown-size-tokens`는 optional `supplier_key` query를 지원합니다. 예를 들어 `?supplier_key=sample_fashion_vendor&limit=20`은 해당 `CatalogProduct.supplier_key`의 현재 운영 상품만 DB에서 필터링한 뒤 기존 vocabulary·비교 정규화 정책으로 집계합니다. `supplier_key`를 생략하면 기존 전체 집계이며, 현재 상품이 없는 공급사는 HTTP 200과 `{"items": []}`를 반환합니다. viewer 권한·limit 범위·응답 구조는 동일하며 API client도 `list_unknown_color_tokens(limit=20, supplier_key="sample_fashion_vendor")` 및 동일한 사이즈 호출을 지원합니다.
 
-공급사 상세의 색상·사이즈 조회 오류는 각각 표시하고 다른 보고서와 ETL 이력은 계속 동작합니다. 공급사를 바꾸면 상세를 다시 조회하며 이전 표를 보존하지 않습니다. 영향 상품 조사는 아래 기존 전체 미판정 토큰 보고서에서 같은 토큰을 선택해 진행합니다. 영향 상품 API는 전체 공급사 범위를 유지하고 상품별 공급사를 함께 표시하며, 전체 보고서의 상위 20개에 없는 토큰은 기존 영향 상품 API에 직접 지정해 조회할 수 있습니다. 미판정은 오류나 공급사 평가 점수가 아니며 자동 alias 등록·데이터 수정은 하지 않습니다.
+공급사별 색상·사이즈 조회 오류는 각각 표시하고 다른 상세와 ETL 이력은 계속 표시합니다. 공급사 상세에서 미판정 토큰을 선택하면 해당 공급사의 영향 상품만 조회합니다. 기존 색상·사이즈 영향 상품 API는 optional `supplier_key`를 지원하며, 생략하면 전체 공급사 범위를 유지합니다. 지정하면 raw 토큰 후보·`total`·상품 모두 해당 `CatalogProduct.supplier_key` 범위로 제한합니다. supplier identity는 기존 토큰 보고서처럼 공백 제거나 대소문자 변환 없이 정확히 비교하며, 존재하지 않는 값은 HTTP 200의 빈 결과입니다. 공급사를 바꾸면 토큰 선택이 초기화되고 이전 상품·오류가 남지 않습니다. 현재 운영 `catalog_products` snapshot의 read-only 조회이며 자동 alias 등록·상품 수정은 없습니다.
 
 #### 미판정 사이즈 토큰 빈도 보고서
 

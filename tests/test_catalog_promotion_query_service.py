@@ -955,3 +955,55 @@ def test_unknown_tokens_filter_suppliers_before_grouping(attribute, token, known
             if supplier is not None:
                 assert "WHERE catalog_products.supplier_key =" in statements[-1]
     engine.dispose()
+
+
+@pytest.mark.parametrize("attribute, token, known", [("color", "CHARCOAL", "BLACK"), ("size", "4XL", "M")])
+@pytest.mark.parametrize("backend", ["sqlite", "postgresql"])
+def test_unknown_product_supplier_scope_in_database(attribute, token, known, backend):
+    from sqlalchemy import create_engine, event, text
+    from sqlalchemy.orm import Session
+    from db import catalog_promotion_query_service as service
+
+    if backend == "postgresql":
+        url = get_optional_database_url()
+        if url is None:
+            pytest.skip("PostgreSQL test database is not configured")
+        engine = create_database_engine(url)
+    else:
+        engine = create_engine("sqlite://")
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        # Temporary shadow table isolates synthetic rows from any existing catalog.
+        connection.execute(text("CREATE TEMPORARY TABLE catalog_products (id BIGINT PRIMARY KEY, supplier_key TEXT, external_product_id TEXT, product_group_id TEXT, product_name TEXT, category TEXT, color TEXT, size TEXT, stock INTEGER, price BIGINT, sale_price BIGINT, image_path TEXT, description TEXT, seller TEXT, source_etl_load_run_id BIGINT, created_at TIMESTAMP, updated_at TIMESTAMP)"))
+        rows = []
+        for supplier, variants in [("A", [token, token.lower(), "  " + token + "  "]), ("B", [token.lower()] * 4)]:
+            for value in variants + [known, token + "-OTHER"]:
+                rows.append(dict(id=len(rows)+1, supplier=supplier, sku=f"SKU-{99-len(rows):03}", value=value))
+        color_value = ":value" if attribute == "color" else "'BLACK'"
+        size_value = ":value" if attribute == "size" else "'M'"
+        connection.execute(text(f"INSERT INTO catalog_products (id,supplier_key,external_product_id,product_group_id,product_name,category,color,size) VALUES (:id,:supplier,:sku,'GROUP','Synthetic product','TOP',{color_value},{size_value})"), rows)
+        statements = []
+        def capture(conn, cursor, statement, parameters, context, many):
+            statements.append((statement, parameters))
+        event.listen(connection, "before_cursor_execute", capture)
+        with Session(bind=connection) as session:
+            report = getattr(service, f"list_unknown_{attribute}_token_products")
+            for supplier, expected in [(None, 7), ("A", 3), ("B", 4), ("missing", 0), (" A ", 0), ("   ", 0)]:
+                before = len(statements)
+                result = report(session, token=token, limit=2, supplier_key=supplier)
+                assert result.total == expected
+                assert len(result.items) == min(2, expected)
+                assert all(supplier is None or item.supplier_key == supplier for item in result.items)
+                ordering = [(item.supplier_key, item.external_product_id, item.catalog_product_id) for item in result.items]
+                assert ordering == sorted(ordering)
+                queries = statements[before:]
+                assert len(queries) == (3 if expected else 1)
+                assert all(query.lstrip().upper().startswith("SELECT") for query, _ in queries)
+                if supplier is not None:
+                    assert all("catalog_products.supplier_key =" in query for query, _ in queries)
+            before = len(statements)
+            assert report(session, token=known, limit=20, supplier_key="A").total == 0
+            assert len(statements) == before
+            assert not session.new and not session.dirty and not session.deleted
+        transaction.rollback()
+    engine.dispose()

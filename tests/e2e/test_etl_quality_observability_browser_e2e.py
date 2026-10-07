@@ -369,3 +369,62 @@ def test_etl_quality_observability_in_real_browser(page):
         raise
     finally:
         _cleanup_quality_fixture(fixture)
+
+
+def test_supplier_unknown_color_products_in_real_browser(page):
+    """Same comparison key across suppliers must never leak into detail results."""
+    from playwright.sync_api import expect
+    from sqlalchemy import delete
+    from db.models import CatalogProduct, ETLLoadRun
+
+    suffix = uuid4().hex[:12]
+    suppliers = [f"vocabulary_e2e_{suffix}_{letter}" for letter in ("a", "b")]
+    product_ids = []
+    load_ids = []
+    try:
+        with _new_session() as session:
+            for supplier, color in zip(suppliers, ("CHARCOAL", "charcoal")):
+                load = ETLLoadRun(source_filename="synthetic_vocabulary.csv",
+                    profile_name=supplier, profile_version="1", input_file_sha256=_make_hash(),
+                    output_file_sha256=_make_hash(), loaded_rows=1)
+                session.add(load)
+                session.flush()
+                load_ids.append(load.id)
+                product = CatalogProduct(supplier_key=supplier, external_product_id=f"{supplier}-SKU",
+                    product_group_id="SYNTHETIC", product_name="Synthetic vocabulary product",
+                    category="TOP", color=color, size="4XL", stock=1, price=100,
+                    image_path="synthetic.jpg", source_etl_load_run_id=load.id)
+                session.add(product)
+                session.flush()
+                product_ids.append(product.id)
+            session.commit()
+        page.goto(STREAMLIT_URL, wait_until="domcontentloaded")
+        _login_as_operator(page)
+        page.get_by_role("tab", name="ETL 적재 이력").click()
+        supplier_selector = page.get_by_role("combobox", name=re.compile("미판정 상세 공급사 선택$"))
+        supplier_selector.click()
+        page.get_by_role("option", name=suppliers[0], exact=True).click()
+        token_selector = page.get_by_role("combobox", name=re.compile("공급사 미판정 색상 영향 상품 토큰 선택$"))
+        token_selector.click()
+        page.get_by_role("option", name="CHARCOAL", exact=True).click()
+        expect(page.get_by_text("선택한 공급사의 영향 상품 1개 중 1개를 표시합니다.", exact=True)).to_be_visible()
+        products = _dataframe_grid_with_column(page, "외부 상품 ID")
+        expect(_dataframe_grid_cell(products, f"{suppliers[0]}-SKU")).to_have_count(1)
+        expect(_dataframe_grid_cell(products, f"{suppliers[1]}-SKU")).to_have_count(0)
+        supplier_selector.click()
+        page.get_by_role("option", name=suppliers[1], exact=True).click()
+        expect(page.get_by_text("선택한 공급사의 영향 상품 1개 중 1개를 표시합니다.", exact=True)).to_have_count(0)
+        expect(products).to_have_count(0)
+        token_selector.click()
+        page.get_by_role("option", name="charcoal", exact=True).click()
+        expect(_dataframe_grid_cell(products, f"{suppliers[1]}-SKU")).to_have_count(1)
+        expect(_dataframe_grid_cell(products, f"{suppliers[0]}-SKU")).to_have_count(0)
+        expect(page.locator("body")).not_to_contain_text("StreamlitAPIException")
+    except BaseException:
+        _preserve_browser_failure_artifacts(page)
+        raise
+    finally:
+        with _new_session() as session:
+            session.execute(delete(CatalogProduct).where(CatalogProduct.id.in_(product_ids)))
+            session.execute(delete(ETLLoadRun).where(ETLLoadRun.id.in_(load_ids)))
+            session.commit()
