@@ -294,11 +294,12 @@ def get_unknown_size_token_products(
     token: str = Query(..., min_length=1, pattern=r".*\S.*"),
     limit: int = Query(default=20, ge=1, le=100),
     supplier_key: str | None = Query(default=None),
+    offset: int = Query(default=0, ge=0),
     _current_user=Depends(require_viewer),
     session: Session = Depends(get_session),
 ) -> UnknownSizeTokenProductListResponse:
     result = list_unknown_size_token_products(
-        session, token=token, limit=limit, supplier_key=supplier_key
+        session, token=token, limit=limit, supplier_key=supplier_key, offset=offset
     )
     return UnknownSizeTokenProductListResponse(
         token=result.token,
@@ -346,11 +347,12 @@ def get_unknown_color_token_products(
     token: str = Query(..., min_length=1, pattern=r".*\S.*"),
     limit: int = Query(default=20, ge=1, le=100),
     supplier_key: str | None = Query(default=None),
+    offset: int = Query(default=0, ge=0),
     _current_user=Depends(require_viewer),
     session: Session = Depends(get_session),
 ) -> UnknownColorTokenProductListResponse:
     result = list_unknown_color_token_products(
-        session, token=token, limit=limit, supplier_key=supplier_key
+        session, token=token, limit=limit, supplier_key=supplier_key, offset=offset
     )
     return UnknownColorTokenProductListResponse(
         token=result.token,
