@@ -146,7 +146,7 @@ Quick Demo와 Full Demo가 모두 `sample_marketplace_vendor_v1` 프로필을 �
 | 시간 | 실행 · 화면에서 확인 | 설명 · 정상 결과 |
 |---|---|---|
 | 0:00–0:40 | “공급사 CSV는 바로 운영 catalog로 가지 않는다”를 말하고 `ETL 적재 이력`을 연다. 상단의 `ETL 품질 요약`·`최근 ETL 품질 추이`를 보고, `ETL 품질 관찰`에서 `sample_marketplace_vendor`를 선택한다. | 변환·품질 gate를 거쳐 staging에 먼저 저장한다. 최신 배치와 직전 배치의 Reject 비율, 변화량 `%p`, 방향, 주요 오류 코드가 보인다. 준비한 두 batch만 있으면 `-50.00%p`·`개선`이다. |
-| 0:40–1:20 | 목록에서 `etl_browser_vendor.csv` batch를 선택해 `상세 조회`를 누르고, `4 / 2 / 2`과 오류 코드별 건수, reject 상세의 마스킹된 원본을 보여 주고, 배치 전체 CSV와 오류 코드별 필터 CSV의 차이를 짧게 설명한다. | 가격을 숫자로 바꿀 수 없고 음수 재고인 행은 staging에 들어가지 않는다. 전체 CSV는 Reject 2행, `INVALID_PRICE` 필터 CSV는 해당 코드가 포함된 1행이다. 두 CSV 모두 저장된 마스킹 원본과 오류 정보를 사용한다. 자세한 다운로드는 Full Demo에서 보여 준다. |
+| 0:40–1:20 | 목록에서 `etl_browser_vendor.csv` batch를 선택해 `상세 조회`를 누르고, 전체 4행·정상 2행·Reject 2행 및 오류 코드별 건수, reject 상세의 마스킹된 원본을 보여 주고, 배치 전체 CSV와 오류 코드별 필터 CSV의 차이를 짧게 설명한다. | 가격을 숫자로 바꿀 수 없고 음수 재고인 행은 staging에 들어가지 않는다. 전체 CSV는 Reject 2행, `INVALID_PRICE` 필터 CSV는 해당 코드가 포함된 1행이다. 두 CSV 모두 저장된 마스킹 원본과 오류 정보를 사용한다. 자세한 다운로드는 Full Demo에서 보여 준다. |
 | 1:20–2:20 | `etl_browser_promotion_vendor.csv` clean batch를 직접 선택해 `운영 반영 미리보기`를 연다. checkbox 전 비활성 버튼과 상품별 변경 전·후를 보인다. | preview는 DB를 바꾸지 않는다. 확인 뒤에만 `운영 상품에 반영`이 가능하고, 성공하면 promotion audit이 남는다. |
 | 2:20–2:50 | 성공 Promotion의 `Rollback Preview`를 열고 checkbox 후 실행한 뒤 rollback change audit을 연다. | rollback도 preview와 별도 승인 절차를 거친다. delete/restore와 실행 사용자가 audit에 남는다. |
 | 2:50–3:00 | 한 줄로 마무리한다. | “문제를 분리하고, 사람이 확인한 변경만 반영하며, 되돌린 기록도 남깁니다.” |
