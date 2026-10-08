@@ -766,6 +766,27 @@ Path의 `etl_load_run_id`는 `1` 이상의 정수만 허용한다. `0`, 음수�
 
 라우터는 ORM 객체를 API 응답으로 직접 내보내지 않고 query service의 dataclass 결과를 Pydantic 모델로 변환한다. 따라서 DB 모델 변경이 HTTP 응답 계약을 암묵적으로 바꾸지 않는다.
 
+### 저장된 Reject 상세와 CSV 다운로드
+
+이 다운로드는 DB에 저장된 ETL 배치의 Reject 상세를 내보내는 기능이다. 공급사 원본 CSV를 변환할 때 `etl.cli`가 만드는 `rejected_rows.csv`와는 별도 흐름이며, 원본 업로드 파일을 다시 읽거나 복원하지 않는다.
+
+`ETL 적재 이력`에서 배치를 선택하고 `상세 조회`를 누른 뒤 `거부 행 오류 코드`를 확인한다. 기존 `GET /api/v1/etl-loads/{etl_load_run_id}/rejections`의 선택적 `error_code`를 사용하며, API나 DB 구조를 추가하지 않는다. API는 해당 코드가 오류 목록에 포함된 행을 조회하고 `total`도 같은 필터 기준으로 반환한다.
+
+| 구분 | 준비 버튼 → 준비 후 다운로드 버튼 | 포함 범위 | 파일명 |
+|---|---|---|---|
+| 기존 전체 CSV | `거부 행 CSV 다운로드 준비` → `거부 행 CSV 다운로드` | 오류 코드 선택 여부와 관계없이 배치 전체 Reject | `etl_load_<배치 ID>_rejections.csv` |
+| 필터 CSV | `현재 오류 코드 Reject CSV 준비` → `<오류 코드> Reject CSV 다운로드` | 선택한 코드가 포함된 Reject 전체 | 예: `etl_load_<배치 ID>_rejections_INVALID_PRICE.csv` |
+
+오류 코드가 `전체`이면 필터 CSV 준비 버튼은 표시하지 않는다. 코드를 선택해도 기존 전체 CSV는 계속 사용할 수 있다. 필터 파일명에는 파일명에 사용할 수 있도록 처리한 오류 코드가 붙는다.
+
+화면은 20건씩 보여 주지만 CSV 준비는 기존 `fetch_all_etl_rejections()`로 100건씩 모든 페이지를 수집한다. 전체 CSV 호출에는 `error_code`를 생략하고 필터 CSV 호출에만 선택한 코드를 전달한다. 한 Reject 행이 여러 오류를 가지면 해당 행은 한 번만 내보내며, 선택한 코드 외의 오류 코드·필드·메시지도 삭제하지 않는다.
+
+전체 CSV와 필터 CSV의 준비 상태는 분리된다. 오류 코드를 변경하면 이전 필터 CSV를 다시 준비해야 하며, 준비된 전체 CSV는 유지된다. ETL 배치를 변경하면 두 CSV의 준비 상태가 모두 초기화된다. 페이지 이동만으로는 준비된 CSV를 다시 수집하지 않는다.
+
+두 CSV는 `build_etl_rejection_csv()`와 `prepare_export_dataframe()`을 재사용해 기존 컬럼, UTF-8 BOM과 Formula Injection 방어를 유지한다. 원본 값은 저장된 `masked_source_data`만 사용하며 raw 개인정보를 복원하지 않는다. 마스킹은 탐지된 패턴에 대한 처리이며 모든 개인정보의 익명화를 보장하지 않는다.
+
+수집 중 API 오류, total 변경, 짧은 페이지, 중복 행 또는 필터와 맞지 않는 행을 발견하면 해당 CSV 준비를 실패 처리하고 부분 파일을 제공하지 않는다. 결과가 0건이면 다운로드할 거부 행이 없다는 안내를 표시한다. Reject 상세가 저장되지 않은 과거 배치는 상세와 CSV를 제공하지 않으며, 오류 코드 집계가 없는 배치는 전체 조회만 제공한다.
+
 ## Streamlit ETL 적재 이력 화면
 
 Streamlit에는 공급사 CSV를 업로드해 ETL을 직접 실행하는 `ETL 실행` 영역과, 저장된 ETL 배치와 staging 상품을 확인하고 선택한 batch를 운영 상품에 반영하는 `ETL 적재 이력` 탭을 제공한다. ETL 실행, 배치·상품·reject 조회, promotion preview와 실제 반영 모두 `CatalogGuardApiClient`가 FastAPI API를 호출하는 방식이며, Streamlit이 DB에 직접 쓰지는 않는다.
@@ -779,7 +800,8 @@ Streamlit에는 공급사 CSV를 업로드해 ETL을 직접 실행하는 `ETL �
 | 배치 상세 | 배치 ID, 파일명, 프로필, 버전, 전체 입력·정상 적재·변환 거부·정상 처리율, 적재 시각과 input/output SHA-256 전체 표시 |
 | Historical lineage comparison | 현재 목록에서 같은 `profile_name`의 다른 batch를 선택해 기존 detail API 응답의 input SHA-256·definition fingerprint·application commit을 비교하고, 양쪽 snapshot이 있으면 매핑·필수 원본 컬럼·기본값 semantic diff 표시 |
 | 오류 통계 | 오류 코드별 발생 건수를 발생 건수 내림차순·코드 오름차순으로 표시하고 reject 0건은 안내 |
-| reject 상세 | reject 행 페이지네이션, 오류 코드·필드·메시지와 마스킹된 원본 값 표시; 과거 미저장 배치는 안내 |
+| reject 상세 | 오류 코드 필터와 20건씩 페이지네이션, 오류 코드·필드·메시지와 마스킹된 원본 값 표시; 과거 미저장 배치는 안내 |
+| Reject CSV | 기존 배치 전체 CSV와 선택한 오류 코드의 필터 CSV를 각각 준비·다운로드; 화면 페이지와 별개로 전체 결과 수집 |
 | 상품 목록 | 선택한 배치의 staging 상품을 20건씩 표시 |
 | promotion | 선택한 batch의 preview 실행, 반영 가능 여부·차단 사유·변경 전후·insert/update/unchanged 표시 |
 | 승인 반영 | 승인 checkbox 선택 전 반영 버튼 비활성화; 승인 후 `expected_preview_hash`와 함께 FastAPI promotion 요청 |

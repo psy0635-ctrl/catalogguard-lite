@@ -74,7 +74,7 @@ python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501
 | Inspection | `data/dev/category_mismatch_test.csv` | 허용 category 검증, 상품명·category 불일치, 상품 group category 일관성 |
 | 선택 Inspection | `data/dev/price_anomaly_test.csv` | 가격 이상치 2건; 다른 category 오류와 구분해 설명 |
 | 선택 Inspection | `data/dev/privacy_masking_test.csv` | 이메일·전화번호·식별번호 **의심 패턴 탐지**와 화면 미리보기 마스킹 |
-| ETL reject | `tests/fixtures/e2e/etl_browser_vendor.csv` | 3행 중 2행 staging, 1행 reject; reject 상세의 민감값 비노출 |
+| ETL reject | `tests/fixtures/e2e/etl_browser_vendor.csv` | 4행 중 2행 staging, 2행 reject; reject 상세의 민감값 비노출 |
 | Promotion | `tests/fixtures/e2e/etl_browser_promotion_vendor.csv` | clean 2행 batch의 preview, 승인, audit, rollback |
 | 품질 관찰 | 위 두 fixture로 만든 batch 2개(같은 profile) | 최신·직전 Reject 비율, 변화량 `%p`, 방향, 주요 오류 코드 |
 | 동기화 차이 | promotion 이후 첫 batch의 `적재 배치 상세` | 신규/변경/동일/`이번 배치 미관측` 건수와 reject 경고 |
@@ -107,7 +107,7 @@ python -m etl.cli `
 python -m etl.load_cli --input .\output\demo\catalogguard_promotion_ready.csv --rejects .\output\demo\promotion_rejected_rows.csv --summary .\output\demo\promotion_etl_summary.json
 ```
 
-첫 fixture의 예상 요약은 `3 / 2 / 1`(전체/정상/reject)이고, clean fixture는 `2 / 2 / 0`이다. 같은 input·profile name·version을 다시 적재하면 SHA-256 identity 때문에 `신규 적재: no`가 정상이다.
+첫 fixture의 예상 요약은 `4 / 2 / 2`(전체/정상/reject)이고, clean fixture는 `2 / 2 / 0`이다. 같은 input·profile name·version을 다시 적재하면 SHA-256 identity 때문에 `신규 적재: no`가 정상이다.
 
 두 batch 모두 같은 profile(`sample_marketplace_vendor` v2)로 실행한다. `etl.load_cli`가 summary JSON의 `total_rows`·`rejected_rows`·`error_counts`를 함께 저장하므로, 이 두 batch는 품질 집계가 가능하고 **같은 공급사 이름 아래 비교 가능한 batch 2개**가 된다. `ETL 품질 관찰`은 이 두 batch를 최신/직전으로 비교한다. 품질 요약 저장 이전에 만들어진 legacy batch는 이 비교에서 제외된다.
 
@@ -115,10 +115,10 @@ python -m etl.load_cli --input .\output\demo\catalogguard_promotion_ready.csv --
 
 | 화면 | 예상 값 |
 |---|---|
-| `ETL 품질 요약` | 실행 배치 2 · 품질 집계 가능 배치 2 · 전체 입력 5 · 정상 적재 4 · Reject 1 · Reject 비율 20.00% |
-| `최근 ETL 품질 추이` | 배치 두 점: 33.33% → 0.00% |
-| `ETL 품질 관찰`(`sample_marketplace_vendor`) | 최신 0.00% · 직전 33.33% · 변화량 `-33.33%p` · 방향 `개선` |
-| `주요 오류 코드` | `INVALID_PRICE` 1건(발생 배치 1) · `NEGATIVE_STOCK` 1건(발생 배치 1) |
+| `ETL 품질 요약` | 실행 배치 2 · 품질 집계 가능 배치 2 · 전체 입력 6 · 정상 적재 4 · Reject 2 · Reject 비율 33.33% |
+| `최근 ETL 품질 추이` | 배치 두 점: 50.00% → 0.00% |
+| `ETL 품질 관찰`(`sample_marketplace_vendor`) | 최신 0.00% · 직전 50.00% · 변화량 `-50.00%p` · 방향 `개선` |
+| `주요 오류 코드` | `INVALID_PRICE` 1건(발생 배치 1) · `NEGATIVE_STOCK` 2건(발생 배치 1) |
 
 이미 다른 batch가 들어 있는 DB에서는 값이 달라진다. 숫자를 외워 말하지 말고 화면에 보이는 값을 그대로 읽는다.
 
@@ -145,8 +145,8 @@ Quick Demo와 Full Demo가 모두 `sample_marketplace_vendor_v1` 프로필을 �
 
 | 시간 | 실행 · 화면에서 확인 | 설명 · 정상 결과 |
 |---|---|---|
-| 0:00–0:40 | “공급사 CSV는 바로 운영 catalog로 가지 않는다”를 말하고 `ETL 적재 이력`을 연다. 상단의 `ETL 품질 요약`·`최근 ETL 품질 추이`를 보고, `ETL 품질 관찰`에서 `sample_marketplace_vendor`를 선택한다. | 변환·품질 gate를 거쳐 staging에 먼저 저장한다. 최신 배치와 직전 배치의 Reject 비율, 변화량 `%p`, 방향, 주요 오류 코드가 보인다. 준비한 두 batch만 있으면 `-33.33%p`·`개선`이다. |
-| 0:40–1:20 | 목록에서 `etl_browser_vendor.csv` batch를 선택해 `상세 조회`를 누르고, `3 / 2 / 1`과 오류 코드별 건수, reject 상세의 마스킹된 원본, `거부 행 CSV 다운로드`를 보여 준다. | 가격을 숫자로 바꿀 수 없고 음수 재고인 행은 staging에 들어가지 않는다. 다운로드 파일도 마스킹된 원본과 오류 사유만 포함하며, 원문 이메일·전화번호·계좌/식별번호 형태를 노출하지 않는다. |
+| 0:00–0:40 | “공급사 CSV는 바로 운영 catalog로 가지 않는다”를 말하고 `ETL 적재 이력`을 연다. 상단의 `ETL 품질 요약`·`최근 ETL 품질 추이`를 보고, `ETL 품질 관찰`에서 `sample_marketplace_vendor`를 선택한다. | 변환·품질 gate를 거쳐 staging에 먼저 저장한다. 최신 배치와 직전 배치의 Reject 비율, 변화량 `%p`, 방향, 주요 오류 코드가 보인다. 준비한 두 batch만 있으면 `-50.00%p`·`개선`이다. |
+| 0:40–1:20 | 목록에서 `etl_browser_vendor.csv` batch를 선택해 `상세 조회`를 누르고, `4 / 2 / 2`과 오류 코드별 건수, reject 상세의 마스킹된 원본을 보여 주고, 배치 전체 CSV와 오류 코드별 필터 CSV의 차이를 짧게 설명한다. | 가격을 숫자로 바꿀 수 없고 음수 재고인 행은 staging에 들어가지 않는다. 전체 CSV는 Reject 2행, `INVALID_PRICE` 필터 CSV는 해당 코드가 포함된 1행이다. 두 CSV 모두 저장된 마스킹 원본과 오류 정보를 사용한다. 자세한 다운로드는 Full Demo에서 보여 준다. |
 | 1:20–2:20 | `etl_browser_promotion_vendor.csv` clean batch를 직접 선택해 `운영 반영 미리보기`를 연다. checkbox 전 비활성 버튼과 상품별 변경 전·후를 보인다. | preview는 DB를 바꾸지 않는다. 확인 뒤에만 `운영 상품에 반영`이 가능하고, 성공하면 promotion audit이 남는다. |
 | 2:20–2:50 | 성공 Promotion의 `Rollback Preview`를 열고 checkbox 후 실행한 뒤 rollback change audit을 연다. | rollback도 preview와 별도 승인 절차를 거친다. delete/restore와 실행 사용자가 audit에 남는다. |
 | 2:50–3:00 | 한 줄로 마무리한다. | “문제를 분리하고, 사람이 확인한 변경만 반영하며, 되돌린 기록도 남깁니다.” |
@@ -218,9 +218,19 @@ Rule Engine 판정
 ### 2. ETL 결과와 staging을 확인한다 (약 1–2분)
 
 - **실행:** 준비한 첫 batch를 `ETL 적재 이력`에서 선택한다.
-- **화면에서 확인:** `전체 행 3 / 정상 적재 2 / 변환 거부 1`, staging 상품, reject 오류와 마스킹된 원본을 연다.
+- **화면에서 확인:** `전체 행 4 / 정상 적재 2 / 변환 거부 2`, staging 상품, reject 오류와 마스킹된 원본을 연다.
 - **설명:** `etl.cli`의 `run_pipeline()`이 standard/reject CSV를 만들고, `etl.load_cli`의 `load_standard_csv()`가 batch 단위 staging 적재를 한다.
 - **정상 결과:** 같은 bytes를 다시 적재해도 기존 batch를 재사용하며 staging/reject 행을 중복하지 않는다.
+
+전체/필터 CSV를 보여 줄 때는 위 ETL 결과 확인 구간 안에서 다음 순서로 진행한다. Quick Demo에서는 차이만 설명하고 다운로드 절차는 생략해 기존 네 장면과 3분 시간표를 유지한다.
+
+1. `ETL 적재 이력` 목록에서 `etl_browser_vendor.csv` 배치를 선택하고 `상세 조회`를 누른다. `거부 행 오류 코드`가 `전체`인지 확인한다.
+2. `거부 행 CSV 다운로드 준비`를 누르고, 준비 완료 후 `거부 행 CSV 다운로드`로 배치 전체 Reject 2행을 다운로드한다.
+3. `거부 행 오류 코드`에서 `INVALID_PRICE`를 선택한다. 기존 전체 CSV는 유지되며 조회 목록에는 해당 코드가 포함된 1행이 표시된다.
+4. `현재 오류 코드 Reject CSV 준비`를 누르고, 준비 완료 후 `INVALID_PRICE Reject CSV 다운로드`로 해당 1행을 다운로드한다. 파일명은 `etl_load_<실제 배치 ID>_rejections_INVALID_PRICE.csv`다.
+5. 필터 CSV의 이 행에는 `INVALID_PRICE`와 `NEGATIVE_STOCK`가 함께 남는다. `NEGATIVE_STOCK`를 선택하면 이전 필터 CSV는 무효화되므로 다시 준비해야 하며, 이 fixture에서는 Reject 2행이 해당된다.
+
+여기서 말하는 CSV는 DB에 저장된 Reject 상세의 다운로드이며, 준비 단계의 `etl.cli`가 생성한 변환 Reject CSV와는 구분한다. 화면의 20건 제한과 별개로 모든 결과 페이지를 수집한다. UTF-8 BOM·수식 삽입 방어·저장된 마스킹 원본을 재사용하고, 수집 실패나 일관성 오류가 발생하면 부분 CSV를 제공하지 않는다. 마스킹은 모든 개인정보의 익명화를 보장하지 않는다. 자세한 상태 초기화·0건·과거 배치 제한은 [ETL MVP의 Reject CSV 안내](etl_mvp.md#저장된-reject-상세와-csv-다운로드)를 참고한다.
 
 ### 3. 품질을 한 흐름으로 관찰한다 (약 30–60초)
 
@@ -229,7 +239,7 @@ Rule Engine 판정
 - **실행:** 탭 상단으로 올라가 `ETL 품질 요약` → `최근 ETL 품질 추이` → `ETL 품질 관찰` 순으로 본다. `ETL 품질 관찰`의 `관찰할 공급사`에서 `sample_marketplace_vendor`를 선택한다.
 - **화면에서 확인:** 요약에서 전체 Reject 비율, 추이에서 배치별 Reject 비율 변화, 관찰에서 최신·직전 Reject 비율과 변화량 `%p`, 방향, `주요 오류 코드`(발생 건수·발생 배치 수)를 본다.
 - **설명:** “전체적으로 Reject가 얼마나 나오는지, 배치별로 어떻게 움직였는지, 그리고 같은 공급사의 최신 배치가 직전보다 좋아졌는지 나빠졌는지를 순서대로 봅니다.”
-- **정상 결과:** 준비한 두 batch만 있으면 요약 `20.00%`, 추이 `33.33% → 0.00%`, 관찰 `-33.33%p / 개선`, 오류 코드 `INVALID_PRICE`·`NEGATIVE_STOCK` 각 1건이다.
+- **정상 결과:** 준비한 두 batch만 있으면 요약 `33.33%`, 추이 `50.00% → 0.00%`, 관찰 `-50.00%p / 개선`, 오류 코드 `INVALID_PRICE` 1건·`NEGATIVE_STOCK` 2건이다.
 
 `관찰할 공급사` 목록은 위 검색어와 무관하다. 품질 정보가 기록된 ETL 적재 이력 전체에서 공급사 이름을 그대로 가져와 정확히 일치하는 이름으로만 비교한다. 화면 목록 10건 안에 없는 과거 공급사도 품질 데이터가 있으면 고를 수 있다. 면접 답변용 한 줄: “화면 pagination과 비교 대상 identity를 분리한 설계입니다.”
 
