@@ -1,3 +1,6 @@
+import csv
+import io
+import json
 import os
 import re
 from pathlib import Path
@@ -565,7 +568,52 @@ def test_catalog_promotion_success_flow_in_real_browser(page):
         raise
 
 
-def _run_etl_reject_details_scenario(page):
+def _download_etl_rejection_csv(
+    page, tmp_path, *, button_label: str, filename: str, source_rows: list[int],
+):
+    from playwright.sync_api import expect
+
+    button = page.get_by_role("button", name=button_label, exact=True)
+    expect(button).to_be_visible()
+    with page.expect_download() as download_info:
+        button.click()
+    download = download_info.value
+    assert download.suggested_filename == filename
+    destination = tmp_path / filename
+    download.save_as(destination)
+    csv_bytes = destination.read_bytes()
+    assert csv_bytes.startswith(b"\xef\xbb\xbf")
+    csv_text = csv_bytes.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(csv_text))
+    assert reader.fieldnames == [
+        "source_row_number", "error_code", "error_field", "error_message",
+        "masked_source_data",
+    ]
+    rows = list(reader)
+    assert [int(row["source_row_number"]) for row in rows] == source_rows
+    assert len({row["source_row_number"] for row in rows}) == len(rows)
+    for row in rows:
+        masked_source = json.loads(row["masked_source_data"])
+        assert isinstance(masked_source, dict) and masked_source
+        assert "NEGATIVE_STOCK" in row["error_code"]
+        assert "stock" in row["error_field"]
+        assert "재고는 음수일 수 없습니다." in row["error_message"]
+        if row["source_row_number"] == "4":
+            assert row["error_code"] == "INVALID_PRICE, NEGATIVE_STOCK"
+            assert row["error_field"] == "price, stock"
+            assert "가격 값을 숫자로 변환할 수 없습니다." in row["error_message"]
+            masked_text = json.dumps(masked_source, ensure_ascii=False)
+            for masked_value in (
+                "te**@example.com", "010-****-5678",
+                "123-***-***012", "900101-*******",
+            ):
+                assert masked_value in masked_text
+        else:
+            assert row["error_code"] == "NEGATIVE_STOCK"
+    return rows, csv_text
+
+
+def _run_etl_reject_details_scenario(page, tmp_path):
     from playwright.sync_api import expect
 
     console_errors: list[str] = []
@@ -620,6 +668,19 @@ def _run_etl_reject_details_scenario(page):
     expect(page.locator("body")).to_contain_text("E2E-100-BLK-M")
     expect(page.locator("body")).to_contain_text("E2E-100-WHT-L")
 
+    selected_label = batch_selector.get_attribute("aria-label") or ""
+    batch_id_match = re.search(
+        rf"(\d+)\s*·\s*{re.escape(SOURCE_FILENAME)}\s*·", selected_label,
+    )
+    assert batch_id_match, selected_label
+    batch_id = int(batch_id_match.group(1))
+    expect(page.get_by_role("button", name="현재 오류 코드 Reject CSV 준비", exact=True)).to_have_count(0)
+    page.get_by_role("button", name="거부 행 CSV 다운로드 준비", exact=True).click()
+    full_rows, full_csv = _download_etl_rejection_csv(
+        page, tmp_path, button_label="거부 행 CSV 다운로드",
+        filename=f"etl_load_{batch_id}_rejections.csv", source_rows=[4, 5],
+    )
+
     row_four = page.get_by_text(re.compile(r"원본 행 4\s*-\s*마스킹 원본"))
     row_five = page.get_by_text(re.compile(r"원본 행 5\s*-\s*마스킹 원본"))
     expect(row_four).to_be_visible()
@@ -630,10 +691,32 @@ def _run_etl_reject_details_scenario(page):
     expect(row_four).to_be_visible()
     expect(row_five).to_have_count(0)
     expect(page.locator("body")).to_contain_text("전체 1개")
+    page.get_by_role("button", name="현재 오류 코드 Reject CSV 준비", exact=True).click()
+    price_rows, price_csv = _download_etl_rejection_csv(
+        page, tmp_path, button_label="INVALID_PRICE Reject CSV 다운로드",
+        filename=f"etl_load_{batch_id}_rejections_INVALID_PRICE.csv", source_rows=[4],
+    )
+    assert price_rows == full_rows[:1]
     error_selector.click()
     page.get_by_role("option", name="NEGATIVE_STOCK", exact=True).click()
     expect(row_four).to_be_visible()
     expect(row_five).to_be_visible()
+    expect(page.get_by_role("button", name="INVALID_PRICE Reject CSV 다운로드", exact=True)).to_have_count(0)
+    expect(page.get_by_role("button", name="NEGATIVE_STOCK Reject CSV 다운로드", exact=True)).to_have_count(0)
+    expect(page.get_by_role("button", name="거부 행 CSV 다운로드", exact=True)).to_be_visible()
+    page.get_by_role("button", name="현재 오류 코드 Reject CSV 준비", exact=True).click()
+    stock_rows, stock_csv = _download_etl_rejection_csv(
+        page, tmp_path, button_label="NEGATIVE_STOCK Reject CSV 다운로드",
+        filename=f"etl_load_{batch_id}_rejections_NEGATIVE_STOCK.csv", source_rows=[4, 5],
+    )
+    assert stock_rows == full_rows
+    # The full batch download remains independent of the selected error code.
+    repeated_full_rows, repeated_full_csv = _download_etl_rejection_csv(
+        page, tmp_path, button_label="거부 행 CSV 다운로드",
+        filename=f"etl_load_{batch_id}_rejections.csv", source_rows=[4, 5],
+    )
+    assert repeated_full_rows == full_rows
+    assert repeated_full_csv == full_csv
     error_selector.click()
     page.get_by_role("option", name="전체", exact=True).click()
     expect(row_five).to_be_visible()
@@ -658,14 +741,16 @@ def _run_etl_reject_details_scenario(page):
     ):
         assert raw_value not in body_text
         assert raw_value not in page_content
+        for csv_text in (full_csv, price_csv, stock_csv, repeated_full_csv):
+            assert raw_value not in csv_text
 
     assert not console_errors, f"Unexpected browser console errors: {console_errors}"
     assert not page_errors, f"Unexpected browser page errors: {page_errors}"
 
 
-def test_etl_reject_details_are_visible_and_masked_in_real_browser(page):
+def test_etl_reject_details_are_visible_and_masked_in_real_browser(page, tmp_path):
     try:
-        _run_etl_reject_details_scenario(page)
+        _run_etl_reject_details_scenario(page, tmp_path)
     except BaseException:
         artifact_dir = os.environ.get("E2E_ARTIFACT_DIR", "").strip()
         if artifact_dir:
