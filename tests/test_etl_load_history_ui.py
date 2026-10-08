@@ -6009,3 +6009,173 @@ def test_unknown_product_all_four_active_pagination_states_stay_independent():
     assert app.session_state["supplier_unknown_color_product_offset"] == 0
     assert app.session_state["supplier_unknown_size_product_offset"] == 0
     assert not app.exception
+
+
+class FilteredExportRejectionClient(PagedRejectionApiClient):
+    fault = None
+
+    def list_etl_rejections(self, run_id, **params):
+        self.calls.append((run_id, params))
+        code = params.get("error_code")
+        matched = [item for item in self.items if code is None or any(
+            error["code"] == code for error in item["errors"]
+        )]
+        offset, limit = params["offset"], params["limit"]
+        if code and limit == 100 and self.fault == "zero":
+            matched = []
+        response = {"available": True, "items": matched[offset:offset + limit],
+                    "total": len(matched), "limit": limit, "offset": offset}
+        if code and limit == 100 and offset and self.fault:
+            if self.fault == "failure":
+                raise catalogguard_api.CatalogGuardApiResponseError("private API URL")
+            if self.fault == "total":
+                response["total"] += 1
+            elif self.fault == "short":
+                response["items"].pop()
+            elif self.fault == "duplicate":
+                response["items"][0] = matched[0]
+            elif self.fault == "wrong_code":
+                response["items"][0] = _rejection_item(999)
+                response["items"][0]["errors"][0]["code"] = "OTHER"
+        return response
+
+
+def _filtered_export_items():
+    items = [_rejection_item(number, error_message="=1+1",
+                             source_data={"seller": "te**@example.com"})
+             for number in range(1, 244)]
+    items[0]["errors"].append({"code": "NEGATIVE_STOCK", "field": "stock", "message": "bad stock"})
+    other = _rejection_item(244)
+    other["errors"][0]["code"] = "NEGATIVE_STOCK"
+    return [*items, other]
+
+
+def test_filtered_rejection_export_collects_all_filtered_pages_and_preserves_errors():
+    client = FilteredExportRejectionClient(_filtered_export_items())
+    items = etl_load_history.fetch_all_etl_rejections(
+        client, etl_load_run_id=12, error_code="INVALID_PRICE",
+    )
+    assert len(items) == 243
+    assert client.calls == [(12, {"limit": 100, "offset": offset, "error_code": "INVALID_PRICE"})
+                            for offset in (0, 100, 200)]
+    assert [item["source_row_number"] for item in items] == list(range(1, 244))
+    data = etl_load_history.build_etl_rejection_csv(items)
+    assert data.startswith(b"\xef\xbb\xbf")
+    rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"))))
+    assert len(rows) == 243
+    assert rows[0]["error_code"] == "INVALID_PRICE, NEGATIVE_STOCK"
+    assert rows[0]["error_message"].startswith("'=1+1")
+    assert json.loads(rows[0]["masked_source_data"]) == {"seller": "te**@example.com"}
+    assert "test@example.com" not in data.decode("utf-8-sig")
+
+
+@pytest.mark.parametrize("fault", ["failure", "total", "short", "duplicate", "wrong_code"])
+def test_filtered_rejection_export_blocks_incomplete_or_mismatched_pages(fault):
+    client = FilteredExportRejectionClient(_filtered_export_items())
+    client.fault = fault
+    with pytest.raises((ValueError, catalogguard_api.CatalogGuardApiResponseError)):
+        etl_load_history.fetch_all_etl_rejections(client, etl_load_run_id=12, error_code="INVALID_PRICE")
+
+
+def test_filtered_rejection_export_zero_and_safe_filename():
+    client = FilteredExportRejectionClient(_filtered_export_items())
+    assert etl_load_history.fetch_all_etl_rejections(client, etl_load_run_id=12, error_code="OTHER") == []
+    assert client.calls == [(12, {"limit": 100, "offset": 0, "error_code": "OTHER"})]
+    assert etl_load_history.build_etl_rejection_download_filename(12, error_code="INVALID_PRICE") == "etl_load_12_rejections_INVALID_PRICE.csv"
+    filename = etl_load_history.build_etl_rejection_download_filename(12, error_code="../bad/code\r\n")
+    assert "/" not in filename and "\r" not in filename and "\n" not in filename
+
+
+def _filtered_rejection_export_app(client):
+    import streamlit as st
+    from ui import etl_load_history as history
+    history.initialize_etl_load_state(st.session_state)
+    if st.session_state["etl_load_selected_run_id"] is None:
+        st.session_state["etl_load_selected_run_id"] = 12
+    st.selectbox("Batch", [12, 11], key="etl_load_selected_run_id",
+                          on_change=history.reset_etl_load_detail_state, args=(st.session_state,))
+    history._render_etl_rejections(client, {"reject_details_stored": True,
+                                           "error_counts": {"INVALID_PRICE": 243, "NEGATIVE_STOCK": 2}})
+
+
+def test_filtered_rejection_export_ui_separates_downloads_and_invalidates_selection():
+    from streamlit.testing.v1 import AppTest
+    client = FilteredExportRejectionClient(_filtered_export_items())
+    app = AppTest.from_function(_filtered_rejection_export_app, args=(client,)).run()
+    assert not any(button.key == "etl_reject_filtered_export_prepare" for button in app.button)
+    app.button(key="etl_reject_export_prepare").click().run()
+    full = app.session_state["etl_reject_export_download"]
+    assert full["total"] == 244
+    app.selectbox(key="etl_reject_error_code").select("INVALID_PRICE").run()
+    app.button(key="etl_reject_filtered_export_prepare").click().run()
+    filtered = app.session_state["etl_reject_filtered_export_download"]
+    assert filtered["total"] == 243
+    assert filtered["file_name"] == "etl_load_12_rejections_INVALID_PRICE.csv"
+    assert len(app.get("download_button")) == 2
+    export_calls = [call for call in client.calls if call[1]["limit"] == 100]
+    app.button(key="etl_reject_next").click().run()
+    assert app.session_state["etl_reject_filtered_export_download"] == filtered
+    assert [call for call in client.calls if call[1]["limit"] == 100] == export_calls
+    app.selectbox(key="etl_reject_error_code").select("NEGATIVE_STOCK").run()
+    assert app.session_state["etl_reject_filtered_export_download"] is None
+    assert app.session_state["etl_reject_export_download"] == full
+    app.button(key="etl_reject_filtered_export_prepare").click().run()
+    assert app.session_state["etl_reject_filtered_export_download"]["total"] == 2
+    app.selectbox(key="etl_load_selected_run_id").select(11).run()
+    assert app.session_state["etl_reject_filtered_export_download"] is None
+    assert app.session_state["etl_reject_export_download"] is None
+    assert app.selectbox(key="etl_reject_error_code").value is None
+    assert not app.exception
+
+
+@pytest.mark.parametrize("fault", ["failure", "total", "short", "duplicate", "wrong_code", "zero"])
+def test_filtered_rejection_export_ui_failure_blocks_partial_csv_and_keeps_full(fault):
+    from streamlit.testing.v1 import AppTest
+    client = FilteredExportRejectionClient(_filtered_export_items())
+    app = AppTest.from_function(_filtered_rejection_export_app, args=(client,)).run()
+    app.button(key="etl_reject_export_prepare").click().run()
+    full = app.session_state["etl_reject_export_download"]
+    app.selectbox(key="etl_reject_error_code").select("INVALID_PRICE").run()
+    app.button(key="etl_reject_filtered_export_prepare").click().run()
+    client.fault = fault
+    app.button(key="etl_reject_filtered_export_prepare").click().run()
+    assert app.session_state["etl_reject_filtered_export_download"] is None
+    assert app.session_state["etl_reject_export_download"] == full
+    assert len(app.get("download_button")) == 1
+    if fault == "zero":
+        assert any("다운로드할 INVALID_PRICE" in info.value for info in app.info)
+    else:
+        assert len(app.error) == 1 and "private" not in app.error[0].value
+        app.run()
+        assert len(app.error) == 1
+    app.selectbox(key="etl_reject_error_code").select(None).run()
+    assert app.session_state["etl_reject_filtered_export_error"] is None
+    assert not app.exception
+
+
+@pytest.mark.parametrize("mismatch", ["error_code", "etl_load_run_id"])
+def test_filtered_rejection_export_ui_hides_stale_download_without_callback(mismatch):
+    from streamlit.testing.v1 import AppTest
+    client = FilteredExportRejectionClient(_filtered_export_items())
+    app = AppTest.from_function(_filtered_rejection_export_app, args=(client,)).run()
+    app.selectbox(key="etl_reject_error_code").select("INVALID_PRICE").run()
+    app.button(key="etl_reject_filtered_export_prepare").click().run()
+    app.session_state["etl_reject_filtered_export_download"][mismatch] = "OTHER"
+    app.run()
+    assert app.session_state["etl_reject_filtered_export_download"] is None
+    assert not app.get("download_button")
+    assert not app.exception
+
+
+def test_filtered_rejection_export_ui_handles_empty_filtered_query():
+    from streamlit.testing.v1 import AppTest
+    client = FilteredExportRejectionClient([])
+    app = AppTest.from_function(_filtered_rejection_export_app, args=(client,)).run()
+    app.selectbox(key="etl_reject_error_code").select("INVALID_PRICE").run()
+    assert any("선택한 오류 코드" in info.value for info in app.info)
+    assert app.button(key="etl_reject_export_prepare")
+    app.button(key="etl_reject_filtered_export_prepare").click().run()
+    assert app.session_state["etl_reject_filtered_export_download"] is None
+    assert any("다운로드할 INVALID_PRICE" in info.value for info in app.info)
+    assert not app.get("download_button")
+    assert not app.error and not app.exception

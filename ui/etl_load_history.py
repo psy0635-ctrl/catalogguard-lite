@@ -1,6 +1,7 @@
 from collections import Counter
 from datetime import datetime
 import json
+import re
 from math import ceil
 from typing import Any
 
@@ -379,6 +380,8 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_reject_error": None,
     "etl_reject_export_download": None,
     "etl_reject_export_error": None,
+    "etl_reject_filtered_export_download": None,
+    "etl_reject_filtered_export_error": None,
     "catalog_reconciliation_batch_id": None,
     "catalog_reconciliation_offset": 0,
     "catalog_reconciliation_response": None,
@@ -940,14 +943,20 @@ def build_etl_rejection_csv(items: list[dict[str, Any]]) -> bytes:
     return export_dataframe.to_csv(index=False).encode("utf-8-sig")
 
 
-def build_etl_rejection_download_filename(etl_load_run_id: int) -> str:
-    return f"etl_load_{etl_load_run_id}_rejections.csv"
+def build_etl_rejection_download_filename(
+    etl_load_run_id: int,
+    *,
+    error_code: str | None = None,
+) -> str:
+    suffix = "" if error_code is None else "_" + re.sub(r"[^A-Za-z0-9_-]", "_", error_code)
+    return f"etl_load_{etl_load_run_id}_rejections{suffix}.csv"
 
 
 def fetch_all_etl_rejections(
     api_client,
     *,
     etl_load_run_id: int,
+    error_code: str | None = None,
     page_size: int = ETL_REJECTION_EXPORT_PAGE_SIZE,
 ) -> list[dict[str, Any]]:
     """Read every rejection page or fail without returning a partial export."""
@@ -958,12 +967,14 @@ def fetch_all_etl_rejections(
     seen_rejected_row_ids: set[int] = set()
     expected_total: int | None = None
     offset = 0
+    filter_params = {} if error_code is None else {"error_code": error_code}
 
     while True:
         response = api_client.list_etl_rejections(
             etl_load_run_id,
             limit=page_size,
             offset=offset,
+            **filter_params,
         )
         if not isinstance(response, dict):
             raise ValueError("invalid rejection export response")
@@ -980,13 +991,22 @@ def fetch_all_etl_rejections(
             raise ValueError("rejection export total changed during fetch")
 
         if total == 0:
+            if items:
+                raise ValueError("inconsistent zero rejection export total")
             return []
+        if len(items) != min(page_size, total - offset):
+            raise ValueError("incomplete rejection export page")
         if response.get("available") is not True or not items:
             raise ValueError("incomplete rejection export response")
 
         for item in items:
             if not isinstance(item, dict):
                 raise ValueError("invalid rejection export item")
+            if error_code is not None and not any(
+                isinstance(error, dict) and error.get("code") == error_code
+                for error in (item.get("errors") or [])
+            ):
+                raise ValueError("rejection export item does not match error code")
             rejected_row_id = item.get("rejected_row_id")
             if (
                 isinstance(rejected_row_id, bool)
@@ -1818,6 +1838,8 @@ def reset_etl_load_detail_state(session_state) -> None:
     session_state["etl_reject_error"] = None
     session_state["etl_reject_export_download"] = None
     session_state["etl_reject_export_error"] = None
+    session_state["etl_reject_filtered_export_download"] = None
+    session_state["etl_reject_filtered_export_error"] = None
     reset_etl_lineage_comparison_state(session_state)
 
 
@@ -2879,41 +2901,56 @@ def _render_etl_error(error: Exception, *, detail: bool = False) -> None:
     st.error(build_etl_api_error_display_message(message, error))
 
 
-def _clear_etl_rejection_export_download(session_state) -> None:
-    session_state["etl_reject_export_download"] = None
-    session_state["etl_reject_export_error"] = None
+def _clear_etl_rejection_export_download(
+    session_state, *, prefix: str = "etl_reject_export",
+) -> None:
+    session_state[f"{prefix}_download"] = None
+    session_state[f"{prefix}_error"] = None
 
 
-def _render_etl_rejection_export(api_client, *, etl_load_run_id: int) -> None:
-    prepared_download = st.session_state.get("etl_reject_export_download")
+def _render_etl_rejection_export(
+    api_client,
+    *,
+    etl_load_run_id: int,
+    error_code: str | None = None,
+) -> None:
+    prefix = "etl_reject_export" if error_code is None else "etl_reject_filtered_export"
+    scope = "전체" if error_code is None else f"{error_code} 오류 코드"
+    filter_params = {} if error_code is None else {"error_code": error_code}
+    prepared_download = st.session_state.get(f"{prefix}_download")
     if not (
         isinstance(prepared_download, dict)
         and prepared_download.get("etl_load_run_id") == etl_load_run_id
+        and prepared_download.get("error_code") == error_code
     ):
-        st.session_state["etl_reject_export_download"] = None
+        st.session_state[f"{prefix}_download"] = None
+        if isinstance(prepared_download, dict):
+            st.session_state[f"{prefix}_error"] = None
         prepared_download = None
 
     if st.button(
-        "거부 행 CSV 다운로드 준비",
-        key="etl_reject_export_prepare",
+        "거부 행 CSV 다운로드 준비" if error_code is None else "현재 오류 코드 Reject CSV 준비",
+        key=f"{prefix}_prepare",
     ):
         try:
             items = fetch_all_etl_rejections(
                 api_client,
                 etl_load_run_id=etl_load_run_id,
+                **filter_params,
             )
             if not items:
-                _clear_etl_rejection_export_download(st.session_state)
-                st.info("다운로드할 거부 행이 없습니다.")
+                _clear_etl_rejection_export_download(st.session_state, prefix=prefix)
+                st.info(f"다운로드할 {scope} 거부 행이 없습니다.")
                 return
             prepared_download = {
                 "etl_load_run_id": etl_load_run_id,
+                "error_code": error_code,
                 "csv_bytes": build_etl_rejection_csv(items),
-                "file_name": build_etl_rejection_download_filename(etl_load_run_id),
+                "file_name": build_etl_rejection_download_filename(etl_load_run_id, **filter_params),
                 "total": len(items),
             }
-            st.session_state["etl_reject_export_download"] = prepared_download
-            st.session_state["etl_reject_export_error"] = None
+            st.session_state[f"{prefix}_download"] = prepared_download
+            st.session_state[f"{prefix}_error"] = None
         except (
             CatalogGuardApiConfigurationError,
             CatalogGuardApiConnectionError,
@@ -2922,14 +2959,14 @@ def _render_etl_rejection_export(api_client, *, etl_load_run_id: int) -> None:
             ETLLoadNotFoundError,
             ValueError,
         ) as error:
-            _clear_etl_rejection_export_download(st.session_state)
-            st.session_state["etl_reject_export_error"] = error
+            _clear_etl_rejection_export_download(st.session_state, prefix=prefix)
+            st.session_state[f"{prefix}_error"] = error
 
-    export_error = st.session_state.get("etl_reject_export_error")
+    export_error = st.session_state.get(f"{prefix}_error")
     if export_error is not None:
         st.error(
             build_etl_api_error_display_message(
-                "전체 거부 행 CSV를 준비하지 못했습니다.",
+                f"{scope} 거부 행 CSV를 준비하지 못했습니다.",
                 export_error,
             )
         )
@@ -2938,17 +2975,18 @@ def _render_etl_rejection_export(api_client, *, etl_load_run_id: int) -> None:
     if not isinstance(prepared_download, dict):
         return
 
-    st.caption(f"준비된 전체 {prepared_download['total']}개 거부 행을 다운로드합니다.")
+    st.caption(f"준비된 {scope} {prepared_download['total']}개 거부 행을 다운로드합니다.")
     st.download_button(
-        "거부 행 CSV 다운로드",
+        "거부 행 CSV 다운로드" if error_code is None else f"{error_code} Reject CSV 다운로드",
         data=prepared_download["csv_bytes"],
         file_name=prepared_download["file_name"],
         mime="text/csv",
-        key="etl_reject_export_download",
+        key=f"{prefix}_download_button",
     )
 
 
 def reset_etl_rejection_filter_state(session_state) -> None:
+    _clear_etl_rejection_export_download(session_state, prefix="etl_reject_filtered_export")
     session_state["etl_reject_offset"] = 0
     session_state["etl_reject_response"] = None
     session_state["etl_reject_error"] = None
@@ -2977,7 +3015,7 @@ def _render_etl_rejections(api_client, detail_response: dict[str, Any]) -> None:
     )
     if error_counts is None:
         st.caption("이 배치는 오류 코드 집계가 없어 전체 거부 행을 조회합니다.")
-    st.caption("CSV 다운로드는 오류 코드 필터와 관계없이 배치의 전체 거부 행을 포함합니다.")
+    st.caption("기존 거부 행 CSV는 필터와 관계없이 배치 전체를 포함합니다. 오류 코드를 선택하면 필터 CSV도 준비할 수 있습니다.")
 
     response = _fetch_etl_rejections(api_client, st.session_state)
     if response is None:
@@ -2996,6 +3034,10 @@ def _render_etl_rejections(api_client, detail_response: dict[str, Any]) -> None:
             selected_run_id = st.session_state.get("etl_load_selected_run_id")
             if isinstance(selected_run_id, int):
                 _render_etl_rejection_export(api_client, etl_load_run_id=selected_run_id)
+                _render_etl_rejection_export(
+                    api_client, etl_load_run_id=selected_run_id,
+                    error_code=st.session_state["etl_reject_error_code"],
+                )
         else:
             st.info("거부 행이 없습니다.")
         return
@@ -3013,6 +3055,11 @@ def _render_etl_rejections(api_client, detail_response: dict[str, Any]) -> None:
     selected_run_id = st.session_state.get("etl_load_selected_run_id")
     if isinstance(selected_run_id, int):
         _render_etl_rejection_export(api_client, etl_load_run_id=selected_run_id)
+        if st.session_state.get("etl_reject_error_code") is not None:
+            _render_etl_rejection_export(
+                api_client, etl_load_run_id=selected_run_id,
+                error_code=st.session_state["etl_reject_error_code"],
+            )
 
     total = max(0, int(response.get("total", 0)))
     current_page, total_pages, has_previous, has_next = calculate_etl_pagination(
