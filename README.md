@@ -83,7 +83,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - `total_rows`, `loaded_rows`, `rejected_rows`, `error_counts`의 PostgreSQL JSONB 저장과 기존 배치 NULL 호환
 - reject CSV의 SHA-256·행 수·구조화된 오류 배열 검증과 `etl_rejected_rows` JSONB 저장
 - reject 원본 값의 개인정보·계좌번호 마스킹과 API·Streamlit reject 상세 조회
-- ETL 적재 상세의 거부 행 전체 페이지를 수집해, 마스킹된 원본·오류 사유만 담은 거부 행 CSV 다운로드(중간 조회 실패 시 부분 파일 미제공)
+- ETL 적재 상세에서 배치 전체 또는 선택한 오류 코드의 거부 행 전체 페이지를 수집해 CSV 다운로드(마스킹된 원본·오류 사유 포함, 중간 조회 실패 시 부분 파일 미제공)
 - DB에서 staging 부모 배치를 삭제할 때의 상품 행 cascade와 음수 stock·price·sale_price 방지 제약
 - ETL 적재 배치 목록의 파일명·프로필명 검색과 페이지네이션
 - ETL 적재 목록·상세의 전체 행·정상 적재·변환 거부 수와 상세 오류 코드 통계
@@ -3296,6 +3296,8 @@ DB 적재 완료
 거부 행: 0
 ```
 
-적재 후에는 `GET /api/v1/etl-loads`로 배치 목록을, `GET /api/v1/etl-loads/{etl_load_run_id}`로 파일 해시와 해당 배치의 staging 상품을, `GET /api/v1/etl-loads/{etl_load_run_id}/rejections`로 구조화된 오류와 마스킹된 원본을 페이지 단위로 조회할 수 있습니다. 선택적 `error_code`는 앞뒤 공백을 제거한 정확한 오류 코드가 포함된 행만 조회하며, `total`과 pagination도 필터 결과 기준입니다. UI의 ‘거부 행 오류 코드’에서 ‘전체’를 선택하면 기존 전체 목록을 조회합니다. 필터는 조회 전용이며 raw 개인정보는 노출하지 않습니다. CSV 다운로드는 필터와 관계없이 해당 배치의 전체 거부 행을 포함합니다. 프로필 구조, 변환·오류 기준, 조회 규칙과 제한사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.
+적재 후에는 `GET /api/v1/etl-loads`로 배치 목록을, `GET /api/v1/etl-loads/{etl_load_run_id}`로 파일 해시와 해당 배치의 staging 상품을, `GET /api/v1/etl-loads/{etl_load_run_id}/rejections`로 구조화된 오류와 마스킹된 원본을 페이지 단위로 조회할 수 있습니다. 선택적 `error_code`는 앞뒤 공백을 제거한 정확한 오류 코드가 포함된 행만 조회하며, `total`과 pagination도 필터 결과 기준입니다. UI의 ‘거부 행 오류 코드’에서 ‘전체’를 선택하면 기존 전체 목록을 조회합니다. 필터는 조회 전용이며 raw 개인정보는 노출하지 않습니다. 기존 전체 거부 행 CSV는 오류 코드 선택 여부와 관계없이 배치의 모든 Reject 행을 포함합니다. `INVALID_PRICE` 등의 오류 코드를 선택하면 해당 코드가 포함된 행만 별도 필터 CSV로 다운로드할 수 있습니다. 필터 CSV는 화면의 20건만 저장하지 않고, 필터 결과의 모든 페이지를 수집합니다.
+
+두 CSV는 기존 생성기를 재사용해 UTF-8 BOM과 Formula Injection 방어를 적용하고, 저장된 마스킹 원본(`masked_source_data`)과 오류 정보를 포함합니다. 한 Reject 행에 여러 오류가 있으면 선택한 코드 외의 오류 정보도 유지합니다. 중간 API 조회 실패나 건수 변경·중복 등 수집 일관성 오류가 발생하면 부분 CSV를 제공하지 않습니다. 준비·다운로드 절차와 제한사항은 [ETL MVP 문서의 Reject CSV 안내](docs/etl_mvp.md#저장된-reject-상세와-csv-다운로드)를 참고하세요.
 
 위 두 CLI 명령과 같은 변환·적재 로직을 Streamlit에서도 실행할 수 있습니다. `ETL 실행` 영역에서 공급사 CSV 또는 XLSX를 업로드하고 `ETL 실행 프로필`을 선택한 뒤 버튼을 클릭하면 `POST /api/v1/etl-loads`가 같은 `run_pipeline()`·`load_standard_csv()`를 호출해 staging까지 적재합니다. XLSX 지원은 이 Web multipart 경로에만 적용되며 CLI·S3·HTTP feed·Airflow는 CSV-only입니다. 웹 ETL의 profile allowlist, 업로드 검증, 중복 재사용과 임시 파일 정리 같은 구현 세부사항은 [ETL MVP 문서](docs/etl_mvp.md)를 참고하세요.
