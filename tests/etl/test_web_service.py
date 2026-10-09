@@ -61,6 +61,40 @@ def valid_row(sku: str) -> list[str]:
     return [sku, "테스트 상품", "TOP", "브랜드", "12000", "10000", "BLACK", "M", "3", "설명", "image.jpg"]
 
 
+@pytest.mark.parametrize("input_format", ["csv", "xlsx"])
+def test_web_etl_rejects_reserved_metadata_before_database_load(input_format):
+    from tests.conftest import FakeSessionWithoutRuntimeOverrides
+
+    header = [*FASHION_PROFILE_COLUMNS, "Error_Message"]
+    row = [*valid_row("SYNTHETIC-001"), "synthetic-private-value"]
+    if input_format == "csv":
+        output = io.StringIO(newline="")
+        csv.writer(output).writerows([header, row])
+        input_bytes = output.getvalue().encode("utf-8")
+    else:
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(header)
+        worksheet.append(row)
+        output = io.BytesIO()
+        workbook.save(output)
+        workbook.close()
+        input_bytes = output.getvalue()
+    before_dirs = _list_temp_etl_dirs()
+
+    with pytest.raises(ETLPipelineError, match="reserved ETL rejection metadata columns") as error:
+        run_web_etl(
+            FakeSessionWithoutRuntimeOverrides(),
+            profile_id="sample_fashion_vendor_v1",
+            source_filename=f"supplier.{input_format}",
+            input_bytes=input_bytes,
+            allowed_input_formats=("csv", "xlsx"),
+        )
+
+    assert "synthetic-private-value" not in str(error.value)
+    assert _list_temp_etl_dirs() == before_dirs
+
+
 def invalid_row(sku: str) -> list[str]:
     return [sku, "오류 상품", "TOP", "브랜드", "무료", "", "BLACK", "M", "1", "설명", "image.jpg"]
 

@@ -149,6 +149,65 @@ def output_paths(tmp_path):
     )
 
 
+@pytest.mark.parametrize("input_format", ["csv", "xlsx"])
+@pytest.mark.parametrize("row_index", [0, 1], ids=["valid-row", "rejected-row"])
+@pytest.mark.parametrize("existing_outputs", [False, True], ids=["new-outputs", "existing-outputs"])
+@pytest.mark.parametrize(
+    ("header", "source_value"),
+    [
+        ("source_row_number", "999"),
+        ("error_code", "synthetic-private-value"),
+        ("error_field", "supplier-field"),
+        ("error_message", "synthetic-private-message"),
+        ("Error_Code", "[123]"),
+        (" error_code ", "[]"),
+        ("SOURCE_ROW_NUMBER", "999"),
+    ],
+)
+def test_pipeline_rejects_reserved_metadata_headers_without_changing_outputs(
+    tmp_path, input_format, row_index, existing_outputs, header, source_value
+):
+    _csv_path, profile_path = write_profile_and_source(tmp_path)
+    input_path = tmp_path / f"supplier.{input_format}"
+    source_columns = [*SOURCE_COLUMNS, header]
+    source_row = [*SOURCE_ROWS[row_index], source_value]
+    if input_format == "csv":
+        with input_path.open("w", encoding="utf-8", newline="") as source_file:
+            writer = csv.writer(source_file)
+            writer.writerow(source_columns)
+            writer.writerow(source_row)
+    else:
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(source_columns)
+        worksheet.append(source_row)
+        workbook.save(input_path)
+        workbook.close()
+
+    outputs = output_paths(tmp_path)
+    original_bytes = [b"existing standard\x00", b"existing rejects\xff", b"existing summary\r\n"]
+    if existing_outputs:
+        outputs[0].parent.mkdir()
+        for path, content in zip(outputs, original_bytes, strict=True):
+            path.write_bytes(content)
+    input_bytes = input_path.read_bytes()
+
+    with pytest.raises(ETLPipelineError, match="reserved ETL rejection metadata columns") as error:
+        run_pipeline(
+            input_path, profile_path, *outputs, allowed_input_formats=("csv", "xlsx")
+        )
+
+    assert source_value not in str(error.value)
+    assert str(tmp_path) not in str(error.value)
+    assert input_path.read_bytes() == input_bytes
+    if existing_outputs:
+        assert [path.read_bytes() for path in outputs] == original_bytes
+        assert sorted(outputs[0].parent.iterdir()) == sorted(outputs)
+    else:
+        assert not any(path.exists() for path in outputs)
+        assert list(outputs[0].parent.iterdir()) == []
+
+
 def test_run_pipeline_writes_standard_reject_and_summary_files(tmp_path):
     input_path, profile_path = write_profile_and_source(tmp_path)
     output_path, rejects_path, summary_path = output_paths(tmp_path)
@@ -192,6 +251,19 @@ def test_run_pipeline_writes_standard_reject_and_summary_files(tmp_path):
         "price",
         "stock",
     ]
+    assert json.loads(rejected_rows[0]["error_code"]) == [
+        "MISSING_SOURCE_VALUE", "MISSING_PRODUCT_ID", "INVALID_PRICE", "INVALID_STOCK"
+    ]
+    assert json.loads(rejected_rows[0]["error_message"]) == [
+        "필수 공급사 값이 비어 있습니다: vendor_sku",
+        "상품 ID가 비어 있습니다.",
+        "가격 값을 숫자로 변환할 수 없습니다.",
+        "재고 값을 정수로 변환할 수 없습니다.",
+    ]
+    assert summary["error_counts"] == {
+        "MISSING_SOURCE_VALUE": 1, "MISSING_PRODUCT_ID": 1,
+        "INVALID_PRICE": 1, "INVALID_STOCK": 1,
+    }
 
 
 def test_run_pipeline_accepts_xlsx_only_with_opt_in_and_preserves_lineage(tmp_path):
