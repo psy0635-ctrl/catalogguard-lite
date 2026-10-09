@@ -98,3 +98,28 @@ def test_cli_returns_one_for_a_pipeline_error_without_traceback(tmp_path):
     assert result.returncode == 1
     assert "ETL 실패" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_cli_rejects_reserved_metadata_header_with_safe_error_and_no_outputs(tmp_path):
+    input_path, profile_path = write_cli_inputs(tmp_path)
+    with input_path.open(encoding="utf-8", newline="") as source_file:
+        source_rows = list(csv.reader(source_file))
+    source_rows[0].append(" error_code ")
+    for row in source_rows[1:]:
+        row.append("synthetic-private-value")
+    with input_path.open("w", encoding="utf-8", newline="") as source_file:
+        csv.writer(source_file).writerows(source_rows)
+    outputs = [tmp_path / name for name in ("ready.csv", "rejects.csv", "summary.json")]
+
+    result = run_cli(
+        "--input", str(input_path), "--profile", str(profile_path),
+        "--output", str(outputs[0]), "--rejects", str(outputs[1]),
+        "--summary", str(outputs[2]),
+    )
+
+    assert result.returncode == 1
+    assert "reserved ETL rejection metadata columns" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert "synthetic-private-value" not in result.stderr
+    assert str(tmp_path) not in result.stderr
+    assert not any(path.exists() for path in outputs)

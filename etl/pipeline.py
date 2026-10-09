@@ -31,6 +31,14 @@ from etl.profile_loader import ETLProfileValidationError, load_profile
 from etl.transformer import transform_rows
 
 
+REJECT_METADATA_COLUMNS = (
+    "source_row_number",
+    "error_code",
+    "error_field",
+    "error_message",
+)
+
+
 class ETLPipelineError(ValueError):
     """Raised for safe, user-facing ETL pipeline failures."""
 
@@ -47,6 +55,13 @@ class ETLPipelineResult:
 
 def _sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def _validate_reject_metadata_headers(source_columns: list[str]) -> None:
+    if any(column.strip().casefold() in REJECT_METADATA_COLUMNS for column in source_columns):
+        raise ETLPipelineError(
+            "Input CSV/XLSX contains reserved ETL rejection metadata columns"
+        )
 
 
 def _read_supplier_csv(input_path: Path, required_columns: tuple[str, ...]) -> tuple[list[str], list[dict[str, str]], list[int], bytes]:
@@ -248,6 +263,7 @@ def run_pipeline(
             raise ETLPipelineError(str(error)) from error
     else:
         raise ETLPipelineError("Input file format is not supported")
+    _validate_reject_metadata_headers(source_columns)
     transformed = transform_rows(source_rows, profile, source_row_numbers)
     temporary_paths: list[Path] = []
     try:
@@ -259,10 +275,7 @@ def run_pipeline(
         temporary_paths.append(output_temp_path)
         output_bytes = output_temp_path.read_bytes()
         reject_fieldnames = [
-            "source_row_number",
-            "error_code",
-            "error_field",
-            "error_message",
+            *REJECT_METADATA_COLUMNS,
             *source_columns,
         ]
         rejects_temp_path = _write_csv_temp(
