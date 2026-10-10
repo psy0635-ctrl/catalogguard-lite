@@ -14,6 +14,19 @@ v0.3.0 기준으로는 기존 OpenAI 경로를 유지하면서 optional OpenAI /
 
 공식 배포 기준은 **v0.3.0**입니다. 현재 `main`에는 v0.3.0 이후의 미출시 변경으로 inspection 관계 행 명시 저장, DB 연결과 repository Alembic single head·DB current revision 일치까지 확인하는 schema-aware `/ready`, CSV/XLSX Web ETL 업로드, 전체 Rule Engine의 Golden Rule Quality Regression이 추가되어 있습니다. 현재 작업 기준 Alembic 단일 head는 `20260915_0020`, `INSPECTION_VERSION`은 `17`, FastAPI 애플리케이션 버전은 `0.1.0`이며, 이 변경들을 v0.3.0에 포함된 기능으로 소급하지 않습니다. 최근 `main`은 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 GitHub Actions 검증을 통과했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
 
+### 2026-10-10 로컬 검증과 기능 동결
+
+현재 `main`은 상품 검수·공급사 ETL·PostgreSQL 저장·JWT 권한·승인형 Promotion/Rollback·변경 이력·웹 화면을 MVP 기능 동결 범위로 관리합니다. 새 기능보다 실제 오류·보안·데이터 무결성·회귀 수정, 필요한 테스트와 문서 보강을 우선합니다. 이 기준은 새 Tag·Release 발행이나 버전 변경을 의미하지 않습니다.
+
+| 검증 실행 | 확인한 결과 |
+|---|---|
+| 독립 PostgreSQL 18.4 ETL | DB Loader **67 passed**, 2 deselected; 중복 방지·저장 실패 Rollback 확인 |
+| 실제 JWT API 통합 | TestClient **35개 시나리오** 예상 결과 일치; 32개 요청에서 DB 무변경 확인 |
+| 실제 Chromium 브라우저 | **8 passed**, 실패·오류·Skip 0; 로그인·CSV/XLSX 업로드·Promotion·Rollback·Audit 화면 확인 |
+| Browser Runner 안전성 단위 테스트 | 별도 **4 passed** |
+
+서로 다른 실행의 수치이며 하나의 pytest 결과로 합산하지 않습니다. API 통합 검증은 TestClient, 브라우저 검증은 FastAPI·Streamlit·Chromium·별도 PostgreSQL을 실제 실행한 결과입니다. 실제 공급사 CSV 전체 호환성, 대규모 운영 성능·장기 안정성, 브라우저의 UPDATE/RESTORE 경로는 이번 결과로 입증하지 않습니다. [검증 범위·근거와 기능 동결 기준](docs/mvp_validation.md)에 환경 분리와 미검증 영역을 정리했습니다. 기존 인프라·성능·Copilot 검증 기록은 아래 각 절의 측정 조건과 범위를 유지합니다.
+
 공개 Streamlit 앱은 아래 주소에서 확인할 수 있습니다.
 
 https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/

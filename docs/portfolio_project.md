@@ -27,6 +27,12 @@ Python·FastAPI와 PostgreSQL을 기반으로 상품 CSV의 형식·중복·가�
 
 Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, Streamlit, Docker Compose, Kubernetes(kind), Terraform, GitHub Actions, Pytest
 
+### 2026-10-10 기준 프로젝트 요약
+
+공급사마다 다른 상품 컬럼과 데이터 품질 문제를 JSON Profile 표준화, Reject 분리와 규칙 기반 검수로 나누어 처리했습니다. PostgreSQL staging의 상품은 Preview·명시적 승인·최신 Hash 확인을 거쳐 카탈로그에 반영하고, Rollback 시 원본 변경 이력과 복구 이력을 함께 보존하도록 구현했습니다. 독립 PostgreSQL ETL 테스트 67건, 실제 JWT TestClient API 시나리오 35건, FastAPI·Streamlit을 실행한 Chromium 테스트 8건과 별도 Runner 단위 테스트 4건의 결과를 각각 확인했습니다. 이는 합성 데이터 기반 로컬 검증이며 실제 외부 공급사 전체 호환성이나 대규모 실서비스 성능을 입증하는 수치는 아닙니다.
+
+[2026-10-10 검증 근거와 MVP 기능 동결 기준](mvp_validation.md)에 각 실행의 환경·결과·한계를 정리했습니다. 아래 기존 핵심 문장과 설계·문제 해결 기록은 각 구현 및 당시 검증 범위의 설명으로 유지합니다.
+
 ### 이력서용 핵심 문장
 
 1. 상품 CSV의 필수값·형식·중복·가격·카테고리·개인정보 문제를 규칙으로 검출하고, 오류 이유와 수정 권장사항을 제공했으며 단위·API 테스트로 주요 흐름을 확인했습니다.
@@ -2109,6 +2115,8 @@ migration은 **빈 표를 만듭니다.** 기존 current-state row를 보고 과
 ### 현재 상태
 
 프로젝트는 **Feature Freeze + Continuous Maintenance Development** 상태입니다. 대형 기능을 계속 추가하는 대신, 실제 오류·transaction·데이터 무결성·오류 처리·회귀 문제를 좁은 범위로 유지개발합니다. 최근에는 ETL 거부 행을 안전하게 내보내고, inspection issue를 원본 논리 행에 연결한 뒤, 그 결과를 수정 작업표로 이어 주는 기존 workflow 보완을 진행했습니다. 따라서 아래 내용은 기능 홍보가 아니라 현재 구현의 실패 경로와 검증 범위를 설명하는 기록입니다.
+
+2026-10-10에는 기존 기능의 로컬 검증을 ETL 저장 → Promotion → Rollback → 실제 JWT API → 실제 Chromium까지 진행했습니다. 이번 기준으로 동결한 핵심 범위와 유지보수 허용·보류 항목은 [MVP 검증 및 기능 동결](mvp_validation.md#기능-동결-기준)에 모았습니다. 아래 69/37 passed 기록은 당시 head `20260826_0018`의 별도 실행이며, 최신 head에서 선별 실행한 67 passed와 합산하거나 대체하지 않습니다. 이 문서 최신화 작업에서는 테스트나 데모를 재실행하지 않았습니다.
 
 ### 오류 우선순위 보호
 

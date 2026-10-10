@@ -364,11 +364,11 @@ Airflow HTTP feed 경로는 실행 전에 effective activation을 확인한다. 
 
 ## 3. 검증 근거와 최소 troubleshooting
 
-사전 검증 근거는 세 갈래다. 모두 수동 demo의 근거일 뿐이고, E2E 전용 setup을 면접 시연의 필수 조건으로 만들지는 않는다.
+사전 검증 근거는 다음 네 영역이다. 모두 수동 demo의 근거일 뿐이고, E2E 전용 setup을 면접 시연의 필수 조건으로 만들지는 않는다.
 
 **A. ETL / Promotion / Rollback 브라우저 E2E** — `scripts/run_etl_browser_e2e.py`, `tests/e2e/test_etl_browser_e2e.py`. 격리 test DB에서 migration, ETL/staging 적재, FastAPI·Streamlit health, reject 상세 마스킹, promotion preview·승인·실행, rollback preview·실행과 PostgreSQL audit을 Chromium으로 확인한다.
 
-**B. Web ETL CSV 업로드 브라우저 E2E** — `tests/e2e/test_web_etl_upload_browser_e2e.py`. operator 로그인, `ETL 실행 프로필` 선택(`sample_marketplace_vendor` v2), 공급사 CSV 파일 업로드, ETL 실행, 성공 batch ID 확인, PostgreSQL `ETLLoadRun`과 staging 상품 2건 확인, ETL 이력 검색, 배치 상세 조회를 Chromium으로 확인한다. `scripts/run_etl_browser_e2e.py`가 A와 함께 실행한다. 업로드 화면의 모든 기능이 아니라 위 경로만 검증한다.
+**B. Web ETL CSV/XLSX 업로드 브라우저 E2E** — `tests/e2e/test_web_etl_upload_browser_e2e.py`. operator 로그인, `ETL 실행 프로필` 선택(`sample_marketplace_vendor` v2), 공급사 CSV 또는 합성 XLSX 파일 업로드, ETL 실행, 성공 batch ID 확인, PostgreSQL `ETLLoadRun`과 staging 상품 2건 확인, ETL 이력 검색, 배치 상세 조회를 Chromium으로 확인한다. `scripts/run_etl_browser_e2e.py`가 A와 함께 실행한다. 업로드 화면의 모든 기능이 아니라 위 경로만 검증한다.
 
 **C. ETL 프로필 runtime activation과 운영 이력** — API integration test(`tests/test_api_etl_profile_activation.py`), API Client test(`tests/test_catalogguard_api_client.py`), Streamlit AppTest(`tests/test_etl_load_history_ui.py`), PostgreSQL 통합 테스트와 migration/service 테스트에 더해 전용 Chromium E2E(`tests/e2e/test_etl_profile_ops_browser_e2e.py`)가 있다. 실제 operator 로그인 뒤 `sample_fashion_vendor_v1`을 deployment default v2에서 deactivate하고, archived v1을 activate한 뒤 reset하여 v2로 복귀하는 UI 흐름을 검증한다. 각 단계에서 현재 상태와 append-only history를 화면과 PostgreSQL에서 함께 확인하고, test-only local DB cleanup으로 원래 current-state와 기존 history를 복원·보존한다. Profile CRUD, 동시 update 경쟁, production DB 또는 Chromium 외 브라우저는 이 E2E 범위가 아니다. Airflow의 `etl_profile_inactive` 분류는 `airflow/tests/test_catalogguard_http_feed_to_staging.py`에 있고, 전용 `airflow-smoke` job의 격리 Airflow image에서 실행된다(Airflow가 없는 일반 pytest run에서는 module 단위로 skip된다).
 
@@ -388,6 +388,8 @@ Airflow HTTP feed 경로는 실행 전에 effective activation을 확인한다. 
 | 방향이 `비교 데이터 없음`(no_baseline) | 같은 공급사 이름으로 품질 집계가 가능한 batch가 1개뿐인지 확인한다. 준비 명령 두 개를 모두 실행했는지 본다. |
 | `이번 배치 미관측`이 많음 | reject 건수와 이 feed가 전체 snapshot인지 부분 feed인지 함께 확인한다. 삭제·판매 종료로 단정하지 않는다. |
 | 새로 적재한 공급사가 관찰 목록에 없음 | Streamlit 화면을 다시 그린 뒤(rerun/새로고침) 확인한다. 목록은 조회 시점 값으로 캐시된다. |
+
+2026-10-10 독립 PostgreSQL에서 위 Chromium 테스트와 별도 Runner 안전성 테스트를 실행한 결과는 [MVP 검증 근거](mvp_validation.md)에 정리했다. 이 문서 수정 중 데모를 다시 실행한 것은 아니며, 기존 시연 준비 절차와 선택적 Copilot·Airflow 범위는 유지한다.
 
 ## 4. 종료, 인터뷰 메시지, 한계
 
