@@ -10,7 +10,7 @@
 
 ## 2. 현재 구조
 
-현재 흐름은 `공급사 CSV -> etl.pipeline -> 표준 CSV/reject CSV/summary JSON -> etl.load_cli -> PostgreSQL staging`이다.
+CLI 흐름은 `공급사 CSV -> etl.pipeline -> 표준 CSV/reject CSV/summary JSON -> etl.load_cli -> PostgreSQL staging`이다. 현재 Web multipart 업로드는 CSV/XLSX를 받아 같은 `run_pipeline()`과 `load_standard_csv()`를 호출한다. CLI·S3·HTTP feed·Airflow 입력은 CSV 전용이다.
 
 - `etl_load_runs`는 `profile_name`, `profile_version`, 파일 해시, `total_rows`, `rejected_rows`, `error_counts`를 저장한다.
 - `catalog_products_staging`은 정상 변환 상품을 `etl_load_run_id`에 연결한다.
@@ -18,7 +18,7 @@
 - `inspect_dataframe()`는 표준 컬럼 DataFrame을 현재 `INSPECTION_VERSION`으로 검사한다. inspection 이력은 ETL batch와 연결되지 않는다.
 - staging에는 batch 내부 상품 identity unique constraint가 없으며, 운영 상품 persistence와 promotion은 별도 service/API가 담당한다. promotion은 staging 행을 직접 수정하지 않고 운영 상품 persistence에만 insert/update한다.
 
-현재 샘플 프로필은 `sample_fashion_vendor`와 `sample_marketplace_vendor`이며 version은 각각 `1`이다.
+현재 샘플 프로필은 `sample_fashion_vendor`와 `sample_marketplace_vendor`이며 기본 활성 version은 각각 `2`다. 보존된 v1 archive와 API 호환용 `_v1` profile ID는 유지하며, 신규 실행 버전은 runtime activation의 영향을 받을 수 있다.
 
 ## 3. 상품 식별 정책
 
@@ -66,7 +66,7 @@ staging 모델을 그대로 복사하지 않는다. staging의 `id`, `etl_load_r
 
 append-only audit log다. `promotion_run_id`, `catalog_product_id`, `action`(`insert`/`update`), `changed_fields`, `before_data`, `after_data`, `created_at`을 저장한다. `changed_fields`는 비어 있지 않은 JSON object, `after_data`는 JSON object여야 한다. `insert`의 `before_data`는 SQL `NULL`, `update`의 `before_data`는 JSON object여야 하며, `JSONB(none_as_null=True)`로 Python `None`을 SQL `NULL`로 보존한다. `unchanged`는 변경 이력 행을 만들지 않는다.
 
-모든 새 FK는 `ON DELETE RESTRICT`다. 운영 상품·promotion 실행·감사 이력의 출처를 보존하고, 부모 행이 참조 중일 때 삭제되지 않게 한다.
+초기 persistence migration에서는 출처 보존을 위해 FK를 `ON DELETE RESTRICT`로 두었다. 현재는 `20260803_0008`에서 두 Audit 테이블의 `catalog_product_id` FK를 제거해 상품 삭제와 이력 보존을 함께 허용한다. 이 값은 삭제된 원래 상품의 ID로 남으며, 배치·Promotion Run·Rollback Run·원본 Audit 사이의 출처 참조는 유지한다. 상세 이유는 24절을 참고한다.
 
 ### Alembic migration과 검증
 
