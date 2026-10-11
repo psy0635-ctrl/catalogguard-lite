@@ -442,7 +442,7 @@ XLSX는 정확히 하나의 visible worksheet와 최대 10,000개 상품 행만 
 
 숫자로 저장된 Excel 상품 ID에서 이미 사라진 앞자리 0은 복구하지 않는다. 앞자리 0을 보존해야 하는 ID 열은 Excel에서 텍스트로 저장해야 한다. XLSX 입력이어도 출력은 계속 `catalogguard_ready.csv`, `rejected_rows.csv`, summary JSON이며, 원본 XLSX bytes의 SHA-256·원본 leaf filename·실제 worksheet row 번호를 lineage로 사용한다.
 
-`run_pipeline()`과 `run_web_etl()`의 기본 허용 형식은 CSV뿐이다. multipart `POST /api/v1/etl-loads`만 XLSX를 명시적으로 opt-in하므로 CLI·S3·HTTP feed·Airflow가 XLSX 지원으로 확장되지 않는다.
+`run_pipeline()`과 `run_web_etl()`의 기본 허용 형식은 CSV뿐이다. Web multipart 실행(`POST /api/v1/etl-loads`)과 사전 검증(`POST /api/v1/etl-loads/preflight`)은 XLSX를 명시적으로 opt-in하며, CLI·S3·HTTP feed·Airflow는 계속 CSV 전용이다.
 
 ### 임시 파일 처리
 
@@ -482,7 +482,8 @@ Web ETL을 위한 새 DB 테이블이나 Alembic migration은 없다. 기존 `et
 _fetch_etl_profiles()로 GET /api/v1/etl-profiles 조회
 -> "ETL 실행 프로필" selectbox
 -> "공급사 CSV / XLSX 파일" file_uploader
--> "ETL 실행" 버튼 (파일 미선택 시 disabled)
+-> 필요하면 "사전 검증" 버튼으로 변환 집계만 확인 (선택 사항, DB 적재 없음)
+-> 사용자가 실제 적재를 선택하면 "ETL 실행" 버튼 (파일 미선택 시 disabled)
 -> 버튼 클릭 시에만 _submit_etl_web_run() 호출
 -> POST /api/v1/etl-loads
 -> 정상 응답: total_rows/loaded_rows/rejected_rows와 etl_load_run_id 표시
@@ -490,7 +491,59 @@ _fetch_etl_profiles()로 GET /api/v1/etl-profiles 조회
 -> st.rerun()
 ```
 
-파일 선택이나 프로필 변경만으로는 API를 호출하지 않는다. `_on_etl_web_run_profile_change()`는 프로필이 바뀌면 이전 `etl_web_run_result`/`etl_web_run_error`를 지워 stale 결과가 새 프로필의 결과처럼 보이지 않게 한다. `POST` 호출은 `_render_etl_web_run()`의 `if st.button(...)` 블록 안에서만 실행되므로, 이후 같은 화면이 다시 rerun되어도(다른 위젯 조작, 페이지 이동 등) 버튼을 다시 클릭하지 않는 한 같은 요청이 반복되지 않는다. 성공 시에는 `etl_load_list_response`·`etl_load_initialized`·`etl_load_offset`만 초기화해 ETL 적재 이력이 새 배치를 다시 조회하게 하며, `catalog_promotion_*` 상태는 건드리지 않는다. 즉 웹 ETL 실행 성공이 promotion을 자동으로 실행하지 않는다. `tests/test_etl_load_history_ui.py`의 `test_etl_web_run_profile_dropdown_lists_allowlisted_profiles`, `test_etl_web_run_submit_button_disabled_without_uploaded_file`, `test_etl_web_run_profile_change_does_not_call_run_etl_load`, `test_etl_web_run_profile_change_clears_stale_result_and_error`, `test_submit_etl_web_run_success_invalidates_history_cache_but_keeps_promotion_cache`가 이 동작을 각각 검증한다.
+파일 선택이나 프로필 변경만으로는 사전 검증·실행 `POST`를 호출하지 않는다. `_on_etl_web_run_profile_change()`는 프로필이 바뀌면 이전 `etl_web_run_result`/`etl_web_run_error`를 지워 stale 결과가 새 프로필의 결과처럼 보이지 않게 한다. `POST` 호출은 `_render_etl_web_run()`의 `if st.button(...)` 블록 안에서만 실행되므로, 이후 같은 화면이 다시 rerun되어도(다른 위젯 조작, 페이지 이동 등) 버튼을 다시 클릭하지 않는 한 같은 요청이 반복되지 않는다. 실제 ETL 실행 성공 시에는 `etl_load_list_response`·`etl_load_initialized`·`etl_load_offset`만 초기화해 ETL 적재 이력이 새 배치를 다시 조회하게 하며, `catalog_promotion_*` 상태는 건드리지 않는다. 즉 웹 ETL 실행 성공이 promotion을 자동으로 실행하지 않는다. `tests/test_etl_load_history_ui.py`의 `test_etl_web_run_profile_dropdown_lists_allowlisted_profiles`, `test_etl_web_run_submit_button_disabled_without_uploaded_file`, `test_etl_web_run_profile_change_does_not_call_run_etl_load`, `test_etl_web_run_profile_change_clears_stale_result_and_error`, `test_submit_etl_web_run_success_invalidates_history_cache_but_keeps_promotion_cache`가 이 동작을 각각 검증한다.
+
+### Web ETL Preflight 사용 예시
+
+사전 검증(Preflight)은 공급사 파일을 데이터베이스에 저장하기 전에 기존 ETL 규칙으로 먼저 확인하는 기능이다. 파일을 선택한 뒤 **사전 검증** 버튼을 눌러야 요청이 실행되며, 실제 ETL 실행을 자동으로 시작하지 않는다.
+
+- **Preflight**: 저장하지 않고 정상 변환·Reject 예상 결과를 확인한다.
+- **ETL 실행**: 기존 변환·검증을 수행한 뒤 정상 상품을 PostgreSQL staging(운영 반영 전 임시 저장 영역)에 적재한다. 기존 동일 배치가 있으면 해당 배치를 반환한다.
+- **Promotion Preview**: 저장된 staging 배치를 선택해 상품 품질과 운영 상품 반영 가능 여부를 별도로 확인한다. Preview 자체는 운영 상품을 반영하지 않는다.
+
+**사용 전 조건**
+
+FastAPI와 Streamlit이 정상 실행 중이고, Operator 계정으로 로그인할 수 있으며, 사용할 공급사 프로필이 활성화되어 있어야 한다. 실행 환경과 계정 준비는 [README의 로컬 실행 안내](../README.md)와 [Demo Runbook의 시연 전 준비](demo_runbook.md#2-시연-전-준비)를 따른다. Viewer는 사전 검증을 실행할 수 없다.
+
+이 예시는 기존 합성 파일 [sample_marketplace_vendor_mixed.csv](../tests/fixtures/etl/sample_marketplace_vendor_mixed.csv)와 [Marketplace v2 프로필](../config/etl/sample_marketplace_vendor/v2.json)을 사용한다. 일반 사용 시에는 선택한 공급사 프로필의 필수 원본 컬럼·컬럼 매핑에 맞는 CSV 또는 XLSX를 준비한다. 이 예시를 따라 할 때는 아래 합성 CSV를 선택한다.
+
+**사용 순서**
+
+1. Streamlit에 Operator 계정으로 로그인한다.
+2. **ETL 적재 이력** 탭으로 이동한다.
+3. **ETL 실행** 영역을 찾는다.
+4. **ETL 실행 프로필**에서 **마켓플레이스 공급사 샘플**을 선택하고, **선택한 ETL 프로필**의 버전이 `2`인지 확인한다.
+5. **공급사 CSV / XLSX 파일**에서 저장소의 `tests/fixtures/etl/sample_marketplace_vendor_mixed.csv`를 업로드한다. JSON 프로필 파일을 업로드하는 것이 아니다.
+6. **사전 검증** 버튼을 누른다. 파일이나 프로필을 선택하지 않았거나 Operator가 아니면 버튼을 사용할 수 없다.
+7. **사전 검증 완료** 아래 전체 상품 행·정상 변환 예상·Reject 예상 집계를 확인한다.
+8. Reject가 있으면 오류 코드별 발생 건수를 확인하고, 아래 예시처럼 한 행에 여러 오류가 있는지 해석한다.
+9. 자신의 공급사 파일에 오류가 있다면 원본 파일을 수정해 다시 업로드하고 **사전 검증**을 다시 누른다. 저장소의 예시 Fixture는 그대로 둔다.
+10. 실제 적재를 원할 때만 별도로 **ETL 실행**을 누른다. 사전 검증은 필수 승인 절차가 아니며, 실제 실행을 반드시 이어서 할 필요도 없다.
+
+Web ETL 프로필 ID는 `sample_marketplace_vendor_v1`이다. `_v1`은 기존 API 호환용 식별자이며 실제 적용 버전을 뜻하지 않는다. 이 예시는 별도 Runtime Override(실행 중 프로필 버전 재지정) 없이 배포 기본 v2가 활성화된 환경을 기준으로 한다. Override가 있으면 실제 적용 버전이 달라질 수 있으므로 화면의 프로필 버전과 검증 결과의 버전을 확인한다.
+
+**결과 예시와 해석**
+
+| 항목 | 예상 값 |
+|---|---:|
+| 전체 상품 행 | 3 |
+| 정상 변환 예상 | 2 |
+| Reject 예상 | 1 |
+| `INVALID_PRICE` | 1 |
+| `NEGATIVE_STOCK` | 1 |
+
+이 수치는 저장소의 합성 Fixture와 v2 프로필 기준이다. 업로드 파일이나 실제 활성 프로필이 다르면 결과가 달라질 수 있다. 전체 상품 행 3개 중 2개는 기존 ETL 규칙상 정상 변환 가능하고, 1개는 변환 오류로 Reject(변환 거부)가 예상된다. Reject 행의 `가격문의`는 숫자 가격으로 변환할 수 없고 재고 `-1`은 음수이므로, 같은 한 행에 가격 오류와 재고 오류가 함께 발생한다. 따라서 Reject는 **1행**, 오류 발생 건수의 합은 **2건**이다. 오류 코드별 발생 건수는 Reject 행 수와 다를 수 있다.
+
+정상 변환 예상 2행도 상품 품질 검수를 모두 통과했다는 뜻은 아니다. 이 Fixture의 정가 `59000`·할인가 `69000` 행은 숫자 변환에는 성공하지만, 이후 상품 품질 검수에서 할인가가 정가보다 높은 오류로 판단된다.
+
+**주의사항**
+
+- 사전 검증만으로 PostgreSQL에 적재 배치를 생성하거나 상품을 저장하지 않는다. 응답에는 적재 배치 ID가 없고, 원본 상품 데이터·개인정보·Reject 원문도 포함하지 않는다.
+- 상품을 staging에 저장하려면 별도로 **ETL 실행**을 눌러야 한다. 운영 상품 반영은 이후 Promotion Preview와 기존 승인 절차를 따른다.
+- 실제 ETL 실행 시 서버가 파일과 현재 활성 프로필을 다시 검증한다. 사전 검증이 실제 적재 성공이나 Promotion 가능 여부를 보장하지 않는다.
+- 파일 내용·파일명·선택 프로필이 바뀌면 이전 사전 검증 결과가 초기화된다. 같은 파일명이더라도 내용이 달라지면 다시 검증해야 한다. 요청 실패 시에도 이전 성공 결과는 표시하지 않는다.
+- Reject 0건이어도 상품 품질 오류가 발생할 수 있다. Preflight가 모든 잘못된 가격 표기를 검출하는 것은 아니며, 기존 가격 변환 정책을 그대로 사용한다.
+- 프로필이 비활성화되면 사전 검증도 제한된다. 검증 후 활성화 상태가 바뀌면 실제 ETL 실행에서 실패할 수 있다.
 
 ### Promotion과의 연결
 
