@@ -99,6 +99,203 @@ def invalid_row(sku: str) -> list[str]:
     return [sku, "오류 상품", "TOP", "브랜드", "무료", "", "BLACK", "M", "1", "설명", "image.jpg"]
 
 
+@pytest.mark.parametrize("input_format", ["csv", "xlsx"])
+@pytest.mark.parametrize("reject", [False, True])
+def test_preflight_reuses_pipeline_without_loading_and_cleans_files(monkeypatch, input_format, reject):
+    from contextlib import nullcontext
+    from dataclasses import asdict
+    from tests.conftest import FakeSessionWithoutRuntimeOverrides
+    from etl import web_service
+
+    class ReadOnlySession(FakeSessionWithoutRuntimeOverrides):
+        no_autoflush = nullcontext()
+
+        def rollback(self):
+            pytest.fail("Preflight must preserve the caller's transaction")
+
+    def forbidden_load(*args, **kwargs):
+        pytest.fail("Preflight must never load the database")
+
+    monkeypatch.setattr(web_service, "load_standard_csv", forbidden_load)
+    rows = [valid_row("SYNTHETIC-001")]
+    if reject:
+        bad = invalid_row("SYNTHETIC-002")
+        bad[8] = "-1"
+        rows.append(bad)
+    content = (build_supplier_xlsx(rows) if input_format == "xlsx" else
+               build_supplier_csv(rows, unique_marker="synthetic"))
+    before = _list_temp_etl_dirs()
+    result = web_service.preflight_web_etl(
+        ReadOnlySession(), profile_id="sample_fashion_vendor_v1",
+        source_filename=f"vendor.{input_format}", input_bytes=content,
+    )
+    assert asdict(result) == {
+        "profile_name": "sample_fashion_vendor", "profile_version": "2",
+        "total_rows": len(rows), "loaded_rows": 1, "rejected_rows": int(reject),
+        "error_counts": {"INVALID_PRICE": 1, "NEGATIVE_STOCK": 1} if reject else {},
+    }
+    assert _list_temp_etl_dirs() == before
+
+
+@pytest.mark.parametrize("content", [
+    b"vendor_sku\nSKU\n",
+    b"vendor_sku,vendor_sku\nSKU,SKU\n",
+    b"", b"not-an-xlsx",
+])
+def test_preflight_invalid_input_cleans_files(content):
+    from contextlib import nullcontext
+    from tests.conftest import FakeSessionWithoutRuntimeOverrides
+    from etl import web_service
+
+    session = FakeSessionWithoutRuntimeOverrides()
+    session.no_autoflush = nullcontext()
+    before = _list_temp_etl_dirs()
+    with pytest.raises((ETLPipelineError, CsvUploadValidationError)):
+        web_service.preflight_web_etl(
+            session, profile_id="sample_fashion_vendor_v1",
+            source_filename="vendor.xlsx" if content == b"not-an-xlsx" else "vendor.csv",
+            input_bytes=content,
+        )
+    assert _list_temp_etl_dirs() == before
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_preflight_preserves_pending_orm_and_core_writes_without_autoflush(failure):
+    from sqlalchemy import create_engine, event, insert
+    from sqlalchemy.orm import Session
+    from db.models import User, ETLProfileActivation
+    from etl.web_service import preflight_web_etl
+
+    engine = create_engine("sqlite://")
+    User.__table__.create(engine)
+    ETLProfileActivation.__table__.create(engine)
+    try:
+        with Session(engine, autoflush=True) as session:
+            session.add_all([
+                User(id=1, username="synthetic-1", password_hash="synthetic", role="viewer"),
+                User(id=2, username="synthetic-2", password_hash="synthetic", role="viewer"),
+            ])
+            session.commit()
+            dirty = session.get(User, 1)
+            deleted = session.get(User, 2)
+            dirty.username = "pending-update"
+            session.delete(deleted)
+            pending = User(id=3, username="pending-new", password_hash="synthetic", role="viewer")
+            session.add(pending)
+            with session.no_autoflush:
+                session.execute(insert(User).values(id=4, username="pending-core", password_hash="synthetic", role="viewer"))
+            transaction = session.get_transaction()
+            statements = []
+            def capture(conn, cursor, statement, parameters, context, executemany):
+                statements.append(statement)
+            event.listen(engine, "before_cursor_execute", capture)
+            try:
+                content = b"bad header\nvalue\n" if failure else build_supplier_csv([valid_row("SYNTHETIC")], unique_marker="test")
+                if failure:
+                    with pytest.raises(ETLPipelineError):
+                        preflight_web_etl(session, profile_id="sample_fashion_vendor_v1", source_filename="vendor.csv", input_bytes=content)
+                else:
+                    assert preflight_web_etl(session, profile_id="sample_fashion_vendor_v1", source_filename="vendor.csv", input_bytes=content).loaded_rows == 1
+                assert session.get_transaction() is transaction
+                assert pending in session.new
+                assert dirty in session.dirty
+                assert deleted in session.deleted
+                assert statements and all(sql.lstrip().upper().startswith("SELECT") for sql in statements)
+                with session.no_autoflush:
+                    assert session.scalars(select(User.username).where(User.id == 4)).one() == "pending-core"
+                    assert session.scalars(select(User.username).where(User.id == 1)).one() == "synthetic-1"
+                    assert session.scalars(select(User.id).where(User.id == 2)).one() == 2
+                    assert session.scalars(select(User.id).where(User.id == 3)).one_or_none() is None
+            finally:
+                event.remove(engine, "before_cursor_execute", capture)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_preflight_postgres_all_tables_unchanged(postgres_session, failure):
+    from db.base import Base
+    from etl.web_service import preflight_web_etl
+    session, _ = postgres_session
+    def snapshot():
+        return {table.name: sorted(repr(tuple(row)) for row in session.execute(select(table)))
+                for table in Base.metadata.sorted_tables}
+    # Include populated ingestion/rejection tables, not just an empty database.
+    seed = run_web_etl(session, profile_id="sample_fashion_vendor_v1", source_filename="seed.csv",
+                       input_bytes=build_supplier_csv([valid_row("SYNTHETIC"), invalid_row("SYNTHETIC-BAD")], unique_marker="test"))
+    try:
+        before = snapshot()
+        content = b"bad header\nvalue\n" if failure else build_supplier_csv([valid_row("SYNTHETIC")], unique_marker="test")
+        if failure:
+            with pytest.raises(ETLPipelineError):
+                preflight_web_etl(session, profile_id="sample_fashion_vendor_v1", source_filename="vendor.csv", input_bytes=content)
+        else:
+            result = preflight_web_etl(session, profile_id="sample_fashion_vendor_v1", source_filename="vendor.csv", input_bytes=content)
+            assert result.loaded_rows == 1
+        assert snapshot() == before
+    finally:
+        _cleanup_runs(postgres_session[1], [seed.etl_load_run_id])
+
+
+def test_preflight_uses_active_version_and_real_run_rechecks_activation(monkeypatch):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+    from db.models import ETLProfileActivation
+    from etl.profile_loader import ETLProfileInactiveError
+    from etl import web_service
+    engine = create_engine("sqlite://")
+    ETLProfileActivation.__table__.create(engine)
+    try:
+        with Session(engine) as session:
+            override = ETLProfileActivation(id=1, profile_id="sample_fashion_vendor_v1", active_version="1")
+            session.add(override)
+            session.commit()
+            content = build_supplier_csv([valid_row("SYNTHETIC")], unique_marker="test")
+            assert web_service.preflight_web_etl(session, profile_id=override.profile_id, source_filename="vendor.csv", input_bytes=content).profile_version == "1"
+            override.active_version = None
+            session.commit()
+            def forbidden(*args, **kwargs):
+                pytest.fail("Inactive profile must not reach the loader")
+            monkeypatch.setattr(web_service, "load_standard_csv", forbidden)
+            with pytest.raises(ETLProfileInactiveError):
+                web_service.run_web_etl(session, profile_id=override.profile_id, source_filename="vendor.csv", input_bytes=content)
+            with pytest.raises(ETLProfileInactiveError):
+                web_service.preflight_web_etl(session, profile_id=override.profile_id, source_filename="vendor.csv", input_bytes=content)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("case", ["reserved", "unsupported", "oversize", "unknown_profile", "price_policy"])
+def test_preflight_existing_validation_and_price_policy(case):
+    from contextlib import nullcontext
+    from conftest import FakeSessionWithoutRuntimeOverrides
+    from etl.web_service import preflight_web_etl
+    session = FakeSessionWithoutRuntimeOverrides()
+    session.no_autoflush = nullcontext()
+    row = valid_row("SYNTHETIC")
+    row[4] = "12,34"
+    content = build_supplier_csv([row], unique_marker="test")
+    filename, profile = "vendor.csv", "sample_fashion_vendor_v1"
+    if case == "reserved":
+        output = io.StringIO()
+        csv.writer(output).writerows([[*FASHION_PROFILE_COLUMNS, "error_code"], [*row, "synthetic-private"]])
+        content = output.getvalue().encode()
+    elif case == "unsupported":
+        filename = "vendor.txt"
+    elif case == "oversize":
+        content = b"x" * (MAX_UPLOAD_SIZE_BYTES + 1)
+    elif case == "unknown_profile":
+        profile = "unknown"
+    before = _list_temp_etl_dirs()
+    if case == "price_policy":
+        result = preflight_web_etl(session, profile_id=profile, source_filename=filename, input_bytes=content)
+        assert result.loaded_rows == 1 and result.error_counts == {}
+    else:
+        with pytest.raises((ETLPipelineError, CsvUploadValidationError, ETLProfileNotFoundError)):
+            preflight_web_etl(session, profile_id=profile, source_filename=filename, input_bytes=content)
+    assert _list_temp_etl_dirs() == before
+
+
 @pytest.fixture()
 def postgres_session():
     database_url = get_optional_database_url()
