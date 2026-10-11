@@ -253,6 +253,51 @@ def make_client(*, response=None, error=None, timeout_seconds=5.0):
     return client, session
 
 
+PREFLIGHT_RESPONSE = {
+    "profile_name": "sample_fashion_vendor", "profile_version": "2",
+    "total_rows": 2, "loaded_rows": 1, "rejected_rows": 1,
+    "error_counts": {"INVALID_PRICE": 1, "NEGATIVE_STOCK": 1},
+}
+
+
+def test_preflight_client_uploads_and_validates_contract():
+    client, session = make_client(response=FakeResponse(payload=PREFLIGHT_RESPONSE))
+    assert client.preflight_etl_load(profile_id=" fashion ", source_filename="vendor.xlsx", file_content=b"xlsx") == PREFLIGHT_RESPONSE
+    assert session.calls[0]["url"] == "https://api.example.com/api/v1/etl-loads/preflight"
+    assert session.calls[0]["data"] == {"profile_id": "fashion"}
+    assert session.calls[0]["files"]["file"][0:2] == ("vendor.xlsx", b"xlsx")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("profile_name", ""), ("profile_version", None), ("total_rows", None),
+    ("loaded_rows", True), ("rejected_rows", -1), ("total_rows", 5),
+    ("error_counts", {"INVALID_PRICE": True}), ("error_counts", {"INVALID_PRICE": 0}),
+    ("error_counts", None), ("error_counts", {}),
+])
+def test_preflight_client_rejects_malformed_response(field, value):
+    payload = dict(PREFLIGHT_RESPONSE, **{field: value})
+    client, _ = make_client(response=FakeResponse(payload=payload))
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.preflight_etl_load(profile_id="fashion", source_filename="vendor.csv", file_content=b"csv")
+
+
+@pytest.mark.parametrize("status_code,code,error_name", [
+    (400, "invalid_upload", "ETLInvalidUploadError"),
+    (400, "unsupported_profile", "ETLUnsupportedProfileError"),
+    (409, "inactive_profile", "ETLProfileInactiveError"),
+])
+def test_preflight_client_maps_existing_errors(status_code, code, error_name):
+    client, _ = make_client(response=FakeResponse(status_code=status_code, payload={"detail": {"code": code, "message": "safe"}}))
+    with pytest.raises(getattr(import_client_module(), error_name)):
+        client.preflight_etl_load(profile_id="fashion", source_filename="vendor.csv", file_content=b"csv")
+
+
+def test_preflight_client_accepts_multiple_same_code_errors_on_one_row():
+    payload = dict(PREFLIGHT_RESPONSE, error_counts={"INVALID_PRICE": 2})
+    client, _ = make_client(response=FakeResponse(payload=payload))
+    assert client.preflight_etl_load(profile_id="fashion", source_filename="vendor.csv", file_content=b"csv") == payload
+
+
 def test_get_catalogguard_api_base_url_strips_trailing_slash(monkeypatch):
     monkeypatch.setenv("CATALOGGUARD_API_BASE_URL", "https://api.example.com/")
 

@@ -71,6 +71,7 @@ from api.schemas import (
     ETLS3LoadRequest,
     ETLStagingProductListResponse,
     ETLStagingProductResponse,
+    ETLPreflightResponse,
     ETLWebRunResponse,
     SupplierVocabularyCoverageListResponse,
     SupplierVocabularyCoverageResponse,
@@ -140,7 +141,7 @@ from db.etl_profile_activation_service import (
     reset_etl_profile_activation,
     set_etl_profile_activation,
 )
-from etl.web_service import ETLWebRunOutcome, run_web_etl
+from etl.web_service import ETLWebRunOutcome, preflight_web_etl, run_web_etl
 from db.catalog_reconciliation_service import (
     CatalogReconciliationDuplicateIdentityError,
     CatalogReconciliationReport,
@@ -1333,6 +1334,39 @@ def list_etl_profile_activation_history_route(
     )
 
 
+def _web_upload_http_error(error: Exception) -> HTTPException:
+    """Share the upload error contract without coupling it to ingestion metrics."""
+    if isinstance(error, ETLProfileNotFoundError):
+        return HTTPException(status_code=400, detail={
+            "code": "unsupported_profile", "message": "지원하지 않는 공급사 프로필입니다.",
+        })
+    if isinstance(error, ETLProfileInactiveError):
+        return HTTPException(status_code=409, detail={
+            "code": "inactive_profile", "message": "비활성화된 공급사 프로필입니다.",
+        })
+    return HTTPException(status_code=400, detail={"code": "invalid_upload", "message": str(error)})
+
+
+@router.post("/api/v1/etl-loads/preflight", response_model=ETLPreflightResponse)
+async def preflight_etl_upload(
+    response: Response,
+    file: UploadFile = File(...),
+    profile_id: str = Form(...),
+    _current_user=Depends(require_operator),
+    session: Session = Depends(get_session),
+) -> ETLPreflightResponse:
+    file_bytes = await file.read(MAX_UPLOAD_SIZE_BYTES + 1)
+    try:
+        outcome = preflight_web_etl(
+            session, profile_id=profile_id,
+            source_filename=file.filename or "", input_bytes=file_bytes,
+        )
+    except (ETLProfileNotFoundError, ETLProfileInactiveError, CsvUploadValidationError, ETLPipelineError) as error:
+        raise _web_upload_http_error(error) from None
+    response.headers["Cache-Control"] = "no-store"
+    return ETLPreflightResponse(**vars(outcome))
+
+
 @router.post("/api/v1/etl-loads", response_model=ETLWebRunResponse)
 async def create_etl_load_run(
     http_request: Request,
@@ -1357,32 +1391,9 @@ async def create_etl_load_run(
             initial_source_ref=_upload_source_ref(file.filename),
             allowed_input_formats=("csv", "xlsx"),
         )
-    except ETLProfileNotFoundError:
+    except (ETLProfileNotFoundError, ETLProfileInactiveError, CsvUploadValidationError, ETLPipelineError) as error:
         record_web_etl_run("failed")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "unsupported_profile",
-                "message": "지원하지 않는 공급사 프로필입니다.",
-            },
-        ) from None
-    except ETLProfileInactiveError:
-        # 없는 프로필(400 unsupported_profile)과 섞지 않습니다. 프로필은 존재하고
-        # archive도 그대로 있지만 지금 실행할 버전이 없는 상태이므로 409입니다.
-        record_web_etl_run("failed")
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "code": "inactive_profile",
-                "message": "비활성화된 공급사 프로필입니다.",
-            },
-        ) from None
-    except (CsvUploadValidationError, ETLPipelineError) as error:
-        record_web_etl_run("failed")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "invalid_upload", "message": str(error)},
-        ) from None
+        raise _web_upload_http_error(error) from None
     except ETLLoadError:
         record_web_etl_run("failed")
         raise HTTPException(
