@@ -29,6 +29,66 @@ client = TestClient(app)
 ENDPOINT = "/api/v1/etl-loads"
 
 
+def _preflight_session():
+    from contextlib import nullcontext
+    from conftest import FakeSessionWithoutRuntimeOverrides
+    session = FakeSessionWithoutRuntimeOverrides()
+    session.no_autoflush = nullcontext()
+    yield session
+
+
+@pytest.mark.parametrize("input_format", ["csv", "xlsx"])
+def test_preflight_operator_contract_and_unchanged_metrics(monkeypatch, input_format):
+    from tests.etl.test_web_service import build_supplier_csv, build_supplier_xlsx, valid_row, invalid_row
+    from etl import web_service
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Preflight must not load DB or record ingestion metrics")
+
+    monkeypatch.setattr(web_service, "load_standard_csv", forbidden)
+    monkeypatch.setattr(etl_loads_route, "record_web_etl_run", forbidden)
+    monkeypatch.setattr(etl_loads_route, "record_web_etl_rows", forbidden)
+    app.dependency_overrides[get_session] = _preflight_session
+    rows = [valid_row("SYNTHETIC-001"), invalid_row("SYNTHETIC-002")]
+    content = build_supplier_xlsx(rows) if input_format == "xlsx" else build_supplier_csv(rows, unique_marker="test")
+    response = client.post(ENDPOINT + "/preflight", files=_files(content=content, filename=f"vendor.{input_format}"),
+                           data={"profile_id": "sample_fashion_vendor_v1"})
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "profile_name": "sample_fashion_vendor", "profile_version": "2",
+        "total_rows": 2, "loaded_rows": 1, "rejected_rows": 1,
+        "error_counts": {"INVALID_PRICE": 1},
+    }
+
+
+@pytest.mark.parametrize("role, expected", [(None, 401), ("viewer", 403)])
+def test_preflight_requires_operator(role, expected):
+    app.dependency_overrides[get_session] = _preflight_session
+    if role is None:
+        app.dependency_overrides.pop(get_current_user, None)
+    else:
+        override_current_user(role=role)
+    response = client.post(ENDPOINT + "/preflight", files=_files(), data={"profile_id": "sample_fashion_vendor_v1"})
+    assert response.status_code == expected
+
+
+@pytest.mark.parametrize("error, expected, code", [
+    (ETLProfileNotFoundError("unknown"), 400, "unsupported_profile"),
+    (ETLProfileInactiveError("sample_fashion_vendor_v1"), 409, "inactive_profile"),
+    (ETLPipelineError("invalid header"), 400, "invalid_upload"),
+    (CsvUploadValidationError("too large"), 400, "invalid_upload"),
+])
+def test_preflight_reuses_upload_error_contract(monkeypatch, error, expected, code):
+    def fail(*args, **kwargs):
+        raise error
+    app.dependency_overrides[get_session] = _preflight_session
+    monkeypatch.setattr(etl_loads_route, "preflight_web_etl", fail)
+    response = client.post(ENDPOINT + "/preflight", files=_files(), data={"profile_id": "sample_fashion_vendor_v1"})
+    assert response.status_code == expected
+    assert response.json()["detail"]["code"] == code
+
+
 def _files(*, content: bytes = b"header\nvalue\n", filename: str = "vendor.csv"):
     return {"file": (filename, content, "text/csv")}
 

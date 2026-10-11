@@ -1,4 +1,7 @@
+import json
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,31 +44,24 @@ def _leaf_filename(filename: str) -> str:
     return filename.replace("\\", "/").split("/")[-1].strip()
 
 
-def run_web_etl(
-    session: Session,
+@dataclass(frozen=True)
+class ETLPreflightOutcome:
+    profile_name: str
+    profile_version: str
+    total_rows: int
+    loaded_rows: int
+    rejected_rows: int
+    error_counts: dict[str, int]
+
+
+@contextmanager
+def _transformed_upload(
     *,
-    profile_id: str,
+    profile_path: Path,
     source_filename: str,
     input_bytes: bytes,
-    actor_user_id: int | None = None,
-    actor_username: str | None = None,
-    initial_source_type: str = ETL_INITIAL_SOURCE_TYPE_UNKNOWN,
-    initial_source_ref: str | None = None,
-    allowed_input_formats: tuple[str, ...] = ("csv",),
-) -> ETLWebRunOutcome:
-    # run_pipeline/load_standard_csv are the same functions etl.cli/etl.load_cli call;
-    # this only bridges an in-memory upload into their existing file-based contract.
-    #
-    # session을 함께 넘겨 runtime activation override까지 반영합니다. Web upload,
-    # S3, HTTP feed, Airflow DAG가 모두 이 함수 하나를 지나므로, 네 경로가 같은
-    # effective active version을 봅니다. 여기서 session을 빠뜨리면 그 경로만 배포
-    # 기본값으로 실행되어 "내렸는데 계속 돈다"가 됩니다.
-    profile_path = get_profile_path(profile_id, session=session)
-    # 위 조회가 autobegin시킨 읽기 트랜잭션을 끝냅니다. 그대로 두면 아래
-    # load_standard_csv()의 with session.begin()이 실패합니다. 보류 중인 쓰기가 있으면
-    # 조용히 버리지 않고 먼저 소리를 냅니다.
-    end_activation_read_transaction(session)
-
+    allowed_input_formats: tuple[str, ...],
+) -> Iterator[tuple[Path, Path, Path]]:
     suffix = Path(_leaf_filename(source_filename)).suffix.casefold().removeprefix(".")
     if suffix not in allowed_input_formats:
         if allowed_input_formats == ("csv",):
@@ -92,6 +88,64 @@ def run_web_etl(
             allowed_input_formats=allowed_input_formats,
         )
 
+        yield output_path, rejects_path, summary_path
+
+
+def preflight_web_etl(
+    session: Session,
+    *,
+    profile_id: str,
+    source_filename: str,
+    input_bytes: bytes,
+) -> ETLPreflightOutcome:
+    """Calculate transformation counts without loading or ending caller transactions."""
+    # A supplied Session may hold unrelated pending writes. Do not flush or rollback it.
+    with session.no_autoflush:
+        profile_path = get_profile_path(profile_id, session=session)
+    with _transformed_upload(
+        profile_path=profile_path, source_filename=source_filename,
+        input_bytes=input_bytes, allowed_input_formats=("csv", "xlsx"),
+    ) as (_, _, summary_path):
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        return ETLPreflightOutcome(
+            profile_name=summary["profile_name"],
+            profile_version=summary["profile_version"],
+            total_rows=summary["total_rows"],
+            loaded_rows=summary["loaded_rows"],
+            rejected_rows=summary["rejected_rows"],
+            error_counts=summary["error_counts"],
+        )
+
+
+def run_web_etl(
+    session: Session,
+    *,
+    profile_id: str,
+    source_filename: str,
+    input_bytes: bytes,
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
+    initial_source_type: str = ETL_INITIAL_SOURCE_TYPE_UNKNOWN,
+    initial_source_ref: str | None = None,
+    allowed_input_formats: tuple[str, ...] = ("csv",),
+) -> ETLWebRunOutcome:
+    # run_pipeline/load_standard_csv are the same functions etl.cli/etl.load_cli call;
+    # this only bridges an in-memory upload into their existing file-based contract.
+    #
+    # session을 함께 넘겨 runtime activation override까지 반영합니다. Web upload,
+    # S3, HTTP feed, Airflow DAG가 모두 이 함수 하나를 지나므로, 네 경로가 같은
+    # effective active version을 봅니다. 여기서 session을 빠뜨리면 그 경로만 배포
+    # 기본값으로 실행되어 "내렸는데 계속 돈다"가 됩니다.
+    profile_path = get_profile_path(profile_id, session=session)
+    # 위 조회가 autobegin시킨 읽기 트랜잭션을 끝냅니다. 그대로 두면 아래
+    # load_standard_csv()의 with session.begin()이 실패합니다. 보류 중인 쓰기가 있으면
+    # 조용히 버리지 않고 먼저 소리를 냅니다.
+    end_activation_read_transaction(session)
+
+    with _transformed_upload(
+        profile_path=profile_path, source_filename=source_filename,
+        input_bytes=input_bytes, allowed_input_formats=allowed_input_formats,
+    ) as (output_path, rejects_path, summary_path):
         outcome = load_standard_csv(
             session,
             output_path.read_bytes(),

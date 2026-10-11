@@ -1,5 +1,6 @@
 from collections import Counter
 from datetime import datetime
+import hashlib
 import json
 import re
 from math import ceil
@@ -416,6 +417,9 @@ ETL_LOAD_STATE_DEFAULTS = {
     "catalog_promotion_rollback_change_offset": 0,
     "catalog_promotion_rollback_change_response": None,
     "catalog_promotion_rollback_change_error": None,
+    "etl_preflight_input": None,
+    "etl_preflight_result": None,
+    "etl_preflight_error": None,
     "etl_web_run_profiles_response": None,
     "etl_web_run_profiles_error": None,
     "etl_web_run_selected_profile_id": None,
@@ -4164,6 +4168,8 @@ def _fetch_etl_profile_detail(
 
 
 def _on_etl_web_run_profile_change(session_state) -> None:
+    session_state["etl_preflight_result"] = None
+    session_state["etl_preflight_error"] = None
     session_state["etl_web_run_result"] = None
     session_state["etl_web_run_error"] = None
     session_state["etl_web_run_profile_detail_id"] = None
@@ -4257,6 +4263,68 @@ def _submit_etl_web_run(api_client, *, profile_id, uploaded_file) -> None:
         st.session_state["etl_web_run_in_flight"] = False
 
 
+def _sync_etl_preflight_input(session_state, profile_id, uploaded_file) -> None:
+    identity = None if uploaded_file is None else (
+        profile_id, uploaded_file.name, hashlib.sha256(uploaded_file.getvalue()).hexdigest(),
+    )
+    if session_state.get("etl_preflight_input") != identity:
+        session_state["etl_preflight_result"] = None
+        session_state["etl_preflight_error"] = None
+        session_state["etl_preflight_input"] = identity
+
+
+def _submit_etl_preflight(api_client, *, profile_id, uploaded_file) -> None:
+    st.session_state["etl_preflight_result"] = None
+    st.session_state["etl_preflight_error"] = None
+    st.session_state["etl_web_run_in_flight"] = True
+    try:
+        with st.spinner("업로드 파일을 사전 검증하고 있습니다."):
+            st.session_state["etl_preflight_result"] = api_client.preflight_etl_load(
+                profile_id=profile_id, source_filename=uploaded_file.name,
+                file_content=uploaded_file.getvalue(),
+            )
+    except (
+        ETLProfileInactiveError, ETLUnsupportedProfileError, ETLInvalidUploadError,
+        CatalogGuardApiConfigurationError, CatalogGuardApiConnectionError,
+        CatalogGuardApiTimeoutError, CatalogGuardApiResponseError, ValueError,
+    ) as error:
+        st.session_state["etl_preflight_error"] = error
+        if isinstance(error, ETLProfileInactiveError):
+            _invalidate_etl_profile_list_cache(st.session_state)
+            st.session_state["etl_web_run_profile_detail_id"] = None
+            st.session_state["etl_web_run_profile_detail_response"] = None
+            st.session_state["etl_web_run_profile_detail_error"] = None
+    finally:
+        st.session_state["etl_web_run_in_flight"] = False
+
+
+def _render_etl_preflight_result() -> None:
+    error = st.session_state.get("etl_preflight_error")
+    if error is not None:
+        st.error(build_etl_api_error_display_message("사전 검증에 실패했습니다.", error))
+    result = st.session_state.get("etl_preflight_result")
+    if not isinstance(result, dict):
+        return
+    st.success("사전 검증 완료")
+    st.caption(f"프로필: {result['profile_name']} · 버전: {result['profile_version']}")
+    columns = st.columns(3)
+    for column, label, field in zip(columns, (
+        "전체 상품 행", "정상 변환 예상", "Reject 예상",
+    ), ("total_rows", "loaded_rows", "rejected_rows")):
+        column.metric(label, result[field], border=True)
+    st.info("업로드한 파일을 기존 ETL 규칙으로 검사한 결과입니다. 아직 데이터베이스에 저장하지 않았습니다.")
+    if result["rejected_rows"]:
+        st.warning("일부 상품에 변환 오류가 있습니다. 오류 코드별 건수를 확인한 뒤 원본 파일을 수정해 주세요.")
+        st.dataframe(build_etl_error_counts_dataframe(result["error_counts"]), hide_index=True)
+        st.caption("한 행에 여러 변환 오류가 있으면 오류 발생 건수의 합이 Reject 행 수보다 클 수 있습니다.")
+    else:
+        st.info("Reject 예상 0건입니다. 변환 오류 코드가 없습니다.")
+    st.caption(
+        "사전 검증은 운영 상품 반영 미리보기가 아닙니다. 실제 ETL 실행에서는 파일과 현재 활성 프로필을 다시 검사하므로 실패할 수 있습니다. "
+        "Reject 0건이어도 품질 검수 오류가 발생할 수 있으며, 모든 가격 표기의 적절성을 보증하지 않습니다."
+    )
+
+
 def _render_etl_web_run(api_client) -> None:
     st.subheader("ETL 실행")
     st.write("공급사 CSV 또는 XLSX를 업로드하고 프로필을 선택해 ETL을 실행합니다.")
@@ -4306,6 +4374,14 @@ def _render_etl_web_run(api_client) -> None:
     can_run_etl = is_operator()
     if not can_run_etl:
         st.caption("ETL 실행은 운영자 권한이 필요합니다.")
+    _sync_etl_preflight_input(st.session_state, selected_profile_id, uploaded_file)
+    if st.button(
+        "사전 검증", key="etl_preflight_submit",
+        disabled=(uploaded_file is None or not selected_profile_id or in_flight or not can_run_etl),
+    ):
+        _submit_etl_preflight(api_client, profile_id=selected_profile_id, uploaded_file=uploaded_file)
+        st.rerun()
+    _render_etl_preflight_result()
     if st.button(
         "ETL 실행",
         key="etl_web_run_submit",

@@ -314,6 +314,15 @@ class ETLRejectedRowListResponse(BaseModel):
     offset: int
 
 
+class ETLPreflightResponse(BaseModel):
+    profile_name: str
+    profile_version: str
+    total_rows: int = Field(ge=0)
+    loaded_rows: int = Field(ge=0)
+    rejected_rows: int = Field(ge=0)
+    error_counts: dict[str, int]
+
+
 class ETLWebRunResponse(BaseModel):
     etl_load_run_id: int
     created: bool

@@ -2227,9 +2227,10 @@ class CatalogGuardApiClient:
         self._validate_response_keys(data, CREATE_RESPONSE_KEYS)
         return self._normalize_create_response(data)
 
-    def run_etl_load(
+    def _post_etl_upload(
         self,
         *,
+        endpoint: str,
         profile_id: str,
         source_filename: str,
         file_content: bytes,
@@ -2247,7 +2248,7 @@ class CatalogGuardApiClient:
             raise ValueError("file_content must not be empty")
 
         data = self._post_json(
-            "/api/v1/etl-loads",
+            endpoint,
             files={
                 "file": (
                     normalized_filename,
@@ -2258,8 +2259,43 @@ class CatalogGuardApiClient:
             data={"profile_id": normalized_profile_id},
             map_etl_run_errors=True,
         )
+        return data
+
+    def run_etl_load(
+        self, *, profile_id: str, source_filename: str, file_content: bytes,
+        content_type: str = "text/csv",
+    ) -> dict[str, Any]:
+        data = self._post_etl_upload(
+            endpoint="/api/v1/etl-loads", profile_id=profile_id,
+            source_filename=source_filename, file_content=file_content, content_type=content_type,
+        )
         self._validate_response_keys(data, ETL_WEB_RUN_RESPONSE_KEYS)
         _validate_etl_web_run_response(data)
+        return data
+
+    def preflight_etl_load(
+        self, *, profile_id: str, source_filename: str, file_content: bytes,
+        content_type: str = "text/csv",
+    ) -> dict[str, Any]:
+        data = self._post_etl_upload(
+            endpoint="/api/v1/etl-loads/preflight", profile_id=profile_id,
+            source_filename=source_filename, file_content=file_content, content_type=content_type,
+        )
+        self._validate_response_keys(data, (
+            "profile_name", "profile_version", "total_rows", "loaded_rows", "rejected_rows", "error_counts",
+        ))
+        if (
+            any(not isinstance(data[field], str) or not data[field].strip()
+                for field in ("profile_name", "profile_version"))
+            or type(data["total_rows"]) is not int
+            or not _validate_etl_quality_counts(
+                total_rows=data["total_rows"], loaded_rows=data["loaded_rows"],
+                rejected_rows=data["rejected_rows"], error_counts=data["error_counts"],
+                require_error_counts=True,
+            )
+            or (data["rejected_rows"] == 0) != (not data["error_counts"])
+        ):
+            raise _invalid_etl_response()
         return data
 
     def list_etl_profiles(self, *, include_inactive: bool = False) -> dict[str, Any]:

@@ -11,6 +11,118 @@ from clients.catalogguard_api import ETLLoadNotFoundError
 from conftest import run_authenticated_app_test
 from ui import etl_load_history
 
+
+@pytest.mark.parametrize("change", ["content", "name", "profile", "removed"])
+def test_preflight_input_change_clears_previous_result(change):
+    from unittest.mock import Mock
+    upload = Mock()
+    upload.name = "vendor.csv"
+    upload.getvalue.return_value = b"original"
+    state = {}
+    etl_load_history._sync_etl_preflight_input(state, "fashion", upload)
+    state["etl_preflight_result"] = {"total_rows": 1}
+    state["etl_preflight_error"] = ValueError("stale")
+    etl_load_history._sync_etl_preflight_input(state, "fashion", upload)
+    assert state["etl_preflight_result"] == {"total_rows": 1}
+    profile = "fashion"
+    if change == "content":
+        upload.getvalue.return_value = b"changed"
+    elif change == "name":
+        upload.name = "renamed.csv"
+    elif change == "profile":
+        profile = "marketplace"
+    else:
+        upload = None
+    etl_load_history._sync_etl_preflight_input(state, profile, upload)
+    assert state["etl_preflight_result"] is None
+    assert state["etl_preflight_error"] is None
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_preflight_submission_clears_stale_result_preserves_history(monkeypatch, fail):
+    from unittest.mock import Mock
+    import streamlit as st
+    upload = Mock()
+    upload.name = "vendor.csv"
+    upload.getvalue.return_value = b"synthetic"
+    api = Mock()
+    result = {"profile_name": "fashion", "profile_version": "2", "total_rows": 1,
+              "loaded_rows": 1, "rejected_rows": 0, "error_counts": {}}
+    api.preflight_etl_load.return_value = result
+    if fail:
+        api.preflight_etl_load.side_effect = ValueError("failure")
+    state = {"etl_preflight_result": {"stale": True}, "etl_load_initialized": True,
+             "etl_load_list_response": {"items": []}}
+    monkeypatch.setattr(st, "session_state", state)
+    etl_load_history._submit_etl_preflight(api, profile_id="fashion", uploaded_file=upload)
+    assert state["etl_preflight_result"] == (None if fail else result)
+    assert (state["etl_preflight_error"] is not None) == fail
+    assert state["etl_load_initialized"] is True
+    assert state["etl_load_list_response"] == {"items": []}
+    api.run_etl_load.assert_not_called()
+
+
+@pytest.mark.parametrize("role", ["viewer", "operator"])
+def test_preflight_button_disabled_without_file_and_rerun_does_not_submit(monkeypatch, role):
+    from unittest.mock import Mock
+    api = FakeEtlApiClient()
+    api.preflight_etl_load = Mock()
+    _patch_etl_api_client(monkeypatch, api)
+    app = run_authenticated_app_test(role=role, timeout=10)
+    app.run(timeout=10)
+    button = next(widget for widget in app.button if widget.key == "etl_preflight_submit")
+    assert button.disabled is True
+    api.preflight_etl_load.assert_not_called()
+
+
+@pytest.mark.parametrize("rejected", [0, 1])
+def test_preflight_operator_button_shows_counts_without_rerun_requests(monkeypatch, rejected):
+    from unittest.mock import Mock
+    api = FakeEtlApiClient()
+    api.preflight_etl_load = Mock(return_value={
+        "profile_name": "sample_fashion_vendor", "profile_version": "2",
+        "total_rows": 2, "loaded_rows": 2 - rejected, "rejected_rows": rejected,
+        "error_counts": {"INVALID_PRICE": 1} if rejected else {},
+    })
+    upload = Mock()
+    upload.name = "vendor.csv"
+    upload.getvalue.return_value = b"synthetic"
+    _patch_etl_api_client(monkeypatch, api)
+    monkeypatch.setattr(etl_load_history.st, "file_uploader", lambda *args, **kwargs: upload)
+    app = run_authenticated_app_test(timeout=10)
+    assert not app.exception
+    api.preflight_etl_load.assert_not_called()
+    next(widget for widget in app.button if widget.key == "etl_preflight_submit").click().run(timeout=10)
+    assert not app.exception
+    assert any("사전 검증 완료" in item.value for item in app.success)
+    metrics = {item.label: item.value for item in app.metric}
+    assert metrics["전체 상품 행"] == "2"
+    assert metrics["정상 변환 예상"] == str(2 - rejected)
+    assert metrics["Reject 예상"] == str(rejected)
+    assert any("아직 데이터베이스에 저장하지 않았습니다" in item.value for item in app.info)
+    if rejected:
+        assert any("INVALID_PRICE" in frame.value.to_string() for frame in app.dataframe)
+    else:
+        assert any("Reject 예상 0건" in item.value for item in app.info)
+    app.run(timeout=10)
+    assert api.preflight_etl_load.call_count == 1
+    assert api.etl_run_calls == []
+    assert any(widget.key == "etl_web_run_submit" and not widget.disabled for widget in app.button)
+
+
+def test_preflight_viewer_cannot_submit_even_with_uploaded_file(monkeypatch):
+    from unittest.mock import Mock
+    api = FakeEtlApiClient()
+    api.preflight_etl_load = Mock()
+    upload = Mock()
+    upload.name = "vendor.csv"
+    upload.getvalue.return_value = b"synthetic"
+    _patch_etl_api_client(monkeypatch, api)
+    monkeypatch.setattr(etl_load_history.st, "file_uploader", lambda *args, **kwargs: upload)
+    app = run_authenticated_app_test(role="viewer", timeout=10)
+    assert next(widget for widget in app.button if widget.key == "etl_preflight_submit").disabled
+    api.preflight_etl_load.assert_not_called()
+
 from ui.etl_load_history import (
     ETL_LOAD_DISPLAY_COLUMNS,
     ETL_PRODUCT_DISPLAY_COLUMNS,

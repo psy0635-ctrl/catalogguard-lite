@@ -244,6 +244,42 @@ def test_web_etl_upload_flow_in_real_browser(page):
         raise
 
 
+def test_web_etl_preflight_in_real_browser_preserves_database(page):
+    from playwright.sync_api import expect
+    from sqlalchemy import select
+    from db.base import Base
+    from db.session import create_session_factory
+
+    factory = create_session_factory(database_url=os.environ["DATABASE_URL"])
+    def snapshot():
+        with factory() as session:
+            return {table.name: sorted(repr(tuple(row)) for row in session.execute(select(table)))
+                    for table in Base.metadata.sorted_tables}
+    try:
+        page.goto(STREAMLIT_URL, wait_until="domcontentloaded")
+        _login_as_operator(page)
+        page.get_by_role("tab", name="ETL 적재 이력").click()
+        page.get_by_role("combobox", name="ETL 실행 프로필").click()
+        page.get_by_role("option", name="마켓플레이스 공급사 샘플", exact=True).click()
+        button = page.get_by_role("button", name="사전 검증", exact=True)
+        expect(button).to_be_disabled()
+        page.get_by_label("공급사 CSV / XLSX 파일", exact=True).locator('input[type="file"]').set_input_files(str(FIXTURE_PATH))
+        expect(button).to_be_enabled()
+        before = snapshot()
+        button.click()
+        expect(page.locator("body")).to_contain_text("사전 검증 완료")
+        expect(page.locator("body")).to_contain_text("정상 변환 예상")
+        expect(page.locator("body")).to_contain_text("Reject 예상 0건")
+        expect(page.locator("body")).to_contain_text("아직 데이터베이스에 저장하지 않았습니다.")
+        expect(page.get_by_role("button", name="ETL 실행", exact=True)).to_be_enabled()
+        assert snapshot() == before
+    except BaseException:
+        _preserve_browser_failure_artifacts(page)
+        raise
+    finally:
+        factory.kw["bind"].dispose()
+
+
 def test_xlsx_web_etl_upload_flow_in_real_browser(page, tmp_path):
     fixture_path = tmp_path / "web_etl_upload_vendor.xlsx"
     workbook = Workbook()
