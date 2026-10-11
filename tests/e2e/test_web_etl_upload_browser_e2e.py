@@ -4,6 +4,7 @@ import os
 import re
 import hashlib
 import json
+import csv
 from pathlib import Path
 
 import pytest
@@ -273,6 +274,145 @@ def test_web_etl_preflight_in_real_browser_preserves_database(page):
         expect(page.locator("body")).to_contain_text("아직 데이터베이스에 저장하지 않았습니다.")
         expect(page.get_by_role("button", name="ETL 실행", exact=True)).to_be_enabled()
         assert snapshot() == before
+    except BaseException:
+        _preserve_browser_failure_artifacts(page)
+        raise
+    finally:
+        factory.kw["bind"].dispose()
+
+
+def test_web_etl_preflight_recovery_after_correcting_csv_in_real_browser(page, tmp_path):
+    from playwright.sync_api import expect
+    from sqlalchemy import select
+    from db.base import Base
+    from db.session import create_session_factory
+
+    source = ROOT / "tests" / "fixtures" / "etl" / "sample_marketplace_vendor_mixed.csv"
+    original_bytes = source.read_bytes()
+    before_file = tmp_path / "before" / "supplier.csv"
+    after_file = tmp_path / "after" / "supplier.csv"
+    before_file.parent.mkdir()
+    after_file.parent.mkdir()
+    before_file.write_bytes(original_bytes)
+    with before_file.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = reader.fieldnames
+        original_rows = list(reader)
+    corrected_rows = [dict(row) for row in original_rows]
+    rejected_rows = [row for row in corrected_rows if row["sku_code"] == "SKU-100-RED-S"]
+    assert len(rejected_rows) == 1
+    rejected_row = rejected_rows[0]
+    assert (rejected_row["regular_price"], rejected_row["available_qty"]) == ("가격문의", "-1")
+    rejected_row.update(regular_price="59000", available_qty="3")
+    with after_file.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(corrected_rows)
+    with after_file.open(encoding="utf-8", newline="") as handle:
+        assert list(csv.DictReader(handle)) == corrected_rows
+    changed_cells = [
+        (row["sku_code"], column)
+        for row, corrected in zip(original_rows, corrected_rows, strict=True)
+        for column in fieldnames
+        if row[column] != corrected[column]
+    ]
+    assert changed_cells == [
+        ("SKU-100-RED-S", "regular_price"), ("SKU-100-RED-S", "available_qty")
+    ]
+    assert before_file.name == after_file.name
+    assert before_file.read_bytes() != after_file.read_bytes()
+    assert hashlib.sha256(original_bytes).digest() != hashlib.sha256(after_file.read_bytes()).digest()
+
+    factory = create_session_factory(database_url=os.environ["DATABASE_URL"])
+
+    def snapshot():
+        with factory() as session:
+            return {
+                table.name: sorted(repr(tuple(row)) for row in session.execute(select(table)))
+                for table in Base.metadata.sorted_tables
+            }
+
+    def assert_metrics(total, loaded, rejected):
+        for label, value in (
+            ("전체 상품 행", total), ("정상 변환 예상", loaded), ("Reject 예상", rejected)
+        ):
+            metric = page.locator('[data-testid="stMetric"]').filter(
+                has=page.get_by_text(label, exact=True)
+            )
+            expect(metric).to_have_count(1)
+            expect(metric.locator('[data-testid="stMetricValue"]')).to_have_text(str(value))
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+    page.on("console", lambda message: console_errors.append(message.text)
+            if message.type == "error" else None)
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    try:
+        page.goto(STREAMLIT_URL, wait_until="domcontentloaded")
+        _login_as_operator(page)
+        page.get_by_role("tab", name="ETL 적재 이력").click()
+        page.get_by_role("combobox", name="ETL 실행 프로필").click()
+        page.get_by_role("option", name="마켓플레이스 공급사 샘플", exact=True).click()
+        expect(page.locator("body")).to_contain_text(re.compile(r"프로필 버전\s*2"))
+        file_input = page.get_by_label("공급사 CSV / XLSX 파일", exact=True).locator('input[type="file"]')
+        button = page.get_by_role("button", name="사전 검증", exact=True)
+        success = page.get_by_text("사전 검증 완료", exact=True)
+        warning = page.get_by_text(
+            "일부 상품에 변환 오류가 있습니다. 오류 코드별 건수를 확인한 뒤 원본 파일을 수정해 주세요.",
+            exact=True,
+        )
+        # Scope to the dataframe immediately following the Preflight warning.
+        error_table = warning.locator(
+            "xpath=ancestor::div[@data-testid='stElementContainer'][1]"
+            "/following-sibling::div[@data-testid='stElementContainer'][1]"
+        ).locator('[data-testid="stDataFrame"]')
+        old_error_cells = page.locator('[data-testid="stDataFrame"]').get_by_role(
+            "gridcell", include_hidden=True
+        ).filter(has_text=re.compile(r"^(INVALID_PRICE|NEGATIVE_STOCK)$"))
+        unsaved_notice = "아직 데이터베이스에 저장하지 않았습니다."
+        file_input.set_input_files(str(before_file))
+        expect(button).to_be_enabled()
+        before = snapshot()
+        button.click()
+        expect(success).to_be_visible()
+        assert_metrics(3, 2, 1)
+        expect(warning).to_be_visible()
+        expect(page.locator("body")).to_contain_text(unsaved_notice)
+        expect(error_table).to_have_count(1)
+        error_table.hover()
+        # Glide's canvas exposes its displayed cells in a hidden accessibility table.
+        expect(error_table.get_by_role("columnheader", include_hidden=True)).to_have_text(
+            ["오류 코드", "발생 건수"]
+        )
+        expect(error_table.get_by_role("gridcell", include_hidden=True)).to_have_text(
+            ["INVALID_PRICE", "1", "NEGATIVE_STOCK", "1"]
+        )
+        after_first = snapshot()
+        assert after_first == before
+
+        file_input.set_input_files(str(after_file))
+        expect(success).to_have_count(0)
+        expect(warning).to_have_count(0)
+        expect(error_table).to_have_count(0)
+        expect(old_error_cells).to_have_count(0)
+        for label in ("전체 상품 행", "정상 변환 예상", "Reject 예상"):
+            expect(page.get_by_text(label, exact=True)).to_have_count(0)
+        expect(button).to_be_enabled()
+        button.click()
+        expect(success).to_be_visible()
+        assert_metrics(3, 3, 0)
+        expect(page.get_by_text("Reject 예상 0건입니다. 변환 오류 코드가 없습니다.", exact=True)).to_be_visible()
+        expect(warning).to_have_count(0)
+        expect(error_table).to_have_count(0)
+        expect(old_error_cells).to_have_count(0)
+        expect(page.locator("body")).to_contain_text(unsaved_notice)
+        expect(page.get_by_role("button", name="ETL 실행", exact=True)).to_be_enabled()
+        after_corrected = snapshot()
+        assert before == after_first == after_corrected
+        assert source.read_bytes() == original_bytes
+        expect(page.locator("body")).not_to_contain_text("StreamlitAPIException")
+        assert not console_errors, f"Unexpected browser console errors: {console_errors}"
+        assert not page_errors, f"Unexpected browser page errors: {page_errors}"
     except BaseException:
         _preserve_browser_failure_artifacts(page)
         raise
