@@ -33,6 +33,8 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, 
 
 [2026-10-10 검증 근거와 MVP 기능 동결 기준](mvp_validation.md)에 각 실행의 환경·결과·한계를 정리했습니다. 아래 기존 핵심 문장과 설계·문제 해결 기록은 각 구현 및 당시 검증 범위의 설명으로 유지합니다.
 
+2026-10-12 main에는 XLSX Preflight 오류 복구 E2E와 DB Snapshot의 빈 metadata 통과 방지를 보강했습니다. 이는 공식 릴리스 v0.3.0 이후의 미출시 변경이며, [문제·원인·수정 기록](#xlsx-preflight-복구와-db-snapshot-검증-보강)과 [별도 로컬 계측·main CI 근거](mvp_validation.md#2026-10-12-main-검증)를 구분해 제공합니다.
+
 ### 이력서용 핵심 문장
 
 1. 상품 CSV의 필수값·형식·중복·가격·카테고리·개인정보 문제를 규칙으로 검출하고, 오류 이유와 수정 권장사항을 제공했으며 단위·API 테스트로 주요 흐름을 확인했습니다.
@@ -2116,7 +2118,17 @@ migration은 **빈 표를 만듭니다.** 기존 current-state row를 보고 과
 
 프로젝트는 **Feature Freeze + Continuous Maintenance Development** 상태입니다. 대형 기능을 계속 추가하는 대신, 실제 오류·transaction·데이터 무결성·오류 처리·회귀 문제를 좁은 범위로 유지개발합니다. 최근에는 ETL 거부 행을 안전하게 내보내고, inspection issue를 원본 논리 행에 연결한 뒤, 그 결과를 수정 작업표로 이어 주는 기존 workflow 보완을 진행했습니다. 따라서 아래 내용은 기능 홍보가 아니라 현재 구현의 실패 경로와 검증 범위를 설명하는 기록입니다.
 
-2026-10-10에는 기존 기능의 로컬 검증을 ETL 저장 → Promotion → Rollback → 실제 JWT API → 실제 Chromium까지 진행했습니다. 이번 기준으로 동결한 핵심 범위와 유지보수 허용·보류 항목은 [MVP 검증 및 기능 동결](mvp_validation.md#기능-동결-기준)에 모았습니다. 아래 69/37 passed 기록은 당시 head `20260826_0018`의 별도 실행이며, 최신 head에서 선별 실행한 67 passed와 합산하거나 대체하지 않습니다. 이 문서 최신화 작업에서는 테스트나 데모를 재실행하지 않았습니다.
+2026-10-10에는 기존 기능의 로컬 검증을 ETL 저장 → Promotion → Rollback → 실제 JWT API → 실제 Chromium까지 진행했습니다. 이번 기준으로 동결한 핵심 범위와 유지보수 허용·보류 항목은 [MVP 검증 및 기능 동결](mvp_validation.md#기능-동결-기준)에 모았습니다. 아래 69/37 passed 기록은 당시 head `20260826_0018`의 별도 실행이며, 2026-10-10 main에서 선별 실행한 67 passed와 합산하거나 대체하지 않습니다. 이 문서 최신화 작업에서는 테스트나 데모를 재실행하지 않았습니다.
+
+### XLSX Preflight 복구와 DB Snapshot 검증 보강
+
+**문제:** 같은 파일명으로 수정된 XLSX를 재업로드했을 때 이전 사전 검증 결과가 남지 않고 오류가 해소되는지 실제 브라우저에서 확인할 필요가 있었습니다. 최종 코드 리뷰에서는 DB 보존 검사 자체가 조회 없이 통과할 수 있는 결함도 발견했습니다.
+
+**원인:** ORM 모델이 import되지 않으면 `Base.metadata.sorted_tables`가 비어 Snapshot은 `{}`가 됩니다. 빈 Snapshot끼리 비교하는 assertion은 데이터 보존을 증명하지 못하며, 앞선 테스트가 모델을 import했는지에 따라 검증 수준이 달라질 수 있었습니다.
+
+**수정:** [PR #132](https://github.com/psy0635-ctrl/catalogguard-lite/pull/132)에서 합성 CSV로 수정 전·후 `supplier.xlsx`를 생성하고 가격·재고 두 셀만 바뀌었음을 확인하는 E2E를 추가했습니다. 기본·CSV·XLSX Preflight는 모델 명시적 등록과 필수 테이블 존재 assertion을 수행하는 공통 Snapshot helper로 등록된 전체 ORM 테이블을 조회합니다. 제품 코드·원본 Fixture·Migration은 변경하지 않았습니다.
+
+**검증:** 학교 PC의 독립 PostgreSQL 18.6에서 세 테스트를 각각 실행해 1 passed씩 확인했습니다. XLSX는 최초 전체/정상 예상/Reject 예상 3/2/1과 `INVALID_PRICE`·`NEGATIVE_STOCK` 각각 1건, 파일 교체 후 이전 결과 제거, 수정 후 3/3/0을 검사했습니다. 실제 SELECT 계측과 Snapshot 해시 비교는 등록된 ORM 테이블 데이터 보존을 확인한 로컬 결과이며, 운영 데이터나 PostgreSQL 시스템 전체의 보존 검증은 아닙니다. 병합 후 main `62db63b7a18d58bd4bbfa73adef2267664bd72c3`의 [CI](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/38192843271) 5개 job은 모두 success입니다. 로컬 계측과 CI 테스트 수치는 [10월 12일 검증 기록](mvp_validation.md#2026-10-12-main-검증)에 모았습니다.
 
 ### 오류 우선순위 보호
 

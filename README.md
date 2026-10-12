@@ -12,7 +12,7 @@ ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl`의 버전�
 
 v0.3.0 기준으로는 기존 OpenAI 경로를 유지하면서 optional OpenAI / Ollama provider 선택과 Local Ollama Two-Phase Inspection Copilot을 추가했습니다. Local Ollama 경로는 v0.2.0의 OpenAI-only Copilot에는 포함되지 않았습니다.
 
-공식 배포 기준은 **v0.3.0**입니다. 현재 `main`에는 v0.3.0 이후의 미출시 변경으로 inspection 관계 행 명시 저장, DB 연결과 repository Alembic single head·DB current revision 일치까지 확인하는 schema-aware `/ready`, CSV/XLSX Web ETL 업로드, 전체 Rule Engine의 Golden Rule Quality Regression이 추가되어 있습니다. 현재 작업 기준 Alembic 단일 head는 `20260915_0020`, `INSPECTION_VERSION`은 `17`, FastAPI 애플리케이션 버전은 `0.1.0`이며, 이 변경들을 v0.3.0에 포함된 기능으로 소급하지 않습니다. 최근 `main`은 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 GitHub Actions 검증을 통과했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
+공식 배포 기준은 **v0.3.0**입니다. 현재 `main`에는 v0.3.0 이후의 미출시 변경으로 inspection 관계 행 명시 저장, DB 연결과 repository Alembic single head·DB current revision 일치까지 확인하는 schema-aware `/ready`, CSV/XLSX Web ETL 업로드와 저장 전 사전 검증(Preflight), 전체 Rule Engine의 Golden Rule Quality Regression이 추가되어 있습니다. 현재 작업 기준 Alembic 단일 head는 `20260915_0020`, `INSPECTION_VERSION`은 `17`, FastAPI 애플리케이션 버전은 `0.1.0`이며, 이 변경들을 v0.3.0에 포함된 기능으로 소급하지 않습니다. 최근 `main`은 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 GitHub Actions 검증을 통과했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
 
 ### 2026-10-10 로컬 검증과 기능 동결
 
@@ -26,6 +26,10 @@ v0.3.0 기준으로는 기존 OpenAI 경로를 유지하면서 optional OpenAI /
 | Browser Runner 안전성 단위 테스트 | 별도 **4 passed** |
 
 서로 다른 실행의 수치이며 하나의 pytest 결과로 합산하지 않습니다. API 통합 검증은 TestClient, 브라우저 검증은 FastAPI·Streamlit·Chromium·별도 PostgreSQL을 실제 실행한 결과입니다. 실제 공급사 CSV 전체 호환성, 대규모 운영 성능·장기 안정성, 브라우저의 UPDATE/RESTORE 경로는 이번 결과로 입증하지 않습니다. [검증 범위·근거와 기능 동결 기준](docs/mvp_validation.md)에 환경 분리와 미검증 영역을 정리했습니다. 기존 인프라·성능·Copilot 검증 기록은 아래 각 절의 측정 조건과 범위를 유지합니다.
+
+### 2026-10-12 main 검증 보강
+
+[PR #132](https://github.com/psy0635-ctrl/catalogguard-lite/pull/132) 병합 후 `main`은 `62db63b7a18d58bd4bbfa73adef2267664bd72c3`입니다. 같은 파일명의 수정된 XLSX를 재업로드해 Reject 예상 1건에서 0건으로 회복하는 Chromium E2E를 추가하고, 기본·CSV·XLSX Preflight의 DB Snapshot이 빈 ORM metadata로 통과하지 않도록 모델 등록과 필수 테이블 검사를 보강했습니다. [병합 후 main CI](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/38192843271)는 5개 job 모두 성공했으며, 전체 pytest 단계는 **3485 passed, 2 skipped, 18 deselected**, 별도 async E2E는 **1 passed**입니다. 등록 ORM 테이블 데이터 보존의 로컬 계측과 CI 결과는 [10월 12일 검증 기록](docs/mvp_validation.md#2026-10-12-main-검증)에 구분했습니다. 위 10월 10일 결과는 당시 실행 기록으로 유지하며, 이번 보강도 v0.3.0 이후의 미출시 변경입니다.
 
 공개 Streamlit 앱은 아래 주소에서 확인할 수 있습니다.
 
