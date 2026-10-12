@@ -993,7 +993,7 @@ def get_etl_quality_observability_route(
     if normalized_profile_name is None:
         # min_length는 공백만 있는 값을 통과시키므로, 공백 입력도 여기서 같은 422로 막습니다.
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={
                 "code": "profile_name_required",
                 "message": "profile_name은 비어 있을 수 없습니다.",
@@ -1213,7 +1213,7 @@ def set_etl_profile_activation_route(
         # 구분되도록 422로 답하고, 고를 수 있는 버전을 함께 알려 줍니다. archive 경로나
         # registry 내부 값은 노출하지 않습니다.
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={
                 "code": "unknown_profile_version",
                 "message": "요청한 ETL 프로필 버전이 없습니다.",
@@ -1890,7 +1890,7 @@ def create_catalog_promotion(
         ) from None
     except CatalogPromotionInvalidPreviewHashError:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={
                 "code": "invalid_preview_hash",
                 "message": "expected_preview_hash 형식이 올바르지 않습니다.",
@@ -2004,7 +2004,7 @@ def create_catalog_promotion_rollback(request: CatalogPromotionRollbackRequest, 
     except CatalogPromotionRollbackConfirmationRequiredError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"code": "confirmation_required", "message": "Explicit confirmation is required to execute rollback."}) from None
     except CatalogPromotionRollbackInvalidPreviewHashError:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"code": "invalid_preview_hash", "message": "expected_preview_hash has an invalid format."}) from None
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"code": "invalid_preview_hash", "message": "expected_preview_hash has an invalid format."}) from None
     except CatalogPromotionRollbackNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={"code": "promotion_not_found", "message": CATALOG_PROMOTION_NOT_FOUND_MESSAGE}) from None
     except CatalogPromotionRollbackAlreadyExecutedError as error:
