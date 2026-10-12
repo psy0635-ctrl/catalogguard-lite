@@ -2,11 +2,11 @@
 
 ## 기준과 해석
 
-2026-10-10 현재 `main`의 `3ea24147fcaf5ab636cc56dc19fc645593fd8bdd`를 기준으로 정리한 로컬 검증 기록이다. Python 3.11.9와 독립 PostgreSQL 18.4에서 합성 공급사 데이터로 실행했다. 현재 `INSPECTION_VERSION`은 `17`, Alembic 단일 head는 `20260915_0020`이다.
+기존 기록은 2026-10-10 당시 `main`의 `3ea24147fcaf5ab636cc56dc19fc645593fd8bdd`를 기준으로 정리한 로컬 검증이다. Python 3.11.9와 독립 PostgreSQL 18.4에서 합성 공급사 데이터로 실행했다. 당시 `INSPECTION_VERSION`은 `17`, Alembic 단일 head는 `20260915_0020`이다. [2026-10-12 main 검증](#2026-10-12-main-검증)은 말미에 별도 기록하며 아래 10월 10일 수치를 대체하지 않는다.
 
 정식 릴리스는 [v0.3.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.3.0)이며, 현재 main의 미출시 변경과 구분한다. 이 문서는 릴리스·Tag 발행이나 프로젝트 버전 변경을 의미하지 않는다. 기존 릴리스 기능과 main의 차이는 [README](../README.md#1-현재-상태와-최근-검증)와 [포트폴리오](portfolio_project.md)에 유지한다.
 
-아래 수치는 서로 다른 실행의 결과다. **67 passed, API 시나리오 35건, Chromium 8 passed, Runner 4 passed를 하나의 pytest 결과로 합산하지 않는다.** 이번 문서 최신화에서는 테스트·데모·DB 작업을 다시 실행하지 않고 기존 실행 보고서와 JSON·JUnit 결과를 대조했다. 원본 로컬 로그·보고서·스크린샷은 공개 저장소에 업로드된 자료가 아니며, 이 문서는 공개 가능한 결과와 재현 대상 파일만 요약한다.
+10월 10일 수치는 서로 다른 실행의 결과다. **67 passed, API 시나리오 35건, Chromium 8 passed, Runner 4 passed를 하나의 pytest 결과로 합산하지 않는다.** 이번 문서 최신화에서는 테스트·데모·DB 작업을 다시 실행하지 않고 기존 실행 보고서와 JSON·JUnit 결과를 대조했다. 원본 로컬 로그·보고서·스크린샷은 공개 저장소에 업로드된 자료가 아니며, 이 문서는 공개 가능한 결과와 재현 대상 파일만 요약한다.
 
 ## 검증 환경 분리
 
@@ -144,3 +144,41 @@ Windows에서는 UTF-8 요구 파일을 읽도록 `PYTHONUTF8=1` 또는 `-X utf8
 - 기존 성능 수치는 원래 fixture·하드웨어·실행 조건을 유지하며 이번 테스트 수나 모든 환경의 성능 보장으로 확대하지 않는다.
 
 다음 유지보수는 문서 변경 검토와 공개 검증 근거 정리를 우선한다. 실제 공급사 파일이 확보되면 개인정보 범위와 입력 계약을 확인한 뒤 매핑 호환성을 별도로 검증한다. 근거 없이 새 기능·인프라를 추가하지 않는다.
+
+## 2026-10-12 main 검증
+
+[PR #132](https://github.com/psy0635-ctrl/catalogguard-lite/pull/132)는 2026-10-12 10:41:06 KST에 Rebase and merge로 병합됐다. 병합 후 main Commit은 [`62db63b7a18d58bd4bbfa73adef2267664bd72c3`](https://github.com/psy0635-ctrl/catalogguard-lite/commit/62db63b7a18d58bd4bbfa73adef2267664bd72c3)이다. 공식 릴리스는 계속 v0.3.0이며 이번 변경은 미출시 main의 테스트 보강이다.
+
+### XLSX 오류 수정과 재검증
+
+[Web ETL E2E 테스트](../tests/e2e/test_web_etl_upload_browser_e2e.py)는 기존 합성 CSV를 읽어 서로 다른 임시 디렉터리에 같은 이름의 `supplier.xlsx` 두 개를 만든다. 가격 `가격문의`와 재고 `-1`만 각각 `59000`, `3`으로 바꾸고, 저장된 workbook을 다시 읽어 다른 셀·행이 보존됐음을 확인한다. 실제 Operator 로그인 후 최초 Preflight는 전체/정상 예상/Reject 예상 **3/2/1**, `INVALID_PRICE`·`NEGATIVE_STOCK` 각각 **1건**이다. 파일을 교체하면 이전 결과·오류 표시가 제거되고, 재검증 결과는 **3/3/0**이다. 실제 ETL 적재 버튼은 클릭하지 않는다.
+
+기존 DB Snapshot은 ORM 모델이 import되지 않으면 `Base.metadata.sorted_tables`가 비어 매번 `{}`를 비교하고 통과할 수 있었다. 공통 `_snapshot_database()`가 `db.models`를 명시적으로 import하고 `users`, `etl_load_runs`, `etl_rejected_rows`, `catalog_products_staging` 포함 여부를 assertion으로 검사한 뒤 등록된 ORM 테이블 전체를 조회하도록 수정했다. 기본 Preflight·CSV 복구·XLSX 복구 테스트가 이 helper를 사용하며, 기존 화면·결과 assertion은 유지했다.
+
+### 학교 PC 로컬 검증
+
+Python 3.11.9의 `.venv-e2e`와 새 전용 PostgreSQL 18.6 컨테이너를 사용했다. 호스트·독립 포트·전용 DB·계정·컨테이너 ID와 빈 DB를 확인한 뒤 해당 DB에만 migration과 Operator 생성을 수행했다. 기존 볼륨을 재사용하지 않고 새 tmpfs를 사용했으며, 원본 Fixture와 기존 컨테이너·볼륨을 보존했다. 실행 후 테스트 서버와 신규 컨테이너는 종료했고 tmpfs 데이터는 소멸했다.
+
+| Snapshot 수정 이후 별도 실행 | 결과 | Snapshot 횟수 |
+|---|---|---:|
+| 신규 XLSX 복구 E2E 단독 실행 | 1 passed, 19.60초 | 3 |
+| 기존 CSV 복구 E2E | 1 passed, 12.32초 | 3 |
+| 기본 Preflight DB 보존 E2E | 1 passed, 9.28초 | 2 |
+
+독립 프로세스에서 모델 등록 **0 → 13개**를 확인했고, 빈 metadata 및 필수 테이블 각각 누락의 5가지 경우는 조회 전에 assertion으로 실패했다. SQLAlchemy 조회 이벤트 계측에서는 Snapshot **8회** 각각 **13개 ORM 테이블**을 조회해 총 **SQL SELECT 104회**를 확인했다. 각 Snapshot에 Operator 1행이 포함됐고, 8개 데이터 해시는 모두 동일했다. 이 계측 수치는 로컬 로그·JSON 기록의 결과이며 GitHub CI 계측 결과가 아니다. 로컬 기록은 Git에 포함하지 않았다.
+
+보존 확인 범위는 **등록된 ORM 테이블 데이터**다. sequence·전체 schema·PostgreSQL 시스템 상태, 실제 운영 데이터·운영 성능까지 검증한 것으로 확대하지 않는다. Snapshot 수정 전에 실행한 관련 테스트 98 passed는 수정 후 재검증 결과에 포함하지 않는다.
+
+### 병합 후 main CI
+
+[GitHub Actions run 38192843271](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/38192843271)은 위 main SHA의 **push 이벤트** 실행이다. PR CI와 별도로 확인한 결과다.
+
+| Job | 최종 결과 |
+|---|---|
+| test | success |
+| browser-e2e | success |
+| kubernetes-smoke | success |
+| terraform-validate | success |
+| airflow-smoke | success |
+
+`test` job의 전체 pytest 단계는 **3485 passed, 2 skipped, 18 deselected, 6 warnings**였고, 별도 async inspection E2E는 **1 passed**였다. 제외된 항목은 통과로 계산하지 않으며, 별도 Chromium·인프라 job 결과를 pytest 수치에 합산하지 않는다. 로컬 전체 프로젝트 테스트는 다시 실행하지 않았다. 6개 warning은 `HTTP_422_UNPROCESSABLE_ENTITY` 관련 Starlette deprecation이며 별도 유지보수 후보로 남긴다.
