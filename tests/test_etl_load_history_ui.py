@@ -3028,6 +3028,7 @@ def test_etl_web_run_profile_dropdown_lists_allowlisted_profiles(monkeypatch):
     )
     assert uploader.label == "공급사 CSV / XLSX 파일"
     assert uploader.allowed_type == [".csv", ".xlsx"]
+    assert uploader.proto.max_upload_size_mb == 5
     assert any(
         "앞자리 0을 보존" in caption.value
         for caption in app.caption

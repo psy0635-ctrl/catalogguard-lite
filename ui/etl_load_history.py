@@ -26,6 +26,7 @@ from clients.catalogguard_api import (
     ETLProfileNotFoundError,
     ETLUnsupportedProfileError,
 )
+from config.settings import MAX_UPLOAD_SIZE_BYTES
 from core.result_exporter import prepare_export_dataframe
 from ui.auth import get_authenticated_api_client, is_operator
 
@@ -4367,6 +4368,7 @@ def _render_etl_web_run(api_client) -> None:
         "공급사 CSV / XLSX 파일",
         type=["csv", "xlsx"],
         key="etl_web_run_upload_file",
+        max_upload_size=MAX_UPLOAD_SIZE_BYTES // (1024 * 1024),
     )
 
     in_flight = st.session_state.get("etl_web_run_in_flight") is True
