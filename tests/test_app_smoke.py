@@ -308,6 +308,7 @@ def test_app_initial_render_without_upload(monkeypatch):
     assert "CSV 입력 템플릿" in [subheader.value for subheader in app.subheader]
     assert "검수 이력" in [subheader.value for subheader in app.subheader]
     assert [uploader.label for uploader in app.file_uploader] == ["CSV 파일 업로드"]
+    assert app.file_uploader[0].proto.max_upload_size_mb == 5
     assert find_widget(app.radio, "검수 방식").value == "즉시 검수"
     assert "검사할 CSV 파일을 업로드해 주세요." in [
         info.value for info in app.info
@@ -495,6 +496,7 @@ def test_app_background_job_posts_once_refreshes_with_get_and_reuses_result_ui(
     find_widget(app.radio, "검수 방식").set_value("백그라운드 검수").run(
         timeout=10
     )
+    assert app.file_uploader[0].proto.max_upload_size_mb == 5
     app.file_uploader[0].upload(
         "group_category_consistency_test.csv",
         GROUP_CATEGORY_TEST_CSV,
@@ -650,6 +652,7 @@ def test_app_reinspection_requires_manual_corrected_upload_then_uses_existing_co
     assert [uploader.label for uploader in app.file_uploader] == [
         "수정한 상품 CSV 파일 업로드"
     ]
+    assert app.file_uploader[0].proto.max_upload_size_mb == 5
     assert api_client.create_calls == []
     assert "Correction Worksheet가 아니라 수정한 원본 상품 CSV를 직접 선택해 다시 검수합니다." in [
         caption.value for caption in app.caption
