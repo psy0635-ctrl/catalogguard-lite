@@ -14,7 +14,7 @@ from clients.catalogguard_api import (
     CatalogGuardApiTimeoutError,
     InspectionNotFoundError,
 )
-from config.settings import OPTIONAL_COLUMNS, REQUIRED_COLUMNS
+from config.settings import MAX_UPLOAD_SIZE_BYTES, OPTIONAL_COLUMNS, REQUIRED_COLUMNS
 from core.presentation import (
     build_inspection_statistics,
     build_validation_summary_message,
@@ -1569,6 +1569,7 @@ def render_csv_inspection_tab() -> None:
         "수정한 상품 CSV 파일 업로드" if is_reinspection else "CSV 파일 업로드",
         type=["csv"],
         key="correction_reinspection_file" if is_reinspection else None,
+        max_upload_size=MAX_UPLOAD_SIZE_BYTES // (1024 * 1024),
     )
 
     # 파일이 없으면 아래 검사 코드를 실행하지 않고 CSV 탭 렌더링만 마칩니다.
