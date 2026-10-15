@@ -147,6 +147,7 @@ from db.catalog_reconciliation_service import (
     CatalogReconciliationReport,
     DEFAULT_ITEM_LIMIT as RECONCILIATION_DEFAULT_LIMIT,
     MAX_ITEM_LIMIT as RECONCILIATION_MAX_LIMIT,
+    ReconciliationStatus,
     build_catalog_reconciliation_report,
 )
 from db.catalog_promotion_preview_service import (
@@ -1801,6 +1802,7 @@ def get_catalog_reconciliation_report(
     etl_load_run_id: int = Path(..., ge=1),
     limit: int = Query(default=RECONCILIATION_DEFAULT_LIMIT, ge=1, le=RECONCILIATION_MAX_LIMIT),
     offset: int = Query(default=0, ge=0),
+    filter_status: ReconciliationStatus | None = Query(default=None, alias="status"),
     _current_user=Depends(require_viewer),
     session: Session = Depends(get_session),
 ) -> CatalogReconciliationResponse:
@@ -1811,6 +1813,7 @@ def get_catalog_reconciliation_report(
             etl_load_run_id=etl_load_run_id,
             limit=limit,
             offset=offset,
+            status=filter_status,
         )
     except ETLLoadRunNotFoundError:
         raise HTTPException(

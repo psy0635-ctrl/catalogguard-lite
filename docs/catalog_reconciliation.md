@@ -171,12 +171,13 @@ GET /api/v1/etl-loads/{etl_load_run_id}/catalog-reconciliation
 | --- | ---: | --- |
 | `limit` | `50` | `1` 이상 `100` 이하 |
 | `offset` | `0` | `0` 이상 |
+| `status` | 생략(전체) | `new`, `changed`, `unchanged`, `not_observed_in_batch` 중 하나 |
 
 | 상황 | HTTP |
 | --- | ---: |
 | 정상 | `200` |
 | 없는 `etl_load_run_id` | `404` |
-| `etl_load_run_id <= 0`, 잘못된 `limit`/`offset` | `422` |
+| `etl_load_run_id <= 0`, 잘못된 `limit`/`offset`/`status` | `422` |
 | staging 배치에 중복 identity | `409` (`duplicate_product_identity`) |
 
 ### 응답
@@ -225,7 +226,15 @@ GET /api/v1/etl-loads/{etl_load_run_id}/catalog-reconciliation
 
 `not_observed_in_batch` 항목은 `changed_fields`가 빈 dict다. **상품이 배치에 없다는 뜻으로 빈 문자열 상품 객체를 만들어 내지 않는다.** 없는 값을 있는 것처럼 표현하면 그 자체가 잘못된 데이터다.
 
-카운트 4개는 **배치 전체 기준**이고 페이지와 무관하다. `total`은 네 카운트의 합이다.
+카운트 4개와 `field_change_counts`는 **배치 전체 기준**이고 필터·페이지와 무관하다.
+`status`를 생략하면 기존 전체 조회와 동일하며 `total`은 네 카운트의 합이다.
+상태를 지정하면 해당 상태만 `items`에 포함하고, `total`은 해당 상태의 전체 건수다.
+`limit`/`offset`은 필터 적용 이후 목록에 적용한다. 범위를 벗어난 offset은 빈 `items`를
+반환하며 전체 집계와 필터된 `total`을 유지한다. 응답 필드는 추가하거나 제거하지 않는다.
+
+예: `?status=changed&limit=1&offset=1`은 변경 상품의 두 번째 항목을 반환한다.
+`not_observed_in_batch` 필터도 기존 SQL COUNT와 LIMIT/OFFSET 조회를 사용하며,
+운영 카탈로그 전체를 메모리에 읽지 않는다. 조회·인증·중복 identity 처리 계약은 유지한다.
 
 ### 정렬
 
@@ -261,6 +270,11 @@ ETL 적재 이력에서 배치를 선택하면 **"상품 동기화 차이"** 영
 - `rejected_rows`가 `null`인 legacy 배치는 비교 범위를 확인할 수 없다고 안내
 
 다른 배치를 선택하면 캐시된 보고서를 버리고 다시 조회한다.
+상태 필터는 전체 / 신규 / 변경 / 동일 / 이번 배치 미관측이며 기본값은 전체다.
+필터를 변경하면 offset을 0으로 되돌리고 응답·오류 캐시를 비운다. 다음·이전 페이지에서도
+필터는 유지하고, 다른 배치를 선택하면 전체로 돌아간다. 결과가 없으면 빈 목록 안내와
+필터된 total을 표시한다. API 오류 후에는 '동기화 차이 다시 조회'로 재시도할 수 있다.
+요약 metric 4개, 필드별 변경 집계, reject·과거 배치 경고와 미관측 안내는 계속 전체 배치 기준이다.
 
 ---
 
@@ -268,7 +282,6 @@ ETL 적재 이력에서 배치를 선택하면 **"상품 동기화 차이"** 영
 
 - **전체 snapshot 여부를 모른다.** 이것이 `not_observed_in_batch`를 삭제 후보로 쓸 수 없는 근본 이유다. 프로필이 snapshot/delta를 선언하기 전에는 해결되지 않는다.
 - **미관측의 원인을 구분하지 못한다.** reject 때문인지, 부분 feed 때문인지, 실제 단종인지 알 수 없다. `rejected_rows`로 "reject가 있었다"까지만 알린다. 원인을 상품 단위로 구분하려면 reject 행의 상품 식별자가 필요한데, 원본 데이터 노출 위험 때문에 이번에는 하지 않았다.
-- **status filter가 없다.** 이번 MVP는 `limit`/`offset`만 받는다. `new`만 보는 식의 필터는 다음 단계다.
 - **보고서를 저장하지 않는다.** 매 요청마다 계산하며 이력 테이블이 없다. "지난주 대비 변경 추세" 같은 질문에는 답하지 못한다.
 - **검수 결과를 포함하지 않는다.** 차이만 설명하고 그 차이가 정상인지 판정하지 않는다. 판정은 Promotion Preview의 몫이다.
 - **필드별 변경의 방향을 집계하지 않는다.** "가격이 오른 상품 수"는 없고 "가격이 바뀐 상품 수"만 있다.

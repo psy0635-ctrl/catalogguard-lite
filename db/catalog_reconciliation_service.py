@@ -180,6 +180,7 @@ def build_catalog_reconciliation_report(
     etl_load_run_id: int,
     limit: int = DEFAULT_ITEM_LIMIT,
     offset: int = 0,
+    status: ReconciliationStatus | None = None,
 ) -> CatalogReconciliationReport:
     """Compare one staging batch with the live catalog for the same supplier.
 
@@ -197,6 +198,8 @@ def build_catalog_reconciliation_report(
     않습니다. staging 배치 크기만큼만 메모리에서 분류하고, not_observed_in_batch는
     DB에서 개수를 세고 요청한 페이지 구간만 읽습니다.
     """
+    if status is not None and status not in STATUS_ORDER:
+        raise ValueError("Invalid reconciliation status")
     with session.no_autoflush:
         load_run = session.get(ETLLoadRun, etl_load_run_id)
         if load_run is None:
@@ -251,13 +254,28 @@ def build_catalog_reconciliation_report(
             or 0
         )
 
+        status_counts = {
+            item_status: sum(item.status == item_status for item in observed_items)
+            for item_status in STATUS_ORDER
+        }
+        status_counts["not_observed_in_batch"] = not_observed_count
+        filtered_observed = (
+            observed_items
+            if status is None
+            else [item for item in observed_items if item.status == status]
+        )
+
         # STATUS_ORDER에서 not_observed_in_batch가 마지막이므로, 전체 정렬은
         # [staging 기반 항목] + [미관측 항목]이 됩니다. 덕분에 페이지 구간을 두 조각으로
         # 나눠 읽을 수 있고 카탈로그 전체를 메모리에 올리지 않아도 됩니다.
-        page_items = observed_items[offset : offset + limit]
+        page_items = filtered_observed[offset : offset + limit]
         remaining = limit - len(page_items)
-        if remaining > 0 and not_observed_count > 0:
-            not_observed_offset = max(0, offset - len(observed_items))
+        if (
+            status in (None, "not_observed_in_batch")
+            and remaining > 0
+            and not_observed_count > 0
+        ):
+            not_observed_offset = max(0, offset - len(filtered_observed))
             if not_observed_offset < not_observed_count:
                 not_observed_ids = list(
                     session.scalars(
@@ -283,14 +301,14 @@ def build_catalog_reconciliation_report(
             total_rows=load_run.total_rows,
             loaded_rows=load_run.loaded_rows,
             rejected_rows=load_run.rejected_rows,
-            new_count=sum(item.status == "new" for item in observed_items),
-            changed_count=sum(item.status == "changed" for item in observed_items),
-            unchanged_count=sum(item.status == "unchanged" for item in observed_items),
+            new_count=status_counts["new"],
+            changed_count=status_counts["changed"],
+            unchanged_count=status_counts["unchanged"],
             not_observed_in_batch_count=not_observed_count,
             # 필드별 건수는 페이지가 아니라 배치 전체 기준입니다.
             field_change_counts=_field_change_counts(observed_items),
             items=page_items,
-            total=len(observed_items) + not_observed_count,
+            total=sum(status_counts.values()) if status is None else status_counts[status],
             limit=limit,
             offset=offset,
         )

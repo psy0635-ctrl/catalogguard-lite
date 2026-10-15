@@ -531,6 +531,7 @@ class CatalogReconciliationResponse(BaseModel):
     not_observed_in_batch_count: int
     field_change_counts: dict[str, int] = Field(default_factory=dict)
     items: list[CatalogReconciliationItemResponse]
+    # total은 status 필터 적용 후 건수이며, 위 상태/필드 집계는 전체 배치 기준입니다.
     total: int
     limit: int
     offset: int

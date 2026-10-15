@@ -1293,10 +1293,12 @@ class FakeEtlApiClient:
             raise self.etl_run_error
         return self.etl_run_response
 
-    def get_catalog_reconciliation(self, etl_load_run_id, *, limit=50, offset=0):
+    def get_catalog_reconciliation(self, etl_load_run_id, *, limit=50, offset=0, status=None):
         self.reconciliation_calls.append(
             {"etl_load_run_id": etl_load_run_id, "limit": limit, "offset": offset}
         )
+        if status is not None:
+            self.reconciliation_calls[-1]["status"] = status
         if self.reconciliation_error is not None:
             raise self.reconciliation_error
         return self.reconciliation_response
@@ -6292,3 +6294,183 @@ def test_filtered_rejection_export_ui_handles_empty_filtered_query():
     assert any("다운로드할 INVALID_PRICE" in info.value for info in app.info)
     assert not app.get("download_button")
     assert not app.error and not app.exception
+
+
+class FilteredReconciliationClient:
+    def __init__(self, *, empty_status=None, rejected_rows=1):
+        self.calls = []
+        self.error = None
+        self.empty_status = empty_status
+        self.rejected_rows = rejected_rows
+
+    def get_catalog_reconciliation(self, etl_load_run_id, *, limit=50, offset=0, status=None):
+        self.calls.append({"etl_load_run_id": etl_load_run_id, "limit": limit,
+                           "offset": offset, "status": status})
+        if self.error is not None:
+            raise self.error
+        items = [dict(item) for item in RECONCILIATION_RESPONSE["items"]]
+        items.insert(1, {"external_product_id": "P004", "status": "new", "changed_fields": {}})
+        items.insert(3, {"external_product_id": "P003", "status": "unchanged", "changed_fields": {}})
+        items = [item for item in items if item["status"] != self.empty_status]
+        counts = {f"{value}_count": sum(item["status"] == value for item in items)
+                  for value in etl_load_history.CATALOG_RECONCILIATION_STATUS_LABELS}
+        filtered = items if status is None else [item for item in items if item["status"] == status]
+        return {**RECONCILIATION_RESPONSE, **counts, "etl_load_run_id": etl_load_run_id,
+                "rejected_rows": self.rejected_rows, "total": len(filtered),
+                "field_change_counts": {"stock": 1, "price": 1} if counts["changed_count"] else {},
+                "items": filtered[offset:offset + limit], "limit": limit, "offset": offset}
+
+
+def _reconciliation_filter_test_app(client):
+    import streamlit as st
+    from ui.etl_load_history import _render_catalog_reconciliation, initialize_etl_load_state
+    initialize_etl_load_state(st.session_state)
+    if st.session_state["etl_load_selected_run_id"] is None:
+        st.session_state["etl_load_selected_run_id"] = 42
+    st.selectbox("테스트 배치", [42, 43], key="etl_load_selected_run_id")
+    _render_catalog_reconciliation(client)
+
+
+def test_reconciliation_filter_change_resets_offset_and_both_caches():
+    state = {"catalog_reconciliation_offset": 50, "catalog_reconciliation_status": "changed",
+             "catalog_reconciliation_response": RECONCILIATION_RESPONSE,
+             "catalog_reconciliation_error": ValueError("stale")}
+    etl_load_history._on_catalog_reconciliation_status_change(state)
+    assert state["catalog_reconciliation_offset"] == 0
+    assert state["catalog_reconciliation_status"] == "changed"
+    assert state["catalog_reconciliation_response"] is None
+    assert state["catalog_reconciliation_error"] is None
+
+
+def test_reconciliation_filter_apptest_keeps_selection_across_pages_and_resets_for_batch(monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    monkeypatch.setattr(etl_load_history, "CATALOG_RECONCILIATION_LIMIT", 1)
+    client = FilteredReconciliationClient()
+    app = AppTest.from_function(_reconciliation_filter_test_app, args=(client,)).run()
+    assert not app.exception
+    assert app.selectbox(key="catalog_reconciliation_status").value == "all"
+    assert app.selectbox(key="catalog_reconciliation_status").options == [
+        "전체", "신규", "변경", "동일", "이번 배치 미관측"
+    ]
+    assert [(m.label, m.value) for m in app.metric] == [
+        ("신규", "2"), ("변경", "1"), ("동일", "1"), ("이번 배치 미관측", "1")
+    ]
+    app.button(key="catalog_reconciliation_next").click().run()
+    assert app.session_state["catalog_reconciliation_offset"] == 1
+    app.selectbox(key="catalog_reconciliation_status").select("new").run()
+    assert not app.exception
+    assert client.calls[-1] == {"etl_load_run_id": 42, "status": "new", "limit": 1, "offset": 0}
+    assert any("상품 1 / 2 페이지 · 전체 2개 상품" in c.value for c in app.caption)
+    app.button(key="catalog_reconciliation_next").click().run()
+    assert client.calls[-1] == {"etl_load_run_id": 42, "status": "new", "limit": 1, "offset": 1}
+    assert any("상품 2 / 2 페이지" in c.value for c in app.caption)
+    assert app.button(key="catalog_reconciliation_next").disabled
+    app.button(key="catalog_reconciliation_previous").click().run()
+    assert client.calls[-1]["status"] == "new" and client.calls[-1]["offset"] == 0
+    app.selectbox(key="etl_load_selected_run_id").select(43).run()
+    assert not app.exception
+    assert app.selectbox(key="catalog_reconciliation_status").value == "all"
+    assert client.calls[-1] == {"etl_load_run_id": 43, "status": None, "limit": 1, "offset": 0}
+
+
+@pytest.mark.parametrize("status", ["new", "changed", "unchanged", "not_observed_in_batch"])
+def test_reconciliation_apptest_filters_each_status_and_preserves_global_metrics(status):
+    from streamlit.testing.v1 import AppTest
+    client = FilteredReconciliationClient()
+    app = AppTest.from_function(_reconciliation_filter_test_app, args=(client,)).run()
+    app.selectbox(key="catalog_reconciliation_status").select(status).run()
+    assert not app.exception and not app.error
+    assert client.calls[-1]["status"] == status
+    assert [m.value for m in app.metric] == ["2", "1", "1", "1"]
+    assert app.dataframe[0].value.to_dict("records") == [
+        {"변경 필드": "price", "변경 건수": 1}, {"변경 필드": "stock", "변경 건수": 1}
+    ]
+    assert set(app.dataframe[-1].value["상태"]) == {etl_load_history.CATALOG_RECONCILIATION_STATUS_LABELS[status]}
+    assert any("삭제 또는 판매 종료" in info.value for info in app.info)
+    assert any("ETL 변환 과정에서 제외" in warning.value for warning in app.warning)
+
+
+@pytest.mark.parametrize("status", ["new", "changed", "unchanged", "not_observed_in_batch"])
+def test_reconciliation_apptest_empty_filter_has_global_metrics_and_zero_total(status):
+    from streamlit.testing.v1 import AppTest
+    client = FilteredReconciliationClient(empty_status=status, rejected_rows=None)
+    app = AppTest.from_function(_reconciliation_filter_test_app, args=(client,)).run()
+    app.selectbox(key="catalog_reconciliation_status").select(status).run()
+    assert not app.exception and not app.error
+    assert any("선택한 상태에 해당하는 상품이 없습니다" in info.value for info in app.info)
+    assert any("전체 0개 상품" in caption.value for caption in app.caption)
+    assert len(app.metric) == 4
+    assert any(w.value == etl_load_history.CATALOG_RECONCILIATION_LEGACY_QUALITY_NOTICE for w in app.warning)
+    assert app.button(key="catalog_reconciliation_previous").disabled
+    assert app.button(key="catalog_reconciliation_next").disabled
+
+
+def test_reconciliation_apptest_error_cache_filter_change_retry_and_failed_batch_switch():
+    from streamlit.testing.v1 import AppTest
+    client = FilteredReconciliationClient()
+    app = AppTest.from_function(_reconciliation_filter_test_app, args=(client,)).run()
+    client.error = etl_load_history.CatalogGuardApiResponseError("server failure")
+    app.selectbox(key="catalog_reconciliation_status").select("changed").run()
+    assert len(app.error) == 1 and not app.exception
+    assert app.session_state["catalog_reconciliation_response"] is None
+    assert app.session_state["catalog_reconciliation_batch_id"] == 42
+    count = len(client.calls)
+    app.run()
+    assert len(client.calls) == count  # Failure cache prevents repeated requests.
+    client.error = None
+    app.button(key="catalog_reconciliation_retry").click().run()
+    assert not app.error and not app.exception
+    assert client.calls[-1]["status"] == "changed"
+    assert app.session_state["catalog_reconciliation_error"] is None
+    client.error = etl_load_history.CatalogGuardApiResponseError("another failure")
+    app.selectbox(key="catalog_reconciliation_status").select("new").run()
+    assert len(app.error) == 1
+    client.error = None
+    app.selectbox(key="catalog_reconciliation_status").select("unchanged").run()
+    assert not app.error
+    client.error = etl_load_history.CatalogGuardApiResponseError("batch failure")
+    app.selectbox(key="catalog_reconciliation_status").select("new").run()
+    client.error = None
+    app.selectbox(key="etl_load_selected_run_id").select(43).run()
+    assert not app.error and not app.exception
+    assert client.calls[-1]["status"] is None
+    assert client.calls[-1]["etl_load_run_id"] == 43
+
+
+def test_reconciliation_apptest_recovers_when_offset_is_past_filtered_total(monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    monkeypatch.setattr(etl_load_history, "CATALOG_RECONCILIATION_LIMIT", 1)
+    client = FilteredReconciliationClient()
+    app = AppTest.from_function(_reconciliation_filter_test_app, args=(client,)).run()
+    app.selectbox(key="catalog_reconciliation_status").select("new").run()
+    app.session_state["catalog_reconciliation_offset"] = 10
+    app.session_state["catalog_reconciliation_response"] = None
+    app.run()
+    assert not app.exception
+    assert client.calls[-2]["offset"] == 10 and client.calls[-1]["offset"] == 1
+    assert client.calls[-1]["status"] == "new"
+    assert any("상품 2 / 2 페이지 · 전체 2개 상품" in c.value for c in app.caption)
+
+
+def test_actual_batch_selection_callback_resets_filter_before_detail_is_requested():
+    state = {"etl_load_selected_run_id": 43, "catalog_reconciliation_batch_id": 42,
+             "catalog_reconciliation_status": "changed", "catalog_reconciliation_offset": 50,
+             "catalog_reconciliation_response": RECONCILIATION_RESPONSE,
+             "catalog_reconciliation_error": ValueError("stale")}
+    etl_load_history._on_etl_load_selection_change(state)
+    assert state["etl_load_detail_requested"] is False
+    assert state["catalog_reconciliation_status"] == "all"
+    assert state["catalog_reconciliation_offset"] == 0
+    assert state["catalog_reconciliation_response"] is None
+    assert state["catalog_reconciliation_error"] is None
+
+
+def test_reconciliation_uncached_batch_resets_a_restored_widget_filter():
+    state = {"etl_load_selected_run_id": 42, "catalog_reconciliation_batch_id": None,
+             "catalog_reconciliation_status": "new", "catalog_reconciliation_offset": 50,
+             "catalog_reconciliation_response": None, "catalog_reconciliation_error": None}
+    etl_load_history.synchronize_catalog_reconciliation_batch(state)
+    assert state["catalog_reconciliation_status"] == "all"
+    assert state["catalog_reconciliation_offset"] == 0
+    assert state["catalog_reconciliation_response"] is None
+    assert state["catalog_reconciliation_error"] is None

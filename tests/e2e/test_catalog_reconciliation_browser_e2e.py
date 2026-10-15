@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+import hashlib
+import json
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -139,7 +142,14 @@ def _preserve_browser_failure_artifacts(page) -> None:
 
 def _new_session():
     from db.session import create_session_factory
+    from sqlalchemy.engine import make_url
 
+    database = make_url(os.environ["DATABASE_URL"])
+    assert database.host in {"127.0.0.1", "localhost", "::1"}
+    assert "test" in (database.database or "").lower(), "E2E requires a test database"
+    assert database.port != 55483, "E2E refuses the school Demo DB port"
+    if os.environ["DATABASE_URL"] != os.environ["TEST_DATABASE_URL"]:
+        raise AssertionError("E2E database settings disagree")
     return create_session_factory(database_url=os.environ["DATABASE_URL"])()
 
 
@@ -555,3 +565,290 @@ def test_catalog_reconciliation_in_real_browser(page):
         raise
     finally:
         _cleanup_reconciliation_fixture(fixture)
+
+
+def _save_evidence(name, data):
+    directory = os.environ.get("E2E_RECONCILIATION_EVIDENCE_DIR")
+    if directory:
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        (Path(directory) / name).write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+
+def _database_snapshot():
+    """Hash all ORM table contents without writing credentials or raw rows to artifacts."""
+    from db.base import Base
+    import db.models
+    snapshot = {}
+    with _new_session() as session:
+        for table in Base.metadata.sorted_tables:
+            rows = [dict(row._mapping) for row in session.execute(
+                table.select().order_by(*table.primary_key.columns)
+            )]
+            raw = json.dumps(rows, sort_keys=True, default=str).encode()
+            snapshot[table.name] = {"rows": len(rows), "sha256": hashlib.sha256(raw).hexdigest()}
+    return snapshot
+
+
+def _create_paginated_reconciliation_fixture():
+    """52 products per status exercise the real 50-item UI page size."""
+    from db.models import CatalogProduct, CatalogProductStaging, ETLLoadRun
+    fixture = _create_reconciliation_fixture()
+    with _new_session() as session:
+        incoming = session.get(ETLLoadRun, fixture.incoming.id)
+        incoming.loaded_rows, incoming.total_rows = 156, 157
+        source = session.get(ETLLoadRun, fixture.catalog_source.id)
+        source.total_rows = source.rejected_rows = source.error_counts = None
+        staging, catalog = [], []
+        for number in range(2, 53):
+            for kind, stock in (("NEW", 5), ("CHANGED", 7), ("SAME", 12)):
+                product_id = f"REC-{kind}-{number:03d}"
+                staging.append(CatalogProductStaging(
+                    etl_load_run_id=incoming.id, product_id=product_id,
+                    **_product_values(product_id, stock=stock),
+                ))
+            for kind, stock in (("CHANGED", 10), ("SAME", 12), ("OLD", 3)):
+                product_id = f"REC-{kind}-{number:03d}"
+                catalog.append(CatalogProduct(
+                    supplier_key=PROFILE_NAME, external_product_id=product_id,
+                    source_etl_load_run_id=source.id,
+                    **_product_values(product_id, stock=stock),
+                ))
+        catalog.append(CatalogProduct(
+            supplier_key=PROFILE_NAME + "_other", external_product_id="REC-NEW-001",
+            source_etl_load_run_id=source.id,
+            **_product_values("REC-NEW-001", stock=999),
+        ))
+        session.add_all([*staging, *catalog])
+        session.flush()
+        result = replace(
+            fixture, incoming=_snapshot_load_run(incoming), catalog_source=_snapshot_load_run(source),
+            staging=fixture.staging + tuple(_snapshot_staging(row) for row in staging),
+            catalog=fixture.catalog + tuple(_snapshot_catalog(row) for row in catalog),
+        )
+        session.commit()
+    return result
+
+
+@contextmanager
+def _duplicate_identity(fixture):
+    """A deliberate fixture write, separate from read-only API snapshot phases."""
+    from sqlalchemy import delete
+    from db.models import CatalogProductStaging
+    with _new_session() as session:
+        duplicate = CatalogProductStaging(
+            etl_load_run_id=fixture.incoming.id, product_id="REC-NEW-001",
+            **_product_values("REC-NEW-001", stock=5),
+        )
+        session.add(duplicate)
+        session.flush()
+        duplicate_id = duplicate.id
+        session.commit()
+    try:
+        yield
+    finally:
+        with _new_session() as session:
+            session.execute(delete(CatalogProductStaging).where(CatalogProductStaging.id == duplicate_id))
+            session.commit()
+
+
+def test_catalog_reconciliation_status_filters_with_postgresql():
+    import requests
+    from sqlalchemy import event
+    from db.catalog_reconciliation_service import build_catalog_reconciliation_report
+
+    baseline = _database_snapshot()
+    fixture = _create_paginated_reconciliation_fixture()
+    records = []
+    try:
+        before = _database_snapshot()
+        http = requests.Session()
+        login = http.post(f"{API_URL}/api/v1/auth/login", json={
+            "username": E2E_OPERATOR_USERNAME, "password": E2E_OPERATOR_PASSWORD,
+        }, timeout=10)
+        assert login.status_code == 200
+        http.headers["Authorization"] = "Bearer " + login.json()["access_token"]
+        endpoint = f"{API_URL}/api/v1/etl-loads/{fixture.incoming.id}/catalog-reconciliation"
+        statuses = {"new": "NEW", "changed": "CHANGED", "unchanged": "SAME", "not_observed_in_batch": "OLD"}
+        all_items = []
+        for status, kind in statuses.items():
+            full = http.get(endpoint, params={"status": status, "limit": 100}, timeout=10)
+            assert full.status_code == 200
+            expected = full.json()["items"]
+            assert [row["external_product_id"] for row in expected] == [f"REC-{kind}-{i:03d}" for i in range(1, 53)]
+            assert all(row["status"] == status for row in expected)
+            all_items.extend(expected)
+            for offset in (0, 1, 51, 52, 99):
+                response = http.get(endpoint, params={"status": status, "limit": 1, "offset": offset}, timeout=10)
+                assert response.status_code == 200
+                data = response.json()
+                assert data["items"] == expected[offset:offset + 1]
+                assert data["total"] == 52 and data["offset"] == offset and data["limit"] == 1
+                assert [data[key + "_count"] for key in statuses] == [52] * 4
+                assert data["field_change_counts"] == {"stock": 52}
+                assert (data["total_rows"], data["loaded_rows"], data["rejected_rows"]) == (157, 156, 1)
+                records.append({"status": status, "offset": offset, "total": data["total"], "items": data["items"]})
+        for offset in (0, 1, 50, 51, 52, 100, 103, 104, 155, 156, 200, 207, 208, 999):
+            data = http.get(endpoint, params={"limit": 1, "offset": offset}, timeout=10).json()
+            assert data["total"] == 208 and data["items"] == all_items[offset:offset + 1]
+        pages = [http.get(endpoint, params={"limit": 50, "offset": offset}, timeout=10).json()["items"]
+                 for offset in range(0, 208, 50)]
+        assert [item for page in pages for item in page] == all_items
+        source_endpoint = f"{API_URL}/api/v1/etl-loads/{fixture.catalog_source.id}/catalog-reconciliation"
+        for status in ("new", "changed", "unchanged"):
+            data = http.get(source_endpoint, params={"status": status}, timeout=10).json()
+            assert data["items"] == [] and data["total"] == 0
+            assert data["not_observed_in_batch_count"] == 156
+        assert http.get(endpoint, params={"status": "deleted"}, timeout=10).status_code == 422
+        assert http.get(endpoint.replace(f"/{fixture.incoming.id}/", "/2147483647/"), timeout=10).status_code == 404
+        assert requests.get(endpoint, timeout=10).status_code == 401
+
+        # Execute the real service inside a PostgreSQL read-only transaction and inspect SQL.
+        with _new_session() as session:
+            connection = session.connection()
+            connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+            statements = []
+            def record_sql(conn, cursor, statement, parameters, context, executemany):
+                statements.append(statement)
+            event.listen(connection, "before_cursor_execute", record_sql)
+            page = build_catalog_reconciliation_report(session, etl_load_run_id=fixture.incoming.id,
+                status="not_observed_in_batch", limit=1, offset=51)
+            assert [row.external_product_id for row in page.items] == ["REC-OLD-052"]
+            assert all(statement.lstrip().upper().startswith("SELECT") for statement in statements)
+            assert any("count(" in statement.lower() for statement in statements)
+            assert any("LIMIT" in statement and "OFFSET" in statement for statement in statements)
+        assert _database_snapshot() == before
+        with _duplicate_identity(fixture):
+            duplicate_before = _database_snapshot()
+            response = http.get(endpoint, params={"status": "new"}, timeout=10)
+            assert response.status_code == 409
+            assert response.json()["detail"]["code"] == "duplicate_product_identity"
+            assert _database_snapshot() == duplicate_before
+        assert _database_snapshot() == before
+        _save_evidence("postgresql-results.json", {"queries": records, "before": before,
+            "after": _database_snapshot(), "read_only_sql": statements,
+            "expected_errors": {"unauthenticated": 401, "missing": 404, "duplicate": 409, "invalid_status": 422}})
+    finally:
+        _cleanup_reconciliation_fixture(fixture)
+    assert _database_snapshot() == baseline
+
+
+def test_catalog_reconciliation_status_filter_browser_pagination_and_recovery(page):
+    from playwright.sync_api import expect
+
+    baseline = _database_snapshot()
+    fixture = _create_paginated_reconciliation_fixture()
+    errors, page_errors, failed_requests, http_errors, warnings = [], [], [], [], []
+    page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error"
+            else warnings.append(msg.text) if msg.type == "warning" else None)
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    page.on("requestfailed", lambda request: failed_requests.append({"method": request.method, "failure": request.failure}))
+    page.on("response", lambda response: http_errors.append(response.status) if response.status >= 400 else None)
+    checks = []
+
+    def choose_filter(label):
+        page.get_by_role("combobox", name=re.compile("상품 동기화 차이 상태$")).click()
+        page.get_by_role("option", name=label, exact=True).click()
+
+    def select_batch(run_id, filename):
+        page.get_by_role("combobox", name=re.compile("적재 배치 선택$")).click()
+        page.get_by_role("option", name=re.compile(rf"^{run_id} · {re.escape(filename)}")).click()
+        expect(page.get_by_text("상품 동기화 차이", exact=True)).not_to_be_visible()
+        page.get_by_role("button", name="상세 조회", exact=True).click()
+        expect(page.get_by_text("상품 동기화 차이", exact=True)).to_be_visible()
+
+    def assert_summary():
+        for label in ("신규", "변경", "동일", "이번 배치 미관측"):
+            metric = page.locator('[data-testid="stMetric"]').filter(has=_metric_label(page, label))
+            expect(metric.locator('[data-testid="stMetricValue"]')).to_have_text("52")
+        grid = _dataframe_grid_with_column(page, "변경 건수")
+        expect(grid).to_contain_text("stock")
+        expect(grid).to_contain_text("52")
+        expect(page.locator("body")).to_contain_text("원본 입력 중 1개 행이 ETL 변환 과정에서 제외되었습니다")
+        expect(page.locator("body")).to_contain_text("삭제 또는 판매 종료를 의미하지 않으며")
+
+    try:
+        before = _database_snapshot()
+        page.goto(STREAMLIT_URL, wait_until="domcontentloaded")
+        _login_as_operator(page)
+        page.get_by_role("tab", name="ETL 적재 이력").click()
+        page.get_by_label("원본 파일명").fill("browser_e2e_reconciliation")
+        page.get_by_label("공급사 프로필").fill(PROFILE_NAME)
+        page.get_by_role("button", name="조회", exact=True).click()
+        select_batch(fixture.incoming.id, SOURCE_FILENAME)
+        expect(page.get_by_text("상품 1 / 5 페이지 · 전체 208개 상품", exact=True)).to_be_visible()
+        filter_box = page.locator('[data-testid="stSelectbox"]').filter(
+            has=page.get_by_role("combobox", name=re.compile("상품 동기화 차이 상태$")))
+        expect(filter_box).to_contain_text("전체")
+        assert_summary()
+        checks.append("default_all_208")
+        page.get_by_role("button", name="동기화 차이 다음", exact=True).click()
+        expect(page.get_by_text("상품 2 / 5 페이지 · 전체 208개 상품", exact=True)).to_be_visible()
+        for label, kind in (("신규", "NEW"), ("변경", "CHANGED"), ("동일", "SAME"), ("이번 배치 미관측", "OLD")):
+            choose_filter(label)
+            expect(page.get_by_text("상품 1 / 2 페이지 · 전체 52개 상품", exact=True)).to_be_visible()
+            assert_summary()
+            item_grid = _dataframe_grid_with_column(page, "상태").filter(has_text=f"REC-{kind}-001")
+            expect(item_grid).to_have_count(1)
+            page.get_by_role("button", name="동기화 차이 다음", exact=True).click()
+            expect(page.get_by_text("상품 2 / 2 페이지 · 전체 52개 상품", exact=True)).to_be_visible()
+            grid = _dataframe_grid_with_column(page, "상태")
+            expect(grid).to_contain_text(f"REC-{kind}-051")
+            expect(grid).to_contain_text(f"REC-{kind}-052")
+            expect(page.get_by_role("button", name="동기화 차이 다음", exact=True)).to_be_disabled()
+            page.get_by_role("button", name="동기화 차이 이전", exact=True).click()
+            expect(page.get_by_text("상품 1 / 2 페이지 · 전체 52개 상품", exact=True)).to_be_visible()
+            checks.append(label + "_52_next_previous")
+            # Changing the next filter from page 2 must also reset offset to zero.
+            page.get_by_role("button", name="동기화 차이 다음", exact=True).click()
+            expect(page.get_by_text("상품 2 / 2 페이지 · 전체 52개 상품", exact=True)).to_be_visible()
+        choose_filter("전체")
+        expect(page.get_by_text("상품 1 / 5 페이지 · 전체 208개 상품", exact=True)).to_be_visible()
+        checks.append("back_to_all_resets_offset")
+
+        # A controlled API 409, produced only by a deliberate test-fixture write.
+        with _duplicate_identity(fixture):
+            failure_before = _database_snapshot()
+            choose_filter("변경")
+            expect(page.get_by_role("button", name="동기화 차이 다시 조회", exact=True)).to_be_visible()
+            expect(page.get_by_text(re.compile("상품 동기화 차이를 불러오지 못했습니다"))).to_be_visible()
+            assert _database_snapshot() == failure_before
+        page.get_by_role("button", name="동기화 차이 다시 조회", exact=True).click()
+        expect(page.get_by_text("상품 1 / 2 페이지 · 전체 52개 상품", exact=True)).to_be_visible()
+        assert_summary()
+        checks.append("expected_api_409_then_successful_retry")
+
+        select_batch(fixture.catalog_source.id, CATALOG_SOURCE_FILENAME)
+        expect(filter_box).to_contain_text("전체")
+        expect(page.locator("body")).to_contain_text("품질 요약")
+        from ui.etl_load_history import CATALOG_RECONCILIATION_LEGACY_QUALITY_NOTICE
+        expect(page.get_by_text(CATALOG_RECONCILIATION_LEGACY_QUALITY_NOTICE, exact=True)).to_be_visible()
+        choose_filter("신규")
+        expect(page.get_by_text("선택한 상태에 해당하는 상품이 없습니다.", exact=True)).to_be_visible()
+        # The empty staging table and filtered reconciliation list both have zero products.
+        empty_captions = page.get_by_text("상품 1 / 1 페이지 · 전체 0개 상품", exact=True)
+        expect(empty_captions).to_have_count(2)
+        for caption in empty_captions.all():
+            expect(caption).to_be_visible()
+        expect(page.get_by_role("button", name="동기화 차이 다음", exact=True)).to_be_disabled()
+        checks.append("different_legacy_batch_all_reset_and_empty_filter")
+        select_batch(fixture.incoming.id, SOURCE_FILENAME)
+        expect(filter_box).to_contain_text("전체")
+        expect(page.get_by_text("상품 1 / 5 페이지 · 전체 208개 상품", exact=True)).to_be_visible()
+        assert_summary()
+        assert not page.locator('[data-testid="stException"]').count()
+        assert not errors and not page_errors and not failed_requests and not http_errors
+        assert _database_snapshot() == before
+        _assert_fixture_unchanged(fixture)
+        _save_evidence("browser-status-filter-results.json", {
+            "checks": checks, "console_errors": errors, "page_errors": page_errors,
+            "failed_requests": failed_requests, "browser_http_errors": http_errors,
+            "renderer_warnings": warnings, "before": before, "after": _database_snapshot(),
+        })
+    except BaseException:
+        _preserve_browser_failure_artifacts(page)
+        raise
+    finally:
+        _cleanup_reconciliation_fixture(fixture)
+    assert _database_snapshot() == baseline

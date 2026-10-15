@@ -73,9 +73,11 @@ def _report(**changes) -> CatalogReconciliationReport:
 def _override_service(monkeypatch, result_or_error, *, calls=None):
     app.dependency_overrides[get_session] = lambda: iter([object()])
 
-    def fake_build(session, *, etl_load_run_id, limit, offset):
+    def fake_build(session, *, etl_load_run_id, limit, offset, status=None):
         if calls is not None:
             calls.append({"etl_load_run_id": etl_load_run_id, "limit": limit, "offset": offset})
+            if status is not None:
+                calls[-1]["status"] = status
         if isinstance(result_or_error, Exception):
             raise result_or_error
         return result_or_error
@@ -230,3 +232,92 @@ def test_endpoint_is_read_only_and_uses_get(monkeypatch):
 
     assert client.post(ENDPOINT).status_code == 405
     assert client.delete(ENDPOINT).status_code == 405
+
+
+@pytest.mark.parametrize("status", ["new", "changed", "unchanged", "not_observed_in_batch"])
+@pytest.mark.parametrize("offset", [0, 1, 2, 10])
+def test_filtered_endpoint_uses_real_service_and_preserves_batch_summary(status, offset):
+    from test_catalog_reconciliation_service import _mixed_filter_session
+
+    session = _mixed_filter_session()
+
+    def readonly_session():
+        yield session
+
+    app.dependency_overrides[get_session] = readonly_session
+    response = client.get(ENDPOINT, params={"status": status, "limit": 1, "offset": offset})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 2
+    assert payload["limit"] == 1 and payload["offset"] == offset
+    assert [payload[f"{value}_count"] for value in (
+        "new", "changed", "unchanged", "not_observed_in_batch"
+    )] == [2, 2, 2, 2]
+    assert payload["field_change_counts"] == {"stock": 2}
+    assert [(item["status"], item["external_product_id"]) for item in payload["items"]] == (
+        [(status, f"{'A' if offset == 0 else 'B'}-{status}")] if offset < 2 else []
+    )
+
+
+@pytest.mark.parametrize("status", ["", "deleted", "NEW", "all", " new "])
+def test_invalid_status_returns_422_without_calling_service(monkeypatch, status):
+    calls = []
+    _override_service(monkeypatch, _report(), calls=calls)
+    response = client.get(ENDPOINT, params={"status": status})
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["query", "status"]
+    assert calls == []
+
+
+def test_valid_status_is_passed_to_service(monkeypatch):
+    calls = []
+    _override_service(monkeypatch, _report(items=[], total=1), calls=calls)
+    assert client.get(ENDPOINT, params={"status": "changed", "offset": 1}).status_code == 200
+    assert calls == [{"etl_load_run_id": 42, "limit": 50, "offset": 1, "status": "changed"}]
+
+
+@pytest.mark.parametrize("status", ["new", "changed", "unchanged", "not_observed_in_batch"])
+def test_filtered_endpoint_preserves_safe_missing_and_duplicate_errors(monkeypatch, status):
+    _override_service(monkeypatch, ETLLoadRunNotFoundError(42))
+    assert client.get(ENDPOINT, params={"status": status}).status_code == 404
+    _override_service(monkeypatch, CatalogReconciliationDuplicateIdentityError(("P001",)))
+    response = client.get(ENDPOINT, params={"status": status})
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "duplicate_product_identity"
+
+
+def test_filtered_endpoint_still_requires_authentication(monkeypatch):
+    _override_service(monkeypatch, _report())
+    clear_current_user_override()
+    assert client.get(ENDPOINT, params={"status": "new"}).status_code == 401
+
+
+@pytest.mark.parametrize("role", ["viewer", "operator"])
+def test_filtered_endpoint_keeps_existing_viewer_permission(monkeypatch, role):
+    override_current_user(role=role)
+    _override_service(monkeypatch, _report())
+    assert client.get(ENDPOINT, params={"status": "new"}).status_code == 200
+
+
+@pytest.mark.parametrize("status", ["new", "changed", "unchanged", "not_observed_in_batch"])
+def test_filtered_endpoint_returns_zero_total_while_other_status_still_exists(status):
+    from test_catalog_reconciliation_service import (
+        ReconciliationSession, _load_run, _staging, _catalog,
+    )
+    session = ReconciliationSession(
+        _load_run(), staging=[_staging()],
+        catalog=[] if status == "unchanged" else [_catalog()],
+    )
+
+    def readonly_session():
+        yield session
+
+    app.dependency_overrides[get_session] = readonly_session
+    response = client.get(ENDPOINT, params={"status": status, "limit": 1})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["items"] == [] and payload["total"] == 0
+    assert sum(payload[f"{s}_count"] for s in (
+        "new", "changed", "unchanged", "not_observed_in_batch"
+    )) == 1
+    assert payload["field_change_counts"] == {}
