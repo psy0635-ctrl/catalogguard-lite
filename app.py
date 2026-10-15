@@ -437,8 +437,15 @@ def render_inspection_quality_trend(api_client, request_params: dict[str, str]) 
     metric_columns[0].metric("신규 검수", int(dataframe["신규 검수"].sum()))
     metric_columns[1].metric("전체 상품", int(dataframe["전체 상품"].sum()))
     metric_columns[2].metric("전체 문제", int(dataframe["전체 문제"].sum()))
-    chart_dataframe = dataframe.set_index("날짜")[["오류", "주의"]]
-    st.line_chart(chart_dataframe, width="stretch")
+    if len(dataframe) == 1:
+        point = dataframe.iloc[0]
+        st.caption(f"검수 날짜: {point['날짜']}")
+        issue_columns = st.columns(2)
+        issue_columns[0].metric("오류", int(point["오류"]))
+        issue_columns[1].metric("주의", int(point["주의"]))
+    else:
+        chart_dataframe = dataframe.set_index("날짜")[["오류", "주의"]]
+        st.line_chart(chart_dataframe, width="stretch")
     st.dataframe(dataframe, width="stretch", hide_index=True)
 
 

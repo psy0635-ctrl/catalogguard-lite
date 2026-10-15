@@ -250,6 +250,21 @@ def test_render_inspection_quality_trend_displays_metrics_chart_and_dataframe(
     fake_st = FakeAppStreamlit()
     client_calls = []
     response = make_quality_trend_response()
+    response["items"].append(
+        {
+            **response["items"][0],
+            "date": "2026-08-28",
+            "run_count": 1,
+            "error_run_count": 0,
+            "warning_run_count": 1,
+            "normal_run_count": 0,
+            "total_products": 10,
+            "total_issues": 2,
+            "error_count": 0,
+            "warning_count": 2,
+        }
+    )
+    original_response = copy.deepcopy(response)
     api_client = SimpleNamespace(
         get_inspection_quality_trend=lambda **params: client_calls.append(params) or response
     )
@@ -265,13 +280,17 @@ def test_render_inspection_quality_trend_displays_metrics_chart_and_dataframe(
     ]
     assert fake_st.subheaders == ["검수 품질 추세"]
     assert fake_st.captions == ["현재 검수 버전 13 기준"]
-    assert [label for _, label, _ in fake_st.metrics] == [
-        "신규 검수",
-        "전체 상품",
-        "전체 문제",
+    assert [(label, value) for _, label, value in fake_st.metrics] == [
+        ("신규 검수", 4),
+        ("전체 상품", 70),
+        ("전체 문제", 10),
     ]
     assert len(fake_st.line_charts) == 1
-    assert list(fake_st.line_charts[0][1].columns) == ["오류", "주의"]
+    chart_dataframe = fake_st.line_charts[0][1]
+    assert list(chart_dataframe.columns) == ["오류", "주의"]
+    assert chart_dataframe.index.tolist() == ["2026-08-27", "2026-08-28"]
+    assert chart_dataframe.values.tolist() == [[5, 3], [0, 2]]
+    assert fake_st.line_charts[0][2] == {"width": "stretch"}
     assert len(fake_st.dataframes) == 1
     assert list(fake_st.dataframes[0][1].columns) == [
         "날짜",
@@ -284,6 +303,54 @@ def test_render_inspection_quality_trend_displays_metrics_chart_and_dataframe(
         "오류",
         "주의",
     ]
+    pd.testing.assert_frame_equal(
+        fake_st.dataframes[0][1],
+        app_module.build_inspection_quality_trend_dataframe(original_response["items"]),
+    )
+    assert response == original_response
+
+
+@pytest.mark.parametrize("error_count,warning_count", [(15, 19), (0, 0), (15, 0), (0, 19)])
+def test_render_inspection_quality_trend_shows_single_day_values_without_hover(
+    app_module, monkeypatch, error_count, warning_count
+):
+    fake_st = FakeAppStreamlit()
+    response = make_quality_trend_response()
+    response["items"][0].update(
+        error_count=error_count,
+        warning_count=warning_count,
+        error_run_count=3 if error_count else 0,
+        warning_run_count=3 if not error_count and warning_count else 0,
+        normal_run_count=3 if not error_count and not warning_count else 0,
+        total_issues=error_count + warning_count,
+    )
+    original_response = copy.deepcopy(response)
+    client_calls = []
+    request_params = {"filename": "products", "start_date": "2026-08-01", "status": "warning"}
+    api_client = SimpleNamespace(
+        get_inspection_quality_trend=lambda **params: client_calls.append(params) or response
+    )
+    monkeypatch.setattr(app_module, "st", fake_st)
+
+    app_module.render_inspection_quality_trend(api_client, request_params)
+
+    assert client_calls == [request_params]
+    assert fake_st.captions == ["현재 검수 버전 13 기준", "검수 날짜: 2026-08-27"]
+    assert [(label, value) for _, label, value in fake_st.metrics] == [
+        ("신규 검수", 3),
+        ("전체 상품", 60),
+        ("전체 문제", error_count + warning_count),
+        ("오류", error_count),
+        ("주의", warning_count),
+    ]
+    assert fake_st.line_charts == []
+    assert len(fake_st.dataframes) == 1
+    pd.testing.assert_frame_equal(
+        fake_st.dataframes[0][1],
+        app_module.build_inspection_quality_trend_dataframe(original_response["items"]),
+    )
+    assert fake_st.dataframes[0][2] == {"width": "stretch", "hide_index": True}
+    assert response == original_response
 
 
 def test_render_inspection_quality_trend_handles_empty_and_api_errors_in_its_section(
@@ -291,14 +358,18 @@ def test_render_inspection_quality_trend_handles_empty_and_api_errors_in_its_sec
     monkeypatch,
 ):
     fake_st = FakeAppStreamlit()
+    client_calls = []
     empty_client = SimpleNamespace(
-        get_inspection_quality_trend=lambda **params: make_quality_trend_response(items=[])
+        get_inspection_quality_trend=lambda **params: client_calls.append(params)
+        or make_quality_trend_response(items=[])
     )
     monkeypatch.setattr(app_module, "st", fake_st)
 
     app_module.render_inspection_quality_trend(empty_client, {})
 
+    assert client_calls == [{}]
     assert fake_st.infos == ["선택한 조건에 해당하는 검수 추세 데이터가 없습니다."]
+    assert fake_st.captions == ["현재 검수 버전 13 기준"]
     assert fake_st.metrics == []
     assert fake_st.line_charts == []
     assert fake_st.dataframes == []
