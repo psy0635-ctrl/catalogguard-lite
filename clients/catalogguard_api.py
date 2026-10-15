@@ -1551,7 +1551,9 @@ def _validate_catalog_reconciliation_item(item: object) -> bool:
     return bool(changed_fields) == (status == "changed")
 
 
-def _validate_catalog_reconciliation_response(data: dict[str, Any]) -> None:
+def _validate_catalog_reconciliation_response(
+    data: dict[str, Any], *, status: str | None = None
+) -> None:
     if any(key not in data for key in CATALOG_RECONCILIATION_RESPONSE_KEYS):
         raise _invalid_etl_response()
     count_fields = (
@@ -1592,11 +1594,12 @@ def _validate_catalog_reconciliation_response(data: dict[str, Any]) -> None:
         or not _validate_etl_list_metadata(data["limit"])
         or not _validate_etl_list_metadata(data["offset"], allow_limit_zero=True)
         or len(items) > data["limit"]
-        or data["total"]
-        != data["new_count"]
-        + data["changed_count"]
-        + data["unchanged_count"]
-        + data["not_observed_in_batch_count"]
+        or data["total"] != (
+            sum(data[field] for field in count_fields)
+            if status is None
+            else data[f"{status}_count"]
+        )
+        or (status is not None and any(item["status"] != status for item in items))
     ):
         raise _invalid_etl_response()
 
@@ -2913,19 +2916,25 @@ class CatalogGuardApiClient:
         *,
         limit: int = 50,
         offset: int = 0,
+        status: str | None = None,
     ) -> dict[str, Any]:
         # 읽기 전용 보고서입니다. 운영 카탈로그를 바꾸지 않습니다.
         _validate_positive_etl_int(etl_load_run_id, "etl_load_run_id")
         _validate_etl_pagination(limit, offset)
+        if status is not None and status not in CATALOG_RECONCILIATION_STATUSES:
+            raise ValueError("Invalid reconciliation status")
+        params = {"limit": limit, "offset": offset}
+        if status is not None:
+            params["status"] = status
 
         data = self._get_json(
             f"/api/v1/etl-loads/{etl_load_run_id}/catalog-reconciliation",
-            params={"limit": limit, "offset": offset},
+            params=params,
             raise_not_found=True,
             not_found_error=ETLLoadNotFoundError,
             not_found_message="ETL 적재 배치를 찾을 수 없습니다.",
         )
-        _validate_catalog_reconciliation_response(data)
+        _validate_catalog_reconciliation_response(data, status=status)
         return data
 
     def get_catalog_promotion_preview(

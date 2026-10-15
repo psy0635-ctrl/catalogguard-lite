@@ -52,6 +52,7 @@ class ReconciliationSession:
         self.no_autoflush = nullcontext()
         self.count_calls = 0
         self.not_observed_id_calls = 0
+        self.not_observed_queries = []
 
     def _staging_ids(self) -> set[str]:
         return {product.product_id for product in self.staging}
@@ -86,6 +87,7 @@ class ReconciliationSession:
             # external_product_id만 고른 질의는 not_observed 페이지 조회입니다.
             if description["name"] == "external_product_id":
                 self.not_observed_id_calls += 1
+                self.not_observed_queries.append(statement)
                 rows = [
                     product.external_product_id for product in self._not_observed()
                 ]
@@ -614,3 +616,86 @@ def test_page_fully_inside_the_staging_section_skips_the_not_observed_query():
 
     assert [item.status for item in page.items] == ["new", "new", "new"]
     assert session.not_observed_id_calls == 0
+
+
+def _mixed_filter_session():
+    return ReconciliationSession(
+        _load_run(total_rows=7, loaded_rows=6, rejected_rows=1),
+        staging=[
+            _staging(f"{prefix}-{status}", id=index * 2 + position)
+            for index, status in enumerate(("new", "changed", "unchanged"))
+            for position, prefix in enumerate(("B", "A"))
+        ],
+        catalog=[
+            _catalog(f"{prefix}-{status}", id=100 + index * 2 + position,
+                     stock=9 if status == "changed" else 10)
+            for index, status in enumerate(("changed", "unchanged", "not_observed_in_batch"))
+            for position, prefix in enumerate(("B", "A"))
+        ] + [_catalog("OTHER", id=999, supplier_key="other_vendor")],
+    )
+
+
+def test_omitted_status_preserves_the_complete_report():
+    session = _mixed_filter_session()
+    implicit = _report(session)
+    assert implicit == _report(session, status=None)
+    assert implicit.total == 8
+    assert [(item.status, item.external_product_id) for item in implicit.items] == [
+        (status, f"{prefix}-{status}")
+        for status in ("new", "changed", "unchanged", "not_observed_in_batch")
+        for prefix in ("A", "B")
+    ]
+
+
+@pytest.mark.parametrize("status", ["new", "changed", "unchanged", "not_observed_in_batch"])
+@pytest.mark.parametrize("offset", [0, 1, 2, 9])
+def test_status_filter_paginates_after_filtering_and_keeps_global_summary(status, offset):
+    session = _mixed_filter_session()
+    page = _report(session, status=status, limit=1, offset=offset)
+    assert page.total == 2
+    assert page.limit == 1 and page.offset == offset
+    assert page.new_count == page.changed_count == page.unchanged_count == 2
+    assert page.not_observed_in_batch_count == 2
+    assert page.field_change_counts == {"stock": 2}
+    assert (page.total_rows, page.loaded_rows, page.rejected_rows) == (7, 6, 1)
+    assert [(item.status, item.external_product_id) for item in page.items] == (
+        [(status, f"{'A' if offset == 0 else 'B'}-{status}")] if offset < 2 else []
+    )
+    assert session.count_calls == 1
+    expected_id_queries = int(status == "not_observed_in_batch" and offset < 2)
+    assert session.not_observed_id_calls == expected_id_queries
+    if expected_id_queries:
+        query = session.not_observed_queries[0]
+        assert query._limit == 1
+        assert query._offset == offset
+        assert query.column_descriptions[0]["name"] == "external_product_id"
+        assert "ORDER BY catalog_products.external_product_id ASC" in str(query)
+
+
+@pytest.mark.parametrize("status", ["new", "changed", "unchanged", "not_observed_in_batch"])
+def test_filter_with_no_matching_status_keeps_other_status_counts(status):
+    session = ReconciliationSession(
+        _load_run(), staging=[_staging()], catalog=[_catalog()]
+    )
+    if status == "unchanged":
+        session.catalog = []  # A new product exists, but no unchanged product.
+    page = _report(session, status=status)
+    assert page.items == [] and page.total == 0
+    assert page.new_count + page.unchanged_count == 1
+    assert session.not_observed_id_calls == 0
+
+
+@pytest.mark.parametrize("status", ["new", "changed", "unchanged", "not_observed_in_batch"])
+def test_filter_does_not_bypass_duplicate_identity_or_missing_batch(status):
+    session = ReconciliationSession(
+        _load_run(), staging=[_staging(id=1), _staging(id=2)]
+    )
+    with pytest.raises(CatalogReconciliationDuplicateIdentityError):
+        _report(session, status=status)
+    with pytest.raises(ETLLoadRunNotFoundError):
+        _report(ReconciliationSession(None), status=status)
+
+
+def test_service_rejects_invalid_status():
+    with pytest.raises(ValueError, match="Invalid reconciliation status"):
+        _report(_mixed_filter_session(), status="deleted")

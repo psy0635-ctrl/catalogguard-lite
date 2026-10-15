@@ -194,6 +194,7 @@ ETL_PROFILE_ADMIN_HISTORY_DISPLAY_COLUMNS = [
 ]
 
 CATALOG_RECONCILIATION_LIMIT = 50
+CATALOG_RECONCILIATION_ALL_STATUS = "all"  # UI 전용 값이며 API에는 보내지 않습니다.
 CATALOG_RECONCILIATION_FIELD_COLUMNS = ["변경 필드", "변경 건수"]
 CATALOG_RECONCILIATION_ITEM_COLUMNS = ["상품 ID", "상태", "변경 필드"]
 CATALOG_RECONCILIATION_STATUS_LABELS = {
@@ -386,6 +387,7 @@ ETL_LOAD_STATE_DEFAULTS = {
     "etl_reject_filtered_export_error": None,
     "catalog_reconciliation_batch_id": None,
     "catalog_reconciliation_offset": 0,
+    "catalog_reconciliation_status": CATALOG_RECONCILIATION_ALL_STATUS,
     "catalog_reconciliation_response": None,
     "catalog_reconciliation_error": None,
     "catalog_promotion_preview_batch_id": None,
@@ -1872,6 +1874,7 @@ def apply_etl_load_search(session_state) -> None:
 
 def _on_etl_load_selection_change(session_state) -> None:
     reset_etl_load_detail_state(session_state)
+    synchronize_catalog_reconciliation_batch(session_state)
     clear_catalog_promotion_preview_state(session_state)
 
 
@@ -3152,16 +3155,26 @@ def _render_etl_load_pagination(response: dict[str, Any]) -> None:
             st.rerun()
 
 
+def _clear_catalog_reconciliation_cache(session_state) -> None:
+    session_state["catalog_reconciliation_response"] = None
+    session_state["catalog_reconciliation_error"] = None
+
+
+def _on_catalog_reconciliation_status_change(session_state) -> None:
+    session_state["catalog_reconciliation_offset"] = 0
+    _clear_catalog_reconciliation_cache(session_state)
+
+
 def synchronize_catalog_reconciliation_batch(session_state) -> None:
     """Drop a cached report that belongs to a previously selected batch."""
     selected_run_id = session_state.get("etl_load_selected_run_id")
     cached_batch_id = session_state.get("catalog_reconciliation_batch_id")
-    if cached_batch_id is None or cached_batch_id == selected_run_id:
+    if cached_batch_id == selected_run_id:
         return
     session_state["catalog_reconciliation_batch_id"] = None
+    session_state["catalog_reconciliation_status"] = CATALOG_RECONCILIATION_ALL_STATUS
     session_state["catalog_reconciliation_offset"] = 0
-    session_state["catalog_reconciliation_response"] = None
-    session_state["catalog_reconciliation_error"] = None
+    _clear_catalog_reconciliation_cache(session_state)
 
 
 def _fetch_catalog_reconciliation(api_client, session_state) -> dict[str, Any] | None:
@@ -3172,13 +3185,20 @@ def _fetch_catalog_reconciliation(api_client, session_state) -> dict[str, Any] |
     selected_run_id = session_state.get("etl_load_selected_run_id")
     if selected_run_id is None:
         return None
+    # 실패 응답도 배치에 귀속시켜 다른 배치로 이동할 때 함께 무효화합니다.
+    session_state["catalog_reconciliation_batch_id"] = selected_run_id
+    request_params = {
+        "limit": CATALOG_RECONCILIATION_LIMIT,
+        "offset": session_state.get("catalog_reconciliation_offset", 0),
+    }
+    selected_status = session_state.get("catalog_reconciliation_status")
+    if selected_status in CATALOG_RECONCILIATION_STATUS_LABELS:
+        request_params["status"] = selected_status
     try:
         response = api_client.get_catalog_reconciliation(
             int(selected_run_id),
-            limit=CATALOG_RECONCILIATION_LIMIT,
-            offset=session_state.get("catalog_reconciliation_offset", 0),
+            **request_params,
         )
-        session_state["catalog_reconciliation_batch_id"] = selected_run_id
         session_state["catalog_reconciliation_response"] = response
         session_state["catalog_reconciliation_error"] = None
         return response
@@ -3196,12 +3216,23 @@ def _fetch_catalog_reconciliation(api_client, session_state) -> dict[str, Any] |
 
 def _render_catalog_reconciliation(api_client) -> None:
     """Show how this batch differs from the live catalog. Read-only."""
+    synchronize_catalog_reconciliation_batch(st.session_state)
+    if st.session_state.get("catalog_reconciliation_status") is None:
+        st.session_state["catalog_reconciliation_status"] = CATALOG_RECONCILIATION_ALL_STATUS
     st.subheader("상품 동기화 차이")
     st.caption(
         "선택한 ETL 배치에서 정상 staging에 적재된 상품과 현재 운영 카탈로그를 비교한 "
         "조회 전용 보고서입니다. 이 화면은 운영 상품을 변경하지 않습니다."
     )
 
+    st.selectbox(
+        "상품 동기화 차이 상태",
+        options=[CATALOG_RECONCILIATION_ALL_STATUS, *CATALOG_RECONCILIATION_STATUS_LABELS],
+        format_func=lambda value: CATALOG_RECONCILIATION_STATUS_LABELS.get(value, "전체"),
+        key="catalog_reconciliation_status",
+        on_change=_on_catalog_reconciliation_status_change,
+        args=(st.session_state,),
+    )
     response = _fetch_catalog_reconciliation(api_client, st.session_state)
     if response is None:
         error = st.session_state.get("catalog_reconciliation_error")
@@ -3211,8 +3242,25 @@ def _render_catalog_reconciliation(api_client) -> None:
                     "상품 동기화 차이를 불러오지 못했습니다.", error
                 )
             )
+            st.button(
+                "동기화 차이 다시 조회",
+                key="catalog_reconciliation_retry",
+                on_click=_clear_catalog_reconciliation_cache,
+                args=(st.session_state,),
+            )
         return
 
+    total = max(0, int(response.get("total", 0)))
+    offset = st.session_state.get("catalog_reconciliation_offset", 0)
+    if offset > 0 and offset >= total:
+        # 조회 사이에 운영 카탈로그가 달라져 마지막 페이지가 사라진 경우에도 복귀합니다.
+        st.session_state["catalog_reconciliation_offset"] = (
+            max(0, total - 1) // CATALOG_RECONCILIATION_LIMIT
+        ) * CATALOG_RECONCILIATION_LIMIT
+        _clear_catalog_reconciliation_cache(st.session_state)
+        st.rerun()
+
+    st.caption("요약과 필드별 변경 건수는 전체 배치 기준이며, 상품 목록은 선택한 상태 기준입니다.")
     metric_columns = st.columns(4)
     metric_columns[0].metric("신규", response.get("new_count", 0), border=True)
     metric_columns[1].metric("변경", response.get("changed_count", 0), border=True)
@@ -3245,16 +3293,18 @@ def _render_catalog_reconciliation(api_client) -> None:
 
     items = response.get("items") or []
     if not items:
-        st.info("비교할 상품이 없습니다.")
-        return
+        st.info(
+            "선택한 상태에 해당하는 상품이 없습니다."
+            if st.session_state.get("catalog_reconciliation_status") in CATALOG_RECONCILIATION_STATUS_LABELS
+            else "비교할 상품이 없습니다."
+        )
+    else:
+        st.dataframe(
+            build_catalog_reconciliation_item_dataframe(items),
+            width="stretch",
+            hide_index=True,
+        )
 
-    st.dataframe(
-        build_catalog_reconciliation_item_dataframe(items),
-        width="stretch",
-        hide_index=True,
-    )
-
-    total = max(0, int(response.get("total", 0)))
     current_page, total_pages, has_previous, has_next = calculate_etl_pagination(
         total=total,
         limit=CATALOG_RECONCILIATION_LIMIT,
@@ -3272,7 +3322,7 @@ def _render_catalog_reconciliation(api_client) -> None:
             st.session_state["catalog_reconciliation_offset"] -= (
                 CATALOG_RECONCILIATION_LIMIT
             )
-            st.session_state["catalog_reconciliation_response"] = None
+            _clear_catalog_reconciliation_cache(st.session_state)
             st.rerun()
     with next_col:
         if st.button(
@@ -3284,7 +3334,7 @@ def _render_catalog_reconciliation(api_client) -> None:
             st.session_state["catalog_reconciliation_offset"] += (
                 CATALOG_RECONCILIATION_LIMIT
             )
-            st.session_state["catalog_reconciliation_response"] = None
+            _clear_catalog_reconciliation_cache(st.session_state)
             st.rerun()
 
 
@@ -3340,7 +3390,6 @@ def _render_etl_load_detail(api_client) -> None:
             st.info("변환 과정에서 거부된 행이 없습니다.")
     _render_etl_rejections(api_client, detail_response)
 
-    synchronize_catalog_reconciliation_batch(st.session_state)
     _render_catalog_reconciliation(api_client)
 
     with st.expander("파일 SHA-256"):

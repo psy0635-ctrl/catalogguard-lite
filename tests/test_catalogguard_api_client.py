@@ -4121,6 +4121,52 @@ def test_get_catalog_reconciliation_rejects_invalid_response(response):
         client.get_catalog_reconciliation(42)
 
 
+@pytest.mark.parametrize("status", ["new", "changed", "unchanged", "not_observed_in_batch"])
+@pytest.mark.parametrize("offset", [0, 1])
+def test_get_catalog_reconciliation_validates_filtered_total_and_items(status, offset):
+    response = {
+        **CATALOG_RECONCILIATION_RESPONSE,
+        "total": 1,
+        "limit": 1,
+        "offset": offset,
+        "items": [item for item in CATALOG_RECONCILIATION_RESPONSE["items"]
+                  if item["status"] == status] if offset == 0 else [],
+    }
+    client, session = make_client(response=FakeResponse(payload=response))
+    assert client.get_catalog_reconciliation(42, status=status, limit=1, offset=offset) == response
+    assert session.calls[0]["params"] == {"status": status, "limit": 1, "offset": offset}
+    assert response["field_change_counts"] == {"stock": 1}
+
+
+@pytest.mark.parametrize("status", ["", "deleted", "NEW", False, 1, []])
+def test_get_catalog_reconciliation_rejects_invalid_status_before_request(status):
+    client, session = make_client(response=FakeResponse(payload=CATALOG_RECONCILIATION_RESPONSE))
+    with pytest.raises(ValueError):
+        client.get_catalog_reconciliation(42, status=status)
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("change", [
+    {"total": 4},
+    {"items": [{"external_product_id": "WRONG", "status": "new", "changed_fields": {}}]},
+    {"changed_count": -1},
+    {"field_change_counts": {"stock": 0}},
+])
+def test_filtered_response_still_rejects_inconsistent_total_status_and_summary(change):
+    client_module = import_client_module()
+    response = {**CATALOG_RECONCILIATION_RESPONSE, "total": 1,
+                "items": [CATALOG_RECONCILIATION_RESPONSE["items"][1]], **change}
+    client, _ = make_client(response=FakeResponse(payload=response))
+    with pytest.raises(client_module.CatalogGuardApiResponseError):
+        client.get_catalog_reconciliation(42, status="changed")
+
+
+def test_get_catalog_reconciliation_accepts_empty_filter_with_nonzero_global_counts():
+    response = {**CATALOG_RECONCILIATION_RESPONSE, "new_count": 0, "total": 0, "items": []}
+    client, _ = make_client(response=FakeResponse(payload=response))
+    assert client.get_catalog_reconciliation(42, status="new") == response
+
+
 LOGIN_RESPONSE = {
     "access_token": "a.b.c",
     "token_type": "bearer",
