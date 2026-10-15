@@ -793,7 +793,12 @@ def test_catalog_reconciliation_status_filter_browser_pagination_and_recovery(pa
             expect(item_grid).to_have_count(1)
             page.get_by_role("button", name="동기화 차이 다음", exact=True).click()
             expect(page.get_by_text("상품 2 / 2 페이지 · 전체 52개 상품", exact=True)).to_be_visible()
-            grid = _dataframe_grid_with_column(page, "상태")
+            grid = _dataframe_grid_with_column(page, "상태").filter(
+                has=page.locator("th[role='columnheader']").filter(
+                    has_text=re.compile(r"^상품 ID$")
+                )
+            )
+            expect(grid).to_have_count(1)
             expect(grid).to_contain_text(f"REC-{kind}-051")
             expect(grid).to_contain_text(f"REC-{kind}-052")
             expect(page.get_by_role("button", name="동기화 차이 다음", exact=True)).to_be_disabled()
