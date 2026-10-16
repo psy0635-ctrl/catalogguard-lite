@@ -77,7 +77,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, 
 
 ### 현재 unreleased main과 v0.3.0 이후 변경
 
-공식 Release는 v0.3.0입니다. 현재 `main`에는 그 이후의 미출시 변경으로 inspection issue의 관계 행 명시 저장, schema-aware `/ready`, CSV/XLSX Web ETL 업로드와 Golden Rule Quality Regression이 추가됐습니다. 현재 작업 기준은 `INSPECTION_VERSION = "17"`, Alembic single head `20260915_0020`, FastAPI 애플리케이션 버전 `0.1.0`이며, 이 변경들을 v0.3.0 기능으로 소급하지 않습니다.
+공식 Release는 v0.3.0입니다. 현재 `main`에는 그 이후의 미출시 변경으로 inspection issue의 관계 행 명시 저장, schema-aware `/ready`, CSV/XLSX Web ETL 업로드와 Golden Rule Quality Regression, [상품 동기화 차이 상태별 필터(PR #138)](#상품-동기화-차이-상태별-필터pr-138)가 추가됐습니다. 현재 작업 기준은 `INSPECTION_VERSION = "17"`, Alembic single head `20260915_0020`, FastAPI 애플리케이션 버전 `0.1.0`이며, 이 변경들을 v0.3.0 기능으로 소급하지 않습니다.
 
 XLSX는 Web multipart에서만 지원합니다. 정확히 하나의 visible worksheet를 요구하고 formula·macro·external link·merged cell과 과도한 resource 사용을 제한하며, CLI·S3·HTTP feed·Airflow는 계속 CSV-only입니다. 처음에는 XLSX 의존성이 최상위 import로 Airflow runtime까지 전파되는 compatibility regression을 격리 Airflow CI smoke에서 발견했지만, XLSX 경로에서만 불러오는 lazy import로 수정해 CSV-only Airflow 경계와 기존 runtime을 보존했습니다.
 
@@ -931,6 +931,39 @@ ETL 적재가 끝나면 운영자가 실제로 묻는 질문은 "이번 배치�
 조회 전용 Catalog Reconciliation Report를 추가하면서 가장 오래 고민한 것은 `not_observed_in_batch`를 무엇으로 해석할지였습니다. "카탈로그에 있는데 이번 피드에 없다"를 판매 종료나 삭제 후보로 읽으면 화면이 곧바로 유용해지지만, 그 해석이 성립하려면 공급사 피드가 항상 전체 snapshot이어야 합니다. 지금 시스템은 피드가 snapshot인지 부분 delta인지 보장하지 않습니다. 게다가 비교 기준이 정상 staging 상품이라, 원본 CSV에는 있었지만 ETL에서 거부된 행 때문에도 카탈로그 상품이 미관측으로 보일 수 있습니다. 두 경우를 데이터만으로 구분할 수 없어서 상태 이름을 관측 사실 그대로(`not_observed_in_batch`) 두고, API 문서와 화면 문구 양쪽에 삭제·판매 종료가 아니라고 명시했습니다.
 
 상태 이름도 Promotion Preview와 일부러 다르게 붙였습니다. `insert`/`update`는 "반영하면 이렇게 된다"는 행동이고 `new`/`changed`는 "지금 이렇게 다르다"는 관측입니다. 같은 단어를 쓰면 조회 보고서가 실행 계획처럼 읽힙니다. 배치 안에 같은 상품 식별자가 두 번 있으면 어느 행이 맞는지 알 수 없으므로 첫 행을 임의로 고르지 않고 `409`로 거부했고, 운영 카탈로그를 통째로 메모리에 올리는 대신 미관측 건수는 SQL `COUNT`, 목록은 요청한 페이지 구간만 `LIMIT`/`OFFSET`으로 읽도록 했습니다.
+
+### 상품 동기화 차이 상태별 필터(PR #138)
+
+**문제와 목적:** 기존 보고서는 네 상태를 전체 목록으로만 조회했습니다. 변경 상품이나 미관측 상품만 확인하려면 다른 상태가 섞인 페이지를 넘겨야 했습니다. 필요한 상태의 상품 목록을 바로 확인하면서도 배치 전체 상황을 함께 볼 수 있도록 선택적 상태 필터를 추가했습니다. 확인 범위를 좁히는 기능이며 업무 시간 단축이나 운영 성과를 측정한 결과는 아닙니다.
+
+**처리 흐름과 역할:** Streamlit에서 배치와 상태를 선택하면 API Client가 FastAPI의 `GET /api/v1/etl-loads/{etl_load_run_id}/catalog-reconciliation`에 `status`와 페이지 조건을 전달합니다. FastAPI는 viewer 이상 권한과 입력값을 검증하고, DB Service가 PostgreSQL의 정상 staging(운영 반영 전 임시 적재 영역) 상품과 같은 공급사의 현재 카탈로그를 비교합니다. 서버는 상태를 필터링한 뒤 페이지를 계산하고, Streamlit은 반환된 목록·총건수·전체 요약을 표시합니다. 화면에 도착한 한 페이지만 다시 필터링하는 구조가 아닙니다.
+
+| 선택 상태 | 비교 결과 |
+|---|---|
+| `new`(신규) | 정상 staging에만 있는 상품 |
+| `changed`(변경) | 양쪽에 있고 비교 필드가 다른 상품 |
+| `unchanged`(동일) | 양쪽의 비교 필드가 모두 같은 상품 |
+| `not_observed_in_batch`(이번 배치 미관측) | 같은 공급사의 운영 카탈로그에는 있으나 정상 staging에는 없는 상품 |
+
+**구현과 호환성:** [DB Service](../db/catalog_reconciliation_service.py)는 기존 Promotion Preview의 비교 필드·값 정규화를 재사용해 staging 기반 세 상태를 분류합니다. 미관측 상품은 SQL `COUNT`로 세고 필요한 구간만 `LIMIT`/`OFFSET`으로 읽어 운영 카탈로그 전체를 메모리에 올리지 않습니다. `status` 생략 시 기존 전체 조회를 유지하며, 지정 시 `items`·`total`만 선택 상태 기준입니다. 네 상태 요약과 `field_change_counts`는 필터·페이지와 무관하게 전체 배치 기준이므로, 변경 상품을 보는 중에도 다른 상태와 필드별 변화 규모를 함께 확인할 수 있습니다. 응답 필드와 기존 인증·404·중복 식별자 409 처리는 유지하며 잘못된 상태는 422로 거부합니다.
+
+[Streamlit UI](../ui/etl_load_history.py)는 필터 변경 시 첫 페이지로 이동하고 응답·오류 캐시를 비웁니다. 페이지 이동 중에는 필터를 유지하며 다른 배치 선택 시 전체 필터·첫 페이지로 복귀합니다. 빈 결과를 안내하고 API 오류 후 `동기화 차이 다시 조회`로 재시도합니다. PostgreSQL 조회 전용 구조와 기존 DB 스키마를 유지하며, 미관측 상품을 자동 삭제·판매 종료·품절로 판정하지 않습니다. 전체 피드인지 부분 변경분인지, ETL Reject 때문인지 구분할 수 없다는 기존 한계도 유지합니다.
+
+**검증 근거:** [PR #138](https://github.com/psy0635-ctrl/catalogguard-lite/pull/138)의 로컬 실행 기록과 [PostgreSQL·Chromium 통합 테스트](../tests/e2e/test_catalog_reconciliation_browser_e2e.py), 병합 후 main CI 로그를 구분해 확인했습니다. PR은 2026-10-15 16:27:00 KST에 Rebase and merge로 병합됐으며, 병합 후 main은 `3025231e674298e886a55cea56df6b562236546c`입니다. 공식 Release v0.3.0에는 포함되지 않은 미출시 변경입니다.
+
+| 별도 검증 실행 | 결과와 범위 |
+|---|---|
+| 로컬 Service·API·Client·Streamlit 관련 테스트 | **973 passed** |
+| 로컬 PostgreSQL 통합 테스트 | **1 passed, 2 deselected**. 독립 PostgreSQL 18에서 합성 비교 대상 총 208건, 네 상태 각 52건; 다른 공급사 제외, 상태 필터·정렬·50건 단위 페이지 경계 확인 |
+| 로컬 Chromium E2E | **2 passed, 1 deselected**. 운영자 로그인·배치 선택·네 필터 전환·상태별 2페이지 이동·필터 변경 후 첫 페이지·배치 변경 후 전체 필터 복귀·빈 결과·오류 후 재시도 확인 |
+| 후속 로컬 전체 Browser Runner | 별도 **13 passed**. 위 개별 실행과 중복 합산하지 않음 |
+| 병합 후 main CI | [run 38698823868](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/38698823868)의 `test`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate`·`airflow-smoke` **5/5 success** |
+| 해당 main CI의 전체 pytest 단계 | **3581 passed, 2 skipped, 20 deselected**, pytest warning **0건** |
+| 해당 main CI의 별도 async E2E | **1 passed** |
+
+전체 208건의 5페이지 순회는 PostgreSQL/API 통합 테스트에서 확인했고, Chromium은 전체 조회의 5페이지 표시와 다음 페이지 이동, 각 상태의 2페이지 왕복을 확인합니다. 조회 전후 **13개 ORM 테이블의 행 수·해시 Snapshot 일치**와 실제 PostgreSQL 읽기 전용 트랜잭션 내 SELECT만 실행되는 것을 확인했습니다. Fixture 생성·정리는 조회 검증과 분리했으며, sequence·시스템 테이블이나 운영 DB 전체 보존을 입증하는 결과는 아닙니다.
+
+상태 필터 Chromium 실행의 console error·pageerror·요청 실패는 각각 **0건**입니다. 기존 renderer 경고와 Arrow 자동 변환 로그는 별도로 남아 있습니다(PR 기록상 단독 실행 renderer 11건·Arrow 46건, 후속 전체 Runner renderer 21건). 서로 다른 실행의 경고를 합산하거나 이번 기능에서 해결한 것으로 표현하지 않습니다. CI Browser Runner 성공 로그에는 내부 pytest 개별 건수가 출력되지 않으므로 CI를 로컬의 `13 passed`로 표기하지 않습니다. 위 결과는 합성 데이터와 해당 환경의 검증이며 실제 운영 상품·대규모 성능·모든 브라우저의 안정성을 보장하지 않습니다. 기존 10월 10일·12일 검증 수치는 당시 기록으로 유지하며, 이번 문서 수정 중 테스트·데모를 재실행하지 않았습니다.
 
 ### 품질 수치를 나열하는 것과 "좋아졌는가"에 답하는 것을 나눈 기준
 

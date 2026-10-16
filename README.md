@@ -31,6 +31,12 @@ v0.3.0 기준으로는 기존 OpenAI 경로를 유지하면서 optional OpenAI /
 
 [PR #132](https://github.com/psy0635-ctrl/catalogguard-lite/pull/132) 병합 후 `main`은 `62db63b7a18d58bd4bbfa73adef2267664bd72c3`입니다. 같은 파일명의 수정된 XLSX를 재업로드해 Reject 예상 1건에서 0건으로 회복하는 Chromium E2E를 추가하고, 기본·CSV·XLSX Preflight의 DB Snapshot이 빈 ORM metadata로 통과하지 않도록 모델 등록과 필수 테이블 검사를 보강했습니다. [병합 후 main CI](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/38192843271)는 5개 job 모두 성공했으며, 전체 pytest 단계는 **3485 passed, 2 skipped, 18 deselected**, 별도 async E2E는 **1 passed**입니다. 등록 ORM 테이블 데이터 보존의 로컬 계측과 CI 결과는 [10월 12일 검증 기록](docs/mvp_validation.md#2026-10-12-main-검증)에 구분했습니다. 위 10월 10일 결과는 당시 실행 기록으로 유지하며, 이번 보강도 v0.3.0 이후의 미출시 변경입니다.
 
+### 2026-10-15 상품 동기화 차이 상태별 필터
+
+[PR #138](https://github.com/psy0635-ctrl/catalogguard-lite/pull/138)은 2026-10-15 16:27:00 KST에 Rebase and merge로 병합됐으며, 병합 후 `main`은 `3025231e674298e886a55cea56df6b562236546c`입니다. 상품 동기화 차이에 신규·변경·동일·이번 배치 미관측 상태별 조회를 추가했습니다. **공식 Release v0.3.0 이후 main의 미출시 기능**이며, `INSPECTION_VERSION = "17"`과 Alembic revision `20260915_0020`은 유지합니다.
+
+[해당 main CI](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/38698823868)는 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` **5/5 success**입니다. 전체 pytest 단계는 **3581 passed, 2 skipped, 20 deselected**, pytest warning 0건이며, 별도 async E2E는 **1 passed**입니다. 독립 PostgreSQL 18과 Chromium에서 합성 비교 대상 208건(네 상태 각 52건)의 필터·페이지 경계·DB 무변경·오류 후 재시도를 검증한 기록은 [포트폴리오의 PR #138 구현·검증](docs/portfolio_project.md#상품-동기화-차이-상태별-필터pr-138)에 모았습니다. 서로 다른 실행은 합산하지 않으며 실제 운영 상품·성능 검증으로 확대하지 않습니다. 기존 10월 10일·12일 기록도 당시 결과로 유지합니다.
+
 공개 Streamlit 앱은 아래 주소에서 확인할 수 있습니다.
 
 https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
@@ -2446,8 +2452,13 @@ identity는 두 값으로 맞춥니다. `supplier_key`는 `ETLLoadRun.profile_na
 |---|---:|---|
 | `limit` | `50` | `1` 이상 `100` 이하 |
 | `offset` | `0` | 앞에서 건너뛸 상품 수, `0` 이상 |
+| `status` | 생략(전체) | `new`, `changed`, `unchanged`, `not_observed_in_batch` 중 하나 |
 
 상태는 `new`·`changed`·`unchanged`·`not_observed_in_batch` 네 가지이며, 상태별 건수와 `field_change_counts`(어떤 필드가 몇 건 바뀌었는지), 상품별 변경 필드 목록을 반환합니다.
+
+`status`를 생략하면 기존 전체 조회를 유지합니다. 지정하면 서버에서 상태를 필터링한 뒤 `limit`/`offset`을 적용하며, `items`와 `total`은 선택 상태 기준입니다. 네 상태 요약(`new_count`, `changed_count`, `unchanged_count`, `not_observed_in_batch_count`)과 `field_change_counts`는 필터·페이지와 무관하게 전체 배치 기준입니다. 예를 들어 `?status=changed&limit=50&offset=50`은 변경 상품의 두 번째 페이지를 조회합니다. 잘못된 `status`는 HTTP `422`입니다.
+
+Streamlit의 `상품 동기화 차이 상태`에서 전체·신규·변경·동일·이번 배치 미관측을 선택합니다. 필터 변경 시 첫 페이지로 이동하고 응답·오류 캐시를 비우며, 다음·이전 페이지에서는 필터를 유지합니다. 다른 배치를 선택하면 전체 필터·첫 페이지로 돌아가 이전 캐시를 비웁니다. 빈 결과 안내와 `동기화 차이 다시 조회`를 통한 오류 후 재시도를 지원합니다. PostgreSQL은 기존 테이블을 조회하기만 하며, 보고서를 저장하거나 운영 상품을 수정하지 않습니다.
 
 가장 중요한 정책은 **`not_observed_in_batch`를 삭제로 읽지 않는다**는 것입니다. 이 상태는 "카탈로그에는 있는데 이번 배치에서는 관측되지 않았다"는 사실만 뜻하며, 판매 종료·품절·삭제 대상 어느 것도 의미하지 않습니다. 공급사 피드가 전체 snapshot인지 부분 delta인지 시스템이 확정할 수 없기 때문입니다. 또 비교 기준이 정상 staging 상품이므로, 원본 CSV에는 있었지만 ETL에서 거부된 행 때문에 카탈로그 상품이 미관측으로 보일 수도 있습니다. 이 두 경우를 구분할 수 없어 자동 삭제 판단을 하지 않습니다.
 
