@@ -1,6 +1,10 @@
 # 역할: 개인정보 탐지와 마스킹 함수가 원본 노출을 막는지 테스트합니다.
-import pandas as pd
+from pathlib import Path
 
+import pandas as pd
+import pytest
+
+from core.inspection_service import inspect_uploaded_csv
 from core.privacy import (
     create_masked_preview,
     mask_email,
@@ -45,6 +49,8 @@ def test_mask_personal_information_masks_values_inside_sentences():
 
 def test_mask_personal_information_keeps_general_text_unchanged():
     assert mask_personal_information("오버핏 반팔 티셔츠") == "오버핏 반팔 티셔츠"
+    # 공용 마스킹 정책은 확대하지 않고, 계좌 보호는 미리보기 복사본에 적용합니다.
+    assert mask_personal_information("계좌 123-456-789012") == "계좌 123-456-789012"
 
 
 def test_create_masked_preview_keeps_original_dataframe_unchanged():
@@ -124,3 +130,105 @@ def test_create_masked_preview_removes_raw_personal_information_from_preview_row
     assert "010-****-5678" in preview_text
     assert "se****@test.com" in preview_text
     assert "000000-*******" in preview_text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("테스트 계좌 123-456-789012", "테스트 계좌 123-***-***012"),
+        ("입금 123-456-789012", "입금 123-***-***012"),
+        ("송금 123-456-789012", "송금 123-***-***012"),
+        ("은행 123-456-789012", "은행 123-***-***012"),
+        ("예금주 123-456-789012", "예금주 123-***-***012"),
+        ("상품 코드 123-456-789012", "상품 코드 123-456-789012"),
+        ("계좌 123-456-789012 2026", "계좌 123-***-***012 2026"),
+        ("계좌 123-456-789012 999999999", "계좌 123-***-***012 999999999"),
+        (
+            "계좌 123-456-789012 999999999999999",
+            "계좌 123-***-***012 999999999999999",
+        ),
+        ("계좌 123 456 789012 2026", "계좌 123-***-***012 2026"),
+        (
+            "계좌 123 456 789012 999999999999999",
+            "계좌 123-***-***012 999999999999999",
+        ),
+        (
+            "계좌 123-456-789012 123-456-789012",
+            "계좌 123-***-***012 123-***-***012",
+        ),
+        (
+            "계좌 123-456-789012 010-000-0000",
+            "계좌 123-***-***012 010-****-0000",
+        ),
+        ("계좌 123 456 789012", "계좌 123-***-***012"),
+        (
+            "계좌 123 456 789012 123 456 789012",
+            "계좌 123-***-***012 123-***-***012",
+        ),
+        ("계좌 12345 67890 1234", "계좌 123-***-***234"),
+        ("계좌 1234567890 1234", "계좌 123-***-***234"),
+        (
+            "계좌 1234 5678901234 1234 5678901234",
+            "계좌 123-***-***234 123-***-***234",
+        ),
+        (
+            "상품 코드 123-456-789012 123-456-789012",
+            "상품 코드 123-456-789012 123-456-789012",
+        ),
+        (
+            "계좌 123-456-789012/123-456-789012",
+            "계좌 123-***-***012/123-***-***012",
+        ),
+        (
+            "계좌 123456789012 123 456 789012 123-456-789012",
+            "계좌 123-***-***012 123-***-***012 123-***-***012",
+        ),
+        (
+            "계좌 123-456-789012 000000-3000000",
+            "계좌 123-***-***012 000000-*******",
+        ),
+        ("계좌 999999999 999999999999999", "계좌 999999999 999999999999999"),
+        (
+            "계좌 123456789012 / 123-456-789012 / 123456789012",
+            "계좌 123-***-***012 / 123-***-***012 / 123-***-***012",
+        ),
+        (
+            "문의 qa-user@example.com 계좌 010-000-0000 01000000000 "
+            "000000-3000000 000000-3000000 123-456-789012",
+            "문의 qa*****@example.com 계좌 010-****-0000 010****0000 "
+            "000000-******* 000000-******* 123-***-***012",
+        ),
+    ],
+)
+def test_create_masked_preview_masks_all_account_occurrences_with_context(text, expected):
+    source = pd.DataFrame({"description": [text]})
+    before = source.copy(deep=True)
+
+    preview = create_masked_preview(source)
+
+    assert preview.loc[0, "description"] == expected
+    pd.testing.assert_frame_equal(source, before)
+
+
+@pytest.mark.parametrize(
+    "column", ["product_group_id", "product_id", "stock", "price", "sale_price"]
+)
+def test_create_masked_preview_keeps_account_text_in_excluded_columns(column):
+    source = pd.DataFrame({column: ["계좌 123-456-789012"]})
+
+    pd.testing.assert_frame_equal(create_masked_preview(source), source)
+
+
+def test_golden_account_preview_masks_number_without_changing_source():
+    path = Path(__file__).parent / "quality" / "golden_catalog.csv"
+    report = inspect_uploaded_csv(path.name, path.read_bytes())
+    account_rows = report.source_dataframe[
+        report.source_dataframe["product_id"] == "P-ACCOUNT"
+    ]
+    assert len(account_rows) == 1
+    index = account_rows.index[0]
+
+    assert report.source_dataframe.loc[index, "description"] == "테스트 계좌 123-456-789012"
+    assert report.masked_preview_dataframe.loc[index, "description"] == (
+        "테스트 계좌 123-***-***012"
+    )

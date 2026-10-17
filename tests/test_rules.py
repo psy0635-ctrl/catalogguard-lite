@@ -889,14 +889,20 @@ def test_check_content_safety_deduplicates_repeated_personal_information_in_fiel
         make_product(
             description=(
                 "문의 test@example.com test@example.com "
-                "010-1234-5678 01012345678"
+                "010-1234-5678 01012345678 "
+                "계좌 123-456-789012 / 123456789012"
             )
         )
     ]
 
     issues = check_prohibited_and_personal_information(products)
 
-    assert [issue.rule for issue in issues] == ["email_address", "phone_number"]
+    assert [issue.rule for issue in issues] == [
+        "email_address", "phone_number", "suspected_bank_account"
+    ]
+    assert issues[-1].message == (
+        "field 'description' contains suspected bank account '123-***-***012'"
+    )
 
 
 def test_check_content_safety_skips_blank_scanned_fields():
