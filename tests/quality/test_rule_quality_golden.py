@@ -430,3 +430,90 @@ def test_golden_rule_quality_matches_expected_issues():
     result = evaluate_golden_issues(expected_issues, report.issues)
 
     assert result.is_clean, format_evaluation_failure(result)
+
+    assert report.summary.total_products == 42
+    assert report.summary.total_issues == 40
+    assert report.summary.error_count == 19
+    assert report.summary.warning_count == 21
+    assert len(report.issues) == 40
+    assert len(report.result_records) == 40
+    assert len(report.result_dataframe) == 40
+
+    color_records = [
+        (index, record)
+        for index, record in enumerate(report.result_records)
+        if record["source_row_number"] == 8
+        and record["오류 항목"] == "색상 표기 비표준"
+    ]
+    assert len(color_records) == 1
+    result_index, color_record = color_records[0]
+
+    expected_display = {
+        "검수 상태": "주의",
+        "오류 항목": "색상 표기 비표준",
+        "상품 그룹 ID": "G-COLOR",
+        "상품 ID": "P-COLOR",
+        "오류 이유": "색상 '블랙'은 표준값 'BLACK'으로 통일하는 것이 좋습니다.",
+        "수정 권장사항": "오류 이유에 표시된 표준 색상값으로 수정하세요.",
+        "위험 수준": "낮음",
+    }
+    assert color_record == {
+        **expected_display,
+        "source_row_number": 8,
+        "related_source_rows": [],
+    }
+
+    assert "source_row_number" not in report.result_dataframe.columns
+    # 표시 표는 정렬된 result_records 순서를 따르므로 찾은 레코드의 위치를 사용합니다.
+    assert report.result_dataframe.iloc[result_index].to_dict() == expected_display
+
+    for source_row, group_id, related_rows in (
+        (24, "G-DUP-ID-A", [25]),
+        (25, "G-DUP-ID-B", [24]),
+    ):
+        duplicate_issues = [
+            issue for issue in report.issues
+            if issue.source_row_number == source_row
+            and issue.rule == "duplicate_product_id"
+        ]
+        assert len(duplicate_issues) == 1
+        duplicate_issue = duplicate_issues[0]
+        assert duplicate_issue.severity == "error"
+        assert duplicate_issue.product_id == "P-DUP-ID"
+        assert duplicate_issue.product_group_id == group_id
+        assert duplicate_issue.source_row_number == source_row
+        assert duplicate_issue.related_source_rows == related_rows
+
+        duplicate_records = [
+            (index, record)
+            for index, record in enumerate(report.result_records)
+            if record["source_row_number"] == source_row
+            and record["오류 항목"] == "상품 ID 중복"
+        ]
+        assert len(duplicate_records) == 1
+        duplicate_index, duplicate_record = duplicate_records[0]
+        expected_duplicate_display = {
+            "검수 상태": "오류",
+            "오류 항목": "상품 ID 중복",
+            "상품 그룹 ID": group_id,
+            "상품 ID": "P-DUP-ID",
+            "오류 이유": (
+                "동일한 상품 ID 'P-DUP-ID'가 여러 상품에 사용되었습니다. "
+                "중복 행: 24, 25."
+            ),
+            "수정 권장사항": "각 상품에 고유한 상품 ID를 입력하십시오.",
+            "위험 수준": "높음",
+        }
+        assert duplicate_record == {
+            **expected_duplicate_display,
+            "source_row_number": source_row,
+            "related_source_rows": related_rows,
+        }
+        assert (
+            report.result_dataframe.iloc[duplicate_index].to_dict()
+            == expected_duplicate_display
+        )
+
+    assert {"source_row_number", "related_source_rows"}.isdisjoint(
+        report.result_dataframe.columns
+    )
