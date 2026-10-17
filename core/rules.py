@@ -33,23 +33,24 @@ from core.group_size_consistency_detector import (
 )
 from core.models import Product, ValidationIssue
 from core.price_anomaly_detector import find_category_price_anomalies
+# 계좌 도구를 공유하되 기존 core.rules import 경로도 유지합니다.
 from core.privacy import (
+    BANK_ACCOUNT_PATTERN,
     EMAIL_PATTERN,
+    _find_suspected_bank_account_matches_with_context,
+    _has_bank_account_context_from_normalized_text,
     extract_digits,
     find_phone_number_matches,
     find_resident_registration_number_matches,
+    find_suspected_bank_account_matches,
+    has_bank_account_context,
+    mask_account_number,
     mask_email,
     mask_phone_number,
     mask_resident_registration_number,
+    normalize_content_text,
+    spans_overlap,
 )
-
-
-BANK_ACCOUNT_PATTERN = re.compile(r"(?<![\d-])(?:\d[-\s]?){9,13}\d(?![-\s]?\d)")
-
-
-def normalize_content_text(value: str) -> str:
-    """내용 검색을 위해 공백과 영문 대소문자를 정리합니다."""
-    return " ".join(value.split()).casefold()
 
 
 def iter_scannable_fields(product: Product):
@@ -111,74 +112,6 @@ def find_unique_matches_by_key(matches: list[re.Match[str]], key_func) -> list[r
         unique_matches.append(match)
 
     return unique_matches
-
-
-def spans_overlap(first: tuple[int, int], second: tuple[int, int]) -> bool:
-    # 두 정규식 결과가 같은 글자 구간을 가리키는지 확인합니다.
-    return first[0] < second[1] and second[0] < first[1]
-
-
-def _has_bank_account_context_from_normalized_text(
-    normalized_text: str,
-    normalized_context_terms: list[tuple[str, str]],
-) -> bool:
-    return any(
-        normalized_term in normalized_text
-        for _, normalized_term in normalized_context_terms
-    )
-
-
-def has_bank_account_context(text: str) -> bool:
-    # 긴 숫자만으로 계좌라고 판단하지 않도록, 주변 문맥어가 있는지 먼저 봅니다.
-    normalized_text = normalize_content_text(text)
-    normalized_context_terms = _build_normalized_terms(BANK_ACCOUNT_CONTEXT_TERMS)
-    return _has_bank_account_context_from_normalized_text(
-        normalized_text,
-        normalized_context_terms,
-    )
-
-
-def _find_suspected_bank_account_matches_with_context(
-    text: str,
-    occupied_spans: list[tuple[int, int]],
-    has_context: bool,
-) -> list[re.Match[str]]:
-    if not has_context:
-        return []
-
-    matches = []
-    seen_numbers = set()
-    for match in BANK_ACCOUNT_PATTERN.finditer(text):
-        # 이미 전화번호나 주민등록번호로 잡힌 숫자는 계좌번호로 중복 표시하지 않습니다.
-        if any(spans_overlap(match.span(), occupied_span) for occupied_span in occupied_spans):
-            continue
-
-        digits = extract_digits(match.group())
-        if not 10 <= len(digits) <= 14:
-            continue
-        if digits in seen_numbers:
-            continue
-
-        seen_numbers.add(digits)
-        matches.append(match)
-
-    return matches
-
-
-def find_suspected_bank_account_matches(
-    text: str,
-    occupied_spans: list[tuple[int, int]],
-) -> list[re.Match[str]]:
-    return _find_suspected_bank_account_matches_with_context(
-        text,
-        occupied_spans,
-        has_bank_account_context(text),
-    )
-
-
-def mask_account_number(value: str) -> str:
-    digits = extract_digits(value)
-    return f"{digits[:3]}-***-***{digits[-3:]}"
 
 
 def check_duplicate_product_id(products: list[Product]) -> list[ValidationIssue]:

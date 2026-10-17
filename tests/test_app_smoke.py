@@ -325,6 +325,65 @@ def test_app_initial_render_without_upload(monkeypatch):
     assert app.session_state["history_status_query"] is None
 
 
+def test_app_upload_masks_account_preview_and_preserves_result_display(monkeypatch):
+    csv_bytes = (
+        "product_group_id,product_id,product_name,category,color,size,stock,price,image_path,description\n"
+        "G-ACCOUNT,P-ACCOUNT,기본 티셔츠,TOP,BLACK,M,10,19900,image.jpg,테스트 계좌 123-456-789012\n"
+    ).encode("utf-8")
+    response = {
+        "inspection_run_id": 10,
+        "created": True,
+        "summary": {
+            "total_products": 1,
+            "total_issues": 1,
+            "error_count": 0,
+            "warning_count": 1,
+        },
+        "results": [
+            {
+                "status": "주의",
+                "product_group_id": "G-ACCOUNT",
+                "product_id": "P-ACCOUNT",
+                "error_field": "계좌번호 의심",
+                "reason": (
+                    "상품 설명에 계좌번호로 의심되는 값 '123-***-***012'이 포함되어 있습니다."
+                ),
+                "recommendation": "계좌번호가 맞는지 확인하고 개인 금융정보라면 제거하세요.",
+                "risk_level": "중간",
+            }
+        ],
+    }
+    api_client = FakeInspectionApiClient(
+        detail_responses=[{
+            **response,
+            "source_filename": "account.csv",
+            "created_at": "2026-10-17T12:00:00+09:00",
+        }]
+    )
+    monkeypatch.setattr(api_client, "create_inspection", lambda **kwargs: response)
+    monkeypatch.setattr(catalogguard_api, "create_catalogguard_api_client", lambda: api_client)
+    monkeypatch.setattr(ui_auth, "get_authenticated_api_client", lambda: api_client)
+    app = run_authenticated_app_test(timeout=10)
+
+    app.file_uploader[0].upload("account.csv", csv_bytes, "text/csv").run(timeout=10)
+
+    assert len(app.exception) == 0
+    preview = app.dataframe[0].value
+    assert preview["product_id"].tolist() == ["P-ACCOUNT"]
+    assert preview["description"].tolist() == ["테스트 계좌 123-***-***012"]
+    assert "123-456-789012" not in preview.to_csv(index=False)
+
+    find_widget(app.button, "검수 실행 및 이력 저장").click().run(timeout=10)
+
+    assert len(app.exception) == 0
+    results = find_result_dataframe(app)
+    assert results["상품 ID"].tolist() == ["P-ACCOUNT"]
+    assert results["오류 이유"].tolist() == [
+        "상품 설명에 계좌번호로 의심되는 값 '123-***-***012'이 포함되어 있습니다."
+    ]
+    assert results["위험 수준"].tolist() == ["중간"]
+
+
 def test_app_upload_filters_and_downloads_group_category_results(monkeypatch):
     api_client = FakeInspectionApiClient(created=True)
     local_inspection_calls = []
