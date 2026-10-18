@@ -157,7 +157,47 @@ jobs:
 
           verification_passed=true
       - name: Run tests
-        run: python -m pytest -q
+        run: python -m pytest -q --junitxml="${RUNNER_TEMP}/catalogguard-pytest.xml"
+      - name: Verify v17-v18 PostgreSQL privacy regressions
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          expected = (
+              "test_privacy_v18_nested_email_reason_persists_to_postgres",
+              "test_privacy_v17_v18_same_hash_coexist_in_postgres",
+              "test_privacy_v17_v18_postgres_dedup_and_unique_index",
+              "test_privacy_v17_postgres_detail_and_http_preserve_original",
+              "test_privacy_v17_v18_postgres_comparison_rejected_with_http_422",
+          )
+          report = Path(os.environ["RUNNER_TEMP"]) / "catalogguard-pytest.xml"
+          try:
+              root = ET.parse(report).getroot()
+          except (OSError, ET.ParseError):
+              raise SystemExit("PostgreSQL regression JUnit report is missing or invalid")
+
+          cases = list(root.iter("testcase"))
+          problems = []
+          for name in expected:
+              matches = [case for case in cases if case.get("name") == name]
+              if len(matches) != 1:
+                  problems.append(f"{name}: expected exactly one result, found {len(matches)}")
+                  continue
+              case = matches[0]
+              if case.get("classname") != "tests.test_inspection_persistence":
+                  problems.append(f"{name}: unexpected test module")
+              for status in ("skipped", "failure", "error"):
+                  if case.find(status) is not None:
+                      problems.append(f"{name}: {status}")
+          if problems:
+              raise SystemExit("\n".join(problems))
+
+          for name in expected:
+              print(f"{name}: PASS")
+          print("5/5 explicit PostgreSQL regression cases passed")
+          PY
       - name: Configure async inspection job directory
         shell: bash
         run: echo "INSPECTION_JOB_DIR=${RUNNER_TEMP}/catalogguard-inspection-jobs" >> "$GITHUB_ENV"
