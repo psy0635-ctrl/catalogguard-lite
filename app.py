@@ -21,7 +21,7 @@ from core.presentation import (
     calculate_dataframe_height,
     filter_result_dataframe,
 )
-from core.privacy import create_masked_preview
+from core.privacy import create_masked_preview, mask_inspection_reason
 from core.product_template import (
     build_product_template_csv,
     get_product_template_filename,
@@ -611,7 +611,7 @@ def build_history_detail_dataframe(results: list[dict]) -> pd.DataFrame:
             "오류 항목": result.get("error_field"),
             "상품 그룹 ID": result.get("product_group_id"),
             "상품 ID": result.get("product_id"),
-            "오류 이유": result.get("reason"),
+            "오류 이유": mask_inspection_reason(result.get("reason")),
             "수정 권장사항": result.get("recommendation"),
             "위험 수준": result.get("risk_level"),
         }
@@ -631,7 +631,7 @@ def build_comparison_changed_items_dataframe(
             "상품 ID": item.get("product_id"),
             "검수 상태": item.get("status"),
             "오류 항목": item.get("error_field"),
-            "오류 이유": item.get("reason"),
+            "오류 이유": mask_inspection_reason(item.get("reason")),
             "수정 권장사항": item.get("recommendation"),
             "위험 수준": item.get("risk_level"),
             "개수": item.get("count"),

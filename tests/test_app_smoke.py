@@ -1,4 +1,8 @@
 # 역할: Streamlit 앱이 업로드 전 초기 화면에서 예외 없이 렌더링되는지 테스트합니다.
+import copy
+
+import pytest
+
 from clients import catalogguard_api
 from conftest import build_authenticated_app_test, run_authenticated_app_test
 from core import inspection_service
@@ -1279,3 +1283,39 @@ def test_app_api_error_does_not_show_stale_success_result(monkeypatch):
     assert "saved_inspection_run_id" not in app.session_state
     assert "current_inspection_detail_response" not in app.session_state
     assert all(metric.label != "전체 문제 수" for metric in app.metric)
+
+
+@pytest.mark.parametrize("background", [False, True])
+def test_legacy_privacy_cached_and_async_results_are_masked_at_display(monkeypatch, background):
+    raw = "계좌 123-456-789012 qa-user@example.com 010-0000-0000 000000-3000000"
+    masked = "계좌 123-***-***012 qa*****@example.com 010-****-0000 000000-*******"
+    detail = make_detail_response()
+    detail["results"][0]["reason"] = raw
+    detail["results"][0]["source_row_number"] = 24
+    before = copy.deepcopy(detail)
+    api_client = FakeInspectionApiClient(
+        detail_responses=[detail], async_statuses=[make_job_status_response("succeeded")],
+    )
+    monkeypatch.setattr(api_client, "create_inspection", lambda **kwargs: detail)
+    monkeypatch.setattr(catalogguard_api, "create_catalogguard_api_client", lambda: api_client)
+    monkeypatch.setattr(ui_auth, "get_authenticated_api_client", lambda: api_client)
+    app = run_authenticated_app_test(timeout=10)
+    if background:
+        find_widget(app.radio, "검수 방식").set_value("백그라운드 검수").run(timeout=10)
+    app.file_uploader[0].upload("products.csv", GROUP_CATEGORY_TEST_CSV, "text/csv").run(timeout=10)
+    if background:
+        find_widget(app.button, "백그라운드 검수 시작").click().run(timeout=10)
+        find_widget(app.button, "상태 새로고침").click().run(timeout=10)
+    else:
+        find_widget(app.button, "검수 실행 및 이력 저장").click().run(timeout=10)
+    assert len(app.exception) == 0
+    assert find_result_dataframe(app)["오류 이유"].tolist()[0] == masked
+    cached_before = copy.deepcopy(app.session_state["current_inspection_detail_response"])
+    detail_calls = list(api_client.detail_calls)
+    app.run(timeout=10)
+    assert len(app.exception) == 0
+    assert find_result_dataframe(app)["오류 이유"].tolist()[0] == masked
+    assert app.session_state["current_inspection_detail_response"] == cached_before
+    assert cached_before["results"][0]["reason"] == raw
+    assert api_client.detail_calls == detail_calls
+    assert detail == before

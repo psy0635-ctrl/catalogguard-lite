@@ -26,6 +26,7 @@ from api.schemas import (
 )
 from config.settings import INSPECTION_VERSION, MAX_UPLOAD_SIZE_BYTES
 from core.inspection_service import InspectionReport, inspect_dataframe
+from core.privacy import mask_inspection_reason
 from core.upload_validator import (
     CsvUploadValidationError,
     validate_and_read_uploaded_csv,
@@ -91,6 +92,7 @@ def build_inspection_response(
             for result_column, api_field in RESULT_FIELD_MAP.items()
         }
         item_data["source_row_number"] = row.get("source_row_number")
+        item_data["reason"] = mask_inspection_reason(item_data["reason"])
         result_items.append(InspectionResultItem(**item_data))
 
     return InspectionResponse(
@@ -118,7 +120,7 @@ def build_inspection_detail_response(
             product_group_id=_clean_text_value(result.product_group_id),
             product_id=_clean_text_value(result.product_id),
             error_field=_clean_text_value(result.error_field),
-            reason=_clean_text_value(result.reason),
+            reason=mask_inspection_reason(_clean_text_value(result.reason)),
             recommendation=_clean_text_value(result.recommendation),
             risk_level=_clean_text_value(result.risk_level),
             source_row_number=getattr(result, "source_row_number", None),
@@ -223,7 +225,7 @@ def build_inspection_comparison_response(
                 product_id=item.product_id,
                 status=item.status,
                 error_field=item.error_field,
-                reason=item.reason,
+                reason=mask_inspection_reason(_clean_text_value(item.reason)),
                 recommendation=item.recommendation,
                 risk_level=item.risk_level,
                 count=item.count,

@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from core import privacy
 from core.inspection_service import inspect_uploaded_csv
 from core.privacy import (
     create_masked_preview,
@@ -16,6 +17,74 @@ from core.privacy import (
 
 def test_mask_phone_number_masks_hyphenated_phone_number():
     assert mask_phone_number("010-1234-5678") == "010-****-5678"
+
+
+def test_nested_email_is_fully_masked_on_first_call():
+    assert privacy.mask_inspection_reason("ref@qa.user@example.com") == "re*@qa*****@example.com"
+
+
+def test_nested_email_masking_is_idempotent():
+    once = privacy.mask_inspection_reason("ref@qa.user@example.com")
+    assert privacy.mask_inspection_reason(once) == once
+
+
+def test_nested_email_does_not_leave_overlapping_original_address():
+    assert "qa.user@example.com" not in privacy.mask_inspection_reason("ref@qa.user@example.com")
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("문의 ref@qa.user@example.com 확인", "문의 re*@qa*****@example.com 확인"),
+    ("ref@qa.user@example.com / ref@qa.user@example.com", "re*@qa*****@example.com / re*@qa*****@example.com"),
+    ("qa-user@example.com other@test.org", "qa*****@example.com ot***@test.org"),
+    ("re*@qa*****@example.com", "re*@qa*****@example.com"),
+    ("계좌 123-456-789012 ref@qa.user@example.com", "계좌 123-***-***012 re*@qa*****@example.com"),
+    ("ref@qa.user@example.com 010-0000-0000 000000-3000000", "re*@qa*****@example.com 010-****-0000 000000-*******"),
+    ("상품 코드 123-456-789012 ref@qa.user@example.com", "상품 코드 123-456-789012 re*@qa*****@example.com"),
+    ("@@@@@@", "@@@@@@"),
+    ("ref@@qa.user@example.com", "ref@@qa*****@example.com"),
+    ("a@b.cd@e.fg", "a*@b.**@e.fg"),
+    ("ref@qa.user@example.com@tail.test", "re*@qa*****@ex*********@tail.test"),
+    ("기본 상품 123456789012", "기본 상품 123456789012"),
+])
+def test_nested_email_boundaries_keep_fixed_output_and_repeat_stability(text, expected):
+    assert privacy.mask_inspection_reason(text) == expected
+    assert privacy.mask_inspection_reason(expected) == expected
+
+
+def test_nested_email_long_chains_and_repeated_at_signs():
+    cases = [
+        ("ref@" + "qa.user@" * 2000 + "example.com", "re*@" + "qa*****@" * 2000 + "example.com"),
+        ("ref@qa.user@example.com " * 1000, "re*@qa*****@example.com " * 1000),
+        ("@" * 10000, "@" * 10000),
+    ]
+    for text, expected in cases:
+        assert mask_personal_information(text) == expected
+        assert privacy.mask_inspection_reason(text) == expected
+        assert privacy.mask_inspection_reason(expected) == expected
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("계좌 123-456-789012", "계좌 123-***-***012"),
+    ("qa-user@example.com", "qa*****@example.com"),
+    ("010-0000-0000", "010-****-0000"),
+    ("000000-3000000", "000000-*******"),
+    ("상품 코드 123-456-789012", "상품 코드 123-456-789012"),
+    (
+        "계좌 123-456-789012 123 456 789012 2026",
+        "계좌 123-***-***012 123-***-***012 2026",
+    ),
+    (
+        "계좌 123-456-789012 010-0000-0000 000000-3000000 qa-user@example.com",
+        "계좌 123-***-***012 010-****-0000 000000-******* qa*****@example.com",
+    ),
+    ("계좌 123-***-***012 qa*****@example.com", "계좌 123-***-***012 qa*****@example.com"),
+    ("", ""),
+])
+def test_mask_inspection_reason_protects_private_text_and_is_idempotent(text, expected):
+    masked = privacy.mask_inspection_reason(text)
+
+    assert masked == expected
+    assert privacy.mask_inspection_reason(masked) == expected
 
 
 def test_mask_phone_number_masks_plain_phone_number():
@@ -231,4 +300,15 @@ def test_golden_account_preview_masks_number_without_changing_source():
     assert report.source_dataframe.loc[index, "description"] == "테스트 계좌 123-456-789012"
     assert report.masked_preview_dataframe.loc[index, "description"] == (
         "테스트 계좌 123-***-***012"
+    )
+
+
+@pytest.mark.parametrize("text", [
+    "product_name 'qa-user@example.com '한정판'' normalized to 'qauserexamplecom한정판' duplicates rows 24, 25 with product_ids 'P1, P2'",
+    "product_name '계좌 123-456-789012 '한정판'' normalized to '계좌123456789012한정판' duplicates rows 24, 25 with product_ids 'P1, P2'",
+])
+@pytest.mark.parametrize("prefix", ["", "\'=", "정상 설명\n"])
+def test_legacy_privacy_internal_duplicate_reason_uses_safe_fallback(text, prefix):
+    assert privacy.mask_inspection_reason(prefix + text) == (
+        "검수 상세 설명을 안전하게 표시할 수 없습니다. 오류 항목과 원본 행을 확인하세요."
     )

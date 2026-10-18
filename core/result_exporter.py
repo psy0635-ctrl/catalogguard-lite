@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 import pandas as pd
 
 from core.presentation import SEVERITY_LABELS, SEVERITY_ORDER
+from core.privacy import mask_inspection_reason, mask_result_reason_columns
 
 
 DEFAULT_RESULT_FILENAME = "catalogguard_validation_results.csv"
@@ -49,7 +50,7 @@ def sanitize_csv_cell(value: object) -> object:
 
 def prepare_export_dataframe(result_df: pd.DataFrame) -> pd.DataFrame:
     """원본 결과 DataFrame을 수정하지 않고 다운로드용 복사본을 만듭니다."""
-    export_df = result_df.copy(deep=True)
+    export_df = mask_result_reason_columns(result_df)
 
     for column in export_df.columns:
         values = export_df[column].tolist()
@@ -144,6 +145,8 @@ def _values_in_input_order(
     values: list[str] = []
     for issue in issues:
         value = "" if issue.get(field) is None else str(issue.get(field))
+        if field == "reason":
+            value = mask_inspection_reason(value)
         if distinct and value in values:
             continue
         values.append(value)

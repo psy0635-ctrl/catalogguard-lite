@@ -159,8 +159,27 @@ def _mask_pattern(
     return pattern.sub(lambda match: masker(match.group()), text)
 
 
+def _mask_overlapping_emails(text: str) -> str:
+    """원본에서 겹치는 이메일을 찾고 서로 겹치지 않는 아이디 부분만 치환합니다."""
+    parts = []
+    cursor = search_start = 0
+    # 매번 @ 다음에서 탐색하므로 후보 수는 원문의 @ 개수를 넘지 않습니다.
+    for _ in range(text.count("@")):
+        match = EMAIL_PATTERN.search(text, search_start)
+        if match is None:
+            break
+        at_index = text.index("@", match.start(), match.end())
+        parts.append(text[cursor:match.start()])
+        parts.append(mask_email(match.group()).split("@", 1)[0])
+        cursor = at_index
+        # match.end()로 건너뛰면 도메인과 겹치는 다음 이메일을 놓칩니다.
+        search_start = at_index + 1
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
 def mask_personal_information(text: str) -> str:
-    masked_text = _mask_pattern(text, EMAIL_PATTERN, mask_email)
+    masked_text = _mask_overlapping_emails(text)
     masked_text = _mask_pattern(masked_text, MOBILE_PHONE_PATTERN, mask_phone_number)
     masked_text = _mask_pattern(masked_text, LANDLINE_PHONE_PATTERN, mask_phone_number)
     masked_text = _mask_pattern(
@@ -195,7 +214,7 @@ def _find_preview_account_matches(
                 continue
             if best is not None and end <= best.end():
                 continue
-            # 미리보기에서만 공백을 끝 경계로 시험하며, 내부 공백은 가장 긴 후보에 남깁니다.
+            # 표시용 문자열에서 공백을 끝 경계로 시험하며, 내부 공백은 가장 긴 후보에 남깁니다.
             candidate = BANK_ACCOUNT_PATTERN.fullmatch(text, start, end)
             if candidate and not any(
                 spans_overlap(candidate.span(), span) for span in occupied_spans
@@ -207,24 +226,54 @@ def _find_preview_account_matches(
     return matches
 
 
-def _mask_preview_value(value):
-    if not isinstance(value, str):
-        return value
-    if value == "":
-        return value
+def mask_inspection_reason(text: str | None) -> str | None:
+    """표시용 설명의 개인정보와 계좌 의심 값을 기존 문맥 기준으로 보호합니다."""
+    if text is None:
+        return None
+    # v17의 파싱 실패 원문에는 정규화로 패턴이 사라진 개인정보도 들어 있습니다.
+    if (
+        re.search(r"(?:^|\n)(?:'?[=+\-@])?product_name '", text)
+        and "' normalized to '" in text
+        and " duplicates rows " in text
+        and " with product_ids '" in text
+    ):
+        return "검수 상세 설명을 안전하게 표시할 수 없습니다. 오류 항목과 원본 행을 확인하세요."
+    return _mask_private_text(text)
+
+
+def mask_result_reason_columns(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """식별자와 숫자 열을 보존하고 이유 열만 보호한 출력 복사본을 만듭니다."""
+    protected = dataframe.copy(deep=True)
+    for column in ("오류 이유", "reason"):
+        if column in protected.columns:
+            protected[column] = pd.Series(
+                [mask_inspection_reason(value) if isinstance(value, str) else value
+                 for value in protected[column]],
+                index=protected.index, dtype=object,
+            )
+    return protected
+
+
+def _mask_private_text(text: str) -> str:
     # 원본 위치에서 겹침을 판단하고 뒤에서부터 치환해 앞쪽 위치가 밀리지 않게 합니다.
     occupied_spans = [
         match.span()
         for match in [
-            *find_phone_number_matches(value),
-            *find_resident_registration_number_matches(value),
+            *find_phone_number_matches(text),
+            *find_resident_registration_number_matches(text),
         ]
     ]
-    account_matches = _find_preview_account_matches(value, occupied_spans)
+    account_matches = _find_preview_account_matches(text, occupied_spans)
     for match in reversed(account_matches):
         start, end = match.span()
-        value = f"{value[:start]}{mask_account_number(match.group())}{value[end:]}"
-    return mask_personal_information(value)
+        text = f"{text[:start]}{mask_account_number(match.group())}{text[end:]}"
+    return mask_personal_information(text)
+
+
+def _mask_preview_value(value):
+    if not isinstance(value, str) or value == "":
+        return value
+    return _mask_private_text(value)
 
 
 def create_masked_preview(dataframe: pd.DataFrame) -> pd.DataFrame:

@@ -1591,3 +1591,33 @@ def test_render_history_detail_passes_complete_dataframe_to_statistics_before_ta
         ("dataframe", None)
     )
     pd.testing.assert_frame_equal(fake_st.dataframes[0][1], expected_dataframe)
+
+
+@pytest.mark.parametrize(("raw", "masked"), [
+    ("계좌 123-456-789012", "계좌 123-***-***012"),
+    ("qa-user@example.com", "qa*****@example.com"),
+    ("ref@qa.user@example.com", "re*@qa*****@example.com"),
+    ("010-0000-0000", "010-****-0000"),
+    ("000000-3000000", "000000-*******"),
+])
+def test_legacy_privacy_history_comparison_and_csv_copy_reasons(app_module, raw, masked):
+    import io
+
+    results = [{"status": "오류", "error_field": "상품명 중복", "product_group_id": "G001",
+                "product_id": "P001", "reason": raw, "recommendation": "확인하세요.",
+                "risk_level": "높음", "source_row_number": 24, "side": "base_only", "count": 2}]
+    before = copy.deepcopy(results)
+    detail = app_module.build_history_detail_dataframe(results)
+    comparison = app_module.build_comparison_changed_items_dataframe(results, side="base_only")
+    assert detail["오류 이유"].tolist() == [masked]
+    pd.testing.assert_frame_equal(app_module.build_history_detail_dataframe(results), detail)
+    assert comparison["오류 이유"].tolist() == [masked]
+    assert comparison["개수"].tolist() == [2]
+    assert detail["상품 ID"].tolist() == ["P001"]
+    # A cached old frame may reach the download boundary without either display builder.
+    detail["오류 이유"] = raw
+    csv_bytes = app_module.build_history_detail_csv(detail)
+    assert csv_bytes.startswith(b"\xef\xbb\xbf")
+    assert pd.read_csv(io.BytesIO(csv_bytes))["오류 이유"].tolist() == [masked]
+    assert detail["오류 이유"].tolist() == [raw]
+    assert results == before

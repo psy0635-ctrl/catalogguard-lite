@@ -254,6 +254,13 @@ def test_tool_registry_has_only_four_explicit_read_only_tools():
         "get_baseline_comparison",
     }
     assert not {"promotion", "rollback", "update", "delete", "insert", "execute_sql", "write_csv"} & names
+    assert {tool.name: set(tool.params_json_schema["properties"])
+            for tool in service.build_inspection_copilot_tools()} == {
+        "get_current_inspection_summary": set(),
+        "get_source_row_issues": {"source_row_number"},
+        "get_correction_overview": {"limit"},
+        "get_baseline_comparison": set(),
+    }
 
 
 @pytest.mark.parametrize(
@@ -944,3 +951,94 @@ def test_explicit_relationship_narrative_grounding(monkeypatch, answer_row, allo
                                             question="204번 행은 왜 오류야?", model=model)
     assert (response.answer == answer) is allowed
     model.assert_complete()
+
+
+@pytest.mark.parametrize(("raw", "masked"), [
+    ("계좌 123-456-789012", "계좌 123-***-***012"),
+    ("qa-user@example.com", "qa*****@example.com"),
+    ("ref@qa.user@example.com", "re*@qa*****@example.com"),
+    ("010-0000-0000", "010-****-0000"),
+    ("000000-3000000", "000000-*******"),
+])
+@pytest.mark.parametrize("provider", ["openai", "ollama"])
+def test_legacy_privacy_reaches_model_only_after_masking(monkeypatch, raw, masked, provider):
+    from copy import deepcopy
+    from services import inspection_copilot_service as service
+
+    detail = make_detail()
+    detail.inspection_version = "17"
+    detail.results = [detail.results[0]]
+    detail.total_issues = detail.error_count = 1
+    detail.warning_count = 0
+    detail.results[0].reason = f"상품명 '{raw}'이 중복됩니다."
+    detail.results[0].recommendation = f"{raw} 값을 확인하세요."
+    before = deepcopy(detail)
+    monkeypatch.setenv("CATALOGGUARD_AGENT_PROVIDER", provider)
+    monkeypatch.setattr(service, "get_inspection_detail", lambda *a, **k: detail)
+    context = service.InspectionCopilotContext(session=object(), current_run_id=101)
+    projection = service.get_source_row_issues(context, source_row_number=2)
+    assert projection["issues"][0]["reason"] == f"상품명 '{masked}'이 중복됩니다."
+    assert service._result_mapping(detail.results[0])["reason"] == f"상품명 '{masked}'이 중복됩니다."
+    overview = service.get_correction_overview(context)
+    assert overview[0]["recommendations"] == [f"{masked} 값을 확인하세요."]
+    pack = service.build_local_inspection_copilot_evidence_pack(
+        context, service.route_local_inspection_copilot_question("2번 행은 왜 오류야?"),
+    )
+    source_row = pack.data["source_row"]
+    assert source_row["source_row_number"] == 2
+    assert source_row["issues"][0]["rule_code"] == "필수 값 누락"
+    assert source_row["issues"][0]["reason"] == f"상품명 '{masked}'이 중복됩니다."
+    assert "qa.user@example.com" not in json.dumps(pack.data, ensure_ascii=False)
+
+    output = {"answer": "저장된 문제를 확인하세요.", "limitations": []}
+    if provider == "openai":
+        output["evidence"] = [{"run_id": 101, "source_row_number": 2,
+                               "rule_codes": ["필수 값 누락"], "comparison_run_ids": []}]
+    messages = [[assistant_message(json.dumps(output, ensure_ascii=False))]]
+    if provider == "openai":
+        messages.insert(0, [function_call("get_source_row_issues", {"source_row_number": 2}, call_id="row")])
+    model = ScriptedModel(messages)
+    service.ask_inspection_copilot(session=object(), current_run_id=101,
+                                  question=f"2번 행은 왜 오류야? {raw}", model=model)
+    model.assert_complete()
+    model_input = json.dumps(model.calls[-1].input, ensure_ascii=False)
+    assert raw not in model_input
+    assert masked in model_input
+    for call in (model.calls[0], model.calls[-1]):
+        payload = json.dumps(call.input, ensure_ascii=False)
+        assert raw not in payload
+        assert "qa.user@example.com" not in payload
+        assert masked in payload
+    if provider == "openai":
+        assert len(model.calls) == 2
+        outputs = [item for item in model.calls[-1].input if item.get("type") == "function_call_output"]
+        assert len(outputs) == 1
+        assert masked in outputs[0]["output"]
+        assert "qa.user@example.com" not in outputs[0]["output"]
+    assert detail == before
+
+
+@pytest.mark.parametrize("explicit, expected", [(None, [3]), ([7], [7]), ([], [])])
+def test_legacy_privacy_related_rows_are_parsed_before_fallback(monkeypatch, explicit, expected):
+    from copy import deepcopy
+    from services import inspection_copilot_service as service
+
+    detail = make_source_row_duplicate_detail()
+    detail.inspection_version = "17"
+    for result in detail.results:
+        result.reason = ("product_name 'qa-user@example.com '한정판'' normalized to "
+                         "'qauserexamplecom한정판' duplicates rows 3, 204 with product_ids 'P1, P2'")
+        result.related_source_rows = explicit
+    before = deepcopy(detail)
+    monkeypatch.setattr(service, "get_inspection_detail", lambda *a, **k: detail)
+    context = service.InspectionCopilotContext(session=object(), current_run_id=101)
+    pack = service.build_local_inspection_copilot_evidence_pack(
+        context, service.route_local_inspection_copilot_question("204번 행은 왜 오류야?"),
+    )
+    assert pack.data["source_row"]["related_source_rows"] == expected
+    assert all(item["reason"] == "검수 상세 설명을 안전하게 표시할 수 없습니다. 오류 항목과 원본 행을 확인하세요."
+               for item in pack.data["source_row"]["issues"])
+    payload = service._build_local_inspection_copilot_input("204번 행은 왜 오류야?", pack)
+    assert "qauserexamplecom" not in payload
+    assert "qa-user@example.com" not in payload
+    assert detail == before
