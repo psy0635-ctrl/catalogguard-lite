@@ -8,6 +8,7 @@ from core.group_category_consistency_detector import parse_group_category_messag
 from core.group_product_name_consistency_detector import parse_group_product_name_message
 from core.group_size_consistency_detector import GROUP_SIZE_SYSTEM_MESSAGE
 from core.models import ValidationIssue
+from core.privacy import mask_inspection_reason
 
 
 # 내부 규칙 이름을 사용자가 볼 한국어 이름으로 바꾸는 표입니다.
@@ -180,6 +181,11 @@ def format_variant_size_display(size: str) -> str:
 
 
 def translate_issue_message(issue: ValidationIssue) -> str:
+    """원본 메시지를 해석한 뒤 새 결과의 표시·저장용 설명을 보호합니다."""
+    return mask_inspection_reason(_translate_issue_message(issue))
+
+
+def _translate_issue_message(issue: ValidationIssue) -> str:
     """검수 결과의 영문 메시지를 사용자용 한글 문장으로 변환합니다."""
     message = issue.message
 
@@ -472,7 +478,8 @@ def translate_issue_message(issue: ValidationIssue) -> str:
                 "벗어났습니다."
             )
 
-    return message
+    # 알 수 없는 형식에는 정규화된 개인정보도 섞일 수 있어 내부 원문을 반환하지 않습니다.
+    return "검수 상세 설명을 안전하게 표시할 수 없습니다. 오류 항목과 원본 행을 확인하세요."
 
 
 def build_result_records(issues: list[ValidationIssue]) -> list[dict[str, object]]:

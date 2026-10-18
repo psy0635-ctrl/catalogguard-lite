@@ -15,6 +15,7 @@ from agents import (
     ModelSettings,
     OpenAIChatCompletionsModel,
     RunConfig,
+    RunContextWrapper,
     Runner,
     ToolExecutionConfig,
     function_tool,
@@ -31,7 +32,7 @@ from config.settings import (
     is_catalogguard_agent_configured,
     is_catalogguard_agent_provider_valid,
 )
-from core.privacy import mask_personal_information
+from core.privacy import mask_inspection_reason
 from core.presentation import RULE_LABELS
 from core.result_exporter import (
     CorrectionWorksheetUnavailableError,
@@ -180,7 +181,7 @@ def _result_mapping(result: Any) -> dict[str, object]:
 
 def _mask_tool_text(value: object) -> str:
     """Keep any user-originated strings projected to the model privacy-masked."""
-    return mask_personal_information(str(value or ""))
+    return mask_inspection_reason(str(value or ""))
 
 
 def _get_detail(context: InspectionCopilotContext):
@@ -231,7 +232,7 @@ def get_source_row_issues(
         return {"source_row_number": source_row_number, "found": False, "issues": []}
 
     first = matching[0]
-    return {
+    projection = {
         "source_row_number": source_row_number,
         "found": True,
         "product_group_id": _mask_tool_text(first.product_group_id),
@@ -248,6 +249,18 @@ def get_source_row_issues(
             for result in matching
         ],
     }
+    if include_related_source_rows:
+        # Legacy NULL 관계는 보호 전 원문에서 파싱합니다. 원문은 모델에 전달하지 않습니다.
+        projection["related_source_rows"] = _project_persisted_related_source_rows({
+            "source_row_number": source_row_number,
+            "issues": [
+                {"rule_code": result.error_field,
+                 "related_source_rows": getattr(result, "related_source_rows", None),
+                 "reason": result.reason}
+                for result in matching
+            ],
+        })
+    return projection
 
 
 def get_correction_overview(
@@ -332,12 +345,12 @@ def get_baseline_comparison(context: InspectionCopilotContext) -> dict[str, obje
 
 def build_inspection_copilot_tools():
     @function_tool(name_override="get_current_inspection_summary")
-    def summary_tool(context) -> dict[str, object]:
+    def summary_tool(context: RunContextWrapper[InspectionCopilotContext]) -> dict[str, object]:
         """Return the selected inspection run's saved summary only."""
         return get_current_inspection_summary(context.context)
 
     @function_tool(name_override="get_source_row_issues")
-    def source_row_tool(context, source_row_number: int) -> dict[str, object]:
+    def source_row_tool(context: RunContextWrapper[InspectionCopilotContext], source_row_number: int) -> dict[str, object]:
         """Return saved issues for one source row in the selected run."""
         return get_source_row_issues(
             context.context,
@@ -345,12 +358,12 @@ def build_inspection_copilot_tools():
         )
 
     @function_tool(name_override="get_correction_overview")
-    def correction_tool(context, limit: int = MAX_CORRECTION_OVERVIEW_ROWS) -> list[dict[str, object]]:
+    def correction_tool(context: RunContextWrapper[InspectionCopilotContext], limit: int = MAX_CORRECTION_OVERVIEW_ROWS) -> list[dict[str, object]]:
         """Return at most ten source-row correction summaries for the selected run."""
         return get_correction_overview(context.context, limit=limit)
 
     @function_tool(name_override="get_baseline_comparison")
-    def comparison_tool(context) -> dict[str, object]:
+    def comparison_tool(context: RunContextWrapper[InspectionCopilotContext]) -> dict[str, object]:
         """Return the existing neutral comparison for the session's baseline and target runs."""
         return get_baseline_comparison(context.context)
 
@@ -479,13 +492,9 @@ def build_local_inspection_copilot_evidence_pack(
             if issues["found"]
             else []
         )
-        source_row_evidence = {
-            **issues,
-            "related_source_rows": _project_persisted_related_source_rows(issues),
-        }
         return LocalInspectionCopilotEvidencePack(
             route.question_type,
-            {"source_row": source_row_evidence},
+            {"source_row": issues},
             evidence,
         )
 
@@ -896,7 +905,7 @@ def _ask_openai_inspection_copilot(
     )
     result = Runner.run_sync(
         agent,
-        question,
+        _mask_tool_text(question),
         context=context,
         max_turns=MAX_AGENT_TURNS,
         run_config=build_inspection_copilot_run_config(),

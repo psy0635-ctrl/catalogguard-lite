@@ -360,3 +360,50 @@ def test_correction_worksheet_csv_uses_existing_safety_bom_and_standard_quoting(
     assert worksheet.iloc[0]["오류 이유"] == "'+test, \"quoted\"\n다음 줄"
     assert worksheet.iloc[0]["수정 권장사항"] == "'@SUM(A1:A2)"
     assert "가격 값을 확인하세요." not in worksheet.iloc[0]["수정 권장사항"]
+
+
+@pytest.mark.parametrize(("raw", "masked"), [
+    ("계좌 123-456-789012", "계좌 123-***-***012"),
+    ("qa-user@example.com", "qa*****@example.com"),
+    ("ref@qa.user@example.com", "re*@qa*****@example.com"),
+    ("010-0000-0000", "010-****-0000"),
+    ("000000-3000000", "000000-*******"),
+])
+def test_legacy_privacy_csv_and_worksheet_preserve_source_and_formula_safety(raw, masked):
+    from copy import deepcopy
+
+    frame = pd.DataFrame({
+        "상품 ID": ["P001"], "오류 이유": [f"={raw}"], "reason": [raw],
+        "원본 행": [24], "수정 권장사항": ["=확인"],
+    }, index=[5])
+    before = frame.copy(deep=True)
+    exported = read_exported_csv(build_validation_result_csv(frame))
+    assert exported.columns.tolist() == frame.columns.tolist()
+    assert exported["오류 이유"].tolist() == [f"'={masked}"]
+    assert exported["reason"].tolist() == [masked]
+    assert exported["수정 권장사항"].tolist() == ["'=확인"]
+    assert exported["상품 ID"].tolist() == ["P001"]
+    assert exported["원본 행"].tolist() == ["24"]
+    assert build_validation_result_csv(frame).startswith(b"\xef\xbb\xbf")
+    protected = prepare_export_dataframe(frame)
+    pd.testing.assert_frame_equal(prepare_export_dataframe(protected), protected)
+    assert build_validation_result_csv(protected) == build_validation_result_csv(frame)
+    pd.testing.assert_frame_equal(frame, before)
+
+    issues = [make_inspection_result(source_row_number=24, reason=raw)]
+    original_issues = deepcopy(issues)
+    worksheet = result_exporter.build_correction_worksheet_dataframe(issues)
+    assert worksheet["오류 이유"].tolist() == [masked]
+    assert worksheet["원본 행"].tolist() == [24]
+    assert worksheet["문제 수"].tolist() == [1]
+    csv_bytes = result_exporter.build_correction_worksheet_csv(issues)
+    assert csv_bytes.startswith(b"\xef\xbb\xbf")
+    assert read_exported_csv(csv_bytes)["오류 이유"].tolist() == [masked]
+    assert issues == original_issues
+
+
+def test_legacy_privacy_export_preserves_non_string_reason_values():
+    frame = pd.DataFrame({"reason": pd.Series([None, "", 7], dtype=object)})
+    before = frame.copy(deep=True)
+    pd.testing.assert_frame_equal(prepare_export_dataframe(frame), before)
+    pd.testing.assert_frame_equal(frame, before)

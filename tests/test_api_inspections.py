@@ -29,6 +29,110 @@ QUALITY_TREND_ENDPOINT = "/api/v1/inspections/quality-trend"
 COMPARISON_ENDPOINT = "/api/v1/inspections/comparison"
 
 
+@pytest.mark.parametrize(("raw", "masked"), [
+    ("계좌 123-456-789012", "계좌 123-***-***012"),
+    ("qa-user@example.com", "qa*****@example.com"),
+    ("ref@qa.user@example.com", "re*@qa*****@example.com"),
+    ("010-0000-0000", "010-****-0000"),
+    ("000000-3000000", "000000-*******"),
+    ("계좌 123-***-***012", "계좌 123-***-***012"),
+    ("기본 상품", "기본 상품"),
+])
+@pytest.mark.parametrize("reuse", [False, True])
+def test_legacy_privacy_detail_and_reuse_copy_reasons(
+    monkeypatch, fake_inspection_persistence, raw, masked, reuse,
+):
+    from copy import deepcopy
+
+    detail = SimpleNamespace(
+        inspection_run_id=11, inspection_version="17", source_filename="legacy.csv",
+        created_at=datetime(2026, 10, 17, tzinfo=timezone.utc), actor_username="operator",
+        total_products=1, total_issues=1, error_count=1, warning_count=0,
+        results=[SimpleNamespace(
+            status="오류", product_group_id="G001", product_id="P001",
+            error_field="상품명 중복", reason=f"상품명 '{raw} 티셔츠'이 다른 상품과 동일합니다.",
+            recommendation="상품명을 확인하세요.", risk_level="높음", source_row_number=24,
+        )],
+    )
+    before = deepcopy(detail)
+    monkeypatch.setattr(inspections_route, "get_inspection_detail", lambda *a, **k: detail)
+    fake_inspection_persistence.save_state.mode = "duplicate" if reuse else "new"
+    response = post_csv(make_csv_text().encode()) if reuse else client.get(f"{ENDPOINT}/11")
+
+    assert response.status_code == 200
+    item = response.json()["results"][0]
+    assert item == {
+        "status": "오류", "product_group_id": "G001", "product_id": "P001",
+        "error_field": "상품명 중복", "reason": f"상품명 '{masked} 티셔츠'이 다른 상품과 동일합니다.",
+        "recommendation": "상품명을 확인하세요.", "risk_level": "높음", "source_row_number": 24,
+    }
+    assert response.json()["created"] is (not reuse)
+    assert detail == before
+    if reuse:
+        assert fake_inspection_persistence.calls == []
+
+
+@pytest.mark.parametrize(("emails", "expected_reason"), [
+    (("qa-user1@example.com", "qa-user2@example.com"), "상품명 'qa******@example.com'이 중복됩니다."),
+    (("ref@qa.user1@example.com", "ref@qa.user2@example.com"), "상품명 're*@qa******@example.com'이 중복됩니다."),
+])
+def test_legacy_privacy_comparison_preserves_distinct_original_identities(monkeypatch, emails, expected_reason):
+    from copy import deepcopy
+    from db import persistence_service
+
+    comparison = _comparison_service_result()
+    base, target = comparison.base_run, comparison.target_run
+    for run, email in zip((base, target), emails):
+        run.inspection_version = "17"
+        run.total_issues = run.error_count = 1
+        run.results = [SimpleNamespace(
+            product_group_id="G001", product_id="P001", status="오류", error_field="상품명 중복",
+            reason=f"상품명 '{email}'이 중복됩니다.", recommendation="확인하세요.", risk_level="높음",
+        )]
+    before = deepcopy((base, target))
+    monkeypatch.setattr(persistence_service, "get_inspection_detail",
+                        lambda session, *, inspection_run_id: base if inspection_run_id == 11 else target)
+    monkeypatch.setattr(inspections_route, "get_inspection_run_comparison",
+                        persistence_service.get_inspection_run_comparison)
+
+    response = client.get(COMPARISON_ENDPOINT, params={"base_run_id": 11, "target_run_id": 12})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert (data["common_issue_count"], data["base_only_issue_count"], data["target_only_issue_count"]) == (0, 1, 1)
+    assert [i["reason"] for i in data["changed_items"]] == [expected_reason] * 2
+    assert [i["side"] for i in data["changed_items"]] == ["base_only", "target_only"]
+    assert [i["count"] for i in data["changed_items"]] == [1, 1]
+    assert (base, target) == before
+    target.inspection_version = "18"
+    assert client.get(COMPARISON_ENDPOINT, params={"base_run_id": 11, "target_run_id": 12}).status_code == 422
+
+
+@pytest.mark.parametrize(("raw", "masked"), [
+    ("계좌 123-456-789012", "계좌 123-***-***012"),
+    ("ref@qa.user@example.com", "re*@qa*****@example.com"),
+])
+def test_legacy_privacy_report_response_handles_cached_dataframe_without_mutation(raw, masked):
+    import pandas as pd
+
+    frame = pd.DataFrame([{
+        "검수 상태": "오류", "상품 그룹 ID": "G001", "상품 ID": "P001",
+        "오류 항목": "상품명 중복", "오류 이유": raw, "source_row_number": 24,
+    }])
+    before = frame.copy(deep=True)
+    report = SimpleNamespace(result_dataframe=frame, summary=SimpleNamespace(
+        total_products=1, total_issues=1, error_count=1, warning_count=0,
+    ))
+
+    response = inspections_route.build_inspection_response(report, inspection_run_id=11)
+
+    assert response.results[0].reason == masked
+    assert "qa.user@example.com" not in response.model_dump_json()
+    assert inspections_route.mask_inspection_reason(response.results[0].reason) == masked
+    assert response.results[0].source_row_number == 24
+    pd.testing.assert_frame_equal(frame, before)
+
+
 @pytest.fixture(autouse=True)
 def authenticated_operator():
     # 이 파일은 인증 자체가 아니라 검수 endpoint 동작을 검증하므로 operator로 항상 인증된 상태를 가정합니다.
@@ -1606,3 +1710,41 @@ def test_inspection_api_keeps_prohibited_term_detection():
 
     assert response.status_code == 200
     assert response.json()["results"][0]["error_field"] == "금지어 포함"
+
+
+def test_legacy_privacy_internal_reason_detail_is_not_echoed(fake_inspection_persistence):
+    from copy import deepcopy
+
+    detail = inspections_route.get_inspection_detail(object(), inspection_run_id=11)
+    detail.results[0].reason = ("product_name 'qa-user@example.com '한정판'' normalized to "
+                                "'qauserexamplecom한정판' duplicates rows 24, 25 with product_ids 'P1, P2'")
+    before = deepcopy(detail)
+    response = client.get(f"{ENDPOINT}/11")
+    assert response.status_code == 200
+    assert response.json()["results"][0]["reason"] == (
+        "검수 상세 설명을 안전하게 표시할 수 없습니다. 오류 항목과 원본 행을 확인하세요."
+    )
+    assert detail == before
+
+
+@pytest.mark.parametrize(("raw", "masked"), [
+    ("계좌 123-456-789012", "계좌 123-***-***012"),
+    ("qa-user@example.com", "qa*****@example.com"),
+    ("ref@qa.user@example.com", "re*@qa*****@example.com"),
+    ("010-0000-0000", "010-****-0000"),
+    ("000000-3000000", "000000-*******"),
+])
+def test_legacy_privacy_new_sync_csv_keeps_masked_reason_and_rows(raw, masked):
+    response = post_csv(make_csv_text([
+        {**BASE_ROW, "product_id": "P-A", "product_group_id": "G-A", "product_name": f"{raw} 티셔츠"},
+        {**BASE_ROW, "product_id": "P-B", "product_group_id": "G-B", "product_name": f"{raw} 티셔츠"},
+    ]).encode("utf-8"))
+    assert response.status_code == 200
+    data = response.json()
+    assert data["created"] is True
+    duplicates = [r for r in data["results"] if r["error_field"] == "상품명 중복"]
+    assert len(duplicates) == 2
+    assert {r["source_row_number"] for r in duplicates} == {2, 3}
+    assert all(raw not in r["reason"] for r in data["results"])
+    assert all(masked in r["reason"] for r in duplicates)
+    assert {(r["product_id"], r["product_group_id"]) for r in duplicates} == {("P-A", "G-A"), ("P-B", "G-B")}

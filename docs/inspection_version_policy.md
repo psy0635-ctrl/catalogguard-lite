@@ -2,7 +2,7 @@
 
 ## 목적과 범위
 
-`INSPECTION_VERSION`은 검수 결과의 의미를 구분하는 단순 증가 문자열입니다. 현재 값은 `"17"`이며, 저장 결과가 달라지는 다음 변경에서는 `"18"`, `"19"`처럼 올립니다. 이 문서는 version model, semantic versioning, 자동 backfill 또는 cross-version comparison을 추가하지 않습니다.
+`INSPECTION_VERSION`은 검수 결과의 의미를 구분하는 단순 증가 문자열입니다. 현재 값은 `"18"`이며, 저장 결과가 달라지는 다음 변경에서는 `"19"`, `"20"`처럼 올립니다. 이 문서는 version model, semantic versioning, 자동 backfill 또는 cross-version comparison을 추가하지 않습니다.
 
 판단 기준은 변경의 이름이 아니라 **같은 CSV를 다시 검사했을 때 저장되는 검수 결과의 의미가 달라질 수 있는가**입니다. 여기서 결과는 run의 요약뿐 아니라 저장되는 문제 row의 `status`, `error_field`, `reason`, `recommendation`, `risk_level`, `product_group_id`, `product_id`, `source_row_number`, `related_source_rows`를 포함합니다. `source_row_number`는 CSV header를 1로 보는 논리 record 번호이며, quoted multiline field도 하나의 record로 계산합니다. Run Comparison은 기존 일곱 판정 필드만 문제 identity로 사용하므로, source-row metadata 추가는 비교 identity를 바꾸지 않습니다.
 
@@ -78,6 +78,14 @@ Version 15는 `duplicate_product_id` / `duplicate_product_name`의 관련 원본
 ### Version 17: category-size system compatibility
 
 개별 상품에서 명확하게 문자형으로 판정된 신발 사이즈에 `incompatible_category_size_system` warning을 추가합니다. 숫자형 신발 사이즈는 허용하고, `find_size_system()`이 판정하지 못하는 값과 FREE 및 BAG은 제외합니다. 같은 CSV의 저장 issue가 달라지므로 version을 17로 올리며 DB schema와 migration은 변경하지 않습니다.
+
+### Version 18: inspection reason privacy (1단계)
+
+새 검수 결과의 한글 오류 이유에 이메일·전화번호·주민등록번호 형식·문맥이 있는 계좌번호 의심 값이 원문으로 인용되지 않도록 보호합니다. 메시지 해석에 실패하면 내부 원문 대신 안전한 고정 한국어 설명을 사용합니다. 원본 상품명과 비교 키, 규칙·심각도·문제 수·상품 및 원본 행 연결은 유지합니다.
+
+같은 CSV의 저장 `reason`이 달라질 수 있으므로 version을 18로 올립니다. 동일 파일 SHA의 v17 실행을 v18 실행으로 재사용하지 않고, 새 검수는 별도 version의 run으로 저장합니다. DB 스키마 변경과 Alembic migration은 없습니다.
+
+과거 v17 저장 데이터는 수정하거나 삭제하지 않습니다. 과거 이력·CSV·비교·Copilot·캐시 출력 보호는 후속 2단계 대상이며, 1단계만으로 배포 가능한 보안 수정이 완료된 것은 아닙니다.
 
 ## 과거 run과 backfill
 

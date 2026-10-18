@@ -1,4 +1,6 @@
 # 역할: 내부 검수 문제를 화면용 한글 결과표로 바꾸는 표시 계층을 테스트합니다.
+from dataclasses import asdict
+
 import pandas as pd
 import pytest
 
@@ -8,6 +10,9 @@ from core.group_category_consistency_detector import build_group_category_messag
 from core.group_product_name_consistency_detector import build_group_product_name_message
 from core.group_size_consistency_detector import GROUP_SIZE_SYSTEM_MESSAGE
 from core.models import ValidationIssue
+from core.inspection_service import inspect_dataframe
+from core.loader import load_products_from_dataframe
+from core.rules import run_all_rules
 from core.presentation import (
     FIELD_LABELS,
     PRICE_RECOMMENDATION,
@@ -32,6 +37,136 @@ def make_issue(**overrides) -> ValidationIssue:
     )
     defaults.update(overrides)
     return ValidationIssue(**defaults)
+
+
+def _privacy_catalog(product_name):
+    return pd.DataFrame([
+        {
+            "product_group_id": group, "product_id": product_id,
+            "product_name": product_name, "category": "TOP", "color": "BLACK",
+            "size": "M", "stock": "10", "price": "19900", "image_path": "image.jpg",
+        }
+        for group, product_id in [("G-PRIVATE-A", "P-PRIVATE-A"), ("G-PRIVATE-B", "P-PRIVATE-B")]
+    ])
+
+
+@pytest.mark.parametrize(("name", "raw", "expected_name"), [
+    ("계좌 123-456-789012 티셔츠", "123-456-789012", "계좌 123-***-***012 티셔츠"),
+    ("qa-user@example.com 티셔츠", "qa-user@example.com", "qa*****@example.com 티셔츠"),
+    ("ref@qa.user@example.com 티셔츠", "qa.user@example.com", "re*@qa*****@example.com 티셔츠"),
+    ("010-0000-0000 티셔츠", "010-0000-0000", "010-****-0000 티셔츠"),
+    ("000000-3000000 티셔츠", "000000-3000000", "000000-******* 티셔츠"),
+    ("기본 티셔츠", None, "기본 티셔츠"),
+    ("상품 코드 123-456-789012 티셔츠", None, "상품 코드 123-456-789012 티셔츠"),
+])
+def test_inspection_duplicate_name_reasons_protect_privacy_without_changing_rules(
+    name, raw, expected_name
+):
+    source = _privacy_catalog(name)
+    before = source.copy(deep=True)
+    original_products = load_products_from_dataframe(source)
+    original_issues = [asdict(issue) for issue in run_all_rules(original_products)]
+
+    report = inspect_dataframe(source)
+
+    pd.testing.assert_frame_equal(source, before)
+    assert [asdict(p) for p in report.products] == [asdict(p) for p in original_products]
+    assert [asdict(i) for i in report.issues] == original_issues
+    duplicates = [i for i in report.issues if i.rule == "duplicate_product_name"]
+    assert len(duplicates) == 2
+    assert all(i.severity == "warning" for i in duplicates)
+    expected_reason = (
+        f"상품명 '{expected_name}'이 다른 상품과 동일하거나 정리 후 같은 값으로 확인되었습니다. "
+        "중복 후보 상품 ID: P-PRIVATE-A, P-PRIVATE-B. 중복 행: 2, 3."
+    )
+    for row, product_id, group, related in [
+        (2, "P-PRIVATE-A", "G-PRIVATE-A", [3]),
+        (3, "P-PRIVATE-B", "G-PRIVATE-B", [2]),
+    ]:
+        issue, = [i for i in duplicates if i.source_row_number == row]
+        assert (issue.product_id, issue.product_group_id, issue.related_source_rows) == (
+            product_id, group, related
+        )
+        record, = [r for r in report.result_records
+                   if r["source_row_number"] == row and r["오류 항목"] == "상품명 중복"]
+        assert record["오류 이유"] == expected_reason
+        assert record["related_source_rows"] == related
+        assert translate_issue_message(issue) == expected_reason
+    displayed = report.result_dataframe.query("`오류 항목` == '상품명 중복'")
+    assert displayed["오류 이유"].tolist() == [expected_reason, expected_reason]
+    from db.persistence_service import build_result_create_items
+    stored = [item for item in build_result_create_items(report) if item.error_field == "상품명 중복"]
+    assert [item.reason for item in stored] == [expected_reason, expected_reason]
+    assert [(item.product_id, item.product_group_id, item.source_row_number, item.related_source_rows)
+            for item in stored] == [
+        ("P-PRIVATE-A", "G-PRIVATE-A", 2, [3]),
+        ("P-PRIVATE-B", "G-PRIVATE-B", 3, [2]),
+    ]
+    if raw:
+        assert raw not in " ".join(r["오류 이유"] for r in report.result_records)
+        assert raw not in report.result_dataframe["오류 이유"].to_csv(index=False)
+        assert all(raw in i.message for i in duplicates)
+
+
+@pytest.mark.parametrize(("rule", "raw", "masked"), [
+    ("inconsistent_group_product_name", "123-456-789012", "123-***-***012"),
+    ("invalid_category", "qa-user@example.com", "qa*****@example.com"),
+    ("duplicate_product_id", "qa-user@example.com", "qa*****@example.com"),
+])
+def test_inspection_other_rule_reasons_protect_privacy_and_keep_identifiers(rule, raw, masked):
+    source = _privacy_catalog("기본 티셔츠")
+    if rule == "inconsistent_group_product_name":
+        source["product_group_id"] = "G-PRIVATE"
+        source.loc[0, "product_name"] = "계좌 123-456-789012 티셔츠"
+    else:
+        source["category" if rule == "invalid_category" else "product_id"] = raw
+    original_products = load_products_from_dataframe(source)
+    original_issues = [asdict(i) for i in run_all_rules(original_products)]
+
+    report = inspect_dataframe(source)
+
+    assert [asdict(i) for i in report.issues] == original_issues
+    assert [asdict(p) for p in report.products] == [asdict(p) for p in original_products]
+    issues = [i for i in report.issues if i.rule == rule]
+    assert len(issues) == 2
+    assert all(raw not in translate_issue_message(i) and masked in translate_issue_message(i)
+               for i in issues)
+    if rule == "duplicate_product_id":
+        assert all(r["상품 ID"] == raw for r in report.result_records)
+
+
+def test_masked_names_do_not_change_original_duplicate_or_group_comparison():
+    source = _privacy_catalog("qa-user1@example.com 티셔츠")
+    source["product_group_id"] = "G-PRIVATE"
+    source.loc[1, "product_name"] = "qa-user2@example.com 티셔츠"
+
+    report = inspect_dataframe(source)
+
+    assert not any(i.rule == "duplicate_product_name" for i in report.issues)
+    group_issues = [i for i in report.issues if i.rule == "inconsistent_group_product_name"]
+    assert len(group_issues) == 2
+    assert all("qa******@example.com" in translate_issue_message(i) for i in group_issues)
+
+
+@pytest.mark.parametrize("name", [
+    "계좌 123-456-789012 '한정판' 티셔츠",
+    "qa-user@example.com '한정판' 티셔츠",
+])
+def test_unparseable_duplicate_name_reason_uses_safe_korean_fallback(name):
+    report = inspect_dataframe(_privacy_catalog(name))
+    issues = [i for i in report.issues if i.rule == "duplicate_product_name"]
+    assert len(issues) == 2
+    expected = "검수 상세 설명을 안전하게 표시할 수 없습니다. 오류 항목과 원본 행을 확인하세요."
+    assert all(translate_issue_message(i) == expected for i in issues)
+    records = [r for r in report.result_records if r["오류 항목"] == "상품명 중복"]
+    assert [r["오류 이유"] for r in records] == [expected, expected]
+
+
+def test_unknown_reason_does_not_echo_unrecognized_normalized_private_text():
+    issue = make_issue(rule="unknown_rule", message="qauserexamplecom internal diagnostic")
+    assert translate_issue_message(issue) == (
+        "검수 상세 설명을 안전하게 표시할 수 없습니다. 오류 항목과 원본 행을 확인하세요."
+    )
 
 
 def test_group_product_name_presentation_is_human_readable():
@@ -491,7 +626,7 @@ def test_translate_duplicate_product_content_message_to_korean():
     )
 
 
-def test_translate_unknown_duplicate_product_content_message_keeps_original_text():
+def test_translate_unknown_duplicate_product_content_message_uses_safe_fallback():
     issue = make_issue(
         rule="duplicate_product_content",
         message="unexpected duplicate product content message",
@@ -499,7 +634,7 @@ def test_translate_unknown_duplicate_product_content_message_keeps_original_text
 
     message = translate_issue_message(issue)
 
-    assert message == "unexpected duplicate product content message"
+    assert message == "검수 상세 설명을 안전하게 표시할 수 없습니다. 오류 항목과 원본 행을 확인하세요."
 
 
 def test_translate_invalid_category_message_to_korean():
@@ -624,7 +759,7 @@ def test_translate_product_category_mismatch_message_to_korean():
     )
 
 
-def test_translate_unknown_category_price_anomaly_message_keeps_original_text():
+def test_translate_unknown_category_price_anomaly_message_uses_safe_fallback():
     issue = make_issue(
         rule="category_price_anomaly",
         severity="warning",
@@ -633,15 +768,15 @@ def test_translate_unknown_category_price_anomaly_message_keeps_original_text():
 
     message = translate_issue_message(issue)
 
-    assert message == "unexpected category price anomaly message"
+    assert message == "검수 상세 설명을 안전하게 표시할 수 없습니다. 오류 항목과 원본 행을 확인하세요."
 
 
-def test_translate_unknown_message_keeps_original_text():
+def test_translate_unknown_message_uses_safe_fallback():
     issue = make_issue(rule="unknown_rule", message="unexpected validation message")
 
     message = translate_issue_message(issue)
 
-    assert message == "unexpected validation message"
+    assert message == "검수 상세 설명을 안전하게 표시할 수 없습니다. 오류 항목과 원본 행을 확인하세요."
 
 
 @pytest.mark.parametrize(
@@ -698,12 +833,12 @@ def test_translate_content_safety_messages_to_korean(rule, message, expected):
         "suspected_bank_account",
     ],
 )
-def test_translate_unknown_content_safety_message_keeps_original_text(rule):
+def test_translate_unknown_content_safety_message_uses_safe_fallback(rule):
     issue = make_issue(rule=rule, message="unexpected content safety message")
 
     message = translate_issue_message(issue)
 
-    assert message == "unexpected content safety message"
+    assert message == "검수 상세 설명을 안전하게 표시할 수 없습니다. 오류 항목과 원본 행을 확인하세요."
 
 
 def test_field_labels_include_content_scan_fields():
@@ -1327,14 +1462,14 @@ def test_build_result_dataframe_presents_group_size_system_issue_in_korean():
     assert "ALPHA" not in result.iloc[0]["오류 이유"]
 
 
-def test_translate_group_size_system_message_keeps_unknown_message_unchanged():
+def test_translate_group_size_system_unknown_message_uses_safe_fallback():
     issue = make_issue(
         rule="inconsistent_group_size_system",
         severity="warning",
         message="unexpected internal message",
     )
 
-    assert translate_issue_message(issue) == "unexpected internal message"
+    assert translate_issue_message(issue) == "검수 상세 설명을 안전하게 표시할 수 없습니다. 오류 항목과 원본 행을 확인하세요."
 
 
 def test_filter_result_dataframe_filters_group_size_system_rule_label():
