@@ -1,15 +1,19 @@
 # 역할: 검수 결과 저장 Service와 Repository가 PostgreSQL에 안전하게 저장하는지 테스트합니다.
 import hashlib
 import importlib
+import os
 import sys
+from copy import deepcopy
+from dataclasses import asdict
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pandas as pd
 import pytest
-from sqlalchemy import delete, event, func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import delete, event, func, select, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError, IntegrityError
 
 from config.database import get_optional_database_url
 from config.settings import INSPECTION_VERSION
@@ -26,7 +30,7 @@ from db.persistence_service import (
     normalize_source_filename,
     save_inspection_report,
 )
-from db.session import create_database_engine, create_session_factory
+from db.session import create_database_engine, create_session_factory, get_expected_alembic_head
 
 
 # 테스트에서 반복해서 사용할 정상 상품 한 줄입니다.
@@ -112,17 +116,33 @@ def database_session():
         session.rollback()
         session.close()
 
-        if created_source_filenames:
-            # 테스트가 만든 실행 기록만 파일명으로 찾아 정리합니다.
-            with session_factory() as cleanup_session:
-                cleanup_session.execute(
-                    delete(InspectionRun).where(
-                        InspectionRun.source_filename.in_(created_source_filenames)
+        try:
+            if created_source_filenames:
+                # 테스트가 만든 실행 기록만 파일명으로 찾아 정리합니다.
+                with session_factory() as cleanup_session:
+                    created_run_ids = cleanup_session.scalars(
+                        select(InspectionRun.id).where(
+                            InspectionRun.source_filename.in_(created_source_filenames)
+                        )
+                    ).all()
+                    cleanup_session.execute(
+                        delete(InspectionRun).where(
+                            InspectionRun.source_filename.in_(created_source_filenames)
+                        )
                     )
-                )
-                cleanup_session.commit()
-
-        engine.dispose()
+                    cleanup_session.commit()
+                    assert cleanup_session.scalar(
+                        select(func.count()).select_from(InspectionRun).where(
+                            InspectionRun.source_filename.in_(created_source_filenames)
+                        )
+                    ) == 0
+                    assert cleanup_session.scalar(
+                        select(func.count()).select_from(InspectionResult).where(
+                            InspectionResult.inspection_run_id.in_(created_run_ids)
+                        )
+                    ) == 0
+        finally:
+            engine.dispose()
 
 
 def unique_filename(prefix: str = "products") -> str:
@@ -2535,3 +2555,279 @@ def test_local_copilot_relationship_from_actual_persisted_detail(database_sessio
     route = copilot.route_local_inspection_copilot_question("2번 행은 왜 오류야?")
     pack = copilot.build_local_inspection_copilot_evidence_pack(context, route)
     assert pack.data["source_row"]["related_source_rows"] == expected
+
+
+# These regressions may write only to the disposable PostgreSQL service of this
+# repository's test job. A URL alone is not authorization to use a local/shared DB.
+def _is_privacy_ci_database(database_url: str | None) -> bool:
+    if not (
+        os.environ.get("GITHUB_ACTIONS") == "true"
+        and os.environ.get("GITHUB_REPOSITORY") == "psy0635-ctrl/catalogguard-lite"
+        and os.environ.get("GITHUB_JOB") == "test"
+        and database_url
+    ):
+        return False
+    try:
+        url = make_url(database_url)
+    except (ArgumentError, ValueError):
+        return False
+    return (
+        url.drivername == "postgresql+psycopg"
+        and url.host in {"localhost", "127.0.0.1", "::1"}
+        and url.port == 5432
+        and url.database == "catalogguard_lite_test"
+        and url.username == "postgres"
+        and not url.query
+    )
+
+
+@pytest.fixture()
+def privacy_postgres_session(request):
+    # Resolve database_session dynamically: its engine/cleanup must not be
+    # initialized before the disposable-CI target has been checked.
+    if not _is_privacy_ci_database(get_optional_database_url()):
+        pytest.skip("Privacy v17/v18 DB regressions require the repository's disposable GitHub Actions test database.")
+    session, filenames = request.getfixturevalue("database_session")
+    assert session.scalar(text("SELECT current_database()")) == "catalogguard_lite_test"
+    assert session.scalars(text("SELECT version_num FROM alembic_version")).all() == [get_expected_alembic_head()]
+    session.rollback()  # End the readiness read before save_inspection_report.begin().
+    return session, filenames
+
+
+@pytest.mark.parametrize(("database_url", "ci_enabled"), [
+    (None, True),
+    ("postgresql+psycopg://postgres@localhost:5432/catalogguard_lite_test", False),
+    ("postgresql+psycopg://postgres@shared.example:5432/catalogguard_lite_test", True),
+    ("postgresql+psycopg://postgres@localhost:5432/business", True),
+    ("postgresql+psycopg://postgres@localhost:6432/catalogguard_lite_test", True),
+    ("postgresql+psycopg://postgres@localhost:5432/catalogguard_lite_test?host=shared.example", True),
+    ("not-a-database-url", True),
+])
+def test_privacy_v18_database_guard_runs_before_existing_fixture(monkeypatch, database_url, ci_enabled):
+    monkeypatch.setenv("GITHUB_ACTIONS", "true" if ci_enabled else "false")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "psy0635-ctrl/catalogguard-lite")
+    monkeypatch.setenv("GITHUB_JOB", "test")
+    monkeypatch.setattr(sys.modules[__name__], "get_optional_database_url", lambda: database_url)
+
+    def forbidden_fixture(_name):
+        raise AssertionError("database_session must not be initialized for an unverified target")
+
+    with pytest.raises(pytest.skip.Exception):
+        privacy_postgres_session.__wrapped__(SimpleNamespace(getfixturevalue=forbidden_fixture))
+
+
+def test_privacy_v18_database_guard_accepts_workflow_test_service(monkeypatch):
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "psy0635-ctrl/catalogguard-lite")
+    monkeypatch.setenv("GITHUB_JOB", "test")
+    assert _is_privacy_ci_database("postgresql+psycopg://postgres@localhost:5432/catalogguard_lite_test")
+
+
+def _make_privacy_version_reports():
+    # A letters-only marker isolates the CSV hash without adding numeric privacy candidates.
+    seller = "synthetic-" + uuid4().hex.translate(str.maketrans("0123456789", "klmnopqrst"))
+    v18 = make_report([
+        {**BASE_ROW, "product_id": "P-SYNTH-A", "product_group_id": "G-SYNTH-A",
+         "product_name": "ref@qa.user@example.com 티셔츠", "seller": seller},
+        {**BASE_ROW, "product_id": "P-SYNTH-B", "product_group_id": "G-SYNTH-B",
+         # Keep the name duplicate but avoid an unrelated complete-content duplicate.
+         "product_name": "ref@qa.user@example.com 티셔츠", "seller": seller, "color": "NAVY"},
+    ])
+    v17 = deepcopy(v18)
+    legacy_reason = "상품명 'ref@qa.user@example.com 티셔츠'이 다른 상품과 동일합니다."
+    for row in v17.result_records:
+        if row["오류 항목"] == "상품명 중복":
+            row["오류 이유"] = legacy_reason
+    v17.result_dataframe.loc[v17.result_dataframe["오류 항목"] == "상품명 중복", "오류 이유"] = legacy_reason
+    return v17, v18
+
+
+def test_privacy_v18_synthetic_legacy_report_does_not_mutate_new_report():
+    v17, v18 = _make_privacy_version_reports()
+    assert asdict(v18.summary) == {
+        "total_products": 2, "total_issues": 4, "error_count": 2, "warning_count": 2,
+    }
+    expected = (
+        "상품명 're*@qa*****@example.com 티셔츠'이 다른 상품과 동일하거나 정리 후 같은 값으로 확인되었습니다. "
+        "중복 후보 상품 ID: P-SYNTH-A, P-SYNTH-B. 중복 행: 2, 3."
+    )
+    assert [item.reason for item in build_result_create_items(v18) if item.error_field == "상품명 중복"] == [expected] * 2
+    assert [item.reason for item in build_result_create_items(v17) if item.error_field == "상품명 중복"] == [
+        "상품명 'ref@qa.user@example.com 티셔츠'이 다른 상품과 동일합니다."
+    ] * 2
+    assert [issue.severity for issue in v18.issues if issue.rule == "duplicate_product_name"] == ["warning"] * 2
+    assert [product.product_name for product in v18.products] == ["ref@qa.user@example.com 티셔츠"] * 2
+    pd.testing.assert_frame_equal(v17.source_dataframe, v18.source_dataframe)
+
+
+@pytest.fixture()
+def privacy_versioned_runs(privacy_postgres_session):
+    session, filenames = privacy_postgres_session
+    v17, v18 = _make_privacy_version_reports()
+    # The exact same CSV bytes identify both versions; the synthetic seller
+    # makes the hash unique to this fixture without changing product/row IDs.
+    file_hash = make_file_hash(v18.source_dataframe.to_csv(index=False).encode("utf-8"))
+    outcomes = []
+    for version, report in [("17", v17), ("18", v18)]:
+        filename = unique_filename(f"privacy_v{version}")
+        filenames.append(filename)  # Register cleanup before attempting a write.
+        outcomes.append(save_inspection_report(
+            session, source_filename=filename, report=report,
+            file_sha256=file_hash, inspection_version=version,
+        ))
+    assert all(outcome.created for outcome in outcomes)
+    return SimpleNamespace(
+        session=session, filenames=filenames, file_hash=file_hash, report=v18,
+        v17_id=outcomes[0].inspection_run_id, v18_id=outcomes[1].inspection_run_id,
+    )
+
+
+@pytest.fixture()
+def privacy_http_client(privacy_versioned_runs):
+    from fastapi.testclient import TestClient
+    from api.main import app
+    from conftest import override_current_user
+    from db.session import get_session
+
+    previous_overrides = app.dependency_overrides.copy()
+    session_factory = create_session_factory(privacy_versioned_runs.session.get_bind())
+
+    def override_session():
+        # Each in-process HTTP request reads the same disposable DB using its
+        # own Session; never fall back to the application's DATABASE_URL.
+        with session_factory() as session:
+            yield session
+
+    override_current_user(role="viewer")
+    app.dependency_overrides[get_session] = override_session
+    try:
+        with TestClient(app) as client:
+            yield client
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(previous_overrides)
+
+
+def test_privacy_v18_nested_email_reason_persists_to_postgres(privacy_postgres_session):
+    session, filenames = privacy_postgres_session
+    _, report = _make_privacy_version_reports()
+    before_source = report.source_dataframe.copy(deep=True)
+    before_products = [asdict(product) for product in report.products]
+    before_records = deepcopy(report.result_records)
+    filename = unique_filename("privacy_v18_nested")
+    filenames.append(filename)
+    outcome = save_inspection_report(
+        session, source_filename=filename, report=report,
+        file_sha256=make_file_hash(report.source_dataframe.to_csv(index=False).encode("utf-8")), inspection_version="18",
+    )
+    assert outcome.created is True
+    session.expire_all()
+    run = session.get(InspectionRun, outcome.inspection_run_id)
+    rows = repositories.get_inspection_results_by_run_id(session, inspection_run_id=run.id)
+    assert run.inspection_version == "18"
+    assert (run.total_products, run.total_issues, run.error_count, run.warning_count) == (2, 4, 2, 2)
+    assert run.total_issues == len(rows)
+    duplicates = [row for row in rows if row.error_field == "상품명 중복"]
+    assert [(row.product_id, row.product_group_id, row.status, row.source_row_number, row.related_source_rows)
+            for row in duplicates] == [
+        ("P-SYNTH-A", "G-SYNTH-A", "주의", 2, [3]),
+        ("P-SYNTH-B", "G-SYNTH-B", "주의", 3, [2]),
+    ]
+    assert all("qa.user@example.com" not in row.reason for row in rows)
+    assert all("re*@qa*****@example.com" in row.reason for row in duplicates)
+    pd.testing.assert_frame_equal(report.source_dataframe, before_source)
+    assert [asdict(product) for product in report.products] == before_products
+    assert report.result_records == before_records
+
+
+def test_privacy_v17_v18_same_hash_coexist_in_postgres(privacy_versioned_runs):
+    pair = privacy_versioned_runs
+    pair.session.expire_all()
+    runs = pair.session.scalars(select(InspectionRun).where(
+        InspectionRun.file_sha256 == pair.file_hash,
+    ).order_by(InspectionRun.inspection_version)).all()
+    assert [(run.id, run.inspection_version, run.file_sha256) for run in runs] == [
+        (pair.v17_id, "17", pair.file_hash), (pair.v18_id, "18", pair.file_hash),
+    ]
+    assert pair.v17_id != pair.v18_id
+    old = persistence_service.get_inspection_detail(pair.session, inspection_run_id=pair.v17_id)
+    new = persistence_service.get_inspection_detail(pair.session, inspection_run_id=pair.v18_id)
+    assert [item.reason for item in old.results if item.error_field == "상품명 중복"] == [
+        "상품명 'ref@qa.user@example.com 티셔츠'이 다른 상품과 동일합니다."
+    ] * 2
+    assert all("qa.user@example.com" not in item.reason for item in new.results)
+
+
+def test_privacy_v17_v18_postgres_dedup_and_unique_index(privacy_versioned_runs):
+    pair = privacy_versioned_runs
+    for version, expected_id in [("17", pair.v17_id), ("18", pair.v18_id)]:
+        found = find_existing_inspection_run(pair.session, file_sha256=pair.file_hash, inspection_version=version)
+        assert found.id == expected_id
+    pair.session.rollback()  # Identity lookup started a read transaction.
+    filename = unique_filename("privacy_v18_reupload")
+    pair.filenames.append(filename)
+    reused = save_inspection_report(
+        pair.session, source_filename=filename, report=pair.report,
+        file_sha256=pair.file_hash, inspection_version="18",
+    )
+    assert reused.created is False
+    assert reused.inspection_run_id == pair.v18_id
+    assert count_inspection_runs(pair.session, file_sha256=pair.file_hash) == 2
+    pair.session.rollback()
+    # Also bypass the service precheck to prove the real PostgreSQL constraint.
+    with pair.session.begin():
+        with pytest.raises(IntegrityError) as error:
+            with pair.session.begin_nested():
+                repositories.create_inspection_run(
+                    pair.session, source_filename=filename, total_products=2,
+                    total_issues=4, error_count=2, warning_count=2,
+                    file_sha256=pair.file_hash, inspection_version="18",
+                )
+        assert error.value.orig.diag.constraint_name == FILE_IDENTITY_UNIQUE_INDEX_NAME
+    assert count_inspection_runs(pair.session, file_sha256=pair.file_hash) == 2
+
+
+def test_privacy_v17_postgres_detail_and_http_preserve_original(privacy_versioned_runs, privacy_http_client):
+    from api.routes.inspections import build_inspection_detail_response
+
+    pair = privacy_versioned_runs
+    detail = persistence_service.get_inspection_detail(pair.session, inspection_run_id=pair.v17_id)
+    assert [item.reason for item in detail.results if item.error_field == "상품명 중복"] == [
+        "상품명 'ref@qa.user@example.com 티셔츠'이 다른 상품과 동일합니다."
+    ] * 2
+    before = deepcopy(detail)
+    expected = "상품명 're*@qa*****@example.com 티셔츠'이 다른 상품과 동일합니다."
+    response = build_inspection_detail_response(detail)
+    assert [item.reason for item in response.results if item.error_field == "상품명 중복"] == [expected] * 2
+    assert detail == before
+    http = privacy_http_client.get(f"/api/v1/inspections/{pair.v17_id}")
+    assert http.status_code == 200
+    assert "qa.user@example.com" not in http.text
+    duplicates = [item for item in http.json()["results"] if item["error_field"] == "상품명 중복"]
+    assert [(item["product_id"], item["product_group_id"], item["source_row_number"], item["status"], item["reason"])
+            for item in duplicates] == [
+        ("P-SYNTH-A", "G-SYNTH-A", 2, "주의", expected),
+        ("P-SYNTH-B", "G-SYNTH-B", 3, "주의", expected),
+    ]
+    pair.session.rollback()
+    pair.session.expire_all()
+    assert persistence_service.get_inspection_detail(pair.session, inspection_run_id=pair.v17_id) == before
+
+
+def test_privacy_v17_v18_postgres_comparison_rejected_with_http_422(privacy_versioned_runs, privacy_http_client):
+    pair = privacy_versioned_runs
+    before = [persistence_service.get_inspection_detail(pair.session, inspection_run_id=run_id)
+              for run_id in (pair.v17_id, pair.v18_id)]
+    with pytest.raises(ValueError, match="^inspection versions must match$"):
+        persistence_service.get_inspection_run_comparison(
+            pair.session, base_run_id=pair.v17_id, target_run_id=pair.v18_id,
+        )
+    response = privacy_http_client.get("/api/v1/inspections/comparison", params={
+        "base_run_id": pair.v17_id, "target_run_id": pair.v18_id,
+    })
+    assert response.status_code == 422
+    assert response.json() == {"detail": "같은 검수 버전의 실행만 비교할 수 있습니다."}
+    pair.session.rollback()
+    pair.session.expire_all()
+    assert [persistence_service.get_inspection_detail(pair.session, inspection_run_id=run_id)
+            for run_id in (pair.v17_id, pair.v18_id)] == before
