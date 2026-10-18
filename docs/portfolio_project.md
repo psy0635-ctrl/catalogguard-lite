@@ -77,7 +77,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, 
 
 ### 현재 unreleased main과 v0.3.0 이후 변경
 
-공식 Release는 v0.3.0입니다. 현재 `main`에는 그 이후의 미출시 변경으로 inspection issue의 관계 행 명시 저장, schema-aware `/ready`, CSV/XLSX Web ETL 업로드와 Golden Rule Quality Regression, [상품 동기화 차이 상태별 필터(PR #138)](#상품-동기화-차이-상태별-필터pr-138)가 추가됐습니다. 현재 작업 기준은 `INSPECTION_VERSION = "17"`, Alembic single head `20260915_0020`, FastAPI 애플리케이션 버전 `0.1.0`이며, 이 변경들을 v0.3.0 기능으로 소급하지 않습니다.
+최신 공식 Release는 [v0.3.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.3.0)입니다. 2026-10-18 기준 `main`에는 그 이후의 미출시 변경으로 inspection issue의 관계 행 명시 저장, schema-aware `/ready`, CSV/XLSX Web ETL 업로드와 Golden Rule Quality Regression, [상품 동기화 차이 상태별 필터(PR #138)](#상품-동기화-차이-상태별-필터pr-138), [개인정보 출력 보호 Version 18(PR #142)](#개인정보-출력-보호-version-18pr-142)이 포함됐습니다. 현재 기준은 `INSPECTION_VERSION = "18"`, Alembic single head `20260915_0020`, FastAPI 애플리케이션 버전 `0.1.0`입니다. PR #142는 main 병합이며 새 Release나 운영 배포가 아닙니다. 병합 후 main SHA와 검증 결과는 아래 PR #142 기록에 모았습니다.
 
 XLSX는 Web multipart에서만 지원합니다. 정확히 하나의 visible worksheet를 요구하고 formula·macro·external link·merged cell과 과도한 resource 사용을 제한하며, CLI·S3·HTTP feed·Airflow는 계속 CSV-only입니다. 처음에는 XLSX 의존성이 최상위 import로 Airflow runtime까지 전파되는 compatibility regression을 격리 Airflow CI smoke에서 발견했지만, XLSX 경로에서만 불러오는 lazy import로 수정해 CSV-only Airflow 경계와 기존 runtime을 보존했습니다.
 
@@ -240,7 +240,7 @@ Streamlit ETL 프로필 운영 관리
 | pandas | 3.0.3 |
 | 데이터베이스 | PostgreSQL, SQLAlchemy, psycopg |
 | 마이그레이션 | Alembic |
-| 현재 검수 버전 | `INSPECTION_VERSION = "17"` |
+| 현재 검수 버전 | `INSPECTION_VERSION = "18"` |
 | 비동기 처리 | Redis, Celery |
 | 설명 보조 | OpenAI Agents SDK 0.22.1 기반 provider 분기. OpenAI: 기본 모델 `gpt-5.6-terra`, 최대 4 turn, 순차 read-only Function Tool 4개. Ollama(v0.3.0): 기본 `qwen3.5:9b`, Python Evidence Pack + tool-less Local LLM + Narrative Grounding Validator |
 | 관측성 | prometheus-client 0.25.0 (HTTP·Web ETL metric instrumentation MVP, Prometheus 서버는 미구축) |
@@ -321,7 +321,7 @@ Streamlit ETL 프로필 운영 관리
 
 ## 6.7 데이터 보호 설계
 
-개인정보 미리보기 기능에서 가장 중요하게 본 점은 원본 데이터와 표시용 데이터를 분리하는 것이었습니다.
+개인정보 보호에서 가장 중요하게 본 점은 원본 데이터와 표시용 데이터를 분리하는 것이었습니다. 미리보기뿐 아니라 신규 v18의 저장 reason과 과거 결과의 출력 경계까지 보호하는 현재 계약은 [PR #142 설계·검증 기록](#개인정보-출력-보호-version-18pr-142)에 정리했습니다. 아래는 기존 미리보기 복사본의 처리 흐름입니다.
 
 ```text
 validated_df
@@ -578,6 +578,33 @@ run `30972097167`의 workflow 로그를 직접 확인한 결과 `Run tests` 단�
 이 샘플은 앱 화면에서 검수 요약, 결과 표, 필터, CSV 다운로드가 연결되어 있는지 확인하는 기준 데이터로 사용할 수 있습니다.
 
 ## 6.13 구현 중 해결한 문제
+
+### 개인정보 출력 보호 Version 18(PR #142)
+
+**문제와 원인.** 원본 상품명을 인용하는 일부 내부 검수 메시지 때문에 개인정보가 오류 이유에 포함될 수 있었고, 과거 v17 DB에도 원문 reason이 남아 있었습니다. 메시지 해석 실패 시 내부 원문을 표시하는 fallback과, 앞 이메일의 도메인이 다음 이메일의 아이디와 겹치는 중첩 패턴이 보호를 우회하는 경로였습니다.
+
+**해결.** 공통 개인정보 보호 함수를 보완해 중첩 이메일을 한 번에 마스킹하고 반복 호출해도 결과가 바뀌지 않도록 했습니다. 이메일·전화번호·주민등록번호 형식·문맥 있는 계좌번호 의심 값을 보호한 새 reason을 v18로 저장하고, 해석에 실패하면 안전한 고정 한국어 설명을 제공합니다. 과거 v17 DB를 일괄 수정하는 대신 신규·재사용·상세·비교 API의 출력 reason을 보호합니다. 결과·수정 작업표·과거 이력 CSV, Streamlit 상세·비교·캐시 재표시, OpenAI·Local Ollama Copilot의 Tool/Evidence Pack과 사용자 질문에도 같은 보호를 적용했습니다.
+
+**핵심 설계 판단.**
+
+1. 원본 검수 데이터와 출력용 복사본을 구분하고, 과거 DB 원문은 수정하거나 삭제하지 않습니다.
+2. 저장 reason의 의미가 달라지므로 Inspection Version을 18로 올립니다. 같은 CSV SHA라도 v17/v18을 별도로 저장하고, 같은 버전만 Dedup으로 재사용합니다. 서로 다른 버전의 비교는 HTTP 422로 거부합니다.
+3. 비교는 마스킹 전 원본으로 계산해 보호 후 문자열이 같아져도 문제 identity가 합쳐지지 않도록 합니다. 문제 수·심각도·상품 식별자·`source_row_number`·`related_source_rows`는 유지합니다.
+4. CSV 수식 삽입 방어를 유지하며, DB schema와 Alembic migration은 추가하지 않습니다.
+
+**실제 검증.** [PR #142](https://github.com/psy0635-ctrl/catalogguard-lite/pull/142)는 2026-10-18 15:27:00 KST에 Rebase and merge로 병합됐습니다. 병합 후 main [`8a568274df23be196926b1410c05263b0632f9a1`](https://github.com/psy0635-ctrl/catalogguard-lite/commit/8a568274df23be196926b1410c05263b0632f9a1)의 [Push CI](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/39104071501)에서 `test`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate`·`airflow-smoke` **5/5 SUCCESS**, 전체 pytest **3722 passed, 2 skipped, 20 deselected**를 확인했습니다. 별도 Async E2E는 **1 passed**, Streamlit startup smoke도 성공했고, Golden은 **42개 상품·40건 문제**를 유지했습니다. 서로 다른 실행 수치는 합산하지 않습니다.
+
+PostgreSQL 18.6과 Alembic head `20260915_0020`의 일회용 CI DB에서 다음 5건을 검증했습니다. 기존 전체 pytest가 만든 JUnit XML에서 각 결과가 정확히 한 번 존재하고 SKIP·failure·error가 없는지 검사하는 [검증 단계](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/39104071501/job/117606093414)가 **5/5 개별 PASS**를 출력했습니다. 단순 테스트 수 증가로 추정한 결과가 아닙니다.
+
+| PostgreSQL 회귀 범위 | 결과 |
+|---|---|
+| 신규 v18 중첩 이메일 reason의 실제 저장 | PASS |
+| 동일 CSV 해시의 v17/v18 실행 공존 | PASS |
+| 버전별 Dedup 및 실제 unique index 제약 | PASS |
+| 과거 v17 원문 보존과 HTTP 상세 출력 보호 | PASS |
+| v17/v18 비교 거부 및 HTTP 422 | PASS |
+
+**한계.** 정규식에 맞지 않는 비정형·인코딩 개인정보를 모두 탐지할 수는 없으며, 매우 긴 비정상 이메일에는 기존 정규식의 처리 비용 한계가 남습니다. 모델 입력 보호는 모델이 자체 생성한 `answer`·`limitations`의 최종 마스킹이나 실제 외부 모델 동작을 보장하지 않습니다. 실서비스 운영 DB 검증과 운영 배포는 수행하지 않았습니다. 이 변경은 v0.3.0 이후 main의 미출시 변경입니다.
 
 ### 원본 데이터와 미리보기 데이터 분리
 

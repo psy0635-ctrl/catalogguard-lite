@@ -12,7 +12,7 @@ ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl`의 버전�
 
 v0.3.0 기준으로는 기존 OpenAI 경로를 유지하면서 optional OpenAI / Ollama provider 선택과 Local Ollama Two-Phase Inspection Copilot을 추가했습니다. Local Ollama 경로는 v0.2.0의 OpenAI-only Copilot에는 포함되지 않았습니다.
 
-공식 배포 기준은 **v0.3.0**입니다. 현재 `main`에는 v0.3.0 이후의 미출시 변경으로 inspection 관계 행 명시 저장, DB 연결과 repository Alembic single head·DB current revision 일치까지 확인하는 schema-aware `/ready`, CSV/XLSX Web ETL 업로드와 저장 전 사전 검증(Preflight), 전체 Rule Engine의 Golden Rule Quality Regression이 추가되어 있습니다. 현재 작업 기준 Alembic 단일 head는 `20260915_0020`, `INSPECTION_VERSION`은 `17`, FastAPI 애플리케이션 버전은 `0.1.0`이며, 이 변경들을 v0.3.0에 포함된 기능으로 소급하지 않습니다. 최근 `main`은 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 다섯 GitHub Actions 검증을 통과했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
+최신 공식 Release는 **[v0.3.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.3.0)**입니다. 2026-10-18 기준 `main`에는 v0.3.0 이후의 미출시 변경으로 inspection 관계 행 명시 저장, DB 연결과 repository Alembic single head·DB current revision 일치까지 확인하는 schema-aware `/ready`, CSV/XLSX Web ETL 업로드와 저장 전 사전 검증(Preflight), 전체 Rule Engine의 Golden Rule Quality Regression, PR #142의 개인정보 출력 보호가 포함되어 있습니다. 현재 Alembic 단일 head는 `20260915_0020`, `INSPECTION_VERSION`은 `18`, FastAPI 애플리케이션 버전은 `0.1.0`이며, 이 변경들을 v0.3.0에 포함된 기능으로 소급하지 않습니다. 최신 main의 SHA와 CI 근거는 [10월 18일 검증](#2026-10-18-개인정보-출력-보호-version-18)에 정리했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 이전 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
 
 ### 2026-10-10 로컬 검증과 기능 동결
 
@@ -36,6 +36,19 @@ v0.3.0 기준으로는 기존 OpenAI 경로를 유지하면서 optional OpenAI /
 [PR #138](https://github.com/psy0635-ctrl/catalogguard-lite/pull/138)은 2026-10-15 16:27:00 KST에 Rebase and merge로 병합됐으며, 병합 후 `main`은 `3025231e674298e886a55cea56df6b562236546c`입니다. 상품 동기화 차이에 신규·변경·동일·이번 배치 미관측 상태별 조회를 추가했습니다. **공식 Release v0.3.0 이후 main의 미출시 기능**이며, `INSPECTION_VERSION = "17"`과 Alembic revision `20260915_0020`은 유지합니다.
 
 [해당 main CI](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/38698823868)는 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` **5/5 success**입니다. 전체 pytest 단계는 **3581 passed, 2 skipped, 20 deselected**, pytest warning 0건이며, 별도 async E2E는 **1 passed**입니다. 독립 PostgreSQL 18과 Chromium에서 합성 비교 대상 208건(네 상태 각 52건)의 필터·페이지 경계·DB 무변경·오류 후 재시도를 검증한 기록은 [포트폴리오의 PR #138 구현·검증](docs/portfolio_project.md#상품-동기화-차이-상태별-필터pr-138)에 모았습니다. 서로 다른 실행은 합산하지 않으며 실제 운영 상품·성능 검증으로 확대하지 않습니다. 기존 10월 10일·12일 기록도 당시 결과로 유지합니다.
+
+### 2026-10-18 개인정보 출력 보호 Version 18
+
+[PR #142](https://github.com/psy0635-ctrl/catalogguard-lite/pull/142)는 2026-10-18 15:27:00 KST에 Rebase and merge로 병합됐습니다. 병합 후 main은 [`8a568274df23be196926b1410c05263b0632f9a1`](https://github.com/psy0635-ctrl/catalogguard-lite/commit/8a568274df23be196926b1410c05263b0632f9a1)이며, **공식 Release v0.3.0 이후의 미출시 변경**입니다. 이번 병합으로 새 Release를 발행하거나 운영 환경에 배포하지 않았습니다.
+
+- 신규 v18 검수 결과는 이메일·전화번호·주민등록번호 형식·문맥 있는 계좌번호 의심 값을 마스킹한 `reason`을 저장합니다. 중첩 이메일을 보호하고, 메시지 해석 실패 시 내부 원문 대신 안전한 고정 설명을 사용합니다.
+- 과거 v17 DB 값은 보존하면서 신규·재사용·상세·비교 API, 결과·수정 작업표·과거 이력 CSV, Streamlit 화면·캐시 재표시의 오류 이유를 출력 경계에서 보호합니다. CSV 수식 삽입 방어도 유지합니다.
+- OpenAI·Local Ollama Copilot에 전달하는 Tool/Evidence Pack과 사용자 질문에도 보호를 적용합니다. 모든 비정형 개인정보 탐지나 모델 생성 답변의 최종 마스킹을 보장하지는 않습니다.
+- 검수 원본·비교 identity·원본 행 연결은 유지합니다. 저장 `reason`이 달라지므로 Version을 18로 올렸으며, 같은 SHA의 v17/v18은 별도로 저장하고 서로 다른 버전의 비교는 거부합니다. DB schema와 Alembic revision은 변경하지 않았습니다.
+
+[새 main Push CI](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/39104071501)는 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` **5/5 SUCCESS**입니다. 전체 pytest는 **3722 passed, 2 skipped, 20 deselected**이며, 같은 실행의 JUnit XML을 검사한 [PostgreSQL 회귀 검증 단계](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/39104071501/job/117606093414)에서 지정된 **5건 모두 개별 PASS**를 확인했습니다(대상 5건의 SKIP·failure·error 0). PostgreSQL은 18.6, migration head는 `20260915_0020`이며, 별도 Async E2E는 **1 passed**, Streamlit startup smoke도 성공했습니다. Golden은 **42개 상품·40건 문제**를 유지합니다. 별도 실행 결과를 전체 pytest에 합산하지 않으며, 기존 날짜별 검증 기록은 당시 결과로 보존합니다.
+
+문제·원인·설계 판단과 검증 범위는 [포트폴리오의 PR #142 기록](docs/portfolio_project.md#개인정보-출력-보호-version-18pr-142), 버전별 저장·비교 계약은 [Inspection Version 정책](docs/inspection_version_policy.md#version-18-inspection-reason-privacy)을 참고하세요.
 
 공개 Streamlit 앱은 아래 주소에서 확인할 수 있습니다.
 
@@ -2548,7 +2561,7 @@ curl.exe "http://127.0.0.1:8001/api/v1/inspections?limit=10&offset=0&filename=pr
 | 컬럼 | 타입 | 설명 |
 |---|---|---|
 | `file_sha256` | `String(64)`, nullable | CSV bytes의 SHA-256 hex 문자열입니다. migration 이전 기존 이력은 NULL입니다. |
-| `inspection_version` | `String(20)`, nullable 아님 | 검수 결과 저장 계약 버전입니다. 현재 작업 기준 `INSPECTION_VERSION` 값은 `"17"`입니다. DB `server_default`는 없습니다. |
+| `inspection_version` | `String(20)`, nullable 아님 | 검수 결과 저장 계약 버전입니다. 현재 작업 기준 `INSPECTION_VERSION` 값은 `"18"`입니다. DB `server_default`는 없습니다. |
 
 중복 판단 기준은 같은 `file_sha256`과 같은 `inspection_version`입니다.
 
