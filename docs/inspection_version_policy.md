@@ -79,13 +79,17 @@ Version 15는 `duplicate_product_id` / `duplicate_product_name`의 관련 원본
 
 개별 상품에서 명확하게 문자형으로 판정된 신발 사이즈에 `incompatible_category_size_system` warning을 추가합니다. 숫자형 신발 사이즈는 허용하고, `find_size_system()`이 판정하지 못하는 값과 FREE 및 BAG은 제외합니다. 같은 CSV의 저장 issue가 달라지므로 version을 17로 올리며 DB schema와 migration은 변경하지 않습니다.
 
-### Version 18: inspection reason privacy (1단계)
+### Version 18: inspection reason privacy
 
-새 검수 결과의 한글 오류 이유에 이메일·전화번호·주민등록번호 형식·문맥이 있는 계좌번호 의심 값이 원문으로 인용되지 않도록 보호합니다. 메시지 해석에 실패하면 내부 원문 대신 안전한 고정 한국어 설명을 사용합니다. 원본 상품명과 비교 키, 규칙·심각도·문제 수·상품 및 원본 행 연결은 유지합니다.
+새 검수 결과의 한글 오류 이유에 이메일·전화번호·주민등록번호 형식·문맥이 있는 계좌번호 의심 값이 원문으로 인용되지 않도록 보호한 뒤 저장합니다. 메시지 해석에 실패하면 내부 원문 대신 안전한 고정 한국어 설명을 사용합니다. 원본 상품명과 비교 키, 규칙·심각도·문제 수·상품 및 원본 행 연결은 유지합니다.
 
-같은 CSV의 저장 `reason`이 달라질 수 있으므로 version을 18로 올립니다. 동일 파일 SHA의 v17 실행을 v18 실행으로 재사용하지 않고, 새 검수는 별도 version의 run으로 저장합니다. DB 스키마 변경과 Alembic migration은 없습니다.
+같은 CSV의 저장 `reason`이 달라질 수 있으므로 version을 18로 올립니다. 동일 파일 SHA의 v17 실행을 v18 실행으로 재사용하지 않고, 두 version의 run을 별도로 저장할 수 있습니다. 같은 SHA·같은 version은 기존 Dedup 계약대로 재사용하며, v17/v18처럼 version이 다른 실행의 비교는 거부합니다. DB 스키마 변경과 Alembic migration은 없습니다.
 
-과거 v17 저장 데이터는 수정하거나 삭제하지 않습니다. 과거 이력·CSV·비교·Copilot·캐시 출력 보호는 후속 2단계 대상이며, 1단계만으로 배포 가능한 보안 수정이 완료된 것은 아닙니다.
+과거 v17 저장 데이터는 수정하거나 삭제하지 않습니다. 신규·재사용·과거 상세 API 및 비교 응답의 `reason`은 출력 경계에서 보호합니다. 결과·수정 작업표·과거 이력 CSV, Streamlit 결과·이력·비교 화면과 캐시 재표시, Copilot Tool/Evidence Pack 및 사용자 질문에도 공통 보호를 적용합니다. 비교 문제 수와 identity는 마스킹 전의 원본 저장 reason으로 계산합니다.
+
+중첩 이메일 `ref@qa.user@example.com`은 공통 함수를 한 번 호출하면 `re*@qa*****@example.com`으로 보호되며, 다시 호출해도 변하지 않습니다. 기존 개인정보 정규식에 맞지 않는 임의 인코딩·변형 값까지 탐지한다는 보장은 없습니다. 매우 긴 비정상 이메일 입력에는 기존 정규식의 처리 비용 한계가 남습니다. 모델 생성 답변의 `answer`·`limitations`는 최종 출력 경계에서 별도로 마스킹하지 않으며, 외부 OpenAI/Ollama의 실제 생성 동작까지 보호를 보장하는 것은 아닙니다.
+
+`tests/test_inspection_persistence.py`에 신규 v18 중첩 이메일 reason 저장, 실제 원문을 가진 합성 v17과 v18의 같은 CSV 해시 공존, 버전별 조회·Dedup·unique index, 과거 상세 HTTP 출력 보호와 DB 원문 보존, 비교 HTTP 422를 검사하는 PostgreSQL 회귀 테스트를 추가했습니다. 이 테스트는 기존 DB fixture 초기화 전에 저장소의 GitHub Actions `test` Job과 지정된 일회용 PostgreSQL 대상인지 확인하고, 현재 Alembic head를 확인한 뒤 실행합니다. 해당 환경이 확인되지 않으면 DB에 접속하지 않고 skip합니다. 테스트 추가 자체는 실제 DB 검증 완료를 뜻하지 않으며, 새 테스트가 포함된 CI의 실행 결과로 완료 여부를 확인해야 합니다.
 
 ## 과거 run과 backfill
 
