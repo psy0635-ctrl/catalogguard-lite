@@ -13,6 +13,8 @@ CatalogGuard Lite는 Python·FastAPI 백엔드와 PostgreSQL 저장 계층을 �
 - 테스트: pytest
 - CI: GitHub Actions
 
+상품 동기화 차이는 상태별 화면 조회에 더해 선택한 배치·상태의 전체 상품을 CSV로 내보냅니다. 기존 API와 보안 처리를 재사용한 [PR #144의 설계·검증 기록](#628-상품-동기화-차이-전체-csv-다운로드-mvp-pr-144)은 6.28절에 정리하였습니다.
+
 ## 이력서용 프로젝트 요약
 
 ### 프로젝트명
@@ -77,7 +79,7 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, 
 
 ### 현재 unreleased main과 v0.3.0 이후 변경
 
-최신 공식 Release는 [v0.3.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.3.0)입니다. 2026-10-18 기준 `main`에는 그 이후의 미출시 변경으로 inspection issue의 관계 행 명시 저장, schema-aware `/ready`, CSV/XLSX Web ETL 업로드와 Golden Rule Quality Regression, [상품 동기화 차이 상태별 필터(PR #138)](#상품-동기화-차이-상태별-필터pr-138), [개인정보 출력 보호 Version 18(PR #142)](#개인정보-출력-보호-version-18pr-142)이 포함됐습니다. 현재 기준은 `INSPECTION_VERSION = "18"`, Alembic single head `20260915_0020`, FastAPI 애플리케이션 버전 `0.1.0`입니다. PR #142는 main 병합이며 새 Release나 운영 배포가 아닙니다. 병합 후 main SHA와 검증 결과는 아래 PR #142 기록에 모았습니다.
+최신 공식 Release는 [v0.3.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.3.0)입니다. 2026-10-19 기준 `main`에는 그 이후의 미출시 변경으로 inspection issue의 관계 행 명시 저장, schema-aware `/ready`, CSV/XLSX Web ETL 업로드와 Golden Rule Quality Regression, [상품 동기화 차이 상태별 필터(PR #138)](#상품-동기화-차이-상태별-필터pr-138), [개인정보 출력 보호 Version 18(PR #142)](#개인정보-출력-보호-version-18pr-142), [상품 동기화 차이 전체 CSV 다운로드 MVP(PR #144)](#628-상품-동기화-차이-전체-csv-다운로드-mvp-pr-144)가 포함됐습니다. 현재 main은 `884620d73a4e5875dc7cf72eac73b71a28e54b0d`이며, [해당 main CI](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/39194257297)는 5/5 SUCCESS, 전체 pytest는 3796 passed입니다. 현재 기준은 `INSPECTION_VERSION = "18"`, Alembic single head `20260915_0020`, FastAPI 애플리케이션 버전 `0.1.0`입니다. PR #142와 #144는 main 병합이며 새 Release나 운영 배포가 아닙니다. 기존 PR #142의 SHA·검증 기록은 그대로 유지하고, 최신 검증의 환경·SKIP·한계는 6.28절에 구분하였습니다.
 
 XLSX는 Web multipart에서만 지원합니다. 정확히 하나의 visible worksheet를 요구하고 formula·macro·external link·merged cell과 과도한 resource 사용을 제한하며, CLI·S3·HTTP feed·Airflow는 계속 CSV-only입니다. 처음에는 XLSX 의존성이 최상위 import로 Airflow runtime까지 전파되는 compatibility regression을 격리 Airflow CI smoke에서 발견했지만, XLSX 경로에서만 불러오는 lazy import로 수정해 CSV-only Airflow 경계와 기존 runtime을 보존했습니다.
 
@@ -234,7 +236,7 @@ Streamlit ETL 프로필 운영 관리
 
 | 항목 | 버전 또는 값 |
 |---|---|
-| Python | 3.11.15 |
+| Python | PR #144 새 main CI 3.11.17 / 학교 PC 검증 3.11.9(서로 다른 실행이며 과거 환경은 각 기록에 유지) |
 | Streamlit | 1.58.0 |
 | API | FastAPI, Uvicorn, Pydantic |
 | pandas | 3.0.3 |
@@ -249,6 +251,7 @@ Streamlit ETL 프로필 운영 관리
 | 로컬 실행 | Docker Compose |
 | pytest | 일반 unit·integration 9.1.1 / Chromium E2E 8.4.1 |
 | CI | GitHub Actions `Test` workflow |
+| PR #144 병합 후 main 검증 | `884620d…`, [Run 39194257297](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/39194257297) CI 5/5 SUCCESS, 전체 pytest 3796 passed / 2 skipped / 21 deselected / 실패·warnings 0. 로컬 결과와 합산하지 않으며 [6.28절](#628-상품-동기화-차이-전체-csv-다운로드-mvp-pr-144)에 검증 범위를 구분 |
 | CI 테스트 서비스 | PostgreSQL 18·Redis 7.4 서비스 컨테이너 |
 | CI 검증 범위 | 일반 `test` job의 Alembic·pytest·비동기 E2E·AWS Docker runtime smoke, `browser-e2e` job의 PostgreSQL·Chromium 실제 브라우저 ETL·promotion E2E, `kubernetes-smoke` job의 kind 실제 Kubernetes 배포·`/health`·`/ready` 검증, `terraform-validate` job의 fmt·init·validate·mock provider test, `airflow-smoke` job의 분리 Airflow image·metadata DB·DAG processor/import·deterministic HTTP staging/idempotency/lineage 검증 |
 | 필수 컬럼 | 9개 |
@@ -2214,3 +2217,109 @@ concentrated duplicate-product-name 입력에서 pair 비교 호출 수를 **4,9
 ### 다음 판단 기준
 
 현재는 synthetic Golden Dataset으로 전체 Rule Engine의 오탐·누락·관계 metadata 회귀를 막습니다. 향후 실제 사용자·운영 데이터가 확보되면 개인정보 보호와 별도 정답 labeling 근거 아래 Rule 품질을 검증하고, 운영 관찰성과 성능 baseline을 계속 보완하는 방향을 우선합니다. Golden Dataset이 이 실데이터 검증을 대체하지는 않습니다. 추천 시스템·대규모 cloud 확장·무제한 Rule 추가는 현재 핵심 계획이 아니며, production 요구가 생겼을 때만 별도 근거로 판단합니다. 기존 `codex/content-safety-subprofile` profiling/backlog 맥락은 보존합니다.
+
+## 6.28 상품 동기화 차이 전체 CSV 다운로드 MVP (PR #144)
+
+### 1. 문제 정의
+
+기존 상품 동기화 차이 화면에서는 공급사 ETL 배치의 정상 적재 상품과 현재 운영 카탈로그를 비교하고, 신규·변경·동일·이번 배치 미관측 상태별로 조회할 수 있었습니다. 그러나 선택한 상태의 상품 전체를 엑셀 등에서 검토할 수 있는 CSV 다운로드 기능은 없었습니다. 운영자는 한 페이지에 표시되는 50건을 확인한 뒤 페이지를 직접 옮겨가며 검토해야 했습니다.
+
+### 2. 개발 목표
+
+선택한 배치·상태의 전체 상품을 안전한 CSV 파일로 내려받는 MVP를 구현하였습니다. 사용 경로는 `ETL 적재 이력 → 배치 선택·상세 조회 → 상품 동기화 차이 → 상태 선택 → 상품 동기화 차이 전체 CSV 준비 → 상품 동기화 차이 전체 CSV 다운로드`입니다. 상태는 전체·신규·변경·동일·이번 배치 미관측을 지원하며, 준비 버튼을 누를 때만 전체 목록을 수집합니다.
+
+### 3. 설계 판단
+
+새 API를 만들지 않고 기존 `GET /api/v1/etl-loads/{etl_load_run_id}/catalog-reconciliation`을 재사용하였습니다. 페이지네이션은 결과를 여러 묶음으로 나누어 조회하는 방식입니다. 기존 API의 페이지 구조와 응답 검증을 그대로 사용하면 화면 조회와 다운로드가 서로 다른 상태 정의나 오류 처리 방식을 갖지 않아 유지보수에 유리합니다. 운영 상품을 수정하지 않는 조회 전용 기능이며, DB Schema·Alembic·Promotion·Rollback 동작은 변경하지 않았습니다.
+
+CSV 생성에는 기존 `prepare_export_dataframe()`의 수식 삽입 방어와 개인정보 출력 보호 함수를 재사용하였습니다. 전체 결과를 메모리에 모으는 방식이므로 최대 5,000개 상품으로 제한하였습니다. 이 수치는 운영 성능이 입증된 최대 처리량이 아니라, MVP 단계의 메모리 보호를 위한 임시 상한입니다.
+
+### 4. 구현 과정
+
+처리 순서는 `상태 선택 → CSV 준비 → 기존 API 페이지별 수집 → 건수·중복·응답 검증 → 개인정보·CSV 보안 → CSV 생성 → 다운로드`입니다.
+
+API를 최대 100건씩 조회하며, 전체 상태에서는 `status`를 생략하고 특정 상태에서는 모든 페이지에 같은 필터를 전달합니다. 배치·공급사·총건수·품질 정보·상태별 요약·필드 집계·요청한 offset/limit이 일치하는지 확인합니다. 한 페이지라도 실패하거나 상품 ID 중복·페이지 누락·응답 불일치가 있으면 수집한 일부만 CSV로 제공하지 않습니다. 0건은 빈 결과로 안내하고, 5,001건 이상은 첫 페이지 확인 후 후속 조회와 파일 생성을 중단합니다.
+
+CSV 컬럼은 **상품 ID·상태·변경 필드**이며 기존 한국어 상태 레이블과 정렬된 필드명을 사용합니다. UTF-8 BOM을 포함해 한글 컬럼을 제공하고, `=`, `+`, `-`, `@` 및 선행 공백·탭 뒤의 수식을 보호합니다. 개인정보·계좌번호 의심 값은 기존 출력 보호 기준으로 마스킹하며, 변경 전·후 원문 값과 Reject 원본은 포함하지 않습니다. 모든 비정형 개인정보의 탐지를 보장한다는 의미는 아닙니다.
+
+배치·상태·페이지 변경이나 재조회 시 준비한 CSV를 제거하고, 재준비 실패 시 과거 다운로드도 남기지 않습니다. 준비 결과를 배치·상태와 연결해 다른 조건의 파일을 내려받지 않도록 하였습니다. `not_observed_in_batch`는 정상 staging에서 관측되지 않았다는 뜻이며 삭제·단종 판정이 아닙니다. 상세 계약은 [Catalog Reconciliation Report](catalog_reconciliation.md#상품-동기화-차이-전체-csv-다운로드-mvp)에 모았습니다.
+
+### 5. 주요 코드
+
+다음 두 부분은 실제 함수에서 연속된 코드를 발췌한 것입니다. 단독 실행 예제나 전체 함수가 아니며, 전체 검증 조건은 연결한 소스에서 확인할 수 있습니다.
+
+#### 기존 API를 사용하는 전체 수집과 상한
+
+**코드:** [Client의 `fetch_all_catalog_reconciliation()`](../clients/catalogguard_api.py) 반복문 내부입니다.
+
+```python
+        params = {"limit": page_size, "offset": offset}
+        if status is not None:
+            params["status"] = status
+        page = api_client.get_catalog_reconciliation(etl_load_run_id, **params)
+        if not isinstance(page, dict):
+            raise _invalid_etl_response()
+        _validate_catalog_reconciliation_response(page, status=status)
+        if page["total"] > CATALOG_RECONCILIATION_EXPORT_MAX_ITEMS:
+            raise CatalogReconciliationExportLimitError("Reconciliation export exceeds MVP limit")
+```
+
+**설명:** 기존 조회 메서드와 응답 검증을 사용하며, 선택 상태의 전체 건수가 상한을 넘으면 예외로 수집을 중단합니다. 전체 함수는 이어서 페이지 길이·메타데이터·ID 중복을 검사하고 모든 페이지가 완성된 경우에만 목록을 반환합니다.
+
+**역할:** 기존 API 계약을 유지하면서 현재 화면의 한 페이지를 넘어 전체 목록을 수집하고, 불완전한 결과와 상한 초과를 차단하는 부분입니다.
+
+#### 준비 실패 시 예외의 참조 보존 방지
+
+**코드:** [UI의 `_render_catalog_reconciliation_export()`](../ui/etl_load_history.py) 오류 처리 부분입니다.
+
+```python
+        except (
+            CatalogGuardApiConfigurationError, CatalogGuardApiConnectionError,
+            CatalogGuardApiTimeoutError, CatalogGuardApiResponseError,
+            ETLLoadNotFoundError, ValueError,
+        ) as error:
+            # Do not retain the collector's partially fetched items through its traceback.
+            state["catalog_reconciliation_export_error"] = error.with_traceback(None)
+```
+
+**설명:** 준비를 시작할 때 이전 CSV를 제거하고, 전체 수집 성공 후에만 새 CSV 바이트를 저장합니다. 실패하면 오류를 표시하되 traceback은 저장하지 않습니다. traceback은 오류 발생 경로를 담고 있으며 당시 함수의 지역 변수를 참조할 수 있는 객체입니다.
+
+**역할:** 오류 안내는 유지하면서 실패한 함수의 부분 수집 목록이 화면 세션에 불필요하게 남는 것을 방지하는 부분입니다.
+
+### 6. 테스트 및 결과
+
+아래는 구현·병합 당시 완료한 서로 다른 실행의 결과입니다. 이번 README·포트폴리오 수정에서는 테스트·DB·브라우저를 다시 실행하지 않았습니다.
+
+| 실행 | 환경·결과 | 확인 범위 |
+|---|---|---|
+| 학교 PC 전체 pytest | Python 3.11.9, **3791 passed / 7 skipped / 21 deselected / 실패·warnings 0** | CSV helper·Client·AppTest를 포함한 전체 회귀. SKIP은 Airflow 수집 2건과 지정 CI DB 전용 개인정보 저장 테스트 5건이며 통과로 계산하지 않았습니다 |
+| 학교 PC 격리 PostgreSQL·Chromium | **4 passed**, 종료 코드 0 | 전체 208행과 네 상태별 각 52행의 실제 CSV 다운로드, UTF-8 BOM·세 컬럼·파일명·상품 ID·캐시 무효화·조회 전용 DB snapshot 검증 |
+| 병합 후 공식 main CI | Python 3.11.17, **3796 passed / 2 skipped / 21 deselected / 실패·warnings 0**, 종료 코드 0 | [Run 39194257297](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/39194257297)의 전체 pytest. SKIP 2건은 별도 Airflow 환경에서 다루는 모듈입니다 |
+
+새 main의 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke`는 **5/5 SUCCESS**입니다. [test Job](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/39194257297/job/117873460204)의 PostgreSQL 개인정보 회귀 5건은 각각 PASS이며 대상 SKIP·failure·error는 0입니다. 별도 Async E2E **1 passed**는 전체 pytest에 합산하지 않았습니다.
+
+브라우저 CI에서는 새 main의 Runner가 신규 CSV 테스트 파일 전체를 제외 필터 없이 실행하는 경로와 Job 성공을 대조하였습니다. 현재 Runner는 성공 시 개별 신규 테스트명 PASS 로그를 출력하지 않으므로, 개별 테스트 PASS 출력을 직접 확인했다고 설명하지 않습니다. 로컬 브라우저의 4 passed와 GitHub CI의 증거 범위를 구분하였습니다.
+
+### 7. 발견한 오류와 해결
+
+**5,000건 상한 누락:** 최초 전체 수집 함수에는 다운로드 건수 제한이 없었습니다. 전체 목록을 메모리에 모으므로 예상보다 큰 배치에서 사용량이 늘어날 수 있었습니다. 첫 페이지의 `total`을 확인한 뒤 5,000건 초과를 전용 예외로 중단하고 상태 필터로 범위를 줄이도록 안내하였습니다. [Client 테스트](../tests/test_catalogguard_api_client.py)는 5,000건 허용과 5,001건에서 첫 요청 후 종료를 검사하고, [UI 테스트](../tests/test_etl_load_history_ui.py)는 제한 안내와 과거 다운로드 제거를 확인합니다.
+
+**실패 traceback의 부분 목록 참조:** 실패 예외를 그대로 `session_state`에 저장하면 traceback을 통해 전체 수집 함수의 지역 변수와 부분 목록이 남을 수 있었습니다. 오류 종류와 안내에 필요한 정보는 유지하고 `error.with_traceback(None)`으로 traceback을 제거하였습니다. UI 실패·재시도 테스트는 다운로드가 사라지는 것과 저장된 예외의 traceback이 `None`인 것을 함께 검사합니다.
+
+### 8. 최종 결과
+
+선택 상태의 전체 상품을 기존 API로 수집해 안전한 CSV로 내보내고, 불완전한 결과는 파일로 제공하지 않도록 구현하였습니다. [PR #144](https://github.com/psy0635-ctrl/catalogguard-lite/pull/144)는 **2026-10-19 12:20:50 KST에 Rebase and merge**로 병합됐으며, 새 main `884620d73a4e5875dc7cf72eac73b71a28e54b0d`의 CI 5/5 성공을 확인하였습니다. 새 API·DB 구조·Alembic 변경 없이 Inspection Version 18과 Golden Dataset 42개 상품·40건 문제 기준을 유지하였습니다. **공식 Release v0.3.0 이후 main에 병합된 미출시 변경**이며 새 Release·운영 배포는 수행하지 않았습니다.
+
+### 9. 한계 및 개선 방향
+
+기존 API에는 Snapshot Token, 즉 여러 조회를 동일 DB 시점으로 고정하는 식별자가 없습니다. total·중복·페이지 길이·응답 메타데이터의 변동은 검사하지만, 건수와 집계가 같게 유지되는 모든 동시 변경까지 탐지하지는 못합니다. 완전한 단일 시점 Snapshot Export로 설명하지 않습니다.
+
+5,000건 상한은 임시 메모리 보호 기준입니다. 대량 처리나 단일 시점 보장이 필요해지면 실제 사용량과 성능 근거를 확보한 뒤 수집 방식을 별도로 검토해야 합니다. 브라우저에서 중간 API 오류를 강제로 주입하는 E2E는 미실행이며, 첫·중간·마지막 페이지 실패 시 부분 CSV 차단은 helper·AppTest에서 검증한 범위입니다. 향후 브라우저 오류 주입 검증을 보완할 수 있으나 이번 MVP에서 구현했다고 주장하지 않습니다.
+
+### 10. GitHub 근거
+
+- [PR #144](https://github.com/psy0635-ctrl/catalogguard-lite/pull/144)
+- [병합 후 main Commit](https://github.com/psy0635-ctrl/catalogguard-lite/commit/884620d73a4e5875dc7cf72eac73b71a28e54b0d)
+- [새 main CI Run 39194257297](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/39194257297)
+- [CSV 상세 설계·사용법·한계](catalog_reconciliation.md#상품-동기화-차이-전체-csv-다운로드-mvp)
+- [실제 PostgreSQL·Chromium 테스트](../tests/e2e/test_catalog_reconciliation_browser_e2e.py)
