@@ -10,6 +10,8 @@ import pandas as pd
 import streamlit as st
 
 from clients.catalogguard_api import (
+    CATALOG_RECONCILIATION_EXPORT_MAX_ITEMS,
+    CatalogReconciliationExportLimitError,
     CatalogGuardApiConfigurationError,
     CatalogGuardApiConnectionError,
     CatalogGuardApiResponseError,
@@ -25,8 +27,10 @@ from clients.catalogguard_api import (
     ETLProfileInactiveError,
     ETLProfileNotFoundError,
     ETLUnsupportedProfileError,
+    fetch_all_catalog_reconciliation,
 )
 from config.settings import MAX_UPLOAD_SIZE_BYTES
+from core.privacy import mask_inspection_reason
 from core.result_exporter import prepare_export_dataframe
 from ui.auth import get_authenticated_api_client, is_operator
 
@@ -194,6 +198,7 @@ ETL_PROFILE_ADMIN_HISTORY_DISPLAY_COLUMNS = [
 ]
 
 CATALOG_RECONCILIATION_LIMIT = 50
+CATALOG_RECONCILIATION_EXPORT_PAGE_SIZE = 100
 CATALOG_RECONCILIATION_ALL_STATUS = "all"  # UI 전용 값이며 API에는 보내지 않습니다.
 CATALOG_RECONCILIATION_FIELD_COLUMNS = ["변경 필드", "변경 건수"]
 CATALOG_RECONCILIATION_ITEM_COLUMNS = ["상품 ID", "상태", "변경 필드"]
@@ -390,6 +395,8 @@ ETL_LOAD_STATE_DEFAULTS = {
     "catalog_reconciliation_status": CATALOG_RECONCILIATION_ALL_STATUS,
     "catalog_reconciliation_response": None,
     "catalog_reconciliation_error": None,
+    "catalog_reconciliation_export_download": None,
+    "catalog_reconciliation_export_error": None,
     "catalog_promotion_preview_batch_id": None,
     "catalog_promotion_preview_response": None,
     "catalog_promotion_preview_hash": None,
@@ -3155,9 +3162,87 @@ def _render_etl_load_pagination(response: dict[str, Any]) -> None:
             st.rerun()
 
 
+def build_catalog_reconciliation_csv(items: list[dict[str, Any]]) -> bytes:
+    """Export the displayed columns only, without before/after product values."""
+    frame = build_catalog_reconciliation_item_dataframe(items)
+    for column in frame.columns:
+        frame[column] = frame[column].map(
+            lambda value: mask_inspection_reason(value) if isinstance(value, str) else value
+        )
+        # Excel may ignore leading whitespace/control characters before a formula.
+        frame[column] = frame[column].map(
+            lambda value: "'" + value
+            if isinstance(value, str) and value[:1] not in ("=", "+", "-", "@")
+            and value.lstrip(" \t\r\n\ufeff").startswith(("=", "+", "-", "@"))
+            else value
+        )
+    return prepare_export_dataframe(frame).to_csv(index=False).encode("utf-8-sig")
+
+
+def _clear_catalog_reconciliation_export(session_state) -> None:
+    session_state["catalog_reconciliation_export_download"] = None
+    session_state["catalog_reconciliation_export_error"] = None
+
+
+def _render_catalog_reconciliation_export(api_client) -> None:
+    state = st.session_state
+    batch_id = state.get("etl_load_selected_run_id")
+    status = state.get("catalog_reconciliation_status", CATALOG_RECONCILIATION_ALL_STATUS)
+    scope = (batch_id, status)
+    prepared = state.get("catalog_reconciliation_export_download")
+    if prepared is not None and prepared.get("scope") != scope:
+        _clear_catalog_reconciliation_export(state)
+        prepared = None
+    st.caption("선택한 배치·상태의 모든 페이지를 CSV로 준비합니다. 변경 전·후 원문 값은 포함하지 않습니다.")
+    if st.button("상품 동기화 차이 전체 CSV 준비", key="catalog_reconciliation_export_prepare"):
+        _clear_catalog_reconciliation_export(state)
+        prepared = None
+        try:
+            items = fetch_all_catalog_reconciliation(
+                api_client, etl_load_run_id=batch_id,
+                status=None if status == CATALOG_RECONCILIATION_ALL_STATUS else status,
+                page_size=CATALOG_RECONCILIATION_EXPORT_PAGE_SIZE,
+            )
+            if not items:
+                st.info("다운로드할 상품 동기화 차이가 없습니다.")
+            else:
+                prepared = {
+                    "scope": scope, "total": len(items),
+                    "csv_bytes": build_catalog_reconciliation_csv(items),
+                    "file_name": f"catalogguard_reconciliation_{batch_id}_{status}.csv",
+                }
+                state["catalog_reconciliation_export_download"] = prepared
+        except (
+            CatalogGuardApiConfigurationError, CatalogGuardApiConnectionError,
+            CatalogGuardApiTimeoutError, CatalogGuardApiResponseError,
+            ETLLoadNotFoundError, ValueError,
+        ) as error:
+            # Do not retain the collector's partially fetched items through its traceback.
+            state["catalog_reconciliation_export_error"] = error.with_traceback(None)
+    if state.get("catalog_reconciliation_export_error") is not None:
+        error = state["catalog_reconciliation_export_error"]
+        if isinstance(error, CatalogReconciliationExportLimitError):
+            st.error(
+                f"CSV 다운로드는 최대 {CATALOG_RECONCILIATION_EXPORT_MAX_ITEMS:,}개 상품까지 가능합니다. "
+                "상태 필터로 범위를 줄인 뒤 다시 준비해 주세요."
+            )
+        else:
+            st.error(build_etl_api_error_display_message(
+                "상품 동기화 차이 CSV를 준비하지 못했습니다. 다시 준비해 주세요.", error,
+            ))
+    elif prepared is not None:
+        st.caption(f"선택한 상태의 전체 {prepared['total']}개 상품을 다운로드합니다.")
+        st.download_button(
+            "상품 동기화 차이 전체 CSV 다운로드", data=prepared["csv_bytes"],
+            file_name=prepared["file_name"], mime="text/csv",
+            key="catalog_reconciliation_export_download_button",
+        )
+
+
 def _clear_catalog_reconciliation_cache(session_state) -> None:
     session_state["catalog_reconciliation_response"] = None
     session_state["catalog_reconciliation_error"] = None
+    _clear_catalog_reconciliation_export(session_state)
 
 
 def _on_catalog_reconciliation_status_change(session_state) -> None:
@@ -3304,6 +3389,8 @@ def _render_catalog_reconciliation(api_client) -> None:
             width="stretch",
             hide_index=True,
         )
+
+    _render_catalog_reconciliation_export(api_client)
 
     current_page, total_pages, has_previous, has_next = calculate_etl_pagination(
         total=total,

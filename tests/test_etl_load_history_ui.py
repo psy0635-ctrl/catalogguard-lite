@@ -6474,3 +6474,234 @@ def test_reconciliation_uncached_batch_resets_a_restored_widget_filter():
     assert state["catalog_reconciliation_offset"] == 0
     assert state["catalog_reconciliation_response"] is None
     assert state["catalog_reconciliation_error"] is None
+
+
+@pytest.mark.parametrize("status", [None, *etl_load_history.CATALOG_RECONCILIATION_STATUS_LABELS])
+def test_reconciliation_export_collects_every_page_in_selected_scope(status):
+    client = FilteredReconciliationClient()
+    items = etl_load_history.fetch_all_catalog_reconciliation(
+        client, etl_load_run_id=42, status=status, page_size=1,
+    )
+    assert len(items) == (5 if status is None else 2 if status == "new" else 1)
+    assert len({item["external_product_id"] for item in items}) == len(items)
+    assert [call["offset"] for call in client.calls] == list(range(len(items)))
+    assert all(call["etl_load_run_id"] == 42 and call["status"] == status for call in client.calls)
+
+
+class FaultyReconciliationExportClient(FilteredReconciliationClient):
+    def __init__(self, fault):
+        super().__init__()
+        self.fault = fault
+
+    def get_catalog_reconciliation(self, etl_load_run_id, **params):
+        page = super().get_catalog_reconciliation(etl_load_run_id, **params)
+        if params["offset"] == 0:
+            return page
+        if self.fault == "timeout":
+            raise catalogguard_api.CatalogGuardApiTimeoutError("private server details")
+        if self.fault == "not_found":
+            raise ETLLoadNotFoundError("private server details")
+        if self.fault == "conflict":
+            raise catalogguard_api.CatalogGuardApiResponseError("private server details")
+        if self.fault == "empty":
+            page["items"] = []
+        elif self.fault == "duplicate":
+            page["items"][0] = {"external_product_id": "P002", "status": "new", "changed_fields": {}}
+        elif self.fault == "total":
+            page["total"] += 1
+            page["new_count"] += 1
+        elif self.fault == "summary":
+            page["new_count"] -= 1
+            page["unchanged_count"] += 1
+        elif self.fault == "fields":
+            page["field_change_counts"] = {"stock": 999}
+        elif self.fault == "quality":
+            page["rejected_rows"] = None
+        elif self.fault == "supplier":
+            page["supplier_key"] = "other_supplier"
+        elif self.fault == "batch":
+            page["etl_load_run_id"] = 43
+        elif self.fault in ("offset", "limit"):
+            page[self.fault] += 1
+        elif self.fault == "malformed":
+            page["items"] = [{"status": "new"}]
+        return page
+
+
+EXPORT_PAGE_FAULTS = [
+    "timeout", "not_found", "conflict", "empty", "duplicate", "total", "summary",
+    "fields", "quality", "supplier", "batch", "offset", "limit", "malformed",
+]
+
+
+@pytest.mark.parametrize("fault", EXPORT_PAGE_FAULTS)
+def test_reconciliation_export_never_returns_partial_results(fault):
+    with pytest.raises((catalogguard_api.CatalogGuardApiError, ValueError)):
+        etl_load_history.fetch_all_catalog_reconciliation(
+            FaultyReconciliationExportClient(fault), etl_load_run_id=42, page_size=1,
+        )
+
+
+@pytest.mark.parametrize("page_size", [0, 101, -1, True, 1.5])
+def test_reconciliation_export_rejects_invalid_page_size_without_request(page_size):
+    client = FilteredReconciliationClient()
+    with pytest.raises(ValueError):
+        etl_load_history.fetch_all_catalog_reconciliation(client, etl_load_run_id=42, page_size=page_size)
+    assert not client.calls
+
+
+def test_reconciliation_export_csv_is_safe_and_omits_raw_changes():
+    from copy import deepcopy
+    items = [
+        {"external_product_id": value, "status": "changed", "changed_fields": {
+            "description": {"before": "secret-before@example.com", "after": "secret-after@example.com"},
+        }}
+        for value in [
+            "=1+1", "+1+1", "-1+1", "@SUM(1)", " \t=1+1", "010-1234-5678",
+            "user@example.com", "900101-1234567", "계좌 110-123-456789",
+            '상품,"인용"\n두 번째 줄',
+        ]
+    ]
+    original = deepcopy(items)
+    payload = etl_load_history.build_catalog_reconciliation_csv(items)
+    assert payload.startswith(b"\xef\xbb\xbf")
+    text = payload.decode("utf-8-sig")
+    rows = list(csv.DictReader(io.StringIO(text)))
+    assert list(rows[0]) == etl_load_history.CATALOG_RECONCILIATION_ITEM_COLUMNS
+    assert all(row["상품 ID"].startswith("'") for row in rows[:5])
+    assert "010-1234-5678" not in text and "user@example.com" not in text
+    assert "900101-1234567" not in text and "110-123-456789" not in text
+    assert rows[-1]["상품 ID"] == '상품,"인용"\n두 번째 줄'
+    assert "secret-before" not in text and "secret-after" not in text
+    assert all(row["상태"] == "변경" and row["변경 필드"] == "description" for row in rows)
+    assert items == original
+
+
+def test_reconciliation_export_apptest_prepares_all_pages_without_moving_ui(monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    monkeypatch.setattr(etl_load_history, "CATALOG_RECONCILIATION_LIMIT", 1)
+    monkeypatch.setattr(etl_load_history, "CATALOG_RECONCILIATION_EXPORT_PAGE_SIZE", 2)
+    client = FilteredReconciliationClient()
+    app = AppTest.from_function(_reconciliation_filter_test_app, args=(client,)).run()
+    assert not app.get("download_button")
+    app.button(key="catalog_reconciliation_next").click().run()
+    client.calls.clear()
+    app.button(key="catalog_reconciliation_export_prepare").click().run()
+    assert not app.exception and not app.error
+    prepared = app.session_state["catalog_reconciliation_export_download"]
+    assert prepared["total"] == 5
+    assert prepared["file_name"] == "catalogguard_reconciliation_42_all.csv"
+    assert len(list(csv.DictReader(io.StringIO(prepared["csv_bytes"].decode("utf-8-sig"))))) == 5
+    assert [call["offset"] for call in client.calls] == [0, 2, 4]
+    assert app.session_state["catalog_reconciliation_offset"] == 1
+    assert len(app.get("download_button")) == 1
+    app.selectbox(key="catalog_reconciliation_status").select("new").run()
+    assert app.session_state["catalog_reconciliation_export_download"] is None
+    assert not app.get("download_button")
+    app.button(key="catalog_reconciliation_export_prepare").click().run()
+    assert app.session_state["catalog_reconciliation_export_download"]["total"] == 2
+    app.selectbox(key="etl_load_selected_run_id").select(43).run()
+    assert not app.get("download_button")
+    assert app.session_state["catalog_reconciliation_export_download"] is None
+
+
+@pytest.mark.parametrize("fault", EXPORT_PAGE_FAULTS)
+def test_reconciliation_export_apptest_failure_clears_download_and_allows_retry(monkeypatch, fault):
+    from streamlit.testing.v1 import AppTest
+    monkeypatch.setattr(etl_load_history, "CATALOG_RECONCILIATION_EXPORT_PAGE_SIZE", 1)
+    client = FaultyReconciliationExportClient(None)
+    app = AppTest.from_function(_reconciliation_filter_test_app, args=(client,)).run()
+    app.button(key="catalog_reconciliation_export_prepare").click().run()
+    assert app.session_state["catalog_reconciliation_export_download"]["total"] == 5
+    client.fault = fault
+    app.button(key="catalog_reconciliation_export_prepare").click().run()
+    assert not app.exception
+    assert app.session_state["catalog_reconciliation_export_download"] is None
+    assert not app.get("download_button")
+    assert app.error and "private server details" not in app.error[0].value
+    assert app.session_state["catalog_reconciliation_export_error"].__traceback__ is None
+    client.fault = None
+    app.button(key="catalog_reconciliation_export_prepare").click().run()
+    assert not app.exception and not app.error
+    assert app.session_state["catalog_reconciliation_export_download"]["total"] == 5
+
+
+def test_reconciliation_export_empty_scope_has_no_download():
+    from streamlit.testing.v1 import AppTest
+    client = FilteredReconciliationClient(empty_status="changed")
+    app = AppTest.from_function(_reconciliation_filter_test_app, args=(client,)).run()
+    app.selectbox(key="catalog_reconciliation_status").select("changed").run()
+    app.button(key="catalog_reconciliation_export_prepare").click().run()
+    assert not app.exception and not app.error
+    assert not app.get("download_button")
+    assert app.session_state["catalog_reconciliation_export_download"] is None
+    assert any("다운로드할 상품 동기화 차이가 없습니다" in info.value for info in app.info)
+
+
+@pytest.mark.parametrize("batch_id,status", [(0, None), (True, None), ("42", None), (42, "all"), (42, "deleted")])
+def test_reconciliation_export_rejects_invalid_scope_before_request(batch_id, status):
+    client = FilteredReconciliationClient()
+    with pytest.raises(ValueError):
+        etl_load_history.fetch_all_catalog_reconciliation(client, etl_load_run_id=batch_id, status=status)
+    assert not client.calls
+
+
+@pytest.mark.parametrize("scope", [(43, "all"), (42, "changed")])
+def test_reconciliation_export_hides_stale_download_without_callback(scope):
+    from streamlit.testing.v1 import AppTest
+    client = FilteredReconciliationClient()
+    app = AppTest.from_function(_reconciliation_filter_test_app, args=(client,)).run()
+    app.session_state["catalog_reconciliation_export_download"] = {
+        "scope": scope, "total": 99, "csv_bytes": b"stale", "file_name": "stale.csv",
+    }
+    app.run()
+    assert not app.exception and not app.get("download_button")
+    assert app.session_state["catalog_reconciliation_export_download"] is None
+
+
+def test_reconciliation_export_limit_clears_previous_download_and_explains_limit(monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    client = FilteredReconciliationClient()
+    app = AppTest.from_function(_reconciliation_filter_test_app, args=(client,)).run()
+    app.button(key="catalog_reconciliation_export_prepare").click().run()
+    assert app.get("download_button")
+    monkeypatch.setattr(catalogguard_api, "CATALOG_RECONCILIATION_EXPORT_MAX_ITEMS", 4)
+    app.button(key="catalog_reconciliation_export_prepare").click().run()
+    assert not app.exception and not app.get("download_button")
+    assert app.session_state["catalog_reconciliation_export_download"] is None
+    assert "5,000" in app.error[0].value and "상태 필터" in app.error[0].value
+
+
+@pytest.mark.parametrize("failure_offset", [0, 100, 200])
+def test_reconciliation_export_first_middle_last_page_failure(failure_offset):
+    class Client(FilteredReconciliationClient):
+        def get_catalog_reconciliation(self, etl_load_run_id, *, limit, offset, status=None):
+            if offset == failure_offset:
+                raise catalogguard_api.CatalogGuardApiTimeoutError("synthetic failure")
+            return {
+                **RECONCILIATION_RESPONSE, "total": 230, "new_count": 230,
+                "changed_count": 0, "unchanged_count": 0, "not_observed_in_batch_count": 0,
+                "field_change_counts": {}, "limit": limit, "offset": offset,
+                "items": [{"external_product_id": f"P{i:04d}", "status": "new", "changed_fields": {}}
+                          for i in range(offset, min(230, offset + limit))],
+            }
+    with pytest.raises(catalogguard_api.CatalogGuardApiTimeoutError):
+        etl_load_history.fetch_all_catalog_reconciliation(Client(), etl_load_run_id=42)
+
+
+@pytest.mark.parametrize("fault", ["json", "id", "wrong_status", "short"])
+def test_reconciliation_export_rejects_malformed_first_page(fault):
+    class Client(FilteredReconciliationClient):
+        def get_catalog_reconciliation(self, etl_load_run_id, **params):
+            page = super().get_catalog_reconciliation(etl_load_run_id, **params)
+            if fault == "json":
+                return []
+            if fault == "id":
+                page["items"][0]["external_product_id"] = ""
+            elif fault == "wrong_status":
+                page["items"][0]["status"] = "unchanged"
+            elif fault == "short":
+                page["items"] = page["items"][:1]
+            return page
+    with pytest.raises(catalogguard_api.CatalogGuardApiResponseError):
+        etl_load_history.fetch_all_catalog_reconciliation(Client(), etl_load_run_id=42, status="new")

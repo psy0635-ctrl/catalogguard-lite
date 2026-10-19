@@ -1604,6 +1604,74 @@ def _validate_catalog_reconciliation_response(
         raise _invalid_etl_response()
 
 
+CATALOG_RECONCILIATION_EXPORT_MAX_ITEMS = 5000
+
+
+class CatalogReconciliationExportLimitError(ValueError):
+    """The selected export exceeds the temporary MVP memory guard."""
+
+
+def fetch_all_catalog_reconciliation(
+    api_client,
+    *,
+    etl_load_run_id: int,
+    status: str | None = None,
+    page_size: int = 100,
+) -> list[dict[str, Any]]:
+    """Collect complete, consistent pages through the existing read-only API.
+
+    No partial result is returned on failure. Metadata checks detect observable
+    changes; the existing API does not provide a cross-request snapshot token.
+    """
+    _validate_positive_etl_int(etl_load_run_id, "etl_load_run_id")
+    _validate_etl_pagination(page_size, 0)
+    if status is not None and status not in CATALOG_RECONCILIATION_STATUSES:
+        raise ValueError("Invalid reconciliation status")
+    items: list[dict[str, Any]] = []
+    identities: set[str] = set()
+    metadata = None
+    offset = 0
+    while True:
+        params = {"limit": page_size, "offset": offset}
+        if status is not None:
+            params["status"] = status
+        page = api_client.get_catalog_reconciliation(etl_load_run_id, **params)
+        if not isinstance(page, dict):
+            raise _invalid_etl_response()
+        _validate_catalog_reconciliation_response(page, status=status)
+        if page["total"] > CATALOG_RECONCILIATION_EXPORT_MAX_ITEMS:
+            raise CatalogReconciliationExportLimitError("Reconciliation export exceeds MVP limit")
+        current_metadata = {
+            key: page[key] for key in CATALOG_RECONCILIATION_RESPONSE_KEYS
+            if key not in {"items", "limit", "offset"}
+        }
+        if metadata is None:
+            metadata = current_metadata
+        if (
+            page["etl_load_run_id"] != etl_load_run_id
+            or page["limit"] != page_size
+            or page["offset"] != offset
+            or current_metadata != metadata
+            or len(page["items"]) != min(page_size, max(0, page["total"] - offset))
+        ):
+            raise _invalid_etl_response()
+        for item in page["items"]:
+            identity = item["external_product_id"]
+            if identity in identities:
+                raise _invalid_etl_response()
+            identities.add(identity)
+        items.extend(page["items"])
+        offset += len(page["items"])
+        if offset == page["total"]:
+            statuses = CATALOG_RECONCILIATION_STATUSES if status is None else (status,)
+            if any(
+                sum(item["status"] == value for item in items) != page[f"{value}_count"]
+                for value in statuses
+            ):
+                raise _invalid_etl_response()
+            return items
+
+
 def _validate_catalog_promotion_preview_response(data: dict[str, Any]) -> None:
     if any(key not in data for key in CATALOG_PROMOTION_PREVIEW_RESPONSE_KEYS):
         raise _invalid_etl_response()
