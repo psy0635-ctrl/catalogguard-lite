@@ -591,6 +591,96 @@ def _database_snapshot():
     return snapshot
 
 
+def test_catalog_reconciliation_csv_download_in_real_browser(page, tmp_path):
+    """Download all 208 rows and filtered 52 rows through the real UI/API/DB."""
+    import csv
+    import io
+    from playwright.sync_api import expect
+
+    baseline = _database_snapshot()
+    fixture = _create_paginated_reconciliation_fixture()
+    evidence = []
+    try:
+        before = _database_snapshot()
+        page.goto(STREAMLIT_URL, wait_until="domcontentloaded")
+        _login_as_operator(page)
+        page.get_by_role("tab", name="ETL 적재 이력").click()
+        page.get_by_label("원본 파일명").fill("browser_e2e_reconciliation")
+        page.get_by_label("공급사 프로필").fill(PROFILE_NAME)
+        page.get_by_role("button", name="조회", exact=True).click()
+
+        def select_batch(run_id, filename):
+            page.get_by_role("combobox", name=re.compile("적재 배치 선택$")).click()
+            page.get_by_role("option", name=re.compile(rf"^{run_id} · {re.escape(filename)}")).click()
+            expect(page.get_by_text("상품 동기화 차이", exact=True)).not_to_be_visible()
+            page.get_by_role("button", name="상세 조회", exact=True).click()
+            expect(page.get_by_text("상품 동기화 차이", exact=True)).to_be_visible()
+
+        def choose_filter(label):
+            page.get_by_role("combobox", name=re.compile("상품 동기화 차이 상태$")).click()
+            page.get_by_role("option", name=label, exact=True).click()
+
+        prepare = page.get_by_role("button", name="상품 동기화 차이 전체 CSV 준비", exact=True)
+        download_button = page.get_by_role("button", name="상품 동기화 차이 전체 CSV 다운로드", exact=True)
+        select_batch(fixture.incoming.id, SOURCE_FILENAME)
+        expect(download_button).not_to_be_visible()
+        expect(page.get_by_text("상품 1 / 5 페이지 · 전체 208개 상품", exact=True)).to_be_visible()
+        page.get_by_role("button", name="동기화 차이 다음", exact=True).click()
+        expect(page.get_by_text("상품 2 / 5 페이지 · 전체 208개 상품", exact=True)).to_be_visible()
+        for code, label, count, kind in (
+            ("all", None, 208, None), ("new", "신규", 52, "NEW"),
+            ("changed", "변경", 52, "CHANGED"), ("unchanged", "동일", 52, "SAME"),
+            ("not_observed_in_batch", "이번 배치 미관측", 52, "OLD"),
+        ):
+            if label:
+                choose_filter(label)
+                expect(download_button).not_to_be_visible()
+            prepare.click()
+            expect(download_button).to_be_visible()
+            if code == "all":
+                expect(page.get_by_text("상품 2 / 5 페이지 · 전체 208개 상품", exact=True)).to_be_visible()
+            with page.expect_download() as download_info:
+                download_button.click()
+            download = download_info.value
+            filename = f"catalogguard_reconciliation_{fixture.incoming.id}_{code}.csv"
+            assert download.suggested_filename == filename
+            path = tmp_path / filename
+            download.save_as(path)
+            payload = path.read_bytes()
+            assert payload.startswith(b"\xef\xbb\xbf")
+            rows = list(csv.DictReader(io.StringIO(payload.decode("utf-8-sig"))))
+            assert len(rows) == count
+            assert list(rows[0]) == ["상품 ID", "상태", "변경 필드"]
+            assert len({row["상품 ID"] for row in rows}) == count
+            if label:
+                assert {row["상태"] for row in rows} == {label}
+                assert [row["상품 ID"] for row in rows] == [f"REC-{kind}-{i:03d}" for i in range(1, 53)]
+            # The existing CSV sanitizer also protects the display placeholder '-'.
+            expected_fields = {"stock"} if code == "changed" else {"'-"}
+            if code == "all":
+                expected_fields.add("stock")
+            assert {row["변경 필드"] for row in rows} == expected_fields
+            evidence.append({"status": code, "rows": len(rows), "filename": filename,
+                             "sha256": hashlib.sha256(payload).hexdigest(), "bom": True})
+        page.get_by_role("button", name="동기화 차이 다음", exact=True).click()
+        expect(download_button).not_to_be_visible()
+        select_batch(fixture.catalog_source.id, CATALOG_SOURCE_FILENAME)
+        expect(download_button).not_to_be_visible()
+        choose_filter("신규")
+        expect(page.get_by_text("선택한 상태에 해당하는 상품이 없습니다.", exact=True)).to_be_visible()
+        prepare.click()
+        expect(page.get_by_text("다운로드할 상품 동기화 차이가 없습니다.", exact=True)).to_be_visible()
+        expect(download_button).not_to_be_visible()
+        assert _database_snapshot() == before
+        _save_evidence("csv-download-results.json", {"downloads": evidence, "read_only": True})
+    except Exception:
+        _preserve_browser_failure_artifacts(page)
+        raise
+    finally:
+        _cleanup_reconciliation_fixture(fixture)
+    assert _database_snapshot() == baseline
+
+
 def _create_paginated_reconciliation_fixture():
     """52 products per status exercise the real 50-item UI page size."""
     from db.models import CatalogProduct, CatalogProductStaging, ETLLoadRun

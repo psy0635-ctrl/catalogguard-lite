@@ -4167,6 +4167,44 @@ def test_get_catalog_reconciliation_accepts_empty_filter_with_nonzero_global_cou
     assert client.get_catalog_reconciliation(42, status="new") == response
 
 
+@pytest.mark.parametrize("total", [0, 1, 50, 100, 101, 205, 230, 5000, 5001])
+@pytest.mark.parametrize("status", [None, "new"])
+def test_fetch_all_reconciliation_uses_existing_http_client_and_page_boundaries(total, status):
+    client_module = import_client_module()
+    client, session = make_client(response=FakeResponse(payload={}))
+    calls = []
+
+    def get(url, *, params, timeout):
+        calls.append({"url": url, "params": dict(params)})
+        offset = params["offset"]
+        return FakeResponse(payload={
+            **CATALOG_RECONCILIATION_RESPONSE,
+            "new_count": total, "changed_count": 0, "unchanged_count": 0,
+            "not_observed_in_batch_count": 0, "field_change_counts": {},
+            "loaded_rows": total, "total_rows": None, "rejected_rows": None,
+            "total": total, "limit": params["limit"], "offset": offset,
+            "items": [{"external_product_id": f"P{index:04d}", "status": "new", "changed_fields": {}}
+                      for index in range(offset, min(total, offset + params["limit"]))],
+        })
+
+    session.get = get
+    if total > 5000:
+        with pytest.raises(client_module.CatalogReconciliationExportLimitError):
+            client_module.fetch_all_catalog_reconciliation(client, etl_load_run_id=42, status=status)
+        assert len(calls) == 1
+        return
+    items = client_module.fetch_all_catalog_reconciliation(client, etl_load_run_id=42, status=status)
+    assert len(items) == total
+    assert [call["params"]["offset"] for call in calls] == (list(range(0, total, 100)) or [0])
+    for call in calls:
+        assert call["url"].endswith("/api/v1/etl-loads/42/catalog-reconciliation")
+        assert call["params"]["limit"] == 100
+        if status is None:
+            assert "status" not in call["params"]
+        else:
+            assert call["params"]["status"] == status
+
+
 LOGIN_RESPONSE = {
     "access_token": "a.b.c",
     "token_type": "bearer",
