@@ -1,5 +1,9 @@
 # 역할: 검수 결과 CSV 내보내기가 한글, BOM, 수식 주입 방지를 지키는지 테스트합니다.
 import io
+import csv
+import hashlib
+import json
+from datetime import datetime, timezone
 
 import pandas as pd
 import pytest
@@ -22,6 +26,40 @@ from core.result_exporter import (
     sanitize_csv_cell,
 )
 from core.rules import run_all_rules
+
+
+def test_reconciliation_manifest_describes_exact_csv_without_product_values():
+    from ui.etl_load_history import build_catalog_reconciliation_csv
+
+    items = [{"external_product_id": '상품,"인용"\n다음 줄', "status": "changed",
+              "changed_fields": {"price": {"before": "987654321", "after": "123456789"},
+                                 "name": {"before": "secret-name", "after": "user@example.com"}},
+              "access_token": "private-token", "phone": "010-1234-5678"}]
+    payload = build_catalog_reconciliation_csv(items)
+    before = datetime.now(timezone.utc)
+    encoded = result_exporter.build_catalog_reconciliation_integrity_manifest(
+        payload, etl_load_run_id=42, status_code="changed", csv_file_name="export.csv",
+    )
+    after = datetime.now(timezone.utc)
+    manifest = json.loads(encoded.decode("utf-8"))
+    assert set(manifest) == {
+        "schema_version", "etl_load_run_id", "status_code", "csv_file_name", "csv_sha256",
+        "row_count", "columns", "generated_at_utc", "consistency_limitation",
+    }
+    reader = csv.reader(io.StringIO(payload.decode("utf-8-sig"), newline=""))
+    assert manifest["columns"] == next(reader) == ["상품 ID", "상태", "변경 필드"]
+    assert manifest["row_count"] == len(list(reader)) == 1
+    assert manifest["csv_sha256"] == hashlib.sha256(payload).hexdigest()
+    assert manifest["schema_version"] == 1
+    assert manifest["etl_load_run_id"] == 42
+    assert manifest["status_code"] == "changed"
+    assert manifest["csv_file_name"] == "export.csv"
+    assert manifest["generated_at_utc"].endswith("Z")
+    assert before <= datetime.fromisoformat(manifest["generated_at_utc"]) <= after
+    assert "단일 시점 Snapshot을 보장하지 않습니다" in manifest["consistency_limitation"]
+    for value in ['상품,', "다음 줄", "987654321", "123456789", "secret-name",
+                  "user@example.com", "private-token", "010-1234-5678", "before", "after"]:
+        assert value not in encoded.decode("utf-8")
 
 
 def read_exported_csv(csv_bytes: bytes) -> pd.DataFrame:

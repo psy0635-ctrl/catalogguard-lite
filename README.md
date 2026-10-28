@@ -164,6 +164,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - 웹 ETL 성공 후 ETL 적재 이력 캐시만 자동 무효화하고, 운영 상품 반영은 사용자가 이력에서 batch를 선택해 별도로 진행
 - `GET /api/v1/etl-loads/{id}/catalog-reconciliation`과 Streamlit `상품 동기화 차이` 영역에서 선택한 ETL 배치와 현재 운영 카탈로그를 공급사·상품 식별자 기준으로 비교해 신규/변경/동일/이번 배치 미관측 건수와 필드별 변경 건수를 조회(정상 staging 상품 기준의 읽기 전용 보고서이며, 미관측 상품을 자동 삭제 후보로 다루지 않음. [Catalog Reconciliation Report](docs/catalog_reconciliation.md))
 - 상품 동기화 차이의 전체·신규·변경·동일·이번 배치 미관측 중 선택한 상태의 **전체 상품 CSV 다운로드**. 화면 한 페이지 50건을 넘어 최대 5,000건까지 수동 준비하며, 배치·상태·페이지 변경이나 재조회·준비 실패 시 이전 다운로드를 제거합니다.
+- CSV 준비 성공 후 바로 아래의 **CSV 무결성 검증 보고서 다운로드**에서 UTF-8 JSON을 받습니다. 동일 CSV bytes의 SHA-256·실제 행 수·열·배치·상태·UTC 준비 시각을 포함하며 추가 API 조회는 없습니다. 단일 시점 Snapshot은 보장하지 않습니다. [보고서 계약·2026-10-28 검증](docs/catalog_reconciliation.md#csv-무결성-검증-보고서-json-mvp)을 참고하세요.
 - `GET /api/v1/etl-loads/quality-summary`와 Streamlit `ETL 품질 요약` 영역에서 실행 배치 수·품질 집계 가능/불가 배치 수·전체 입력 행·정상 적재 행·변환 거부 행과 누적 Reject 비율을 조회. 품질 요약 기능 도입 전 배치는 `total_rows`·`rejected_rows`·`error_counts`가 모두 `NULL`이므로 Reject 0건으로 간주하지 않고 집계에서 제외합니다.
 - `GET /api/v1/etl-loads/quality-trend`와 Streamlit `최근 ETL 품질 추이` 차트에서 최근 품질 집계 가능 배치의 배치별 Reject 비율을 시간순으로 조회
 - `GET /api/v1/etl-loads/quality-observability`와 Streamlit `ETL 품질 관찰` 영역에서 같은 공급사의 최신 배치와 직전 배치 Reject 비율을 퍼센트 포인트(%p)로 비교하고, 같은 관찰 구간의 오류 코드별 발생 건수·발생 배치 수를 조회(읽기 전용 관찰이며 위험 임계값·자동 차단·자동 알림은 없음)

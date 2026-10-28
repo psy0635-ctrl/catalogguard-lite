@@ -34,6 +34,56 @@ Reject 및 legacy 품질 정보 안내는 기존 화면에 유지된다.
 
 검수 규칙·Inspection Version 18·Golden Dataset·DB 스키마는 변경하지 않는다.
 
+## CSV 무결성 검증 보고서 JSON MVP
+
+CSV 준비가 성공하면 기존 다운로드 버튼 바로 아래에 **CSV 무결성 검증 보고서 다운로드**가
+표시된다. 파일명은 `catalogguard_reconciliation_{배치 ID}_{상태 코드 또는 all}.integrity.json`이다.
+JSON은 UTF-8(BOM 없음)이며 다음 9개 필드만 포함한다.
+
+| 필드 | 의미 |
+| --- | --- |
+| `schema_version` | 보고서 스키마 버전 `1` |
+| `etl_load_run_id` | 준비한 선택 배치 ID |
+| `status_code` | `all`, `new`, `changed`, `unchanged`, `not_observed_in_batch` |
+| `csv_file_name` | 대응하는 기존 CSV 파일명 |
+| `csv_sha256` | BOM을 포함한 실제 다운로드 CSV bytes의 SHA-256 |
+| `row_count` | CSV 파서로 센 데이터 행 수(헤더 제외, 셀 내부 줄바꿈은 행으로 세지 않음) |
+| `columns` | 실제 CSV 헤더의 열 이름과 순서 |
+| `generated_at_utc` | 준비 완료 시 생성한 UTC ISO 8601 시각(`Z` 접미사), 다운로드 시각이 아님 |
+| `consistency_limitation` | 여러 페이지의 단일 시점 Snapshot을 보장하지 않으며 같은 건수·집계의 동시 변경을 놓칠 수 있다는 설명 |
+
+기존 CSV 생성기를 그대로 사용하고, 생성된 bytes만 표준 라이브러리 `csv`·`hashlib`·`json`·
+`datetime`으로 처리한다. 추가 API 호출·DB 조회·endpoint·schema·패키지는 없다.
+상품 ID·상품명·가격·개인정보·변경 전후 원본 값·인증 토큰은 JSON에 넣지 않는다.
+CSV 파일명·세 열·UTF-8 BOM·마스킹·수식 방어는 그대로 유지한다.
+
+두 파일은 하나의 session_state 준비 결과에 저장되어 기존 캐시 무효화 경로로 함께 제거된다.
+배치·상태·페이지 변경이나 재조회·재준비 실패 시 이전 보고서도 제거하며, 0건·API 실패·
+5,001건 이상에서는 두 다운로드를 모두 제공하지 않는다. 5,000건은 허용한다.
+JSON 다운로드는 재실행을 유발하지 않으며 CSV 준비 결과를 유지한다.
+
+### 2026-10-28 로컬 검증
+
+학교 Windows 11, `.venv-e2e` Python 3.11.9에서 다음을 실제 실행했다.
+과거 검증 수치와 별개인 이번 기능 브랜치의 실행 결과다.
+
+| 실행 | 결과 | 범위 |
+| --- | --- | --- |
+| `.venv-e2e/Scripts/python.exe -m pytest tests/test_result_exporter.py tests/test_catalogguard_api_client.py tests/test_etl_load_history_ui.py -q` | **1000 PASS**, FAIL/SKIP 0 | 기존 CSV·API·UI 회귀, JSON 유효성·정확한 9개 필드·UTF-8·SHA-256·실제 행 수·열·UTC 시각·민감 값 미포함, 전체·4개 상태와 배치 ID, 선택 변경 무효화, API 실패·0건·5,000/5,001건 경계 |
+| `.venv-e2e/Scripts/python.exe -m pytest tests/e2e/test_catalog_reconciliation_integrity_download_browser_e2e.py -m e2e -q` | **1 PASS**, FAIL/SKIP 0 | 가짜 API와 임시 Streamlit 서버에서 실제 Chromium CSV/JSON 다운로드·해시/행 수/파일명 일치·JSON 반복 다운로드 후 같은 CSV bytes 유지 |
+
+기존 PostgreSQL E2E는 테스트 배치·staging·catalog fixture를 생성·삭제하므로 이번에는
+실행하지 않았다. 새 브라우저 검증은 DB 없이 기존 UI 테스트의 가짜 API를 재사용하고,
+자신이 시작한 임시 서버만 종료한다. 실제 PostgreSQL 통합·전체 pytest·기존 14개 Chromium
+E2E·12단계 시연을 다시 수행한 결과는 아니다. 기존 시연 DB·Docker·볼륨은 사용하지 않았다.
+
+### 기술적 한계
+
+해시는 받은 CSV bytes와 보고서의 일치 여부를 확인하는 용도다. 전자서명·서버 인증·
+상품 데이터의 정확성 증명은 제공하지 않으며 CSV와 JSON을 함께 수정한 변조도 인증하지 못한다.
+기존 페이지 API의 Snapshot Token 부재와 메모리 기반 5,000건 상한은 그대로다.
+다운로드 보고서는 DB에 보관하지 않으며 새로 준비하면 UTC 시각이 달라질 수 있다.
+
 ## 1. 왜 필요한가
 
 공급사가 보낸 CSV를 ETL로 적재하고 나면, 운영자가 실제로 묻는 질문은 하나다.

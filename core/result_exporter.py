@@ -1,6 +1,11 @@
 # 역할: 검수 결과 DataFrame을 엑셀에서 안전하게 열 수 있는 다운로드 CSV로 변환합니다.
+import csv
+import hashlib
+import io
+import json
 import re
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -28,6 +33,30 @@ CORRECTION_WORKSHEET_UNAVAILABLE_MESSAGE = (
 DISPLAY_SEVERITY_ORDER = {
     SEVERITY_LABELS[severity]: order for severity, order in SEVERITY_ORDER.items()
 }
+
+
+def build_catalog_reconciliation_integrity_manifest(
+    csv_bytes: bytes, *, etl_load_run_id: int, status_code: str, csv_file_name: str,
+) -> bytes:
+    """Describe the exact prepared CSV without retaining its product values."""
+    reader = csv.reader(io.StringIO(csv_bytes.decode("utf-8-sig"), newline=""))
+    columns = next(reader)
+    row_count = sum(1 for _ in reader)
+    manifest = {
+        "schema_version": 1,
+        "etl_load_run_id": etl_load_run_id,
+        "status_code": status_code,
+        "csv_file_name": csv_file_name,
+        "csv_sha256": hashlib.sha256(csv_bytes).hexdigest(),
+        "row_count": row_count,
+        "columns": columns,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "consistency_limitation": (
+            "여러 페이지 조회의 단일 시점 Snapshot을 보장하지 않습니다. "
+            "건수와 집계가 같은 동시 변경은 탐지하지 못할 수 있습니다."
+        ),
+    }
+    return json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
 
 
 class CorrectionWorksheetUnavailableError(ValueError):

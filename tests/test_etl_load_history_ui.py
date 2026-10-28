@@ -6594,7 +6594,7 @@ def test_reconciliation_export_apptest_prepares_all_pages_without_moving_ui(monk
     assert len(list(csv.DictReader(io.StringIO(prepared["csv_bytes"].decode("utf-8-sig"))))) == 5
     assert [call["offset"] for call in client.calls] == [0, 2, 4]
     assert app.session_state["catalog_reconciliation_offset"] == 1
-    assert len(app.get("download_button")) == 1
+    assert len(app.get("download_button")) == 2
     app.selectbox(key="catalog_reconciliation_status").select("new").run()
     assert app.session_state["catalog_reconciliation_export_download"] is None
     assert not app.get("download_button")
@@ -6603,6 +6603,82 @@ def test_reconciliation_export_apptest_prepares_all_pages_without_moving_ui(monk
     app.selectbox(key="etl_load_selected_run_id").select(43).run()
     assert not app.get("download_button")
     assert app.session_state["catalog_reconciliation_export_download"] is None
+
+
+@pytest.mark.parametrize("batch_id", [42, 43])
+@pytest.mark.parametrize("status", ["all", *etl_load_history.CATALOG_RECONCILIATION_STATUS_LABELS])
+def test_reconciliation_integrity_download_matches_scope_and_survives_rerender(monkeypatch, batch_id, status):
+    import hashlib
+    from streamlit.testing.v1 import AppTest
+
+    downloads = []
+    original = etl_load_history.st.download_button
+
+    def capture(label, **kwargs):
+        downloads.append((label, kwargs))
+        return original(label, **kwargs)
+
+    monkeypatch.setattr(etl_load_history.st, "download_button", capture)
+    client = FilteredReconciliationClient()
+    app = AppTest.from_function(_reconciliation_filter_test_app, args=(client,)).run()
+    app.selectbox(key="etl_load_selected_run_id").select(batch_id).run()
+    app.selectbox(key="catalog_reconciliation_status").select(status).run()
+    client.calls.clear()
+    app.button(key="catalog_reconciliation_export_prepare").click().run()
+    assert not app.exception and not app.error
+    prepared = app.session_state["catalog_reconciliation_export_download"]
+    manifest = json.loads(prepared["manifest_bytes"].decode("utf-8"))
+    assert manifest["etl_load_run_id"] == batch_id
+    assert manifest["status_code"] == status
+    assert manifest["csv_sha256"] == hashlib.sha256(prepared["csv_bytes"]).hexdigest()
+    assert manifest["row_count"] == len(list(csv.DictReader(
+        io.StringIO(prepared["csv_bytes"].decode("utf-8-sig"))))) == prepared["total"]
+    assert manifest["csv_file_name"] == prepared["file_name"]
+    assert prepared["manifest_file_name"] == f"catalogguard_reconciliation_{batch_id}_{status}.integrity.json"
+    assert len(client.calls) == 1  # Only the existing CSV collection request.
+    assert [label for label, _ in downloads] == [
+        "상품 동기화 차이 전체 CSV 다운로드", "CSV 무결성 검증 보고서 다운로드",
+    ]
+    assert downloads[0][1]["data"] == prepared["csv_bytes"]
+    assert downloads[1][1]["data"] == prepared["manifest_bytes"]
+    assert downloads[1][1]["mime"] == "application/json"
+    assert downloads[1][1]["on_click"] == "ignore"
+    client.calls.clear()
+    app.run()
+    assert not app.exception and not client.calls
+    assert app.session_state["catalog_reconciliation_export_download"] == prepared
+
+
+@pytest.mark.parametrize("total", [5000, 5001])
+def test_reconciliation_integrity_ui_real_limit_boundaries(total):
+    from streamlit.testing.v1 import AppTest
+
+    class Client(FilteredReconciliationClient):
+        def get_catalog_reconciliation(self, etl_load_run_id, *, limit, offset, status=None):
+            self.calls.append(offset)
+            return {
+                **RECONCILIATION_RESPONSE, "etl_load_run_id": etl_load_run_id,
+                "total": total, "new_count": total, "changed_count": 0, "unchanged_count": 0,
+                "not_observed_in_batch_count": 0, "field_change_counts": {},
+                "limit": limit, "offset": offset,
+                "items": [{"external_product_id": f"P{i:04d}", "status": "new", "changed_fields": {}}
+                          for i in range(offset, min(total, offset + limit))],
+            }
+
+    client = Client()
+    app = AppTest.from_function(_reconciliation_filter_test_app, args=(client,)).run()
+    client.calls.clear()
+    app.button(key="catalog_reconciliation_export_prepare").click().run()
+    assert not app.exception
+    prepared = app.session_state["catalog_reconciliation_export_download"]
+    if total == 5000:
+        assert json.loads(prepared["manifest_bytes"])["row_count"] == 5000
+        assert len(app.get("download_button")) == 2 and not app.error
+        assert len(client.calls) == 50
+    else:
+        assert prepared is None and not app.get("download_button")
+        assert "5,000" in app.error[0].value
+        assert client.calls == [0]
 
 
 @pytest.mark.parametrize("fault", EXPORT_PAGE_FAULTS)
