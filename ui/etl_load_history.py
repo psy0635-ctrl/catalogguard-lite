@@ -31,7 +31,10 @@ from clients.catalogguard_api import (
 )
 from config.settings import MAX_UPLOAD_SIZE_BYTES
 from core.privacy import mask_inspection_reason
-from core.result_exporter import prepare_export_dataframe
+from core.result_exporter import (
+    build_catalog_reconciliation_integrity_manifest,
+    prepare_export_dataframe,
+)
 from ui.auth import get_authenticated_api_client, is_operator
 
 
@@ -3206,10 +3209,17 @@ def _render_catalog_reconciliation_export(api_client) -> None:
             if not items:
                 st.info("다운로드할 상품 동기화 차이가 없습니다.")
             else:
+                csv_bytes = build_catalog_reconciliation_csv(items)
+                file_name = f"catalogguard_reconciliation_{batch_id}_{status}.csv"
                 prepared = {
                     "scope": scope, "total": len(items),
-                    "csv_bytes": build_catalog_reconciliation_csv(items),
-                    "file_name": f"catalogguard_reconciliation_{batch_id}_{status}.csv",
+                    "csv_bytes": csv_bytes,
+                    "file_name": file_name,
+                    "manifest_bytes": build_catalog_reconciliation_integrity_manifest(
+                        csv_bytes, etl_load_run_id=batch_id, status_code=status,
+                        csv_file_name=file_name,
+                    ),
+                    "manifest_file_name": file_name.removesuffix(".csv") + ".integrity.json",
                 }
                 state["catalog_reconciliation_export_download"] = prepared
         except (
@@ -3236,6 +3246,11 @@ def _render_catalog_reconciliation_export(api_client) -> None:
             "상품 동기화 차이 전체 CSV 다운로드", data=prepared["csv_bytes"],
             file_name=prepared["file_name"], mime="text/csv",
             key="catalog_reconciliation_export_download_button",
+        )
+        st.download_button(
+            "CSV 무결성 검증 보고서 다운로드", data=prepared["manifest_bytes"],
+            file_name=prepared["manifest_file_name"], mime="application/json",
+            key="catalog_reconciliation_integrity_download_button", on_click="ignore",
         )
 
 

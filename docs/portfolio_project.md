@@ -2323,3 +2323,14 @@ CSV 컬럼은 **상품 ID·상태·변경 필드**이며 기존 한국어 상태
 - [새 main CI Run 39194257297](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/39194257297)
 - [CSV 상세 설계·사용법·한계](catalog_reconciliation.md#상품-동기화-차이-전체-csv-다운로드-mvp)
 - [실제 PostgreSQL·Chromium 테스트](../tests/e2e/test_catalog_reconciliation_browser_e2e.py)
+
+
+## 6.29 CSV 무결성 검증 보고서 JSON MVP (2026-10-28 로컬 미커밋 구현)
+
+기존 상품 동기화 차이 CSV 준비 결과에 UTF-8 JSON 다운로드를 추가했다. CSV 다운로드 바로 아래의 **CSV 무결성 검증 보고서 다운로드**로 같은 이름의 `.integrity.json` 파일을 받는다. 기존 CSV 생성·페이지 수집·인증을 재사용하며 API·DB schema·조회 로직·패키지를 추가하지 않았다.
+
+보고서는 `schema_version`, `etl_load_run_id`, `status_code`, `csv_file_name`, `csv_sha256`, `row_count`, `columns`, `generated_at_utc`, `consistency_limitation`만 담는다. 실제 CSV bytes(BOM 포함)를 해시하고 CSV 파서로 헤더·데이터 행 수를 계산하므로 셀 내부 줄바꿈도 정확히 처리한다. 상품명·가격·상품 식별자·개인정보·변경 전후 값·인증 토큰은 JSON에 저장하지 않는다. CSV와 JSON을 한 session_state 준비 결과에 묶어 선택 변경·실패 시 함께 제거하고, JSON 다운로드 후에도 같은 CSV를 유지한다.
+
+**실제 검증:** 학교 Windows 11, Python 3.11.9 `.venv-e2e`에서 결과 exporter·API Client·ETL UI 테스트 **1000 PASS**, DB 없는 별도 Chromium 다운로드 테스트 **1 PASS**(각 FAIL/SKIP 0). 해시·행 수·열·파일명·UTC 시각·전체/상태별 배치 정보·민감 값 미포함, 기존 선택 무효화·실패·0건, 실제 5,000건 허용/5,001건 차단을 검증했다. Chromium에서는 JSON 반복 다운로드 뒤 CSV bytes가 유지됨을 확인했다. [실행 명령·상세 계약](catalog_reconciliation.md#csv-무결성-검증-보고서-json-mvp)에 범위를 기록했다. 과거 테스트 수치와 합산하거나 기존 검증 기록을 대체하지 않는다.
+
+**보존과 한계:** 기존 PostgreSQL E2E의 fixture 생성·삭제 범위를 분석한 뒤 이번 검증에는 가짜 API·임시 Streamlit 서버를 사용했다. 실제 PostgreSQL 통합·전체 테스트·기존 14개 Chromium E2E·12단계 시연은 재실행하지 않았다. 학교 시연 DB·Docker·볼륨은 사용하지 않았으며 Inspection Version 18·Golden Dataset 42상품/40이슈·Alembic head `20260915_0020`·검수/ETL 규칙은 변경하지 않았다. SHA-256은 CSV bytes 일치 확인용이며 전자서명이나 상품 데이터 정확성 인증이 아니다. 여러 페이지의 단일 시점 Snapshot은 보장하지 않고, 동일 건수·집계의 동시 변경 탐지 한계와 메모리 보호용 5,000건 상한은 유지한다. Commit·Push·PR·Merge·Release·배포는 수행하지 않았다.
