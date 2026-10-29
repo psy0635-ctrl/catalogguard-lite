@@ -694,6 +694,29 @@ jobs:
           python -m playwright install --with-deps chromium
       - name: Run ETL Chromium browser E2E
         run: python scripts/run_etl_browser_e2e.py
+      - name: Run reconciliation JSON integrity Chromium E2E
+        env:
+          DATABASE_URL: ""
+          TEST_DATABASE_URL: ""
+        run: |
+          python -m pytest tests/e2e/test_catalog_reconciliation_integrity_download_browser_e2e.py -m e2e -o addopts= -q --junitxml="${RUNNER_TEMP}/reconciliation-json-integrity.xml"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          report = Path(os.environ["RUNNER_TEMP"]) / "reconciliation-json-integrity.xml"
+          cases = list(ET.parse(report).getroot().iter("testcase"))
+          expected = "test_integrity_json_download_preserves_prepared_csv_in_chromium"
+          if (
+              len(cases) != 1
+              or cases[0].get("name") != expected
+              or cases[0].get("classname") != "tests.e2e.test_catalog_reconciliation_integrity_download_browser_e2e"
+              or any(cases[0].find(status) is not None for status in ("skipped", "failure", "error"))
+          ):
+              raise SystemExit("Expected exactly one passing JSON integrity Chromium test; no skips allowed")
+          print(f"{expected}: PASS (1 test, 0 failures/errors/skips)")
+          PY
       - name: Upload browser E2E failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
