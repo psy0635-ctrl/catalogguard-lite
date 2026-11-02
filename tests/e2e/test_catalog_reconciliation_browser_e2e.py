@@ -592,9 +592,11 @@ def _database_snapshot():
 
 
 def test_catalog_reconciliation_csv_download_in_real_browser(page, tmp_path):
-    """Download all 208 rows and filtered 52 rows through the real UI/API/DB."""
+    """Download CSV/JSON pairs through the real UI/API/DB and verify offline."""
     import csv
     import io
+    import subprocess
+    import sys
     from playwright.sync_api import expect
 
     baseline = _database_snapshot()
@@ -622,6 +624,7 @@ def test_catalog_reconciliation_csv_download_in_real_browser(page, tmp_path):
 
         prepare = page.get_by_role("button", name="상품 동기화 차이 전체 CSV 준비", exact=True)
         download_button = page.get_by_role("button", name="상품 동기화 차이 전체 CSV 다운로드", exact=True)
+        manifest_button = page.get_by_role("button", name="CSV 무결성 검증 보고서 다운로드", exact=True)
         select_batch(fixture.incoming.id, SOURCE_FILENAME)
         expect(download_button).not_to_be_visible()
         expect(page.get_by_text("상품 1 / 5 페이지 · 전체 208개 상품", exact=True)).to_be_visible()
@@ -635,8 +638,10 @@ def test_catalog_reconciliation_csv_download_in_real_browser(page, tmp_path):
             if label:
                 choose_filter(label)
                 expect(download_button).not_to_be_visible()
+                expect(manifest_button).not_to_be_visible()
             prepare.click()
             expect(download_button).to_be_visible()
+            expect(manifest_button).to_be_visible()
             if code == "all":
                 expect(page.get_by_text("상품 2 / 5 페이지 · 전체 208개 상품", exact=True)).to_be_visible()
             with page.expect_download() as download_info:
@@ -644,9 +649,21 @@ def test_catalog_reconciliation_csv_download_in_real_browser(page, tmp_path):
             download = download_info.value
             filename = f"catalogguard_reconciliation_{fixture.incoming.id}_{code}.csv"
             assert download.suggested_filename == filename
-            path = tmp_path / filename
+            directory = Path(os.environ.get("E2E_RECONCILIATION_EVIDENCE_DIR", str(tmp_path)))
+            pair_dir = directory / f"download-{fixture.incoming.id}-{code}-{uuid4().hex[:8]}"
+            pair_dir.mkdir(parents=True)
+            path = pair_dir / filename
             download.save_as(path)
             payload = path.read_bytes()
+            with page.expect_download() as manifest_info:
+                manifest_button.click()
+            manifest_download = manifest_info.value
+            manifest_name = filename.removesuffix(".csv") + ".integrity.json"
+            assert manifest_download.suggested_filename == manifest_name
+            manifest_path = pair_dir / manifest_name
+            manifest_download.save_as(manifest_path)
+            manifest_bytes = manifest_path.read_bytes()
+            manifest = json.loads(manifest_bytes.decode("utf-8"))
             assert payload.startswith(b"\xef\xbb\xbf")
             rows = list(csv.DictReader(io.StringIO(payload.decode("utf-8-sig"))))
             assert len(rows) == count
@@ -660,12 +677,63 @@ def test_catalog_reconciliation_csv_download_in_real_browser(page, tmp_path):
             if code == "all":
                 expected_fields.add("stock")
             assert {row["변경 필드"] for row in rows} == expected_fields
+            assert manifest["etl_load_run_id"] == fixture.incoming.id
+            assert manifest["status_code"] == code
+            assert manifest["csv_file_name"] == filename
+            assert manifest["csv_sha256"] == hashlib.sha256(payload).hexdigest()
+            assert manifest["row_count"] == count
+            assert manifest["columns"] == list(rows[0])
+            originals = (hashlib.sha256(payload).hexdigest(), hashlib.sha256(manifest_bytes).hexdigest())
+            cli_checks = []
+            script = Path(__file__).resolve().parents[2] / "scripts" / "verify_reconciliation_export.py"
+            cases = ("normal", "csv_content", "csv_header", "json_hash", "json_rows", "invalid_json") if code == "all" else ("normal",)
+            for case in cases:
+                csv_path, json_path = path, manifest_path
+                if case != "normal":
+                    variant = pair_dir / case
+                    variant.mkdir()
+                    csv_path, json_path = variant / filename, variant / manifest_name
+                    changed_csv, changed_manifest = payload, dict(manifest)
+                    if case == "csv_content":
+                        changed_csv = payload.replace(b"REC-NEW-001", b"REC-NEW-002", 1)
+                        assert changed_csv != payload
+                    elif case == "csv_header":
+                        changed_csv = payload.replace("상품 ID".encode(), b"wrong_header", 1)
+                        # Keep the hash valid so the header check is exercised independently.
+                        changed_manifest["csv_sha256"] = hashlib.sha256(changed_csv).hexdigest()
+                    elif case == "json_hash":
+                        changed_manifest["csv_sha256"] = "0" * 64
+                    elif case == "json_rows":
+                        changed_manifest["row_count"] += 1
+                    csv_path.write_bytes(changed_csv)
+                    json_path.write_text("{broken" if case == "invalid_json" else json.dumps(changed_manifest), encoding="utf-8")
+                result = subprocess.run(
+                    [sys.executable, str(script), "--csv", str(csv_path), "--manifest", str(json_path)],
+                    capture_output=True, text=True, encoding="utf-8", timeout=15,
+                    env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                )
+                expected_code = 0 if case == "normal" else 1
+                assert result.returncode == expected_code
+                assert ("검증 성공" if case == "normal" else "검증 실패") in result.stdout + result.stderr
+                assert "REC-" not in result.stdout + result.stderr
+                assert "Traceback" not in result.stderr
+                assert originals == (hashlib.sha256(path.read_bytes()).hexdigest(), hashlib.sha256(manifest_path.read_bytes()).hexdigest())
+                cli_checks.append({"case": case, "exit_code": result.returncode,
+                                   "stdout": result.stdout, "stderr": result.stderr})
+            if code == "all":
+                page.screenshot(path=str(pair_dir / "download-complete.png"), full_page=True)
             evidence.append({"status": code, "rows": len(rows), "filename": filename,
-                             "sha256": hashlib.sha256(payload).hexdigest(), "bom": True})
+                             "batch_id": fixture.incoming.id, "manifest_filename": manifest_name,
+                             "sha256": originals[0], "manifest_sha256": originals[1],
+                             "manifest_csv_sha256": manifest["csv_sha256"], "columns": manifest["columns"],
+                             "directory": str(pair_dir), "originals_unchanged": True,
+                             "cli_checks": cli_checks, "bom": True})
         page.get_by_role("button", name="동기화 차이 다음", exact=True).click()
         expect(download_button).not_to_be_visible()
+        expect(manifest_button).not_to_be_visible()
         select_batch(fixture.catalog_source.id, CATALOG_SOURCE_FILENAME)
         expect(download_button).not_to_be_visible()
+        expect(manifest_button).not_to_be_visible()
         choose_filter("신규")
         expect(page.get_by_text("선택한 상태에 해당하는 상품이 없습니다.", exact=True)).to_be_visible()
         prepare.click()
