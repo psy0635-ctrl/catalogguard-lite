@@ -6,14 +6,14 @@
 
 CatalogGuard Lite는 Python·FastAPI 백엔드와 PostgreSQL 저장 계층을 중심으로 상품 CSV의 데이터 품질을 검수하고, 적재된 결과를 운영 카탈로그와 비교하며, 공급사별 ETL 품질 변화와 주요 오류 원인을 관찰한 뒤 검증된 변경만 승인 기반으로 운영 상품에 반영하는 데이터 품질 서비스입니다. 공급사 입력의 Profile 기반 표준화·적재는 CLI·Streamlit 웹 업로드·configured HTTP feed Airflow manual DAG가 같은 ETL Pipeline·loader를 공유합니다. Web multipart 업로드는 CSV와 XLSX를 지원하고 CLI·S3·HTTP feed·Airflow는 CSV-only이며, Streamlit은 저장된 batch를 선택해 preview·승인·promotion을 요청하고 FastAPI와 PostgreSQL이 반영·audit·conflict-safe rollback을 처리합니다.
 
-- 배포 URL: https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
+- 공개 앱 URL(현재 배포 SHA·main 반영 여부 미확인): https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
 - 개발 언어: Python
 - 화면 프레임워크: Streamlit
 - 데이터 처리: pandas
 - 테스트: pytest
 - CI: GitHub Actions
 
-상품 동기화 차이는 상태별 화면 조회에 더해 선택한 배치·상태의 전체 상품을 CSV로 내보냅니다. 기존 API와 보안 처리를 재사용한 [PR #144의 설계·검증 기록](#628-상품-동기화-차이-전체-csv-다운로드-mvp-pr-144)은 6.28절에 정리하였습니다.
+상품 동기화 차이는 상태별 전체 CSV와 JSON 무결성 보고서를 제공하며, 다운로드한 파일 쌍은 오프라인 CLI로 검증할 수 있습니다. 기존 API를 재사용한 [CSV 내보내기 설계](#628-상품-동기화-차이-전체-csv-다운로드-mvp-pr-144)와 [PR #149의 파일 대응·실패 입력 검증](#630-오프라인-무결성-검증기-pr-149)을 구분해 기록했습니다.
 
 ## 이력서용 프로젝트 요약
 
@@ -79,7 +79,9 @@ Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, Airflow 3.3.0, 
 
 ### 현재 unreleased main과 v0.3.0 이후 변경
 
-최신 공식 Release는 [v0.3.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.3.0)입니다. 2026-10-19 기준 `main`에는 그 이후의 미출시 변경으로 inspection issue의 관계 행 명시 저장, schema-aware `/ready`, CSV/XLSX Web ETL 업로드와 Golden Rule Quality Regression, [상품 동기화 차이 상태별 필터(PR #138)](#상품-동기화-차이-상태별-필터pr-138), [개인정보 출력 보호 Version 18(PR #142)](#개인정보-출력-보호-version-18pr-142), [상품 동기화 차이 전체 CSV 다운로드 MVP(PR #144)](#628-상품-동기화-차이-전체-csv-다운로드-mvp-pr-144)가 포함됐습니다. 현재 main은 `884620d73a4e5875dc7cf72eac73b71a28e54b0d`이며, [해당 main CI](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/39194257297)는 5/5 SUCCESS, 전체 pytest는 3796 passed입니다. 현재 기준은 `INSPECTION_VERSION = "18"`, Alembic single head `20260915_0020`, FastAPI 애플리케이션 버전 `0.1.0`입니다. PR #142와 #144는 main 병합이며 새 Release나 운영 배포가 아닙니다. 기존 PR #142의 SHA·검증 기록은 그대로 유지하고, 최신 검증의 환경·SKIP·한계는 6.28절에 구분하였습니다.
+최신 공식 Release는 [v0.3.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.3.0)이며, 2026-11-02 확인 기준 공식 main은 [`b5f7ed560dfce4b19c611bccbfe5ce9735483b52`](https://github.com/psy0635-ctrl/catalogguard-lite/commit/b5f7ed560dfce4b19c611bccbfe5ce9735483b52)입니다. 그 이후의 미출시 변경으로 관계 행 명시 저장, schema-aware `/ready`, CSV/XLSX Web ETL·Preflight, Golden 회귀, [상태 필터(PR #138)](#상품-동기화-차이-상태별-필터pr-138), [개인정보 출력 보호 Version 18(PR #142)](#개인정보-출력-보호-version-18pr-142), [전체 CSV(PR #144)](#628-상품-동기화-차이-전체-csv-다운로드-mvp-pr-144), JSON 무결성 보고서(PR #146)와 [오프라인 검증기(PR #149)](#630-오프라인-무결성-검증기-pr-149)가 포함됐습니다. [새 main Push CI](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/41403060834)는 **5/5 completed / success**이며 최신 전체 pytest 건수는 이 문서에서 새로 주장하지 않습니다. `INSPECTION_VERSION = "18"`, Alembic single head `20260915_0020`, FastAPI 버전 `0.1.0`은 서로 다른 버전 기준입니다.
+
+이전 PR별 SHA·테스트 수치는 당시 기록으로 보존합니다. main 병합은 새 Release 발행이나 운영 배포 확인을 뜻하지 않습니다. v0.3.0 대비 **68개 커밋·112개 변경 파일(신규 18, 수정 94)**의 범위와 조건부 마이너 Release 제안은 [별도 준비 상태 분석](release_readiness_post149_20261102.md)에 정리했습니다. 현재 Railway·Streamlit 배포 SHA는 미확인입니다.
 
 XLSX는 Web multipart에서만 지원합니다. 정확히 하나의 visible worksheet를 요구하고 formula·macro·external link·merged cell과 과도한 resource 사용을 제한하며, CLI·S3·HTTP feed·Airflow는 계속 CSV-only입니다. 처음에는 XLSX 의존성이 최상위 import로 Airflow runtime까지 전파되는 compatibility regression을 격리 Airflow CI smoke에서 발견했지만, XLSX 경로에서만 불러오는 lazy import로 수정해 CSV-only Airflow 경계와 기존 runtime을 보존했습니다.
 
@@ -2329,7 +2331,7 @@ CSV 컬럼은 **상품 ID·상태·변경 필드**이며 기존 한국어 상태
 
 **당시 게시 기록(2026-10-28, 병합 전):** 기능 구현과 검증을 완료하고 [Commit `a2829ad0dc17fe205fa55d4f8330f0bf2c9840ac`](https://github.com/psy0635-ctrl/catalogguard-lite/commit/a2829ad0dc17fe205fa55d4f8330f0bf2c9840ac)을 Push했다. [PR #146](https://github.com/psy0635-ctrl/catalogguard-lite/pull/146)은 당시 OPEN이었으며 main 병합 전이었다. [해당 기능 Commit의 PR CI Run 40638097492](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/40638097492)에서 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` 5개 Job이 모두 SUCCESS였다. Release 생성과 운영 배포는 수행하지 않았다.
 
-**최신 GitHub 상태(2026-10-29 확인):** [PR #146](https://github.com/psy0635-ctrl/catalogguard-lite/pull/146)은 **2026-10-28 15:14:51 KST**, 신규 JSON Chromium 테스트를 `browser-e2e`의 별도 단계로 자동 등록한 [PR #147](https://github.com/psy0635-ctrl/catalogguard-lite/pull/147)은 **2026-10-29 11:20:31 KST**에 각각 Rebase and merge로 병합됐다. 공식 main은 [Commit `764dbf8fd73affde2a0dead83e39858913d0dae3`](https://github.com/psy0635-ctrl/catalogguard-lite/commit/764dbf8fd73affde2a0dead83e39858913d0dae3)이다. 아래의 Python **1,000 PASS**와 독립 PostgreSQL E2E **14 PASS**는 기존 별도 실행 결과로 유지하며 최신 CI 결과와 합산하지 않는다. 새 Release 생성과 운영 배포는 수행하지 않았다.
+**당시 GitHub 상태(2026-10-29 확인):** [PR #146](https://github.com/psy0635-ctrl/catalogguard-lite/pull/146)은 **2026-10-28 15:14:51 KST**, 신규 JSON Chromium 테스트를 `browser-e2e`의 별도 단계로 자동 등록한 [PR #147](https://github.com/psy0635-ctrl/catalogguard-lite/pull/147)은 **2026-10-29 11:20:31 KST**에 각각 Rebase and merge로 병합됐다. 공식 main은 [Commit `764dbf8fd73affde2a0dead83e39858913d0dae3`](https://github.com/psy0635-ctrl/catalogguard-lite/commit/764dbf8fd73affde2a0dead83e39858913d0dae3)이다. 아래의 Python **1,000 PASS**와 독립 PostgreSQL E2E **14 PASS**는 기존 별도 실행 결과로 유지하며 최신 CI 결과와 합산하지 않는다. 새 Release 생성과 운영 배포는 수행하지 않았다.
 
 **병합 후 main CI:** 위 main Commit의 push 이벤트로 실행된 [Run #40805767268](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/40805767268)에서 `test`, `browser-e2e`, `kubernetes-smoke`, `terraform-validate`, `airflow-smoke` **5개 Job 모두 SUCCESS**를 확인했다. [browser-e2e 실제 로그](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/40805767268/job/123224233064)에서 기존 ETL의 `Chromium E2E 성공`, 신규 JSON의 `1 passed in 3.74s`, JUnit의 `PASS (1 test, 0 failures/errors/skips)`를 확인했다. 신규 JSON Chromium은 정확히 **1 PASS**, 실패·오류·SKIP **0**이다. 이 테스트는 가짜 API·임시 Streamlit 서버 기반이며 실제 PostgreSQL 통합 E2E를 대체하지 않는다. 이번 문서 수정에서는 테스트를 다시 실행하지 않고 기존 GitHub 결과와 로그를 대조했다.
 
@@ -2340,3 +2342,40 @@ CSV 컬럼은 **상품 ID·상태·변경 필드**이며 기존 한국어 상태
 **실제 검증:** 학교 Windows 11, Python 3.11.9 `.venv-e2e`에서 최초 구현 단계의 선택 Python 테스트(결과 exporter·API Client·ETL UI)는 **1,000 PASS**, DB 없는 별도 신규 JSON Chromium 다운로드 테스트는 **1 PASS**였다. 해시·행 수·열·파일명·UTC 시각·전체/상태별 배치 정보·민감 값 미포함, 기존 선택 무효화·실패·0건, 실제 5,000건 허용/5,001건 차단을 검증했다. Chromium에서는 JSON 반복 다운로드 뒤 CSV bytes가 유지됨을 확인했다. 이후 최종 리뷰 단계에서 기존 runner를 재사용한 독립 PostgreSQL E2E가 **14 PASS(Chromium 시나리오 13개 + PostgreSQL/API 검증 1개)**였으며, 신규 JSON Chromium도 별도로 재실행해 **1 PASS**를 확인했다. 각 실행의 FAIL/SKIP은 0이다. 반복 실행한 JSON 결과는 중복 합산하지 않는다. [최초 구현 단계의 실행 명령·상세 계약](catalog_reconciliation.md#csv-무결성-검증-보고서-json-mvp)에 해당 단계의 범위를 기록했다. 과거 테스트 수치와 합산하거나 기존 검증 기록을 대체하지 않는다.
 
 **보존과 한계:** 최초 구현 단계에는 가짜 API·임시 Streamlit 서버를 사용하고 PostgreSQL E2E는 실행하지 않았다. 추가 PostgreSQL E2E는 최종 리뷰 단계에서 새 고유 컨테이너·빈 테스트 DB·독립 tmpfs·별도 localhost 포트로 실행했다. 학교 시연 DB와 기존 Docker 컨테이너·볼륨은 조작하지 않았으며 Inspection Version 18·Golden Dataset 42상품/40이슈·Alembic head `20260915_0020`·검수/ETL 규칙은 변경하지 않았다. 전체 pytest suite·12단계 시연·운영환경·대용량 성능은 이번 작업에서 검증하지 않았다. SHA-256은 CSV bytes 일치 확인용이며 전자서명이나 상품 데이터 정확성 인증이 아니다. 여러 페이지의 단일 시점 Snapshot은 보장하지 않고, 동일 건수·집계의 동시 변경 탐지 한계와 메모리 보호용 5,000건 상한은 유지한다.
+
+
+## 6.30 오프라인 무결성 검증기 (PR #149)
+
+### 문제와 구현 판단
+
+다운로드한 CSV가 편집됐거나 다른 배치의 JSON과 섞였을 때, 사용자가 서버에 다시 접속하지 않고 두 파일의 대응을 확인하기 어려웠습니다. 기존 JSON 생성기를 바꾸지 않고 [독립 CLI](../scripts/verify_reconciliation_export.py)를 추가해 이 경계를 검증했습니다. Python 표준 라이브러리 `hashlib`, `csv`, `json`, `argparse`를 사용하며 추가 패키지·DB 테이블·API Endpoint·네트워크 전송 없이 입력 파일을 읽기만 합니다.
+
+BOM을 포함한 실제 bytes의 SHA-256과 CSV 파서가 센 행 수·헤더 순서를 비교합니다. 셀 내부 줄바꿈은 한 데이터 행으로 세며 JSON 9개 필드·자료형·schema_version 1·양의 배치 ID·상태 코드·파일명을 확인합니다. 잘못된 JSON·중복 키·깊은 중첩, 누락 파일, 헤더·행 수·해시 불일치는 실패 종료 코드 `1`로 구분합니다. CLI 옵션 오류는 `2`, 정상 파일은 `0`입니다. 오류 메시지에 상품 원문·개인정보·인증정보를 출력하지 않습니다.
+
+### 기존 시스템과의 호환성 및 실제 검증
+
+[기존 실제 DB 기반 Chromium 테스트](../tests/e2e/test_catalog_reconciliation_browser_e2e.py)의 `test_catalog_reconciliation_csv_download_in_real_browser`를 보강했습니다. 실제 PostgreSQL Fixture 생성·정확한 ID 기준 정리·DB Snapshot·필터·페이지 검증은 유지하고, 같은 준비 작업의 JSON 다운로드와 실제 CLI 실행을 연결했습니다. 별도 가짜 API 기반 JSON 테스트의 성공을 실제 DB 통합 검증으로 대신하지 않았습니다. 기존 CI의 Browser Runner가 수정된 테스트를 실행합니다.
+
+| 별도 실행 | 결과와 범위 |
+|---|---|
+| 2026-11-02 병합 전 학교 PC 통합 | 새 PostgreSQL 18.6·실제 FastAPI·Streamlit·Playwright Chromium, **1 PASS / FAIL·SKIP 0**. 합성 Operator 로그인, 배치 2의 전체 208행·네 상태별 각 52행, CSV·JSON 다섯 쌍 다운로드 |
+| 실제 다운로드 파일의 CLI | 정상 다섯 쌍 모두 **종료 코드 0**. 전체 상태의 복사본에서 CSV 한 글자·헤더·JSON 해시·행 수 변경과 잘못된 JSON 다섯 경우 모두 **종료 코드 1**. 원본 SHA-256 보존. 헤더 사례는 복사본 해시도 갱신해 별도로 검사 |
+| 병합 후 학교 PC main 회귀 | Windows Python 3.11.9, `tests/test_result_exporter.py tests/test_reconciliation_export_verifier.py -q`: **73 PASS / FAIL·SKIP 0** |
+| 병합 후 main GitHub Actions | [Run 41403060834](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/41403060834), 아래 main SHA의 `push` 이벤트. `test`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate`·`airflow-smoke` **5/5 completed / success** |
+
+서로 다른 실행을 합산해 전체 pytest 건수로 표시하지 않습니다. 이번 문서 수정에서는 기능·브라우저 테스트를 재실행하지 않고 기존 결과와 GitHub 상태를 대조했습니다. 로컬 원본 로그·스크린샷은 저장소 외부 증거 폴더에 보관돼 있으며 공개 링크처럼 소개하지 않습니다.
+
+### 발견한 오류와 검증의 경계
+
+초기 단위 테스트는 **26 PASS·1 FAIL**이었습니다. UTF-8인 CLI 출력을 Windows 기본 CP949로 읽는 테스트 오류를 출력 인코딩 명시로 해결했고, 깊은 중첩 JSON도 고정된 실패 메시지로 처리하도록 보완했습니다. 기존 CSV·JSON 생성기로 만든 파일 쌍의 상태 코드 5종 호환성도 단위 테스트로 확인했습니다.
+
+독립 통합 검증의 일회성 보조 스크립트는 마지막 조회에서 `catalog_products_staging`을 `catalog_product_staging`으로 잘못 적어 **종료 코드 1**을 반환했습니다. 기능 E2E 1 PASS와 회귀 테스트는 그 전에 통과했으며, 별도 읽기 전용 조회에서 Fixture 테이블 세 곳이 모두 0건인 것을 확인했습니다. 신규 서버·컨테이너만 정리하고 기존 Docker 컨테이너 15개·볼륨·네트워크·보고서를 보존한 결과는 각각 대조했습니다. 보조 스크립트 전체 성공으로 포장하지 않습니다.
+
+### 한계와 GitHub 근거
+
+SHA-256은 받은 CSV와 보고서의 대응 확인이며 전자서명·발행자 인증·데이터 정확성 평가가 아닙니다. 두 파일을 함께 다시 만든 변조, 검증 중 파일 교체를 완전히 차단하지 못합니다. 기존 여러 페이지 조회의 단일 시점 보장 부재와 메모리 보호용 5,000건 상한도 유지합니다. 실제 운영환경·운영 데이터·다른 브라우저는 미검증입니다. 기술적 가치는 기능 개수보다 기존 생성 계약을 유지하면서 실패 입력과 실제 사용자 다운로드 경로를 함께 검증한 데 있습니다.
+
+- [PR #149](https://github.com/psy0635-ctrl/catalogguard-lite/pull/149): 2026-11-02 15:56:10 KST Rebase and merge
+- [병합 후 main b5f7ed560dfce4b19c611bccbfe5ce9735483b52](https://github.com/psy0635-ctrl/catalogguard-lite/commit/b5f7ed560dfce4b19c611bccbfe5ce9735483b52)
+- [독립 단위 테스트](../tests/test_reconciliation_export_verifier.py), [CLI 사용법·한계](reconciliation_integrity_verifier.md)
+- [Release 범위·마이그레이션·운영 미검증 분석](release_readiness_post149_20261102.md)
