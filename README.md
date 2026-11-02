@@ -12,7 +12,27 @@ ETL 프로필의 **정의와 버전 archive**는 계속 `config/etl`의 버전�
 
 v0.3.0 기준으로는 기존 OpenAI 경로를 유지하면서 optional OpenAI / Ollama provider 선택과 Local Ollama Two-Phase Inspection Copilot을 추가했습니다. Local Ollama 경로는 v0.2.0의 OpenAI-only Copilot에는 포함되지 않았습니다.
 
-최신 공식 Release는 **[v0.3.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.3.0)**입니다. 2026-10-19 기준 `main`에는 v0.3.0 이후의 미출시 변경으로 inspection 관계 행 명시 저장, DB 연결과 repository Alembic single head·DB current revision 일치까지 확인하는 schema-aware `/ready`, CSV/XLSX Web ETL 업로드와 저장 전 사전 검증(Preflight), 전체 Rule Engine의 Golden Rule Quality Regression, PR #142의 개인정보 출력 보호, PR #144의 상품 동기화 차이 상태별 전체 CSV 다운로드가 포함되어 있습니다. 현재 Alembic 단일 head는 `20260915_0020`, `INSPECTION_VERSION`은 `18`, FastAPI 애플리케이션 버전은 `0.1.0`이며, 이 변경들을 v0.3.0에 포함된 기능으로 소급하지 않습니다. 최신 main의 SHA와 CI 근거는 [10월 19일 검증](#2026-10-19-상품-동기화-차이-전체-csv-다운로드-mvp)에 정리했습니다. PostgreSQL 18.4의 일회성 테스트 DB에서 수행한 이전 ETL transaction 검증은 해당 환경의 계약 확인 기록이며, 지원 버전을 PostgreSQL 18.4로만 한정한다는 뜻은 아닙니다. 자세한 범위와 결과는 [테스트 실행 방법](#23-테스트-실행-방법)을 참고하세요.
+최신 공식 Release는 **[v0.3.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.3.0)**입니다. 2026-11-02 확인 기준 공식 main은 [`b5f7ed560dfce4b19c611bccbfe5ce9735483b52`](https://github.com/psy0635-ctrl/catalogguard-lite/commit/b5f7ed560dfce4b19c611bccbfe5ce9735483b52)입니다. v0.3.0 이후의 미출시 변경으로 inspection 관계 행 명시 저장, schema-aware `/ready`, CSV/XLSX Web ETL·저장 전 Preflight, Golden Rule Quality Regression, 개인정보 출력 보호 Version 18, 상품 동기화 차이 상태별 전체 CSV·JSON 다운로드와 오프라인 무결성 검증기를 포함합니다. Alembic 단일 head는 `20260915_0020`, `INSPECTION_VERSION`은 `18`, FastAPI 애플리케이션 버전은 `0.1.0`이며 Release 버전과 구분합니다. 이 기능들을 v0.3.0에 포함된 것으로 소급하지 않습니다.
+
+[11월 2일 main 검증](#2026-11-02-오프라인-무결성-검증과-main-확인)에 최신 근거를, 아래 날짜별 절에는 당시 결과를 보존했습니다. [Release 준비 상태 분석](docs/release_readiness_post149_20261102.md)은 v0.3.0 이후 **68개 커밋·112개 변경 파일(신규 18, 수정 94)**과 마이그레이션·의존성·운영 미검증 사항을 구분합니다. 현재 Railway·Streamlit의 실제 배포 SHA와 신규 기능 반영 여부는 미확인입니다.
+
+### 2026-11-02 오프라인 무결성 검증과 main 확인
+
+[PR #149](https://github.com/psy0635-ctrl/catalogguard-lite/pull/149)는 Rebase and merge로 병합됐습니다. 같은 준비 작업에서 다운로드한 CSV와 `.integrity.json`을 Python 표준 라이브러리 CLI로 비교해 실제 bytes의 SHA-256·행 수·헤더 순서·배치·상태·파일명·JSON 9개 필드 계약·UTF-8 BOM을 확인합니다. 잘못된 JSON·중복 키·깊은 중첩과 변조 파일은 실패로 처리하며 파일을 수정하거나 네트워크로 보내지 않습니다.
+
+```powershell
+python scripts/verify_reconciliation_export.py --csv "catalogguard_reconciliation_42_all.csv" --manifest "catalogguard_reconciliation_42_all.integrity.json"
+```
+
+`42_all`은 예시이며 실제 다운로드한 배치·상태·경로를 사용합니다. 종료 코드는 성공 `0`, 파일 검증 실패 `1`, 잘못된 CLI 인자 `2`입니다. [사용법과 기술적 한계](docs/reconciliation_integrity_verifier.md), [문제 해결·실제 통합 검증 기록](docs/portfolio_project.md#630-오프라인-무결성-검증기-pr-149)을 참고하세요.
+
+| 서로 다른 검증 실행 | 확인 결과 |
+|---|---|
+| 병합 후 main Push CI | [Run 41403060834](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/41403060834), 위 main SHA의 `test`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate`·`airflow-smoke` **5/5 completed / success** |
+| 병합 후 학교 PC main 회귀 | Windows Python 3.11.9, 내보내기·신규 검증기 **73 PASS, FAIL/SKIP 0** |
+| 병합 전 별도 실제 통합 검증 | 신규 독립 PostgreSQL 18.6·FastAPI·Streamlit·Chromium E2E **1 PASS**; CSV·JSON 다섯 쌍(전체 208행, 네 상태 각 52행) 다운로드, 정상 종료 코드 0·변조/잘못된 입력 1, 원본 해시 보존 |
+
+수치를 합산하거나 73 PASS를 전체 프로젝트 pytest 결과로 표시하지 않습니다. 이번 문서 작업에서는 기능 테스트를 다시 실행하지 않고 GitHub 결과와 보존된 로컬 증거를 대조했습니다. SHA-256은 파일 간 대응 확인이며 발행자 신원·상품 데이터 정확성·두 파일의 동시 변조를 인증하지 않습니다. 검증 중 파일 교체와 CSV 페이지 조회의 단일 시점 보장 한계도 유지합니다. Release 생성·운영 배포 결과는 아닙니다.
 
 ### 2026-10-10 로컬 검증과 기능 동결
 
@@ -163,7 +183,7 @@ CatalogGuard Lite는 상품 운영자가 CSV로 관리하는 상품 목록을 �
 - 동일한 원본 파일 해시·프로필 이름·버전의 웹 ETL 요청은 새 배치를 만들지 않고 기존 배치를 `created=false`로 재사용
 - 웹 ETL 성공 후 ETL 적재 이력 캐시만 자동 무효화하고, 운영 상품 반영은 사용자가 이력에서 batch를 선택해 별도로 진행
 - `GET /api/v1/etl-loads/{id}/catalog-reconciliation`과 Streamlit `상품 동기화 차이` 영역에서 선택한 ETL 배치와 현재 운영 카탈로그를 공급사·상품 식별자 기준으로 비교해 신규/변경/동일/이번 배치 미관측 건수와 필드별 변경 건수를 조회(정상 staging 상품 기준의 읽기 전용 보고서이며, 미관측 상품을 자동 삭제 후보로 다루지 않음. [Catalog Reconciliation Report](docs/catalog_reconciliation.md))
-- 상품 동기화 차이의 전체·신규·변경·동일·이번 배치 미관측 중 선택한 상태의 **전체 상품 CSV 다운로드**. 화면 한 페이지 50건을 넘어 최대 5,000건까지 수동 준비하며, 배치·상태·페이지 변경이나 재조회·준비 실패 시 이전 다운로드를 제거합니다.
+- 상품 동기화 차이의 전체·신규·변경·동일·이번 배치 미관측 중 선택한 상태의 **전체 상품 CSV와 JSON 무결성 보고서 다운로드**, Python CLI의 오프라인 대응 검증. 화면 한 페이지 50건을 넘어 최대 5,000건까지 수동 준비하며, 배치·상태·페이지 변경이나 재조회·준비 실패 시 이전 다운로드를 제거합니다.
 - CSV 준비 성공 후 바로 아래의 **CSV 무결성 검증 보고서 다운로드**에서 UTF-8 JSON을 받습니다. 동일 CSV bytes의 SHA-256·실제 행 수·열·배치·상태·UTC 준비 시각을 포함하며 추가 API 조회는 없습니다. 단일 시점 Snapshot은 보장하지 않습니다. [보고서 계약·2026-10-28 검증](docs/catalog_reconciliation.md#csv-무결성-검증-보고서-json-mvp)을 참고하세요.
 - `GET /api/v1/etl-loads/quality-summary`와 Streamlit `ETL 품질 요약` 영역에서 실행 배치 수·품질 집계 가능/불가 배치 수·전체 입력 행·정상 적재 행·변환 거부 행과 누적 Reject 비율을 조회. 품질 요약 기능 도입 전 배치는 `total_rows`·`rejected_rows`·`error_counts`가 모두 `NULL`이므로 Reject 0건으로 간주하지 않고 집계에서 제외합니다.
 - `GET /api/v1/etl-loads/quality-trend`와 Streamlit `최근 ETL 품질 추이` 차트에서 최근 품질 집계 가능 배치의 배치별 Reject 비율을 시간순으로 조회
@@ -1148,7 +1168,7 @@ medium, m -> M
 
 ### 카테고리별 가격 이상치 비교 기준
 
-가격 이상치 기준은 `config/settings.py`의 `PRICE_ANOMALY_MIN_CATEGORY_SAMPLE_SIZE`, `PRICE_ANOMALY_LOW_RATIO`, `PRICE_ANOMALY_HIGH_RATIO`에서 관리합니다. 기존과 동일하게 유효 가격 5개 이상일 때 중앙값을 계산하고, 중앙값의 0.25배 미만 또는 4.0배 초과인 가격만 이상치로 표시합니다. 이번 상수 위치 이동은 검수 결과를 바꾸지 않아 `INSPECTION_VERSION = "17"`을 유지합니다. 향후 실제 정책값을 바꿔 검수 결과가 달라지는 경우에는 [Inspection Version 정책](docs/inspection_version_policy.md)에 따라 버전을 올려야 합니다. 환경변수나 관리 화면을 통한 runtime override는 지원하지 않습니다.
+가격 이상치 기준은 `config/settings.py`의 `PRICE_ANOMALY_MIN_CATEGORY_SAMPLE_SIZE`, `PRICE_ANOMALY_LOW_RATIO`, `PRICE_ANOMALY_HIGH_RATIO`에서 관리합니다. 기존과 동일하게 유효 가격 5개 이상일 때 중앙값을 계산하고, 중앙값의 0.25배 미만 또는 4.0배 초과인 가격만 이상치로 표시합니다. 상수 위치 이동 당시에는 검수 결과를 바꾸지 않아 `INSPECTION_VERSION = "17"`을 유지했습니다. 이후 개인정보 출력 보호 변경으로 현재 값은 `"18"`입니다. 향후 실제 정책값을 바꿔 검수 결과가 달라지는 경우에는 [Inspection Version 정책](docs/inspection_version_policy.md)에 따라 버전을 올려야 합니다. 환경변수나 관리 화면을 통한 runtime override는 지원하지 않습니다.
 
 카테고리별 가격 중앙값을 기준으로 지나치게 낮거나 높은 가격을 `가격 이상치` 주의로 표시합니다. 이때 상품을 같은 카테고리로 묶는 비교 기준은 `core.category_mismatch_detector.normalize_category()`를 그대로 재사용합니다. 따라서 `TOP`/`top`/`상의`, `SHOES`/`shoes`/`신발`, `BAG`/`bag`/`가방`은 의미상 같은 카테고리 그룹으로 함께 비교합니다.
 
@@ -1678,7 +1698,7 @@ IAM은 EC2 Role의 inline policy 하나로 `s3:GetObject`만, 그것도 `arn:aws
 
 ### Railway FastAPI 배포 설정
 
-production 환경에는 `catalogguard-lite` FastAPI 서비스와 `Postgres` PostgreSQL 서비스가 배포되어 있습니다. API 의존성은 `requirements-api.txt`에 분리되어 있으므로 Railway 대시보드에서 Build Command는 비워 두고, 다음 설정을 사용합니다.
+아래는 `catalogguard-lite` FastAPI와 `Postgres`를 사용한 기존 Railway production 배포 구성 기록입니다. 2026-11-02에는 Railway 연결 재인증이 필요해 현재 서비스 상태와 실제 배포 SHA를 조회하지 못했으며, 최신 main 반영 여부는 미확인입니다. API 의존성은 `requirements-api.txt`에 분리되어 있으므로 Railway 대시보드에서 Build Command는 비워 두고, 다음 설정을 사용합니다.
 
 ```text
 Root Directory: /
@@ -1710,7 +1730,7 @@ CATALOGGUARD_API_BASE_URL = "https://catalogguard-lite-production.up.railway.app
 CATALOGGUARD_API_TIMEOUT_SECONDS = "10"
 ```
 
-현재 배포에서 확인한 범위는 `/health`, `/docs`, Streamlit Community Cloud 연결, CSV 검수, PostgreSQL 검수 이력 저장, 목록·상세 조회, 상세·전체 CSV 다운로드와 동일 파일 중복 저장입니다. promotion의 실제 배포 여부와 공개 앱 기능 범위는 별도 검증하지 않았습니다.
+기존 배포 확인 기록의 범위는 `/health`, `/docs`, Streamlit Community Cloud 연결, CSV 검수, PostgreSQL 검수 이력 저장, 목록·상세 조회, 상세·전체 CSV 다운로드와 동일 파일 중복 저장입니다. promotion의 실제 배포 여부와 공개 앱 기능 범위는 별도 검증하지 않았습니다.
 
 #### 첫 배포 오류 해결
 
@@ -2494,6 +2514,8 @@ Streamlit의 `상품 동기화 차이 상태`에서 전체·신규·변경·동�
 4. `상품 동기화 차이 상태` 필터를 선택합니다.
 5. `상품 동기화 차이 전체 CSV 준비`를 누릅니다.
 6. 준비가 성공하면 `상품 동기화 차이 전체 CSV 다운로드`를 누릅니다.
+7. 배치·상태·페이지를 바꾸거나 다시 준비하지 않고 `CSV 무결성 검증 보고서 다운로드`로 같은 준비 작업의 JSON을 받습니다.
+8. [오프라인 검증기 사용법](docs/reconciliation_integrity_verifier.md)에 따라 다운로드한 두 파일을 CLI로 검사합니다.
 
 0건이면 빈 결과를 안내하고, 5,001건 이상이면 후속 페이지 조회·파일 생성을 중단합니다. CSV 컬럼·보안·실패 처리의 상세 계약은 [CSV 다운로드 MVP](docs/catalog_reconciliation.md#상품-동기화-차이-전체-csv-다운로드-mvp)를 참고하세요.
 
