@@ -6,7 +6,7 @@
 
 CatalogGuard Lite는 Python·FastAPI 백엔드와 PostgreSQL 저장 계층을 중심으로 상품 CSV의 데이터 품질을 검수하고, 적재된 결과를 운영 카탈로그와 비교하며, 공급사별 ETL 품질 변화와 주요 오류 원인을 관찰한 뒤 검증된 변경만 승인 기반으로 운영 상품에 반영하는 데이터 품질 서비스입니다. 공급사 입력의 Profile 기반 표준화·적재는 CLI·Streamlit 웹 업로드·configured HTTP feed Airflow manual DAG가 같은 ETL Pipeline·loader를 공유합니다. Web multipart 업로드는 CSV와 XLSX를 지원하고 CLI·S3·HTTP feed·Airflow는 CSV-only이며, Streamlit은 저장된 batch를 선택해 preview·승인·promotion을 요청하고 FastAPI와 PostgreSQL이 반영·audit·conflict-safe rollback을 처리합니다.
 
-- 공개 앱 URL(현재 배포 SHA·main 반영 여부 미확인): https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/
+- [공개 앱 URL](https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/)(현재 배포 SHA·main 반영 여부 미확인)
 - 개발 언어: Python
 - 화면 프레임워크: Streamlit
 - 데이터 처리: pandas
@@ -14,6 +14,8 @@ CatalogGuard Lite는 Python·FastAPI 백엔드와 PostgreSQL 저장 계층을 �
 - CI: GitHub Actions
 
 상품 동기화 차이는 상태별 전체 CSV와 JSON 무결성 보고서를 제공하며, 다운로드한 파일 쌍은 오프라인 CLI로 검증할 수 있습니다. 기존 API를 재사용한 [CSV 내보내기 설계](#628-상품-동기화-차이-전체-csv-다운로드-mvp-pr-144)와 [PR #149의 파일 대응·실패 입력 검증](#630-오프라인-무결성-검증기-pr-149)을 구분해 기록했습니다.
+
+**2026-11-04 운영 상태:** Railway Trial 만료로 FastAPI·Postgres가 Offline이며 활성 배포가 없습니다. 볼륨 삭제 예정 경고와 `No Backups`를 확인했지만 실제 데이터 무결성·외부 백업·운영 DB Revision은 미확인입니다. Streamlit의 저장소·main 연결은 확인했으나 배포 SHA와 정상 실행은 미확인입니다. 과거 시연·CI 성공은 현재 운영 가용성을 입증하지 않으며, v0.4.0 Release 발행·운영 재배포는 보류합니다. [상세 진단과 데이터 보존 우선순위](release_readiness_post149_20261102.md#운영-배포-상태-2026-11-04-진단)를 참고하세요.
 
 ## 이력서용 프로젝트 요약
 

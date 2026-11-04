@@ -14,7 +14,9 @@ v0.3.0 기준으로는 기존 OpenAI 경로를 유지하면서 optional OpenAI /
 
 최신 공식 Release는 **[v0.3.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.3.0)**입니다. 2026-11-02 확인 기준 공식 main은 [`b5f7ed560dfce4b19c611bccbfe5ce9735483b52`](https://github.com/psy0635-ctrl/catalogguard-lite/commit/b5f7ed560dfce4b19c611bccbfe5ce9735483b52)입니다. v0.3.0 이후의 미출시 변경으로 inspection 관계 행 명시 저장, schema-aware `/ready`, CSV/XLSX Web ETL·저장 전 Preflight, Golden Rule Quality Regression, 개인정보 출력 보호 Version 18, 상품 동기화 차이 상태별 전체 CSV·JSON 다운로드와 오프라인 무결성 검증기를 포함합니다. Alembic 단일 head는 `20260915_0020`, `INSPECTION_VERSION`은 `18`, FastAPI 애플리케이션 버전은 `0.1.0`이며 Release 버전과 구분합니다. 이 기능들을 v0.3.0에 포함된 것으로 소급하지 않습니다.
 
-[11월 2일 main 검증](#2026-11-02-오프라인-무결성-검증과-main-확인)에 최신 근거를, 아래 날짜별 절에는 당시 결과를 보존했습니다. [Release 준비 상태 분석](docs/release_readiness_post149_20261102.md)은 v0.3.0 이후 **68개 커밋·112개 변경 파일(신규 18, 수정 94)**과 마이그레이션·의존성·운영 미검증 사항을 구분합니다. 현재 Railway·Streamlit의 실제 배포 SHA와 신규 기능 반영 여부는 미확인입니다.
+[11월 2일 main 검증](#2026-11-02-오프라인-무결성-검증과-main-확인)에 코드 검증 근거를, 아래 날짜별 절에는 당시 결과를 보존했습니다. [Release 준비 상태 분석](docs/release_readiness_post149_20261102.md)은 v0.3.0 이후 **68개 커밋·112개 변경 파일(신규 18, 수정 94)**과 마이그레이션·의존성·운영 미검증 사항을 구분합니다.
+
+**2026-11-04 운영 진단:** Railway는 `Trial expired`이며 FastAPI·Postgres 모두 `Offline`, 활성 배포는 없습니다. `postgres-volume`에 삭제 예정 경고가 있고 Backups는 `No Backups`입니다. 정확한 삭제 시각·데이터 무결성·외부 백업·운영 DB Revision·Streamlit 배포 SHA는 미확인입니다. 데이터가 이미 소실됐다는 뜻은 아니며, **v0.4.0 Release 발행과 운영 재배포는 보류**합니다. [직접 확인·과거 기록·미확인 사항](docs/release_readiness_post149_20261102.md#운영-배포-상태-2026-11-04-진단)을 구분해 기록했습니다.
 
 ### 2026-11-02 오프라인 무결성 검증과 main 확인
 
@@ -1698,7 +1700,7 @@ IAM은 EC2 Role의 inline policy 하나로 `s3:GetObject`만, 그것도 `arn:aws
 
 ### Railway FastAPI 배포 설정
 
-아래는 `catalogguard-lite` FastAPI와 `Postgres`를 사용한 기존 Railway production 배포 구성 기록입니다. 2026-11-02에는 Railway 연결 재인증이 필요해 현재 서비스 상태와 실제 배포 SHA를 조회하지 못했으며, 최신 main 반영 여부는 미확인입니다. API 의존성은 `requirements-api.txt`에 분리되어 있으므로 Railway 대시보드에서 Build Command는 비워 두고, 다음 설정을 사용합니다.
+아래는 `catalogguard-lite` FastAPI와 `Postgres`를 사용한 기존 Railway production 배포 구성 기록입니다. 2026-11-02에는 인증 문제로 조회하지 못했으나, 11월 4일 기존 인증 연결과 대시보드에서 Trial 만료·두 서비스 Offline을 확인했습니다. [운영 진단과 보류 조건](docs/release_readiness_post149_20261102.md#운영-배포-상태-2026-11-04-진단)을 먼저 확인하세요. 다음은 API 의존성을 `requirements-api.txt`로 분리한 구성 기록이며, 이번 문서 PR에서 설정·재배포를 실행하지 않습니다.
 
 ```text
 Root Directory: /
@@ -1730,7 +1732,7 @@ CATALOGGUARD_API_BASE_URL = "https://catalogguard-lite-production.up.railway.app
 CATALOGGUARD_API_TIMEOUT_SECONDS = "10"
 ```
 
-기존 배포 확인 기록의 범위는 `/health`, `/docs`, Streamlit Community Cloud 연결, CSV 검수, PostgreSQL 검수 이력 저장, 목록·상세 조회, 상세·전체 CSV 다운로드와 동일 파일 중복 저장입니다. promotion의 실제 배포 여부와 공개 앱 기능 범위는 별도 검증하지 않았습니다.
+과거 배포 성공 당시의 확인 범위는 `/health`, `/docs`, Streamlit Community Cloud 연결, CSV 검수, PostgreSQL 검수 이력 저장, 목록·상세 조회, 상세·전체 CSV 다운로드와 동일 파일 중복 저장입니다. 현재 가용성을 뜻하지 않으며, 2026-11-04의 공개 `/health`·`/ready` 요청은 모두 `404 Application not found`였습니다. promotion의 실제 배포 여부와 공개 앱 기능 범위는 별도 검증하지 않았습니다.
 
 #### 첫 배포 오류 해결
 

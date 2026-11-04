@@ -2,9 +2,9 @@
 
 ## 기준과 결론
 
-2026-11-02 확인 기준 최신 공식 Release는 [v0.3.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.3.0), 비교 대상 main은 [`b5f7ed560dfce4b19c611bccbfe5ce9735483b52`](https://github.com/psy0635-ctrl/catalogguard-lite/commit/b5f7ed560dfce4b19c611bccbfe5ce9735483b52)이다. 이 보고서는 해당 시점의 스냅샷이며 이후 문서 커밋이나 main 이동까지 숫자에 포함하지 않는다.
+2026-11-02의 코드 비교 기준은 공식 Release [v0.3.0](https://github.com/psy0635-ctrl/catalogguard-lite/releases/tag/v0.3.0)과 main [`b5f7ed560dfce4b19c611bccbfe5ce9735483b52`](https://github.com/psy0635-ctrl/catalogguard-lite/commit/b5f7ed560dfce4b19c611bccbfe5ce9735483b52)이다. 2026-11-04에도 같은 main과 최신 Release를 확인했다. 아래 비교 집계에는 이후 문서 커밋을 포함하지 않으며, 운영 상태는 11월 4일 진단으로 갱신했다.
 
-**추천은 신규 마이너 Release 준비다. 후보는 `v0.4.0`이며, 현재 즉시 발행을 권하지 않는다.** 기능 추가 범위가 패치 Release로 설명하기에는 크다. 운영 배포 SHA·DB revision·백업 및 복구 검증이 미확인이므로 먼저 릴리스 후보의 호환성·운영 검증 범위를 확정해야 한다. 이번 작업에서는 Release·Tag·Push·PR·운영 배포를 수행하지 않는다.
+**v0.4.0 Release 발행과 운영 재배포는 보류한다.** 신규 마이너 Release 준비라는 방향은 유지하지만, Trial 만료·서비스 중단·볼륨 삭제 예정 경고·Railway 볼륨 백업 부재를 먼저 다뤄야 한다. 데이터 보존·복구 가능성과 운영 DB Revision이 확인되기 전에는 운영 migration을 권장하지 않는다. 이 문서 PR은 운영 변경이나 Release 발행을 포함하지 않는다.
 
 ## 실제 비교 범위
 
@@ -38,7 +38,7 @@
 
 | 영역 | 실제 변경과 위험 | Release 전 확인 |
 |---|---|---|
-| DB migration | 새 revision 하나가 `inspection_results.related_source_rows` nullable JSONB와 array/NULL CHECK를 추가한다. backfill은 없다. additive schema이지만 운영 migration의 lock·권한·소요 시간은 미검증 | [migration](../alembic/versions/20260915_0020_add_inspection_related_source_rows.py)을 운영 복제/복구 DB에서 적용하고 결과·권한·소요 시간 확인. downgrade는 컬럼을 제거하므로 무손실 복구 수단으로 간주하지 않음 |
+| DB migration | v0.3.0 대비 새 revision 하나가 `inspection_results.related_source_rows` nullable JSONB와 array/NULL CHECK를 추가한다. backfill은 없다. 실제 운영 Revision은 미확인이며 필요한 전체 적용 범위·lock·권한·소요 시간도 미검증 | 복구 가능한 백업을 먼저 확인한 뒤 별도 승인된 격리 복원본에서 실제 출발 Revision부터 검증. [0019→0020 migration](../alembic/versions/20260915_0020_add_inspection_related_source_rows.py)만으로 운영 호환성을 판단하지 않음. downgrade는 컬럼을 제거하므로 무손실 복구 수단이 아님 |
 | 검수 결과·과거 데이터 | v14와 v18은 같은 파일에도 다른 run이 생길 수 있고, 다른 inspection version 간 비교는 거부한다. 과거 reason은 DB에서 보존하면서 출력 시 보호 | 버전별 dedup·이력·비교·legacy NULL 경로 확인. 과거 데이터를 자동 갱신하거나 전체 재검수하지 않음 |
 | API 동작 | 조회 endpoint·Preflight가 추가됐다. `/ready`는 DB 연결뿐 아니라 revision 일치도 요구해 불일치 시 503이다. limiter 활성화 시 로그인 429가 추가되고 출력 reason은 마스킹될 수 있음 | 기존 Client의 오류 처리·nullable 필드·응답 계약과 배포 순서 확인. route가 유지된다는 사실만으로 완전한 하위 호환을 단정하지 않음 |
 | 의존성 | API runtime에 openpyxl·defusedxml이 추가됐다. XLSX는 Web multipart만 지원하며 CLI·S3·HTTP feed·Airflow는 CSV-only. Airflow에는 lazy import 격리가 필요 | 실제 배포 이미지의 설치 파일·import 경로·XLSX 제한을 격리 환경에서 확인 |
@@ -62,22 +62,29 @@
 
 CI는 합성 테스트 DB·Chromium, kind, Terraform mock provider, 격리 Airflow의 계약 검증이다. 실제 공급사 호환성·운영 데이터 정확성·운영 규모 성능·장기 안정성·Firefox/WebKit·실제 AWS `terraform apply` 결과를 입증하지 않는다. SHA-256은 파일 대응 확인이며 전자서명·출처 인증·동시 변조 방지가 아니다.
 
-## 운영 배포 상태
+## 운영 배포 상태 (2026-11-04 진단)
 
-| 출처 | 확인 결과 | 해석 |
+| 출처·구분 | 확인 결과 | 해석 |
 |---|---|---|
-| Railway 연결 | 프로젝트 조회 시 재인증 필요(`UNAUTHORIZED`) | 현재 서비스·배포 SHA·DB revision·설정·의존성을 조회하지 못함. 접근을 우회하거나 변경하지 않음 |
-| GitHub Deployment 기록 | 조회된 최신 레코드는 2026-08-09, `railway-app[bot]`, SHA `56a40766eb359f27a2a2e77df28eb7e763d4c2b5`; 이 레코드의 최신 상태는 8월 10일 `inactive` | [과거 레코드](https://api.github.com/repos/psy0635-ctrl/catalogguard-lite/deployments/5816634137)는 현재 실제 Railway 배포 SHA의 증거가 아님 |
-| Streamlit | [공개 앱 URL](https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/)은 기존 문서에 있음. 현재 배포 Commit 조회 근거는 없음 | 접속 가능 여부와 최신 main 배포를 동일시하지 않음. 현재 SHA·PR #149 반영 여부 미확인 |
-| 저장소 설정 | [README의 Railway 구성 기록](../README.md#railway-fastapi-배포-설정), API 의존성·migration·Client 코드 확인 | 구성 예시가 현재 production 설정이나 적용 완료를 증명하지 않음 |
+| Railway 연결·과거 기록 | 11월 2일에는 `UNAUTHORIZED`로 조회하지 못했음 | 11월 4일 기존 인증 연결·대시보드 조회는 성공. 과거 인증 오류를 현재 상태로 사용하지 않음 |
+| Railway 실행 상태・직접 확인 | production FastAPI·Postgres 모두 `Offline`, 활성 배포 없음. 대시보드에 `Trial expired`와 체험 만료로 모든 배포가 중지됐다는 안내 | 현재 중단을 설명하는 근거. 과거 배포 제거 주체·정확한 종료 원인까지 입증하지는 않음 |
+| 공개 GET・직접 확인 | `/health`·`/ready` 각각 `404 Application not found` | FastAPI의 정상 응답이나 DB 준비 상태를 확인한 결과가 아님 |
+| Postgres 볼륨・직접 확인 | `postgres-volume` 500MB가 서비스에 연결돼 있으나 삭제 예정 경고 표시. Backups 탭은 `No Backups` | 볼륨 존재가 데이터 무결성·복구 가능성을 보장하지 않음. 정확한 삭제 시각·실제 DB Revision은 미확인이며 이미 소실됐다고 단정하지 않음 |
+| 외부 백업・확인 범위와 미확인 | 프로젝트 및 문서에 명시된 학교 PC 백업 경로에서 운영 DB dump를 찾지 못함. 확인된 보고서 원본 백업과 합성 DB 전후 비교 Snapshot은 DB 복원본이 아님 | 외부 백업 전체의 부재를 입증한 것은 아님. 복구 가능한 운영 백업·복원 검증 근거는 미확인 |
+| 배포 이력・과거 기록 | 시간순 최신 Railway 이력은 `e8c582fb-7d33-4a81-9dbf-4e8f3dba7508`의 `REMOVED`. 같은 SHA `56a40766eb359f27a2a2e77df28eb7e763d4c2b5`의 GitHub 상태는 8월 9일 `success` → 8월 10일 `inactive` | [과거 상태 이력](https://api.github.com/repos/psy0635-ctrl/catalogguard-lite/deployments/5816634137/statuses)은 현재 활성 배포가 아님. 제거 주체·사유는 미확인 |
+| 배포 실패・과거 기록 | 서비스 요약의 `latestDeployment`는 더 오래된 7월 10일 FAILED(`f1ca10bc-1bd3-4658-94e0-7e555f0897f0`), 실패 단계는 `PRE_DEPLOY_COMMAND` | 시간순 최신 배포와 구분. 세부 로그가 없어 패키지·접속·migration 중 어느 원인인지 단정하지 않음 |
+| Streamlit・직접 확인과 미확인 | 기존 관리 세션에서 `psy0635-ctrl/catalogguard-lite`・`main`・`app.py` 연결 확인. [공개 앱](https://catalogguard-lite-p6jtwmdhwqcapphpghfzduo.streamlit.app/)의 비인증 요청은 인증 경로로 연결됨 | 실제 배포 SHA·정상 실행·Railway API 연결 대상과 성공 여부·PR #149 반영은 미확인. Secrets는 열지 않음 |
+| 자동 migration・직접 확인과 추론 | Railway pre-deploy 설정은 `cd /app && /app/.venv/bin/alembic upgrade head` | 향후 배포 시 운영 DB 변경 위험. 실제 설치 명령의 값이나 운영 Revision은 확인하지 않음 |
 
-**운영 반영 여부는 미확인이다.** 공개 서비스에 업로드·로그인·migration·설정 변경·재배포·재시작을 수행하지 않았다. 최신 main의 오프라인 CLI는 내려받은 로컬 소스에서 사용할 수 있지만 운영 UI가 대응 CSV·JSON을 생성하는지는 별도로 확인해야 한다.
+**데이터 보존 확인이 Release 준비보다 우선이다.** [공식 Trial 정책](https://docs.railway.com/pricing/free-trial#data-retention)은 크레딧 만료 후 30일의 볼륨 보존 기간을 안내하지만, 이 프로젝트의 삭제 예정 시각을 계산하거나 무료 보존·반출이 가능하다고 가정하지 않는다. 소유자가 정확한 보존 기한과 운영 실행 없는 보존·반출 가능성을 확인해야 한다. 결제만으로 데이터 복구를 보장할 수도 없다.
+
+과거 성공 SHA의 소스는 migration `0011`·Inspection Version `5`였다. 이는 실제 DB Revision의 증거가 아니며, 복구 검증을 v0.3.0 기준의 `0019→0020`·Version `14→18`에만 한정해서는 안 된다. 운영 반영 여부는 여전히 미확인이다. 진단에서는 DB 연결·SQL·백업 생성/복원·migration·요금제 변경·재배포·재시작을 수행하지 않았다.
 
 ## Release 선택지
 
 | 선택 | 사용자 가치·포트폴리오 | 범위·호환성·배포 난이도 | 테스트 신뢰도·유지관리 부담 | 판단 |
 |---|---|---|---|---|
-| A. v0.3.0 유지 | 현재 안정 기준은 유지하나 최신 검증 기능을 공식 산출물로 제공하지 못함 | 즉시 변경 위험은 낮음. Release·main·운영 차이를 계속 설명해야 함 | 새 CI 결과는 main에만 적용됨. 두 기준의 문서 관리 부담 지속 | 검증 준비 중의 현 상태로는 타당하나 장기 전략으로는 부족 |
+| A. v0.3.0 유지 | 공식 코드 기준은 유지하나 최신 검증 기능을 공식 산출물로 제공하지 못함 | 즉시 변경 위험은 낮음. Release·main·운영 차이를 계속 설명해야 함 | 새 CI 결과는 main에만 적용됨. 두 기준의 문서 관리 부담 지속 | 검증 준비 중의 현 상태로는 타당하나 장기 전략으로는 부족 |
 | B. 신규 패치 Release | 소규모 수정 전달에는 적합하나 XLSX·Preflight·조회/내보내기·검수 버전 변경을 충분히 설명하기 어려움 | 후보 범위를 일부 수정만으로 별도 선정하지 않는 한 실제 변화가 큼. 배포 위험이 버전 이름 때문에 줄어들지 않음 | 제한한 패치 범위를 다시 검증해야 하며 지원 기준이 하나 더 생김 | 이번 전체 변경 묶음에는 비추천 |
 | C. 신규 마이너 Release 준비 | 새 사용자 흐름과 실패 입력 검증을 공식 기준으로 소개할 수 있고 취업용 재현 근거도 선명해짐 | migration·출력/버전 정책·새 의존성 확인이 필요해 준비 비용이 가장 큼 | main CI와 독립 통합 증거가 있으나 운영 차이는 남음. 발행 후 하나의 기준으로 관리 가능 | **추천. 검증 조건 충족 후 발행 판단** |
 
@@ -85,12 +92,12 @@ CI는 합성 테스트 DB·Chromium, kind, Terraform mock provider, 격리 Airfl
 
 ## 다음 최우선 작업과 발행 전 조건
 
-**가장 먼저 실제 Railway·Streamlit 배포 SHA와 DB revision을 읽기 전용으로 확인한다.** 현 배포가 v0.3.0인지 그보다 오래된 코드인지도 확정되지 않아, main과의 차이·적용할 migration·필요 설정을 정확히 정할 수 없기 때문이다. 사용자 연결이 복구되면 Codex에서 이 인벤토리를 이어서 작성할 수 있다.
+**가장 먼저 소유자가 Railway 볼륨의 정확한 삭제 예정 시각과 보존·복구 경로를 확인한다.** 외부 백업과 고유 운영 이력의 중요도도 확인해야 한다. 복구 가능한 백업을 확보하지 못하면 운영 DB 변경을 권장하지 않는다. 합성 fixture로 새 개발 환경을 만드는 것은 과거 운영 이력의 복원이 아니다.
 
 그 결과를 기준으로 다음 순서로 Release 준비를 진행한다. 아래는 제안이며 이번에 실행한 작업이 아니다.
 
-1. 실제 배포 SHA·DB revision·환경변수 이름·설치 의존성을 비밀 값 없이 기록하고 고정 후보 SHA와 비교한다.
-2. 백업과 복구가 가능한 독립 복제/테스트 DB에서 필요한 migration·새 API 이미지·동일 버전 UI의 호환성과 read-only 조회를 검증한다. 단순 downgrade를 복구 계획으로 대체하지 않는다.
+1. 기존 승인된 백업의 대상·시각·형식·복원 가능성을 확인한다. 실제 DB Revision·PostgreSQL 버전은 별도 승인된 격리 복원본에서 식별하고, Streamlit SHA·환경변수 이름·설치 의존성과 함께 고정 후보 SHA에 대응시킨다.
+2. 운영 자원과 연결되지 않는 독립 테스트 환경에서 실제 출발 Revision부터 migration·새 API 이미지·동일 버전 UI의 호환성을 검증한다. `0019→0020`·Version `14→18`, legacy 데이터, JWT·권한·의존성, `/health`·schema-aware `/ready` 및 실패 응답을 확인한다. 단순 downgrade를 복구 계획으로 대체하지 않는다.
 3. 후보 SHA에 CI 5/5 성공과 검수 버전·legacy 데이터·rate limit·Preflight·CSV/JSON 회귀 결과를 연결하고, 실패 시 복구 기준을 확정한다.
 4. 별도 배포 승인이 있는 경우에만 반영한다. 이후 `/health`·schema-aware `/ready`·인증된 조회와 기존 합성 배치의 CSV/JSON·오프라인 CLI로 읽기 전용 점검한다. 적절한 합성 배치가 없으면 운영 데이터를 새로 적재하지 않고 미검증으로 남긴다.
 5. 공개 가능한 변경사항·호환성·제약을 Release Notes에 정리하고 `v0.4.0` 후보 발행 여부를 별도로 승인받는다. Release 발행과 서비스 배포는 각각 구분해 기록한다.
