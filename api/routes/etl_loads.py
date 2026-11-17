@@ -1,5 +1,8 @@
+import json
 import logging
 from dataclasses import asdict
+from decimal import Decimal, InvalidOperation
+from typing import Any
 
 from fastapi import (
     APIRouter,
@@ -212,13 +215,27 @@ from db.session import get_session
 router = APIRouter()
 
 
+class _QualityAlertPreviewRequest(Request):
+    async def json(self) -> Any:
+        return json.loads(await self.body(), parse_float=self._parse_decimal)
+
+    @staticmethod
+    def _parse_decimal(token: str) -> Decimal | str:
+        try:
+            return Decimal(token)
+        except InvalidOperation:
+            # Let FastAPI resolve authentication before Pydantic rejects an
+            # exponent outside Decimal's representable range.
+            return token
+
+
 class _QualityAlertPreviewRoute(APIRoute):
     def get_route_handler(self):
         handle = super().get_route_handler()
 
         async def handle_without_echoing_input(request: Request) -> Response:
             try:
-                return await handle(request)
+                return await handle(_QualityAlertPreviewRequest(request.scope, request.receive))
             except RequestValidationError as error:
                 # An invalid value or unexpected field name may contain sensitive input.
                 detail = [
@@ -242,6 +259,7 @@ CATALOG_PROMOTION_NOT_FOUND_MESSAGE = "Promotion run not found."
 CATALOG_PROMOTION_ROLLBACK_NOT_FOUND_MESSAGE = "Rollback run not found."
 ETL_LOAD_NOT_FOUND_MESSAGE = "ETL 적재 배치를 찾을 수 없습니다."
 SERVER_SIDE_INACTIVE_PROFILE_MESSAGE = "Supplier profile is inactive."
+_POSTGRESQL_BIGINT_MAX = 2**63 - 1
 
 
 @router.get(
@@ -1751,7 +1769,7 @@ def get_etl_load_run(
 def create_etl_quality_alert_preview(
     thresholds: ETLQualityAlertPreviewRequest,
     response: Response,
-    etl_load_run_id: int = Path(..., ge=1),
+    etl_load_run_id: int = Path(..., ge=1, le=_POSTGRESQL_BIGINT_MAX),
     _current_user=Depends(require_viewer),
     session: Session = Depends(get_session),
 ) -> ETLQualityAlertPreviewResponse:
