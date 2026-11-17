@@ -2139,6 +2139,7 @@ def main() -> None:
     render_auth_sidebar()
 
     if not is_authenticated():
+        st.session_state.pop("etl_quality_alert_preview", None)
         st.info("좌측 사이드바에서 로그인한 뒤 이용해 주세요.")
         return
 

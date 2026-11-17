@@ -2,6 +2,8 @@ import csv
 import io
 import json
 from datetime import datetime
+from decimal import Decimal
+from unittest.mock import Mock
 
 import pandas as pd
 import pytest
@@ -2790,6 +2792,62 @@ def _patch_etl_api_client(monkeypatch, api_client):
         "create_catalogguard_api_client",
         lambda: api_client,
     )
+
+
+def test_quality_alert_apptest_invalidates_stale_results_and_requires_explicit_submit(monkeypatch):
+    api_client = FakeEtlApiClient(list_items=[make_load(12), make_load(13)])
+    preview = Mock(return_value={
+        "status": "ALERT",
+        "total_rows": 1000,
+        "loaded_rows": 920,
+        "rejected_rows": 80,
+        "rejection_rate": 8.0,
+        "violations": [{"code": "rejection_rate_exceeded", "message": "3%p 초과"}],
+    })
+    api_client.get_etl_quality_alert_preview = preview
+    _patch_etl_api_client(monkeypatch, api_client)
+
+    app = run_authenticated_app_test(role="viewer", timeout=10)
+    select_etl_batch(app, 12)
+    app.button(key="etl_load_show_detail").click().run(timeout=10)
+    assert not app.exception
+    preview.assert_not_called()
+    app.button(key="etl_quality_alert_check").click().run(timeout=10)
+    assert any("허용 최대 거부율" in error.value for error in app.error)
+    preview.assert_not_called()
+
+    app.text_input(key="etl_quality_alert_rate").set_value("5.00").run(timeout=10)
+    app.text_input(key="etl_quality_alert_count").set_value("80").run(timeout=10)
+    preview.assert_not_called()
+    app.button(key="etl_quality_alert_check").click().run(timeout=10)
+    preview.assert_called_once_with(
+        12, max_rejection_rate=Decimal("5.00"), max_rejected_rows=80,
+    )
+    assert any("ALERT ·" in warning.value for warning in app.warning)
+    assert any(metric.value == "8.00%" for metric in app.metric)
+    assert "3%p 초과" in _body_text(app)
+
+    app.text_input(key="etl_quality_alert_count").set_value("90").run(timeout=10)
+    assert not any("ALERT ·" in warning.value for warning in app.warning)
+    assert preview.call_count == 1
+    app.button(key="etl_quality_alert_check").click().run(timeout=10)
+    assert any("ALERT ·" in warning.value for warning in app.warning)
+
+    request_id = "a" * 32
+    preview.side_effect = catalogguard_api.CatalogGuardApiResponseError(
+        "테스트 API 오류", request_id=request_id,
+    )
+    app.button(key="etl_quality_alert_check").click().run(timeout=10)
+    assert not any("ALERT ·" in warning.value for warning in app.warning)
+    assert any(request_id in error.value for error in app.error)
+
+    preview.side_effect = None
+    app.button(key="etl_quality_alert_check").click().run(timeout=10)
+    select_etl_batch(app, 13)
+    app.button(key="etl_load_show_detail").click().run(timeout=10)
+    assert not any("ALERT ·" in warning.value for warning in app.warning)
+    assert preview.call_count == 4
+    assert not app.exception
 
 
 def test_catalog_promotion_apptest_requires_batch_selection(monkeypatch):

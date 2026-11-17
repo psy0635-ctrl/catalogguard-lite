@@ -1,5 +1,6 @@
 # 역할: CSV 검수 API가 반환하는 JSON 응답 구조를 Pydantic 모델로 정의합니다.
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -185,6 +186,31 @@ class ETLLoadQualityTrendItemResponse(BaseModel):
 
 class ETLLoadQualityTrendResponse(BaseModel):
     items: list[ETLLoadQualityTrendItemResponse]
+
+
+class ETLQualityAlertPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_rejection_rate: Decimal = Field(ge=0, le=100, decimal_places=2)
+    max_rejected_rows: int | None = Field(default=None, ge=0, strict=True)
+
+
+class ETLQualityAlertViolationResponse(BaseModel):
+    code: Literal["rejection_rate_exceeded", "rejected_rows_exceeded"]
+    message: str
+
+
+class ETLQualityAlertPreviewResponse(BaseModel):
+    etl_load_run_id: int
+    profile_name: str
+    total_rows: int | None
+    loaded_rows: int | None
+    rejected_rows: int | None
+    rejection_rate: float | None
+    thresholds: ETLQualityAlertPreviewRequest
+    status: Literal["PASS", "ALERT", "INSUFFICIENT_DATA"]
+    violations: list[ETLQualityAlertViolationResponse]
+    data_issue: str | None
 
 
 # 방향만 말하고 위험 임계값은 정하지 않습니다. "몇 %부터 위험한가"는 공급사마다 달라서

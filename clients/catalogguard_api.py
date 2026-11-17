@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+from decimal import Decimal
 import re
 from typing import Any
 from urllib.parse import quote
@@ -480,6 +481,54 @@ def _validate_positive_etl_int(value: object, name: str) -> None:
 
 def _invalid_etl_response() -> "CatalogGuardApiResponseError":
     return CatalogGuardApiResponseError(INVALID_RESPONSE_MESSAGE)
+
+
+def _validate_etl_quality_alert_preview_response(
+    data: dict[str, Any], etl_load_run_id: int, thresholds: dict[str, Any],
+) -> None:
+    required = (
+        "etl_load_run_id", "profile_name", "total_rows", "loaded_rows",
+        "rejected_rows", "rejection_rate", "thresholds", "status",
+        "violations", "data_issue",
+    )
+    if not all(field in data for field in required):
+        raise _invalid_etl_response()
+    run_id = data["etl_load_run_id"]
+    if type(run_id) is not int or run_id != etl_load_run_id:
+        raise _invalid_etl_response()
+    if not isinstance(data["profile_name"], str) or data["thresholds"] != thresholds:
+        raise _invalid_etl_response()
+    counts = (data["total_rows"], data["loaded_rows"], data["rejected_rows"])
+    if any(value is not None and type(value) is not int for value in counts):
+        raise _invalid_etl_response()
+
+    status = data["status"]
+    rate = data["rejection_rate"]
+    violations = data["violations"]
+    issue = data["data_issue"]
+    if not isinstance(violations, list):
+        raise _invalid_etl_response()
+    if status == "INSUFFICIENT_DATA":
+        if rate is not None or violations or not isinstance(issue, str) or not issue:
+            raise _invalid_etl_response()
+        return
+    if (
+        status not in ("PASS", "ALERT")
+        or issue is not None
+        or any(value is None or value < 0 for value in counts)
+        or type(rate) not in (float, int)
+        or not 0 <= rate <= 100
+        or bool(violations) != (status == "ALERT")
+    ):
+        raise _invalid_etl_response()
+    for violation in violations:
+        if (
+            not isinstance(violation, dict)
+            or violation.get("code") not in ("rejection_rate_exceeded", "rejected_rows_exceeded")
+            or not isinstance(violation.get("message"), str)
+            or not violation["message"]
+        ):
+            raise _invalid_etl_response()
 
 
 def _validate_etl_list_metadata(
@@ -3003,6 +3052,28 @@ class CatalogGuardApiClient:
             not_found_message="ETL 적재 배치를 찾을 수 없습니다.",
         )
         _validate_catalog_reconciliation_response(data, status=status)
+        return data
+
+    def get_etl_quality_alert_preview(
+        self,
+        etl_load_run_id: int,
+        *,
+        max_rejection_rate: Decimal,
+        max_rejected_rows: int | None = None,
+    ) -> dict[str, Any]:
+        _validate_positive_etl_int(etl_load_run_id, "etl_load_run_id")
+        thresholds = {
+            "max_rejection_rate": str(max_rejection_rate),
+            "max_rejected_rows": max_rejected_rows,
+        }
+        data = self._post_json(
+            f"/api/v1/etl-loads/{etl_load_run_id}/quality-alert-preview",
+            json_body=thresholds,
+            raise_not_found=True,
+            not_found_error=ETLLoadNotFoundError,
+            not_found_message="ETL 적재 배치를 찾을 수 없습니다.",
+        )
+        _validate_etl_quality_alert_preview_response(data, etl_load_run_id, thresholds)
         return data
 
     def get_catalog_promotion_preview(
