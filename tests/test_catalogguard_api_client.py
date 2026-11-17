@@ -1,5 +1,6 @@
 import importlib
 from datetime import date
+from decimal import Decimal
 
 import pytest
 import requests
@@ -2807,6 +2808,49 @@ def test_catalog_promotion_history_rejects_malformed_json_and_hides_500_body():
 
     assert "postgresql" not in str(error.value).lower()
     assert "traceback" not in str(error.value).lower()
+
+
+@pytest.mark.parametrize("response_run_id", [12, 13])
+def test_quality_alert_preview_posts_thresholds_and_checks_response_batch(response_run_id):
+    thresholds = {"max_rejection_rate": "5.00", "max_rejected_rows": 50}
+    payload = {
+        "etl_load_run_id": response_run_id,
+        "profile_name": "synthetic_vendor",
+        "total_rows": 1000,
+        "loaded_rows": 950,
+        "rejected_rows": 50,
+        "rejection_rate": 5.0,
+        "thresholds": thresholds,
+        "status": "PASS",
+        "violations": [],
+        "data_issue": None,
+    }
+    client, session = make_client(response=FakeResponse(payload=payload))
+    if response_run_id == 12:
+        assert client.get_etl_quality_alert_preview(
+            12, max_rejection_rate=Decimal("5.00"), max_rejected_rows=50,
+        ) == payload
+    else:
+        with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+            client.get_etl_quality_alert_preview(
+                12, max_rejection_rate=Decimal("5.00"), max_rejected_rows=50,
+            )
+    assert session.calls == [{
+        "url": "https://api.example.com/api/v1/etl-loads/12/quality-alert-preview",
+        "files": None,
+        "json": thresholds,
+        "timeout": 5.0,
+    }]
+
+
+def test_quality_alert_preview_maps_missing_batch_and_preserves_request_id():
+    request_id = "a" * 32
+    client, _ = make_client(response=FakeResponse(
+        status_code=404, headers={"X-Request-ID": request_id},
+    ))
+    with pytest.raises(import_client_module().ETLLoadNotFoundError) as error:
+        client.get_etl_quality_alert_preview(12, max_rejection_rate=Decimal("5"))
+    assert error.value.request_id == request_id
 
 
 def test_get_catalog_promotion_preview_posts_without_body_and_validates_response():

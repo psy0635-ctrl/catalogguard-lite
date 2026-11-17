@@ -891,6 +891,16 @@ ETL 적재 이력 탭
 
 Streamlit rerun에 대비해 목록·상세·reject 응답과 선택 상태를 ETL 전용 `session_state`에 보관한다. 검색 조건이나 batch가 바뀌면 이전 상세·상품·reject 상태와 promotion preview·승인 상태·lineage 비교 대상을 초기화해 stale 데이터가 남거나 다른 batch에 반영되지 않게 한다. 현재 선택한 비교 대상 detail의 성공·실패 결과도 대상 batch ID와 함께 cache해 같은 대상의 rerun 때 재호출하지 않는다. `NULL` lineage는 changed가 아니라 알 수 없음이며, 비교는 저장된 metadata 기준의 조사 화면일 뿐 원인을 자동으로 판정하거나 전체 실행 환경을 재현하지 않는다. preview 요청 중에는 중복 요청을 막고, preview hash가 없거나 승인하지 않은 상태에서는 반영 버튼을 비활성화한다. 성공 후에는 preview·승인 상태를 제거하고 결과만 보존하며, `preview_stale`가 발생하면 이전 preview를 제거해 새 preview를 요구한다. API Client는 preview·promotion 응답의 필수 key, count, action, before/after shape, SHA-256을 검증하고 HTTP 오류를 안전한 사용자 메시지로 변환한다. 순수 helper 테스트와 Streamlit AppTest로 목록·검색·페이지 이동·상세·품질 지표·오류 코드·SHA-256·lineage 비교·reject 상세·nullable·404·request ID·promotion 상태 초기화를 검증한다.
 
+## ETL 품질 경보 시뮬레이터
+
+`ETL 적재 이력`에서 배치를 선택하고 `상세 조회`를 누릅니다. `품질 경보 시뮬레이터`에 허용 최대 거부율(0~100%, 소수점 둘째 자리까지)과 선택 사항인 허용 최대 거부 건수(0 이상의 정수)를 입력한 뒤 `품질 경보 확인`을 누릅니다. 두 기준 모두 사용자 입력값을 사용하며, 기준이 바뀌면 이전 결과가 사라집니다.
+
+`POST /api/v1/etl-loads/{etl_load_run_id}/quality-alert-preview`는 기존 Bearer 인증과 `viewer` 또는 `operator` 역할을 사용합니다. 예를 들어 `{"max_rejection_rate":"5.00","max_rejected_rows":75}`를 보낼 수 있습니다. 거부 건수 기준을 사용하지 않을 때는 필드를 생략하거나 `null`로 보냅니다. 존재하지 않는 배치는 404, 유효하지 않은 입력은 422를 반환합니다.
+
+실제 거부율은 거부 건수를 전체 처리 건수로 나눈 백분율입니다. 기준과 같은 값은 `PASS`에 포함됩니다. 기준 하나라도 초과하면 `ALERT`와 초과 기준·초과량을 반환합니다. 표시용 거부율은 소수점 둘째 자리로 반올림하며, 판정은 반올림 전 비율을 사용합니다. 요약이 누락된 Legacy 배치, 처리 행 0건, 저장 건수가 모순되는 배치는 `INSUFFICIENT_DATA`입니다.
+
+이 API는 배치 요약만 읽으며 임계값과 응답을 DB에 저장하지 않습니다. 품질 판정과 Promotion Preview의 반영 가능 여부는 별개입니다. `PASS`여도 운영 반영이 차단될 수 있고, `ALERT`는 실제 반영을 차단하거나 변경하지 않습니다.
+
 ## Catalog promotion preview와 승인 반영
 
 ETL staging은 운영 상품을 바로 덮어쓰는 테이블이 아니므로, 사용자가 반영 대상을 확인하고 명시적으로 승인하는 두 단계 workflow를 둔다. ETL batch를 자동으로 고르지 않고 Streamlit에서 사용자가 직접 선택해야 하며, preview 단계에서는 DB의 운영 상품을 변경하지 않는다.

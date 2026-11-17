@@ -1,4 +1,5 @@
 import logging
+from dataclasses import asdict
 
 from fastapi import (
     APIRouter,
@@ -13,6 +14,9 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from sqlalchemy.orm import Session
 
 from api.dependencies import require_operator, require_viewer
@@ -60,6 +64,8 @@ from api.schemas import (
     ETLProfileDetailResponse,
     ETLProfileListResponse,
     ETLProfileResponse,
+    ETLQualityAlertPreviewRequest,
+    ETLQualityAlertPreviewResponse,
     ETLQualityObservabilityErrorCodeResponse,
     ETLQualityObservabilityErrorBatchResponse,
     ETLQualityObservabilityProfileListResponse,
@@ -88,6 +94,10 @@ from api.schemas import (
 from config.metrics import record_web_etl_run, record_web_etl_rows
 from config.logging import LOGGER_NAME, log_event
 from core.upload_validator import CsvUploadValidationError
+from db.etl_quality_alert_service import (
+    evaluate_etl_quality_alert,
+    get_etl_quality_alert_batch,
+)
 from db.etl_quality_observability_service import (
     DEFAULT_BATCH_LIMIT as OBSERVABILITY_DEFAULT_LIMIT,
     ETLQualityObservability,
@@ -200,6 +210,33 @@ from db.session import get_session
 
 
 router = APIRouter()
+
+
+class _QualityAlertPreviewRoute(APIRoute):
+    def get_route_handler(self):
+        handle = super().get_route_handler()
+
+        async def handle_without_echoing_input(request: Request) -> Response:
+            try:
+                return await handle(request)
+            except RequestValidationError as error:
+                # An invalid value or unexpected field name may contain sensitive input.
+                detail = [
+                    {
+                        "type": issue["type"],
+                        "loc": issue["loc"][:1] if issue["type"] == "extra_forbidden" else issue["loc"],
+                        "msg": issue["msg"],
+                    }
+                    for issue in error.errors()
+                ]
+                return JSONResponse(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    content={"detail": detail},
+                )
+
+        return handle_without_echoing_input
+
+
 _LOGGER = logging.getLogger(LOGGER_NAME)
 CATALOG_PROMOTION_NOT_FOUND_MESSAGE = "Promotion run not found."
 CATALOG_PROMOTION_ROLLBACK_NOT_FOUND_MESSAGE = "Rollback run not found."
@@ -1709,6 +1746,45 @@ def get_etl_load_run(
             detail=ETL_LOAD_NOT_FOUND_MESSAGE,
         )
     return _build_detail_response(result)
+
+
+def create_etl_quality_alert_preview(
+    thresholds: ETLQualityAlertPreviewRequest,
+    response: Response,
+    etl_load_run_id: int = Path(..., ge=1),
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> ETLQualityAlertPreviewResponse:
+    batch = get_etl_quality_alert_batch(session, etl_load_run_id=etl_load_run_id)
+    if batch is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ETL_LOAD_NOT_FOUND_MESSAGE,
+        )
+    evaluation = evaluate_etl_quality_alert(
+        batch,
+        max_rejection_rate=thresholds.max_rejection_rate,
+        max_rejected_rows=thresholds.max_rejected_rows,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return ETLQualityAlertPreviewResponse(
+        etl_load_run_id=batch.etl_load_run_id,
+        profile_name=batch.profile_name,
+        total_rows=batch.total_rows,
+        loaded_rows=batch.loaded_rows,
+        rejected_rows=batch.rejected_rows,
+        thresholds=thresholds,
+        **asdict(evaluation),
+    )
+
+
+router.add_api_route(
+    "/api/v1/etl-loads/{etl_load_run_id}/quality-alert-preview",
+    create_etl_quality_alert_preview,
+    methods=["POST"],
+    response_model=ETLQualityAlertPreviewResponse,
+    route_class_override=_QualityAlertPreviewRoute,
+)
 
 
 @router.get(

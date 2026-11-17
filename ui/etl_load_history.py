@@ -1,5 +1,6 @@
 from collections import Counter
 from datetime import datetime
+from decimal import Decimal
 import hashlib
 import json
 import re
@@ -13,6 +14,7 @@ from clients.catalogguard_api import (
     CATALOG_RECONCILIATION_EXPORT_MAX_ITEMS,
     CatalogReconciliationExportLimitError,
     CatalogGuardApiConfigurationError,
+    CatalogGuardApiError,
     CatalogGuardApiConnectionError,
     CatalogGuardApiResponseError,
     CatalogGuardApiTimeoutError,
@@ -1845,6 +1847,7 @@ def reset_etl_lineage_comparison_state(session_state) -> None:
 
 
 def reset_etl_load_detail_state(session_state) -> None:
+    session_state.pop("etl_quality_alert_preview", None)
     session_state["etl_load_detail_requested"] = False
     session_state["etl_load_detail_response"] = None
     session_state["etl_load_detail_error"] = None
@@ -3440,12 +3443,84 @@ def _render_catalog_reconciliation(api_client) -> None:
             st.rerun()
 
 
+def _render_etl_quality_alert_preview(api_client, etl_load_run_id: int) -> None:
+    st.subheader("품질 경보 시뮬레이터")
+    st.caption(
+        "입력한 기준을 이 배치에 적용해 보는 읽기 전용 기능입니다. "
+        "품질 판정과 Promotion Preview의 반영 가능 여부는 별개이며, "
+        "품질 판정은 실제 반영을 승인하거나 차단하지 않습니다."
+    )
+    rate_input = st.text_input(
+        "허용 최대 거부율 (%)", placeholder="0~100, 소수점 둘째 자리까지",
+        key="etl_quality_alert_rate",
+    ).strip()
+    count_input = st.text_input(
+        "허용 최대 거부 건수 (선택)", placeholder="0 이상의 정수",
+        key="etl_quality_alert_count",
+    ).strip()
+    preview_key = "etl_quality_alert_preview"
+    inputs = (etl_load_run_id, rate_input, count_input)
+    preview = st.session_state.get(preview_key)
+    if preview is not None and preview[0] != inputs:
+        st.session_state.pop(preview_key)
+        preview = None
+
+    if st.button("품질 경보 확인", key="etl_quality_alert_check"):
+        st.session_state.pop(preview_key, None)
+        if not re.fullmatch(r"[0-9]{1,3}(\.[0-9]{1,2})?", rate_input) or Decimal(rate_input) > 100:
+            st.error("허용 최대 거부율은 0~100 사이의 숫자로, 소수점 둘째 자리까지 입력해 주세요.")
+            return
+        try:
+            if count_input and not re.fullmatch(r"[0-9]+", count_input):
+                raise ValueError
+            max_rejected_rows = int(count_input) if count_input else None
+        except ValueError:
+            st.error("허용 최대 거부 건수는 0 이상의 정수로 입력해 주세요.")
+            return
+        try:
+            result = api_client.get_etl_quality_alert_preview(
+                etl_load_run_id,
+                max_rejection_rate=Decimal(rate_input),
+                max_rejected_rows=max_rejected_rows,
+            )
+        except CatalogGuardApiError as error:
+            st.error(build_etl_api_error_display_message(
+                f"품질 경보를 확인하지 못했습니다. {error}", error,
+            ))
+            return
+        preview = (inputs, result)
+        st.session_state[preview_key] = preview
+
+    if preview is None:
+        return
+    result = preview[1]
+    rate = result["rejection_rate"]
+    columns = st.columns(4)
+    for column, (label, field) in zip(columns[:3], (
+        ("전체 처리", "total_rows"), ("정상 적재", "loaded_rows"), ("거부 건수", "rejected_rows"),
+    )):
+        value = result[field]
+        column.metric(label, "—" if value is None else value)
+    columns[3].metric("실제 거부율", "—" if rate is None else f"{rate:.2f}%")
+    if rate is not None:
+        st.caption("거부율은 소수점 둘째 자리까지 표시하며, 판정에는 반올림 전 값을 사용합니다.")
+    if result["status"] == "PASS":
+        st.success("PASS · 입력한 기준을 모두 충족합니다.")
+    elif result["status"] == "ALERT":
+        st.warning("ALERT · 입력한 기준을 초과했습니다.")
+        for violation in result["violations"]:
+            st.write(violation["message"])
+    else:
+        st.info(f"INSUFFICIENT_DATA · {result['data_issue']}")
+
+
 def _render_etl_load_detail(api_client) -> None:
     selected_run_id = st.session_state.get("etl_load_selected_run_id")
     if selected_run_id is None:
         return
 
     st.subheader("적재 배치 상세")
+    _render_etl_quality_alert_preview(api_client, selected_run_id)
     detail_response = _fetch_etl_load_detail(api_client, st.session_state)
     if detail_response is None:
         error = st.session_state.get("etl_load_detail_error")
