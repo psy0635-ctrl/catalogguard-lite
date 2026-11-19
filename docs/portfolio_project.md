@@ -2381,3 +2381,16 @@ SHA-256은 받은 CSV와 보고서의 대응 확인이며 전자서명·발행�
 - [병합 후 main b5f7ed560dfce4b19c611bccbfe5ce9735483b52](https://github.com/psy0635-ctrl/catalogguard-lite/commit/b5f7ed560dfce4b19c611bccbfe5ce9735483b52)
 - [독립 단위 테스트](../tests/test_reconciliation_export_verifier.py), [CLI 사용법·한계](reconciliation_integrity_verifier.md)
 - [Release 범위·마이그레이션·운영 미검증 분석](release_readiness_post149_20261102.md)
+
+## 6.31 ETL 품질 경보 미리보기
+
+적재 배치 상세의 **품질 경보 시뮬레이터**는 저장된 배치의 실제 거부율을 사용자가 입력한 허용 최대 거부율과 비교합니다. 필요하면 최대 거부 건수도 함께 적용할 수 있습니다. 운영자는 같은 배치에 여러 기준을 적용해 결과를 비교할 수 있으며, 미리보기는 배치 데이터나 상품 반영 상태를 바꾸지 않습니다. [PR #154](https://github.com/psy0635-ctrl/catalogguard-lite/pull/154)
+
+2026-11-19, 공식 main `20806be8785ffb6e6949e3c86e60f79406860f98`에서 격리된 로컬 Streamlit·FastAPI·PostgreSQL로 검증했습니다. [기존 합성 CSV fixture](../tests/fixtures/e2e/etl_browser_vendor.csv)를 Streamlit에서 한 번 적재한 뒤 같은 배치의 판정을 실제 브라우저 화면에서 확인했습니다.
+
+| 전체 | 정상 적재 | 거부 | 실제 거부율 | 허용 최대 거부율 | 최대 거부 건수 | 화면 판정 |
+|---:|---:|---:|---:|---:|---|---|
+| 4건 | 2건 | 2건 | 50% | 25% | 미설정 | **ALERT** |
+| 4건 | 2건 | 2건 | 50% | 50% | 미설정 | **PASS** |
+
+두 판정 후 로컬 PostgreSQL에는 동일한 ETL 배치 한 건만 저장돼 있었습니다. 검증 범위는 로컬 환경과 합성 데이터로 제한했으며, 운영 배포와 운영 데이터는 범위 밖이었습니다.
