@@ -353,23 +353,17 @@ def _run_quality_observability_scenario(page, fixture: _QualityFixture) -> None:
     expect(page.locator("body")).to_contain_text(
         "품질 정보가 있는 최근 2개 배치입니다. 오래된 배치부터 표시합니다."
     )
-    # The page-wide load history also uses this header. Its grid does not have
-    # both percentage values, so identify the observed-batches table by the
-    # complete, deterministic semantic content instead of DOM position.
-    observed_batches_grid = _dataframe_grid_with_column(page, "적재 배치 ID")
-    observed_grid_texts = observed_batches_grid.all_inner_texts()
-    assert any(
-        all(
-            value in grid_text
-            for value in (
-                str(fixture.previous.id),
-                str(fixture.latest.id),
-                "20.00%",
-                "10.00%",
-            )
-        )
-        for grid_text in observed_grid_texts
+    # The load history shares the ID header. The observed grid also has a Reject rate column.
+    observed_batches_grid = _dataframe_grid_with_column(page, "적재 배치 ID").filter(
+        has=page.locator("th[role='columnheader']", has_text=re.compile(r"^Reject 비율$"))
     )
+    expect(observed_batches_grid).to_have_count(1)
+    for batch_id, reject_rate in ((fixture.previous.id, "20.00%"), (fixture.latest.id, "10.00%")):
+        batch_row = observed_batches_grid.locator("tbody tr[role='row']").filter(
+            has=page.locator("td[role='gridcell'][aria-colindex='1']", has_text=re.compile(rf"^{batch_id}$"))
+        )
+        expect(batch_row).to_have_count(1)
+        expect(_dataframe_grid_cell(batch_row, reject_rate)).to_have_count(1)
 
     page.get_by_role("combobox", name=re.compile("조사할 오류 코드$")).click()
     page.get_by_role("option", name="missing_required", exact=True).click()
