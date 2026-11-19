@@ -16,6 +16,7 @@ DEFAULT_CATALOGGUARD_AGENT_PROVIDER = "openai"
 DEFAULT_CATALOGGUARD_OLLAMA_MODEL = "qwen3.5:9b"
 CATALOGGUARD_AGENT_PROVIDERS = frozenset({"openai", "ollama"})
 DEFAULT_CATALOGGUARD_OLLAMA_BASE_URL = "http://localhost:11434/v1/"
+CATALOGGUARD_ASYNC_ETL_ENABLED_ENV_VAR = "CATALOGGUARD_ASYNC_ETL_ENABLED"
 CATALOGGUARD_ETL_S3_BUCKET_ENV_VAR = "CATALOGGUARD_ETL_S3_BUCKET"
 CATALOGGUARD_ETL_S3_PREFIX_ENV_VAR = "CATALOGGUARD_ETL_S3_PREFIX"
 # 서버 운영자가 지정하는 신뢰 공급사 HTTP feed입니다. API 사용자는 URL을 선택할 수 없습니다.
@@ -241,6 +242,12 @@ def get_catalogguard_api_base_url() -> str | None:
 
     normalized_url = api_base_url.rstrip("/")
     return normalized_url or None
+
+
+def is_async_etl_enabled() -> bool:
+    return os.environ.get(CATALOGGUARD_ASYNC_ETL_ENABLED_ENV_VAR, "").strip().lower() in {
+        "true", "1", "yes"
+    }
 
 
 def get_catalogguard_etl_s3_bucket() -> str | None:

@@ -2393,6 +2393,51 @@ class CatalogGuardApiClient:
         _validate_etl_web_run_response(data)
         return data
 
+    def submit_etl_job(
+        self, *, profile_id: str, source_filename: str, file_content: bytes,
+        content_type: str = "text/csv",
+    ) -> dict[str, Any]:
+        data = self._post_etl_upload(
+            endpoint="/api/v1/etl-jobs", profile_id=profile_id,
+            source_filename=source_filename, file_content=file_content, content_type=content_type,
+        )
+        self._validate_response_keys(data, JOB_SUBMISSION_RESPONSE_KEYS)
+        job_id = self._normalize_job_id(data["job_id"])
+        if (
+            job_id is None
+            or data["status"] != "queued"
+            or data["status_url"] != f"/api/v1/etl-jobs/{job_id}"
+        ):
+            raise _invalid_etl_response()
+        return {**data, "job_id": job_id}
+
+    def get_etl_job(self, job_id: str) -> dict[str, Any]:
+        normalized_job_id = self._normalize_job_id(job_id)
+        if normalized_job_id is None:
+            raise ValueError("job_id must be a valid UUID")
+
+        data = self._get_json(f"/api/v1/etl-jobs/{normalized_job_id}")
+        self._validate_response_keys(data, (
+            "job_id", "status", "etl_load_run_id", "created", "error_code", "message",
+            "created_at", "updated_at",
+        ))
+        status = data["status"]
+        if (
+            self._normalize_job_id(data["job_id"]) != normalized_job_id
+            or not isinstance(status, str)
+            or status not in VALID_JOB_STATUSES
+            or any(data[key] is not None and not isinstance(data[key], str)
+                   for key in ("error_code", "message"))
+            or any(_parse_etl_created_at(data[key]) is None
+                   for key in ("created_at", "updated_at"))
+        ):
+            raise _invalid_etl_response()
+        if status == "succeeded":
+            run_id = data["etl_load_run_id"]
+            if type(run_id) is not int or run_id <= 0 or type(data["created"]) is not bool:
+                raise _invalid_etl_response()
+        return {**data, "job_id": normalized_job_id}
+
     def preflight_etl_load(
         self, *, profile_id: str, source_filename: str, file_content: bytes,
         content_type: str = "text/csv",

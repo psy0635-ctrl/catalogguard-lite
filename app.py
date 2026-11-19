@@ -38,7 +38,7 @@ from core.upload_validator import (
     validate_and_read_uploaded_csv,
 )
 from ui.auth import get_authenticated_api_client, is_authenticated, render_auth_sidebar
-from ui.etl_load_history import render_etl_load_history
+from ui.etl_load_history import clear_async_etl_session, render_etl_load_history
 
 
 HISTORY_LIMIT_DEFAULT = 10
@@ -2139,6 +2139,7 @@ def main() -> None:
     render_auth_sidebar()
 
     if not is_authenticated():
+        clear_async_etl_session(st.session_state)
         st.session_state.pop("etl_quality_alert_preview", None)
         st.info("좌측 사이드바에서 로그인한 뒤 이용해 주세요.")
         return
