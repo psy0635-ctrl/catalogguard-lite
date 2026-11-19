@@ -10,7 +10,7 @@ from alembic.script import ScriptDirectory
 
 def test_relationship_migration_head_and_reversible_sql(monkeypatch):
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    assert script.get_heads() == ["20260915_0020"]
+    assert script.get_heads() == ["20261119_0021"]
     revision = script.get_revision("20260915_0020")
     assert revision.down_revision == "20260908_0019"
     output = StringIO()

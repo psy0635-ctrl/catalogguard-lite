@@ -6,7 +6,7 @@ from config.settings import get_celery_broker_url
 celery_app = Celery(
     "catalogguard",
     broker=get_celery_broker_url(),
-    include=["workers.inspection_tasks"],
+    include=["workers.inspection_tasks", "workers.etl_tasks"],
 )
 celery_app.conf.update(
     task_serializer="json",
