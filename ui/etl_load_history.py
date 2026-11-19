@@ -31,7 +31,7 @@ from clients.catalogguard_api import (
     ETLUnsupportedProfileError,
     fetch_all_catalog_reconciliation,
 )
-from config.settings import MAX_UPLOAD_SIZE_BYTES
+from config.settings import MAX_UPLOAD_SIZE_BYTES, is_async_etl_enabled
 from core.privacy import mask_inspection_reason
 from core.result_exporter import (
     build_catalog_reconciliation_integrity_manifest,
@@ -4552,13 +4552,128 @@ def _render_etl_preflight_result() -> None:
     )
 
 
+ETL_JOB_STATUS_LABELS = {
+    "queued": "대기 중",
+    "running": "처리 중",
+    "succeeded": "성공",
+    "failed": "실패",
+}
+ETL_ACTIVE_JOB_STATUSES = {"queued", "running"}
+
+
+def clear_async_etl_session(session_state) -> None:
+    if session_state.pop("etl_async_detail_run_id", None) is not None:
+        session_state.pop("etl_load_selected_run_id", None)
+        reset_etl_load_detail_state(session_state)
+        clear_catalog_promotion_preview_state(session_state)
+    for key in (
+        "etl_async_job", "etl_async_submit_error", "etl_async_lookup_error",
+        "etl_async_open_run_id",
+    ):
+        session_state.pop(key, None)
+
+
+def _submit_async_etl_job(api_client, profile_id, uploaded_file) -> None:
+    state = st.session_state
+    state.pop("etl_async_job", None)
+    state.pop("etl_async_lookup_error", None)
+    state.pop("etl_async_submit_error", None)
+    try:
+        with st.spinner("ETL 작업을 제출하고 있습니다."):
+            state["etl_async_job"] = api_client.submit_etl_job(
+                profile_id=profile_id,
+                source_filename=uploaded_file.name,
+                file_content=uploaded_file.getvalue(),
+            )
+    except ETLProfileInactiveError as error:
+        _on_etl_web_run_profile_change(state)
+        _invalidate_etl_profile_list_cache(state)
+        state["etl_async_submit_error"] = _etl_web_run_error_message(error)
+    except (ETLUnsupportedProfileError, ETLInvalidUploadError) as error:
+        state["etl_async_submit_error"] = _etl_web_run_error_message(error)
+    except ValueError:
+        state["etl_async_submit_error"] = "내용이 있는 CSV 파일을 선택해 주세요."
+    except CatalogGuardApiError as error:
+        state["etl_async_submit_error"] = build_etl_api_error_display_message(
+            "ETL 작업의 접수 여부를 확인할 수 없습니다. 적재 이력을 확인한 뒤 "
+            "필요한 경우에만 다시 제출해 주세요.",
+            error,
+        )
+
+
+def _render_async_etl_job(api_client) -> None:
+    state = st.session_state
+    job = state.get("etl_async_job")
+    if job is None:
+        return
+
+    job_id = job["job_id"]
+    active = job["status"] in ETL_ACTIVE_JOB_STATUSES
+    polling = active and not state.get("etl_async_lookup_error")
+    first_render = True
+
+    @st.fragment(run_every=2 if polling else None)
+    def render_status() -> None:
+        nonlocal first_render
+        st.caption(f"ETL 작업 ID: {job_id}")
+        refresh = active and st.button("ETL 상태 새로고침", key="etl_async_refresh")
+        # The first full run shows the accepted state. Timer and button runs
+        # fetch only status for the captured job ID.
+        if refresh or (polling and not first_render):
+            _refresh_async_etl_job(api_client, job_id)
+        first_render = False
+
+        current = state["etl_async_job"]
+        status = current["status"]
+        st.write(f"ETL 작업 상태: {ETL_JOB_STATUS_LABELS[status]}")
+        if state.get("etl_async_lookup_error"):
+            st.warning(state["etl_async_lookup_error"])
+        if status == "failed":
+            st.error(current.get("message") or "ETL 작업을 완료하지 못했습니다.")
+        if status == "succeeded":
+            run_id = current["etl_load_run_id"]
+            st.success(f"ETL 작업이 완료되었습니다. 적재 배치 ID: {run_id}")
+            if st.button("적재 배치 상세 열기", key="etl_async_open_detail"):
+                state["etl_async_open_run_id"] = run_id
+                st.rerun()
+
+    render_status()
+
+
+def _refresh_async_etl_job(api_client, job_id: str) -> None:
+    state = st.session_state
+    was_paused = bool(state.get("etl_async_lookup_error"))
+    try:
+        job = api_client.get_etl_job(job_id)
+    except CatalogGuardApiError as error:
+        state["etl_async_lookup_error"] = build_etl_api_error_display_message(
+            "ETL 작업 상태를 불러오지 못했습니다. 같은 작업의 상태를 다시 확인해 주세요.",
+            error,
+        )
+        if not was_paused:
+            st.rerun()
+        return
+
+    state["etl_async_job"] = job
+    state.pop("etl_async_lookup_error", None)
+    if job["status"] == "succeeded":
+        state["etl_load_list_response"] = None
+        state["etl_load_initialized"] = False
+    if was_paused or job["status"] not in ETL_ACTIVE_JOB_STATUSES:
+        st.rerun()
+
+
 def _render_etl_web_run(api_client) -> None:
+    async_enabled = is_async_etl_enabled()
     st.subheader("ETL 실행")
-    st.write("공급사 CSV 또는 XLSX를 업로드하고 프로필을 선택해 ETL을 실행합니다.")
-    st.caption(
-        "XLSX는 단일 visible worksheet만 지원합니다. 상품 ID 등의 앞자리 0을 "
-        "보존하려면 Excel에서 해당 열을 텍스트로 저장해 주세요."
-    )
+    if async_enabled:
+        st.write("공급사 CSV와 프로필을 선택해 백그라운드 ETL 작업을 제출합니다.")
+    else:
+        st.write("공급사 CSV 또는 XLSX를 업로드하고 프로필을 선택해 ETL을 실행합니다.")
+        st.caption(
+            "XLSX는 단일 visible worksheet만 지원합니다. 상품 ID 등의 앞자리 0을 "
+            "보존하려면 Excel에서 해당 열을 텍스트로 저장해 주세요."
+        )
 
     profiles = _fetch_etl_profiles(api_client, st.session_state)
     if profiles is None:
@@ -4591,8 +4706,8 @@ def _render_etl_web_run(api_client) -> None:
         st.session_state.get("etl_web_run_selected_profile_id"),
     )
     uploaded_file = st.file_uploader(
-        "공급사 CSV / XLSX 파일",
-        type=["csv", "xlsx"],
+        "공급사 CSV 파일" if async_enabled else "공급사 CSV / XLSX 파일",
+        type=["csv"] if async_enabled else ["csv", "xlsx"],
         key="etl_web_run_upload_file",
         max_upload_size=MAX_UPLOAD_SIZE_BYTES // (1024 * 1024),
     )
@@ -4610,6 +4725,19 @@ def _render_etl_web_run(api_client) -> None:
         _submit_etl_preflight(api_client, profile_id=selected_profile_id, uploaded_file=uploaded_file)
         st.rerun()
     _render_etl_preflight_result()
+    if async_enabled:
+        job = st.session_state.get("etl_async_job")
+        active_job = job is not None and job["status"] in ETL_ACTIVE_JOB_STATUSES
+        if st.button(
+            "백그라운드 ETL 제출", key="etl_async_submit", type="primary",
+            disabled=not (uploaded_file and selected_profile_id and can_run_etl) or active_job,
+        ):
+            _submit_async_etl_job(api_client, selected_profile_id, uploaded_file)
+            st.rerun()
+        if error := st.session_state.get("etl_async_submit_error"):
+            st.error(error)
+        return
+
     if st.button(
         "ETL 실행",
         key="etl_web_run_submit",
@@ -5527,6 +5655,8 @@ def render_etl_load_history(api_client=None) -> None:
             return
 
     _render_etl_web_run(api_client)
+    if is_async_etl_enabled():
+        _render_async_etl_job(api_client)
     # 실행 흐름 바로 아래, 별도 구획으로 둡니다. 관리 기능이 일반 ETL 실행 화면을
     # 복잡하게 만들지 않도록 divider로 나눕니다.
     _render_etl_profile_management(api_client)
@@ -5544,29 +5674,43 @@ def render_etl_load_history(api_client=None) -> None:
     # 공급사 후보를 전용 조회에서 받으므로 아래 목록 조회의 성공 여부와 무관합니다.
     _render_etl_quality_observability(api_client)
 
+    if run_id := st.session_state.pop("etl_async_open_run_id", None):
+        st.session_state["etl_async_detail_run_id"] = run_id
+        st.session_state["etl_load_selected_run_id"] = run_id
+        _on_etl_load_selection_change(st.session_state)
+        st.session_state["etl_load_detail_requested"] = True
+    opened_run_id = st.session_state.get("etl_async_detail_run_id")
+    if opened_run_id != st.session_state.get("etl_load_selected_run_id"):
+        st.session_state.pop("etl_async_detail_run_id", None)
+        opened_run_id = None
     response = _fetch_etl_load_list(api_client, st.session_state)
     if response is None:
         error = st.session_state.get("etl_load_list_error")
         if error is not None:
             _render_etl_error(error)
-        return
+        if opened_run_id is None:
+            return
 
-    items = response.get("items") or []
-    if not items:
+    items = (response or {}).get("items") or []
+    if items:
+        st.dataframe(
+            build_etl_load_dataframe(items),
+            width="stretch",
+            hide_index=True,
+        )
+    elif response is not None:
         st.info("조건에 맞는 ETL 적재 이력이 없습니다.")
+    if not items and opened_run_id is None:
         _render_catalog_promotion_history(api_client)
         return
-
-    st.dataframe(
-        build_etl_load_dataframe(items),
-        width="stretch",
-        hide_index=True,
-    )
     run_options = [item["etl_load_run_id"] for item in items]
     option_labels = {
         item["etl_load_run_id"]: build_etl_load_option_label(item)
         for item in items
     }
+    if opened_run_id is not None and opened_run_id not in run_options:
+        run_options.append(opened_run_id)
+        option_labels[opened_run_id] = f"적재 배치 ID: {opened_run_id}"
     if st.session_state.get("etl_load_selected_run_id") not in run_options:
         st.session_state["etl_load_selected_run_id"] = None
     synchronize_catalog_promotion_batch(st.session_state)
@@ -5587,7 +5731,8 @@ def render_etl_load_history(api_client=None) -> None:
         st.session_state["etl_load_detail_requested"] = True
         st.rerun()
 
-    _render_etl_load_pagination(response)
+    if response is not None:
+        _render_etl_load_pagination(response)
     _render_catalog_promotion_preview(api_client)
     if st.session_state.get("etl_load_detail_requested", False):
         _render_etl_load_detail(api_client)

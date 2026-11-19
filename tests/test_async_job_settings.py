@@ -1,5 +1,18 @@
 from pathlib import Path
 
+import pytest
+
+
+@pytest.mark.parametrize(("value", "expected"), [(None, False), ("false", False), (" TRUE ", True)])
+def test_streamlit_async_etl_is_opt_in(monkeypatch, value, expected):
+    from config.settings import CATALOGGUARD_ASYNC_ETL_ENABLED_ENV_VAR, is_async_etl_enabled
+
+    if value is None:
+        monkeypatch.delenv(CATALOGGUARD_ASYNC_ETL_ENABLED_ENV_VAR, raising=False)
+    else:
+        monkeypatch.setenv(CATALOGGUARD_ASYNC_ETL_ENABLED_ENV_VAR, value)
+    assert is_async_etl_enabled() is expected
+
 
 def test_async_job_settings_use_environment_values(monkeypatch) -> None:
     import config.settings as settings

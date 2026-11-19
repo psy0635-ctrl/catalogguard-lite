@@ -261,6 +261,41 @@ PREFLIGHT_RESPONSE = {
 }
 
 
+def test_submit_etl_job_sends_one_multipart_request():
+    response = {**JOB_SUBMISSION_RESPONSE, "status_url": f"/api/v1/etl-jobs/{JOB_ID}"}
+    client, session = make_client(response=FakeResponse(payload=response, status_code=202))
+    assert client.submit_etl_job(
+        profile_id=" marketplace ", source_filename="vendor.csv", file_content=b"csv"
+    ) == response
+    assert session.calls == [{
+        "url": "https://api.example.com/api/v1/etl-jobs",
+        "files": {"file": ("vendor.csv", b"csv", "text/csv")},
+        "data": {"profile_id": "marketplace"},
+        "timeout": 5.0,
+    }]
+
+
+@pytest.mark.parametrize("overrides", [
+    {"job_id": "56407ebf-14eb-41b5-8d50-bdc5b0a4f1ce"},
+    {"status": []},
+    {"etl_load_run_id": True},
+    {"created": None},
+])
+def test_get_etl_job_rejects_mismatched_or_invalid_status_response(overrides):
+    response = {
+        "job_id": JOB_ID, "status": "succeeded", "etl_load_run_id": 3, "created": True,
+        "error_code": None, "message": None,
+        "created_at": "2026-11-19T00:00:00Z", "updated_at": "2026-11-19T00:00:01Z",
+        **overrides,
+    }
+    client, session = make_client(response=FakeResponse(payload=response))
+    with pytest.raises(import_client_module().CatalogGuardApiResponseError):
+        client.get_etl_job(JOB_ID)
+    assert [call["url"] for call in session.calls] == [
+        f"https://api.example.com/api/v1/etl-jobs/{JOB_ID}"
+    ]
+
+
 def test_preflight_client_uploads_and_validates_contract():
     client, session = make_client(response=FakeResponse(payload=PREFLIGHT_RESPONSE))
     assert client.preflight_etl_load(profile_id=" fashion ", source_filename="vendor.xlsx", file_content=b"xlsx") == PREFLIGHT_RESPONSE
