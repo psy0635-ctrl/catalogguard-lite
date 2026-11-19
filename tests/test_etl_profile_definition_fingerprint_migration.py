@@ -16,7 +16,7 @@ from db.session import create_database_engine
 
 
 REVISION = "20260825_0016"
-HEAD_REVISION = "20260915_0020"
+HEAD_REVISION = "20261119_0021"
 PREVIOUS_REVISION = "20260823_0015"
 COLUMN = "profile_definition_sha256"
 

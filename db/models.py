@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
@@ -12,6 +13,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    Uuid,
     func,
     text,
 )
@@ -344,6 +346,35 @@ class ETLLoadRun(Base):
         back_populates="etl_load_run",
         passive_deletes=True,
     )
+
+
+class ETLJob(Base):
+    """Durable status for a CSV job. The input contents live in the shared spool."""
+
+    __tablename__ = "etl_jobs"
+    __table_args__ = (
+        CheckConstraint("status IN ('queued', 'running', 'succeeded', 'failed')", name="ck_etl_jobs_status"),
+        CheckConstraint(
+            "(status = 'succeeded') = (etl_load_run_id IS NOT NULL AND created IS NOT NULL) "
+            "AND (etl_load_run_id IS NULL) = (created IS NULL) "
+            "AND (status = 'failed') = (error_code IS NOT NULL)",
+            name="ck_etl_jobs_result",
+        ),
+    )
+
+    job_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    status: Mapped[str] = mapped_column(String(10))
+    profile_id: Mapped[str] = mapped_column(Text)
+    source_filename: Mapped[str] = mapped_column(Text)
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="SET NULL"),
+    )
+    actor_username: Mapped[str] = mapped_column(String(50))
+    etl_load_run_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("etl_load_runs.id"))
+    created: Mapped[bool | None]
+    error_code: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ETLRejectedRow(Base):

@@ -926,7 +926,7 @@ catalogguard-lite/
 | `alembic/versions/20260813_0013_add_etl_initial_source_lineage.py` | `etl_load_runs`에 최초 입력 경로를 기록하는 `initial_source_type`·`initial_source_ref`를 추가하는 ETL lineage 마이그레이션 |
 | `alembic/versions/20260822_0014_create_etl_profile_activations.py` | 프로필당 runtime activation 상태 한 행을 저장하는 `etl_profile_activations` 테이블 생성 마이그레이션. 빈 표로 시작하므로 적용해도 기존 동작이 바뀌지 않습니다 |
 | `alembic/versions/20260823_0015_create_etl_profile_activation_events.py` | 성공한 activation 운영 명령을 쌓는 append-only `etl_profile_activation_events` 테이블과 조회 index 생성 마이그레이션. **빈 표로 시작하며 기존 current-state row로 과거 이력을 backfill하지 않습니다** |
-| `alembic/versions/20260825_0016_add_etl_profile_definition_sha256.py`·`20260826_0017_add_etl_application_commit_sha.py`·`20260826_0018_add_etl_profile_definition_snapshot.py`·`20260908_0019_add_inspection_source_row_number.py`·`20260915_0020_add_inspection_related_source_rows.py` | ETL profile lineage와 `inspection_results.source_row_number`, `related_source_rows`를 추가하는 순차 마이그레이션. `0020`가 현재 단일 head입니다 |
+| `alembic/versions/20260825_0016_add_etl_profile_definition_sha256.py`·`20260826_0017_add_etl_application_commit_sha.py`·`20260826_0018_add_etl_profile_definition_snapshot.py`·`20260908_0019_add_inspection_source_row_number.py`·`20260915_0020_add_inspection_related_source_rows.py` | ETL profile lineage와 `inspection_results.source_row_number`, `related_source_rows`를 추가하는 순차 마이그레이션. |
 | `.github/workflows/test.yml` | 일반 테스트와 분리된 `browser-e2e`·`kubernetes-smoke` job을 포함해 PostgreSQL·Chromium 실제 브라우저 흐름과 kind 실제 Kubernetes 배포까지 실행하는 GitHub Actions workflow |
 | `k8s/dev-postgres.yaml`, `k8s/migration-job.yaml`, `k8s/catalogguard-api.yaml` | kind CI 전용 PostgreSQL, Alembic Migration Job, FastAPI Deployment/Service manifest |
 | `.env.example` | 로컬 PostgreSQL 연결 환경변수 예시 |
@@ -1365,7 +1365,7 @@ python -m alembic upgrade head
 python -m alembic history
 ```
 
-현재 main의 Alembic head는 `20260915_0020`입니다.
+현재 Alembic head는 `20261119_0021`입니다.
 
 `20260703_0001_create_inspection_tables.py`는 다음 테이블을 만듭니다.
 
@@ -1489,7 +1489,7 @@ psql "$env:DATABASE_URL" -c "\d etl_profile_activation_events"
 
 같은 방식으로 로컬 disposable PostgreSQL 18에서 빈 DB의 `upgrade head`, `downgrade 20260803_0007`, `downgrade 20260728_0006`, 재-upgrade와 단일 head도 확인했다. `20260805_0009`도 같은 방식으로 `downgrade 20260803_0008` 뒤 재-upgrade와 단일 head(`20260805_0009`)를 disposable PostgreSQL 18에서 확인했다.
 
-`20260825_0016_add_etl_profile_definition_sha256.py`·`20260826_0017_add_etl_application_commit_sha.py`·`20260826_0018_add_etl_profile_definition_snapshot.py`는 각각 `etl_load_runs`에 프로필 정의 fingerprint, 실행 애플리케이션 commit SHA, 프로필 정의 JSONB snapshot을 추가해 적재 시점 lineage를 보존합니다. `20260908_0019_add_inspection_source_row_number.py`는 `inspection_results.source_row_number` nullable 정수와 2 이상 논리 row 제약을 추가합니다. `20260915_0020_add_inspection_related_source_rows.py`는 nullable JSONB 관계 metadata와 array 또는 NULL 제약을 추가하며 backfill하지 않습니다. 현재 main의 단일 head는 `20260915_0020`입니다.
+`20260825_0016_add_etl_profile_definition_sha256.py`·`20260826_0017_add_etl_application_commit_sha.py`·`20260826_0018_add_etl_profile_definition_snapshot.py`는 각각 `etl_load_runs`에 프로필 정의 fingerprint, 실행 애플리케이션 commit SHA, 프로필 정의 JSONB snapshot을 추가해 적재 시점 lineage를 보존합니다. `20260908_0019_add_inspection_source_row_number.py`는 `inspection_results.source_row_number` nullable 정수와 2 이상 논리 row 제약을 추가합니다. `20260915_0020_add_inspection_related_source_rows.py`는 nullable JSONB 관계 metadata와 array 또는 NULL 제약을 추가하며 backfill하지 않습니다. `20261119_0021_add_etl_jobs.py`는 비동기 CSV ETL 상태와 적재 배치 ID를 저장하는 `etl_jobs`를 추가합니다.
 
 `tests/test_inspection_actor_migration.py`·`tests/test_catalog_promotion_migration.py`·`tests/test_etl_profile_activation_history_migration.py`는 역사적 migration 계약을 확인합니다. CI의 `Apply database migrations` step은 고정 revision이 아니라 `upgrade head`를 실행하므로 현재 migration chain 전체를 적용합니다.
 
@@ -3238,6 +3238,25 @@ PostgreSQL 18의 격리 테스트 DB에서 검수 실행 10,000건과 상세 결
 $env:RUN_SQL_PERFORMANCE="1"
 python -m pytest -m performance tests/performance/test_inspection_query_performance.py -s -q
 ```
+
+## 웹 CSV ETL 비동기 실행
+
+로컬 Compose의 PostgreSQL·Redis·API·Celery Worker가 필요합니다. API와 Worker에 동일한 `INSPECTION_JOB_DIR` 공유 볼륨을 연결하고, DB에 Alembic `20261119_0021`을 적용합니다. 웹 업로드는 다음과 같이 호출합니다. PowerShell의 `$Headers`에는 로컬 로그인에서 받은 Bearer 인증 헤더를 사용합니다.
+
+```powershell
+$BaseUrl = "http://127.0.0.1:8001"
+$job = Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/v1/etl-jobs" -Headers $Headers -Form @{
+    profile_id = "sample_marketplace_vendor_v1"
+    file = Get-Item "tests/fixtures/e2e/etl_browser_vendor.csv"
+}
+$result = Invoke-RestMethod -Uri "$BaseUrl$($job.status_url)" -Headers $Headers
+```
+
+operator 접수는 `202 Accepted`와 `job_id`, `status_url`을 반환합니다. viewer 이상은 같은 URL에서 `queued`, `running`, `succeeded`, `failed`를 조회할 수 있습니다. 성공 시 `etl_load_run_id`를 `GET /api/v1/etl-loads/{etl_load_run_id}`에 사용합니다. `created=false`는 기존 배치를 재사용했다는 의미입니다. 잘못된 파일명·크기와 미등록 프로필은 접수에서 거부하고, CSV 내용 검증은 Worker가 수행합니다. 프로필은 접수할 때 활성 여부를 확인하고 Worker 실행 시 당시의 유효 버전을 다시 조회합니다. 접수 후 비활성화되면 적재 없이 `inactive_profile`로 실패합니다.
+
+Celery 메시지에는 작업 ID만 전달합니다. CSV 원문은 공유 볼륨의 `etl` 하위 폴더에 임시 저장하며, 접수 실패 또는 최종 상태 기록 이후 제거합니다. 작업의 배치 ID와 성공 상태는 적재와 같은 PostgreSQL 트랜잭션에서 확정합니다. 동일 작업 재전달 시 완료 결과를 유지합니다. 동기 `POST /api/v1/etl-loads`와 기존 소스 어댑터는 그대로 사용합니다.
+
+공유 볼륨이 없는 별도 API·Worker 환경에서는 이 경로를 사용할 수 없습니다. 작업 이력 자동 만료 및 프로세스 강제 종료나 스토리지 장애로 남은 임시 파일의 자동 정리는 제공하지 않습니다.
 
 ## 공급사 CSV ETL MVP
 

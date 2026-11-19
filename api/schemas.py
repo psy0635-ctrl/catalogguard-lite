@@ -751,6 +751,23 @@ class InspectionJobStatusResponse(BaseModel):
     updated_at: datetime
 
 
+class ETLJobSubmissionResponse(BaseModel):
+    job_id: str
+    status: Literal["queued"]
+    status_url: str
+
+
+class ETLJobStatusResponse(BaseModel):
+    job_id: str
+    status: Literal["queued", "running", "succeeded", "failed"]
+    etl_load_run_id: int | None = None
+    created: bool | None = None
+    error_code: str | None = None
+    message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 CatalogPromotionRollbackRunStatus = Literal[
     "applying",
     "succeeded",

@@ -3,6 +3,7 @@ import logging
 from dataclasses import asdict
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from uuid import UUID
 
 from fastapi import (
     APIRouter,
@@ -17,6 +18,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
@@ -54,6 +56,8 @@ from api.schemas import (
     CatalogVocabularyCoverageResponse,
     ColorVocabularyCoverageResponse,
     ETLHTTPFeedLoadRequest,
+    ETLJobStatusResponse,
+    ETLJobSubmissionResponse,
     ETLLoadDetailResponse,
     ETLLoadListItemResponse,
     ETLLoadListResponse,
@@ -155,6 +159,8 @@ from db.etl_profile_activation_service import (
     set_etl_profile_activation,
 )
 from etl.web_service import ETLWebRunOutcome, preflight_web_etl, run_web_etl
+from db.models import ETLJob
+from services.etl_job_service import ERROR_MESSAGES, ETLJobSubmissionError, submit_etl_job
 from db.catalog_reconciliation_service import (
     CatalogReconciliationDuplicateIdentityError,
     CatalogReconciliationReport,
@@ -1401,6 +1407,67 @@ def _web_upload_http_error(error: Exception) -> HTTPException:
             "code": "inactive_profile", "message": "비활성화된 공급사 프로필입니다.",
         })
     return HTTPException(status_code=400, detail={"code": "invalid_upload", "message": str(error)})
+
+
+@router.post(
+    "/api/v1/etl-jobs",
+    response_model=ETLJobSubmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_etl_job(
+    response: Response,
+    file: UploadFile = File(...),
+    profile_id: str = Form(...),
+    current_user=Depends(require_operator),
+    session: Session = Depends(get_session),
+) -> ETLJobSubmissionResponse:
+    file_bytes = await file.read(MAX_UPLOAD_SIZE_BYTES + 1)
+    try:
+        job_id = await run_in_threadpool(
+            submit_etl_job,
+            session,
+            profile_id=profile_id,
+            source_filename=_upload_source_ref(file.filename) or "",
+            file_bytes=file_bytes,
+            actor_user_id=current_user.id,
+            actor_username=current_user.username,
+        )
+    except (ETLProfileNotFoundError, ETLProfileInactiveError, CsvUploadValidationError) as error:
+        raise _web_upload_http_error(error) from None
+    except ETLJobSubmissionError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "etl_job_unavailable", "message": "ETL 작업을 시작하지 못했습니다."},
+        ) from None
+
+    status_url = f"/api/v1/etl-jobs/{job_id}"
+    response.headers["Location"] = status_url
+    response.headers["Cache-Control"] = "no-store"
+    return ETLJobSubmissionResponse(job_id=str(job_id), status="queued", status_url=status_url)
+
+
+@router.get("/api/v1/etl-jobs/{job_id}", response_model=ETLJobStatusResponse)
+def get_etl_job(
+    job_id: UUID,
+    response: Response,
+    _current_user=Depends(require_viewer),
+    session: Session = Depends(get_session),
+) -> ETLJobStatusResponse:
+    job = session.get(ETLJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="ETL 작업을 찾을 수 없습니다.")
+
+    response.headers["Cache-Control"] = "no-store"
+    return ETLJobStatusResponse(
+        job_id=str(job.job_id),
+        status=job.status,
+        etl_load_run_id=job.etl_load_run_id,
+        created=job.created,
+        error_code=job.error_code,
+        message=ERROR_MESSAGES.get(job.error_code),
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+    )
 
 
 @router.post("/api/v1/etl-loads/preflight", response_model=ETLPreflightResponse)
