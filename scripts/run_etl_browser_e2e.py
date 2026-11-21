@@ -24,6 +24,9 @@ PROMOTION_FIXTURE_PATH = (
 WEB_UPLOAD_FIXTURE_PATH = (
     ROOT / "tests" / "fixtures" / "e2e" / "web_etl_upload_vendor.csv"
 )
+ASYNC_BROWSER_TEST = (
+    "tests/e2e/test_web_etl_upload_browser_e2e.py::test_async_csv_etl_job_in_real_browser"
+)
 PROFILE_PATH = ROOT / "config" / "etl" / "sample_marketplace_vendor" / "v2.json"
 DEFAULT_ARTIFACT_DIR = ROOT / "artifacts" / "browser-e2e"
 
@@ -43,6 +46,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--api-port", type=int, default=8000)
     parser.add_argument("--streamlit-port", type=int, default=8501)
+    parser.add_argument(
+        "--async-only", action="store_true", help="Run only the async CSV ETL scenario."
+    )
     parser.add_argument(
         "--artifacts-dir",
         type=Path,
@@ -162,6 +168,8 @@ class ETLBrowserE2ERunner:
             "E2E_OPERATOR_USERNAME": self.operator_username,
             "E2E_OPERATOR_PASSWORD": self.operator_password,
             "CATALOGGUARD_SEED_USER_PASSWORD": self.operator_password,
+            "E2E_ETL_JOB_CONTROL_DIR": str(self.temp_dir),
+            "INSPECTION_JOB_DIR": str(self.temp_dir / "job-inputs"),
             "PYTHONIOENCODING": "utf-8",
         }
 
@@ -189,7 +197,8 @@ class ETLBrowserE2ERunner:
         )
         if completed.returncode != 0:
             raise BrowserE2EError(
-                f"{name} failed with exit code {completed.returncode}; see {log_path}"
+                f"{name} failed with exit code {completed.returncode}; "
+                f"see {self.artifact_dir / log_name}"
             )
         return completed
 
@@ -249,13 +258,14 @@ class ETLBrowserE2ERunner:
         command: list[str],
         *,
         log_name: str,
+        env_overrides: dict[str, str] | None = None,
     ) -> tuple[subprocess.Popen[bytes], Path]:
         log_path = self.temp_dir / log_name
         log_file = log_path.open("wb")
         process = subprocess.Popen(
             command,
             cwd=ROOT,
-            env=self.environment,
+            env={**self.environment, **(env_overrides or {})},
             stdout=log_file,
             stderr=subprocess.STDOUT,
         )
@@ -263,13 +273,60 @@ class ETLBrowserE2ERunner:
         self.processes.append((name, process, log_path))
         return process, log_path
 
+    def _run_chromium(self, test_paths: list[str], *, async_etl: bool) -> None:
+        stage = "async" if async_etl else "sync"
+        streamlit_process, streamlit_log = self._start_service(
+            f"Streamlit ({stage} ETL)",
+            [
+                sys.executable,
+                "-m",
+                "streamlit",
+                "run",
+                "app.py",
+                "--server.headless=true",
+                "--server.address=127.0.0.1",
+                f"--server.port={self.args.streamlit_port}",
+                "--browser.gatherUsageStats=false",
+            ],
+            log_name=f"streamlit-{stage}.log",
+            env_overrides={"CATALOGGUARD_ASYNC_ETL_ENABLED": str(async_etl).lower()},
+        )
+        try:
+            _wait_for_http(
+                f"http://127.0.0.1:{self.args.streamlit_port}/_stcore/health",
+                expected_body="ok",
+                process=streamlit_process,
+                log_path=streamlit_log,
+            )
+            completed = self._run_command(
+                f"Chromium browser E2E ({stage} ETL)",
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    *test_paths,
+                    "--browser",
+                    "chromium",
+                    "--tracing",
+                    "retain-on-failure",
+                    "--output",
+                    str(self.temp_dir / f"chromium-{stage}"),
+                    "-o",
+                    "addopts=",
+                    "-q",
+                ],
+                log_name=f"playwright-{stage}.log",
+            )
+            print(f"Chromium ({stage} ETL)\n{completed.stdout.rstrip()}", flush=True)
+        finally:
+            _terminate_process(streamlit_process)
+
     def _preserve_failure_artifacts(self) -> None:
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
-        for _, _, log_path in self.processes:
-            if log_path.is_file():
-                shutil.copy2(log_path, self.artifact_dir / log_path.name)
         for log_path in self.temp_dir.glob("*.log"):
             shutil.copy2(log_path, self.artifact_dir / log_path.name)
+        for trace_dir in self.temp_dir.glob("chromium-*"):
+            shutil.copytree(trace_dir, self.artifact_dir / trace_dir.name, dirs_exist_ok=True)
 
     def run(self) -> None:
         failed = True
@@ -330,7 +387,9 @@ class ETLBrowserE2ERunner:
                     sys.executable,
                     "-m",
                     "uvicorn",
-                    "api.main:app",
+                    "etl_browser_api:app",
+                    "--app-dir",
+                    str(ROOT / "tests" / "e2e"),
                     "--host",
                     "127.0.0.1",
                     "--port",
@@ -352,55 +411,23 @@ class ETLBrowserE2ERunner:
                 log_path=api_log,
             )
 
-            streamlit_process, streamlit_log = self._start_service(
-                "Streamlit",
-                [
-                    sys.executable,
-                    "-m",
-                    "streamlit",
-                    "run",
-                    "app.py",
-                    "--server.headless=true",
-                    "--server.address=127.0.0.1",
-                    f"--server.port={self.args.streamlit_port}",
-                    "--browser.gatherUsageStats=false",
-                ],
-                log_name="streamlit.log",
+            self._run_chromium(
+                [ASYNC_BROWSER_TEST],
+                async_etl=True,
             )
-            _wait_for_http(
-                f"http://127.0.0.1:{self.args.streamlit_port}/_stcore/health",
-                expected_body="ok",
-                process=streamlit_process,
-                log_path=streamlit_log,
-            )
-
-            self._run_command(
-                "Chromium browser E2E",
-                [
-                    sys.executable,
-                    "-m",
-                    "pytest",
-                    "tests/e2e/test_etl_browser_e2e.py",
-                    "tests/e2e/test_web_etl_upload_browser_e2e.py",
-                    # Profile Ops mutates persistent activation state, so run it
-                    # after the existing ETL and upload flows as an extra guard.
-                    "tests/e2e/test_etl_profile_ops_browser_e2e.py",
-                    # Quality observability creates and removes only its own
-                    # synthetic history rows, independent of earlier scenarios.
-                    "tests/e2e/test_etl_quality_observability_browser_e2e.py",
-                    # Reconciliation owns its synthetic staging/catalog rows and
-                    # removes them by exact primary key after the read-only flow.
-                    "tests/e2e/test_catalog_reconciliation_browser_e2e.py",
-                    "--browser",
-                    "chromium",
-                    "--tracing",
-                    "retain-on-failure",
-                    "-o",
-                    "addopts=",
-                    "-q",
-                ],
-                log_name="playwright.log",
-            )
+            if not self.args.async_only:
+                self._run_chromium(
+                    [
+                        "tests/e2e/test_etl_browser_e2e.py",
+                        "tests/e2e/test_web_etl_upload_browser_e2e.py",
+                        f"--deselect={ASYNC_BROWSER_TEST}",
+                        # Profile Ops mutates activation state; leave it after uploads.
+                        "tests/e2e/test_etl_profile_ops_browser_e2e.py",
+                        "tests/e2e/test_etl_quality_observability_browser_e2e.py",
+                        "tests/e2e/test_catalog_reconciliation_browser_e2e.py",
+                    ],
+                    async_etl=False,
+                )
             failed = False
             print("ETL 변환 성공")
             print("PostgreSQL 적재 성공")
