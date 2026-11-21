@@ -6,6 +6,7 @@ import hashlib
 import json
 import csv
 from pathlib import Path
+from uuid import UUID, uuid4
 
 import pytest
 from openpyxl import Workbook
@@ -134,6 +135,110 @@ def _api_headers(page) -> dict[str, str]:
     )
     assert response.ok, response.text()
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+def test_async_csv_etl_job_in_real_browser(page, tmp_path):
+    from playwright.sync_api import expect
+
+    control_dir = Path(os.environ["E2E_ETL_JOB_CONTROL_DIR"])
+    fixture = FIXTURE_PATH.with_name("etl_browser_vendor.csv")
+    upload = tmp_path / "async_browser_vendor.csv"
+    # Give this upload its own product IDs and preserve the fixture's 4/2/2 split.
+    upload.write_bytes(fixture.read_bytes().replace(b"E2E-100", uuid4().hex[:12].encode()))
+    jobs_path = "/api/v1/etl-jobs"
+    expected_counts = {"total_rows": 4, "loaded_rows": 2, "rejected_rows": 2}
+
+    def requests():
+        return [
+            json.loads(line)
+            for line in (control_dir / "api-requests.log").read_text(encoding="utf-8").splitlines()
+        ]
+
+    try:
+        page.goto(STREAMLIT_URL, wait_until="domcontentloaded")
+        _login_as_operator(page)
+        page.get_by_role("tab", name="ETL 적재 이력").click()
+        page.get_by_role("combobox", name="ETL 실행 프로필").click()
+        page.get_by_role("option", name="마켓플레이스 공급사 샘플", exact=True).click()
+        expect(page.locator("body")).to_contain_text(re.compile(r"프로필 버전\s*2"))
+
+        submit = page.get_by_role("button", name="백그라운드 ETL 제출", exact=True)
+        expect(submit).to_be_disabled()
+        before_upload = len(requests())
+        uploader = page.get_by_label("공급사 CSV 파일", exact=True)
+        uploader.locator('input[type="file"]').set_input_files(str(upload))
+        expect(submit).to_be_enabled()
+        submit.click()
+
+        # The fixture holds delivery and pauses automatic polling on the first GET.
+        warning = page.get_by_text("같은 작업의 상태를 다시 확인해 주세요.", exact=False)
+        expect(warning).to_be_visible(timeout=15_000)
+        expect(page.get_by_text("ETL 작업 상태: 대기 중", exact=True)).to_be_visible()
+        expect(submit).to_be_disabled()
+        job_caption = page.get_by_text(re.compile(r"^ETL 작업 ID: "))
+        job_id = str(UUID(job_caption.inner_text().removeprefix("ETL 작업 ID: ")))
+        job_path = f"{jobs_path}/{job_id}"
+        before_refresh = requests()
+        assert [event for event in before_refresh[before_upload:] if event[1].startswith(jobs_path)] == [
+            ["POST", jobs_path, 202],
+            ["GET", job_path, 503],
+        ]
+
+        (control_dir / "release-etl-job").touch()
+        refresh = page.get_by_role("button", name="ETL 상태 새로고침", exact=True)
+        refresh.click()
+        expect(page.get_by_text("ETL 작업 상태: 성공", exact=True)).to_be_visible(timeout=15_000)
+        expect(job_caption).to_have_text(f"ETL 작업 ID: {job_id}")
+        expect(warning).to_have_count(0)
+        expect(refresh).to_have_count(0)
+        after_refresh = requests()
+        refresh_requests = after_refresh[len(before_refresh):]
+        assert all(method == "GET" for method, _, _ in refresh_requests), refresh_requests
+        assert [event for event in refresh_requests if event[1].startswith(jobs_path)] == [
+            ["GET", job_path, 200]
+        ]
+
+        success = page.get_by_text(re.compile(r"^ETL 작업이 완료되었습니다\. 적재 배치 ID: \d+$"))
+        batch_id = int(success.inner_text().rsplit(" ", 1)[-1])
+        detail_path = f"/api/v1/etl-loads/{batch_id}"
+        page.get_by_role("button", name="적재 배치 상세 열기", exact=True).click()
+        expect(page.get_by_role("heading", name="적재 배치 상세", exact=True)).to_be_visible()
+        expect(page.get_by_text(f"적재 배치 ID: {batch_id}", exact=True)).to_be_visible()
+        expect(page.get_by_text(f"원본 파일명: {upload.name}", exact=True)).to_be_visible()
+        # The history summary also has metrics with these labels.
+        detail_metrics = page.get_by_text("정상 처리율", exact=True).locator(
+            "xpath=ancestor::div[@data-testid='stHorizontalBlock'][1]"
+        )
+        for label, field in (
+            ("전체 입력", "total_rows"), ("정상 적재", "loaded_rows"), ("변환 거부", "rejected_rows")
+        ):
+            metric = detail_metrics.locator('[data-testid="stMetric"]').filter(
+                has=page.get_by_text(label, exact=True)
+            )
+            expect(metric.locator('[data-testid="stMetricValue"]')).to_have_text(
+                f"{expected_counts[field]}행"
+            )
+        browser_requests = requests()
+        assert ["GET", detail_path, 200] in browser_requests[len(after_refresh):]
+        assert [event for event in browser_requests[before_upload:] if event[0] != "GET"] == [
+            ["POST", jobs_path, 202]
+        ]
+
+        # Check the API payloads after capturing the Streamlit requests.
+        headers = _api_headers(page)
+        job = page.request.get(f"{API_URL}{job_path}", headers=headers)
+        detail = page.request.get(f"{API_URL}{detail_path}", headers=headers)
+        assert job.ok, job.text()
+        assert detail.ok, detail.text()
+        job_data = job.json()
+        detail_data = detail.json()
+        assert (job_data["job_id"], job_data["status"]) == (job_id, "succeeded")
+        assert job_data["etl_load_run_id"] == detail_data["etl_load_run_id"] == batch_id
+        assert detail_data["source_filename"] == upload.name
+        assert {field: detail_data[field] for field in expected_counts} == expected_counts
+    except BaseException:
+        _preserve_browser_failure_artifacts(page)
+        raise
 
 
 def _run_web_etl_upload_scenario(
