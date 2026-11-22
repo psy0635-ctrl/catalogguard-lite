@@ -2394,3 +2394,26 @@ SHA-256은 받은 CSV와 보고서의 대응 확인이며 전자서명·발행�
 | 4건 | 2건 | 2건 | 50% | 50% | 미설정 | **PASS** |
 
 두 판정 후 로컬 PostgreSQL에는 동일한 ETL 배치 한 건만 저장돼 있었습니다. 검증 범위는 로컬 환경과 합성 데이터로 제한했으며, 운영 배포와 운영 데이터는 범위 밖이었습니다.
+
+## 6.32 비동기 웹 CSV ETL
+
+### 제출부터 적재 배치 조회까지
+
+웹 CSV ETL의 적재 처리를 업로드 요청 수명에서 분리했습니다. 사용자가 `ETL 적재 이력` 탭에서 CSV와 프로필을 선택해 한 번 제출하면 FastAPI의 `POST /api/v1/etl-jobs`가 `202 Accepted`와 작업 ID를 반환합니다. API는 임시 CSV를 공유 볼륨에 저장하고 Redis 큐에는 작업 ID만 전달합니다. Celery Worker가 별도로 CSV를 읽어 기존 웹 ETL 로직으로 적재합니다. Streamlit은 같은 ID의 `GET /api/v1/etl-jobs/{job_id}`로 상태를 조회합니다. 성공 응답에 담긴 `etl_load_run_id`로 **적재 배치 상세 열기**에서 기존 배치 상세를 조회할 수 있습니다. [FastAPI·Celery 구현 PR #156](https://github.com/psy0635-ctrl/catalogguard-lite/pull/156) · [Streamlit 구현 PR #157](https://github.com/psy0635-ctrl/catalogguard-lite/pull/157)
+
+`CATALOGGUARD_ASYNC_ETL_ENABLED`의 기본값은 꺼짐입니다. 설정을 생략하거나 `false`로 두면 기존 동기 CSV/XLSX 경로를 사용합니다.
+
+### 중복 제출과 Worker 재전달 처리
+
+- **화면의 중복 제출 방지.** Streamlit은 명시적인 제출 버튼에서만 POST를 호출하고, 세션에 작업 ID를 보관하며 작업이 대기 또는 처리 중이면 제출 버튼을 비활성화합니다. 상태 조회에 실패하면 자동 폴링을 멈춥니다. 수동 상태 새로고침은 같은 작업 ID의 GET만 호출합니다. [Streamlit 상태 처리](../ui/etl_load_history.py)
+- **Worker의 재전달 처리.** Celery는 작업 확인을 실행 이후로 미루고 Worker가 유실되면 재전달하도록 설정합니다. Worker는 작업 행을 잠근 뒤 종료 상태를 확인하며, 이미 완료된 작업은 다시 적재하지 않습니다. `_execute_job`의 `factory.begin()` 안에서 기존 적재 로직을 SAVEPOINT로 실행하고 `etl_load_run_id`와 `succeeded`를 기록합니다. 배치 적재와 성공 상태는 바깥 PostgreSQL 트랜잭션에서 함께 커밋됩니다. [Worker 트랜잭션과 재전달 처리](../workers/etl_tasks.py)
+
+### 실제 검증
+
+| 별도 실행 | 결과와 범위 |
+|---|---|
+| 로컬 Redis·Celery·PostgreSQL 통합 | 실제 FastAPI·Redis 큐·Celery Worker·PostgreSQL에서 같은 작업의 `queued → running → succeeded` 전이와 합성 CSV 배치 상세의 **전체 4행·정상 적재 2행·거부 2행**을 확인했습니다. [PR #158의 로컬 통합 검증 기록](https://github.com/psy0635-ctrl/catalogguard-lite/pull/158) |
+| GitHub Chromium CI | **비동기 시나리오 1개·기존 ETL 테스트 14개 통과**. 테스트용 API가 첫 상태 GET에 `503`을 주입하고, 테스트가 실행을 허용한 뒤 다음 상태 GET에서 작업 함수를 직접 호출했습니다. 요청 기록으로 제출 POST 1회와 수동 새로고침 시 같은 작업 ID의 GET을 확인했고, 성공 후 배치 상세의 **전체 4행·정상 적재 2행·거부 2행**이 화면과 API에서 일치했습니다. [Chromium 회귀 테스트 PR #158](https://github.com/psy0635-ctrl/catalogguard-lite/pull/158) · [browser-e2e 실행 로그](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/44911438221/job/136867918540) |
+| 병합 후 main push CI | `main`의 `e7efcff419bf213eeb81ec57eee99ce2258cf407`에서 `test`·`browser-e2e`·`kubernetes-smoke`·`terraform-validate`·`airflow-smoke` **5/5 성공**. [Run #44911438221](https://github.com/psy0635-ctrl/catalogguard-lite/actions/runs/44911438221) |
+
+운영 앱에 실제 반영된 SHA와 운영 환경에서의 비동기 ETL 실행은 미확인입니다.
