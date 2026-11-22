@@ -362,6 +362,40 @@ CatalogGuard HTTP feed ingestion failed [etl_profile_inactive]
 
 Airflow HTTP feed 경로는 실행 전에 effective activation을 확인한다. 이미 inactive인 프로필이면 `read_http_feed_csv()`를 호출하지 않고 `etl_profile_inactive`로 끝난다. 다만 pre-check 뒤 운영자가 deactivate하면 HTTP fetch가 이미 시작될 수 있다. 이 race에서는 `run_web_etl()`의 최종 activation 재검사가 ETL load를 차단하며, 외부 HTTP 요청 동안 DB transaction이나 lock을 유지하지 않는 MVP 정책은 그대로다.
 
+## E. Optional 비동기 웹 CSV ETL
+
+3분 Quick Demo와 별도로 진행한다. [2절 시연 전 준비](#2-시연-전-준비)에서 가상환경과 로컬 전용 `.env.local`을 준비한다. 저장소 루트의 전용 PowerShell에서 아직 사용하지 않은 Compose 프로젝트 이름과 비어 있는 루프백 포트를 지정한다. 아래 예시 포트가 사용 중이면 다른 빈 포트로 바꾸고 Streamlit의 API 주소도 맞춘다.
+
+```powershell
+$demoProject = 'cg-async-etl-demo'
+$env:POSTGRES_HOST_PORT = '127.0.0.1:15433'
+$env:API_HOST_PORT = '127.0.0.1:18001'
+$demoCompose = @('compose', '-p', $demoProject, '--env-file', '.env.local', '-f', 'compose.local.yaml')
+docker @demoCompose up --build -d --wait --wait-timeout 120
+```
+
+Compose 프로젝트 이름은 컨테이너·네트워크·볼륨을 구분한다. `--build`는 다른 로컬 프로젝트와 공유하는 기본 API·Worker 이미지 태그도 갱신한다.
+
+2절의 Alembic 및 readiness 확인을 같은 프로젝트와 API 포트로 수행한다. API와 Celery Worker는 같은 `INSPECTION_JOB_DIR` 볼륨을 사용한다. 처음 쓰는 프로젝트의 빈 DB에는 아래처럼 operator를 생성하고 비밀번호는 프롬프트에 입력한다. 같은 프로젝트 이름으로 다시 시작하면 기존 DB와 계정을 재사용한다.
+
+```powershell
+docker @demoCompose exec api python scripts/create_user.py --username demo_operator --role operator
+```
+
+별도 시연용 PowerShell에서 저장소 루트로 이동하고 2절대로 가상환경을 활성화한 뒤 Streamlit을 시작한다.
+
+```powershell
+$env:CATALOGGUARD_API_BASE_URL = 'http://127.0.0.1:18001'
+$env:CATALOGGUARD_ASYNC_ETL_ENABLED = 'true'
+python -m streamlit run app.py --server.address 127.0.0.1 --server.port 18501
+```
+
+1. Chromium에서 로컬 operator로 로그인하고 **ETL 적재 이력**을 연다. **ETL 실행 프로필**에서 **마켓플레이스 공급사 샘플**(`sample_marketplace_vendor_v1`)을 선택하고 활성 버전이 **2**인지 확인한다.
+2. [합성 CSV fixture](../tests/fixtures/e2e/etl_browser_vendor.csv)를 선택한다. 버튼이 활성화되면 **백그라운드 ETL 제출**을 한 번 누르고 성공을 기다린다.
+3. 성공 메시지의 배치 ID를 확인하고 **적재 배치 상세 열기**를 누른다. 열린 상세의 배치 ID가 일치하고 **전체 입력 4행·정상 적재 2행·변환 거부 2행**인지 확인한다.
+
+시연이 끝나면 Streamlit 터미널에서 `Ctrl+C`를 누르고 해당 PowerShell을 닫는다. Compose를 기동한 PowerShell에서 `docker @demoCompose down`을 실행한 뒤 닫는다. 이 명령은 시연 전용 프로젝트의 컨테이너와 네트워크를 종료하며 named volume은 보존한다.
+
 ## 3. 검증 근거와 최소 troubleshooting
 
 사전 검증 근거는 다음 네 영역이다. 모두 수동 demo의 근거일 뿐이고, E2E 전용 setup을 면접 시연의 필수 조건으로 만들지는 않는다.
